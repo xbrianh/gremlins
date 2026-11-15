@@ -561,6 +561,23 @@ impl<B: Backend> LiveArea<B> {
         self.transcript_mut().push_tool_output_chunk(id, call, text);
     }
 
+    /// Push live progress from a running Task tool into a transcript slot
+    /// keyed by the parent tool-call id.
+    #[allow(clippy::too_many_arguments)]
+    pub fn push_task_progress(
+        &mut self,
+        parent_id: &str,
+        kind: &str,
+        call: &str,
+        reasoning: &str,
+        text: &str,
+        stats: Option<&serde_json::Value>,
+        total: Option<&serde_json::Value>,
+    ) {
+        self.transcript_mut()
+            .push_task_progress(parent_id, kind, call, reasoning, text, stats, total);
+    }
+
     /// Commit the finished tool stream (or a single `◆` event line for a
     /// non-streaming tool) into the transcript's permanent tool segment.
     pub fn commit_tool_result(&mut self, id: &str, call: &str) {

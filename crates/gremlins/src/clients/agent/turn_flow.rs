@@ -414,24 +414,50 @@ pub(super) async fn emit_turn_artifacts(
     raw: &mut Option<std::fs::File>,
     captured: &mut Option<Vec<serde_json::Value>>,
     prefix: &str,
+    wants_events: bool,
+    parent_id: &str,
+    parent_call: &str,
+    kind: &str,
+    chain: &str,
 ) -> Result<(), ClientError> {
-    if !nested {
-        log::debug!(
-            "agent_loop: broadcasting TurnComplete (turn={})",
-            state.turn_num
-        );
-        tokio::select! {
-            biased;
-            _ = cancel.cancelled() => {
-                return Err(cancelled_error("cancelled", &state.conv.messages()));
+    if wants_events {
+        if nested {
+            // A sub-agent turn summary updates the parent's Task slot with
+            // this turn's stats instead of broadcasting a top-level TurnComplete.
+            tokio::select! {
+                biased;
+                _ = cancel.cancelled() => {
+                    return Err(cancelled_error("cancelled", &state.conv.messages()));
+                }
+                _ = emit_run_event_async(&state.message_prefix, EventKind::TaskProgress {
+                    parent_id: parent_id.to_string(),
+                    chain: chain.to_string(),
+                    kind: kind.to_string(),
+                    call: parent_call.to_string(),
+                    reasoning: String::new(),
+                    text: String::new(),
+                    stats: turn_stats.clone(),
+                    totals: Some(totals.clone()),
+                }) => {}
             }
-            _ = emit_run_event_async(&state.message_prefix, EventKind::TurnComplete {
-                turn: state.turn_num,
-                text: text.to_string(),
-                tool_calls: tool_calls.iter().map(format_tool_call).collect(),
-                stats: turn_stats.clone(),
-                totals: Some(totals.clone()),
-            }) => {}
+        } else {
+            log::debug!(
+                "agent_loop: broadcasting TurnComplete (turn={})",
+                state.turn_num
+            );
+            tokio::select! {
+                biased;
+                _ = cancel.cancelled() => {
+                    return Err(cancelled_error("cancelled", &state.conv.messages()));
+                }
+                _ = emit_run_event_async(&state.message_prefix, EventKind::TurnComplete {
+                    turn: state.turn_num,
+                    text: text.to_string(),
+                    tool_calls: tool_calls.iter().map(format_tool_call).collect(),
+                    stats: turn_stats.clone(),
+                    totals: Some(totals.clone()),
+                }) => {}
+            }
         }
     }
 

@@ -105,6 +105,27 @@ pub enum EventKind {
     Ended { reason: String },
     #[serde(rename = "stream_reset")]
     StreamReset,
+    #[serde(rename = "task_progress")]
+    TaskProgress {
+        /// The parent tool-call id (prefixed if nested) identifying which TUI slot this updates.
+        parent_id: String,
+        /// The task chain (e.g. "a3f1" or "a3f1.b72e").
+        chain: String,
+        /// Task kind as string: "Scout", "Implement", or "Fork".
+        kind: String,
+        /// Formatted tool call (e.g. `Task(kind="Scout")`) for the title row.
+        call: String,
+        /// Streamed reasoning delta (empty when not a reasoning chunk).
+        reasoning: String,
+        /// Streamed text delta (empty when not a text chunk).
+        text: String,
+        /// Per-turn token stats (present in turn-summary events).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        stats: Option<TurnStats>,
+        /// Conversation-wide cumulative totals (present in turn-summary events).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        totals: Option<UsageStats>,
+    },
 
     // ── Stage-stream protocol ─────────────────────────────────────────
     #[serde(rename = "stage_boundary")]

@@ -41,6 +41,11 @@ pub(super) async fn consume_stream_events(
     prefix: &str,
     idle_timeout: f64,
     nested: bool,
+    wants_events: bool,
+    parent_id: &str,
+    parent_call: &str,
+    kind: &str,
+    chain: &str,
     timeout_retry_backoff: &[f64],
     turn_retry_backoff: &[f64],
 ) -> Result<StreamAccumulator, ClientError> {
@@ -161,45 +166,113 @@ pub(super) async fn consume_stream_events(
                     first_token = Some(now);
                 }
                 last_token = Some(now);
-                if !nested {
-                    match &chunk {
-                        Item::Event(StreamEvent::Text { ref text, .. }) => {
-                            tokio::select! {
-                                biased;
-                                _ = cancel.cancelled() => {
-                                    return Err(cancelled_error("cancelled", &stream_snapshot));
+                if wants_events {
+                    if nested {
+                        // Emit TaskProgress for text/reasoning deltas so a
+                        // sub-agent's live output reaches the parent TUI slot
+                        // identified by `parent_id`.
+                        match &chunk {
+                            Item::Event(StreamEvent::Text { ref text, .. }) => {
+                                tokio::select! {
+                                    biased;
+                                    _ = cancel.cancelled() => {
+                                        return Err(cancelled_error("cancelled", &stream_snapshot));
+                                    }
+                                    _ = emit_run_event_async(&state.message_prefix, EventKind::TaskProgress {
+                                        parent_id: parent_id.to_string(),
+                                        chain: chain.to_string(),
+                                        kind: kind.to_string(),
+                                        call: parent_call.to_string(),
+                                        reasoning: String::new(),
+                                        text: text.clone(),
+                                        stats: None,
+                                        totals: None,
+                                    }) => {}
                                 }
-                                _ = emit_run_event_async(&state.message_prefix, EventKind::StreamChunk {
-                                    text: text.clone(),
-                                }) => {}
                             }
-                        }
-                        Item::Event(StreamEvent::Reasoning { ref text, .. }) => {
-                            tokio::select! {
-                                biased;
-                                _ = cancel.cancelled() => {
-                                    return Err(cancelled_error("cancelled", &stream_snapshot));
+                            Item::Event(StreamEvent::Reasoning { ref text, .. }) => {
+                                tokio::select! {
+                                    biased;
+                                    _ = cancel.cancelled() => {
+                                        return Err(cancelled_error("cancelled", &stream_snapshot));
+                                    }
+                                    _ = emit_run_event_async(&state.message_prefix, EventKind::TaskProgress {
+                                        parent_id: parent_id.to_string(),
+                                        chain: chain.to_string(),
+                                        kind: kind.to_string(),
+                                        call: parent_call.to_string(),
+                                        reasoning: text.clone(),
+                                        text: String::new(),
+                                        stats: None,
+                                        totals: None,
+                                    }) => {}
                                 }
-                                _ = emit_run_event_async(&state.message_prefix, EventKind::ReasoningChunk {
-                                    text: text.clone(),
-                                }) => {}
                             }
-                        }
-                        Item::Event(StreamEvent::End {
-                            content: rig_core::completion::message::AssistantContent::ToolCall(tc),
-                            ..
-                        }) => {
-                            tokio::select! {
-                                biased;
-                                _ = cancel.cancelled() => {
-                                    return Err(cancelled_error("cancelled", &stream_snapshot));
+                            Item::Event(StreamEvent::End {
+                                content:
+                                    rig_core::completion::message::AssistantContent::ToolCall(tc),
+                                ..
+                            }) => {
+                                tokio::select! {
+                                    biased;
+                                    _ = cancel.cancelled() => {
+                                        return Err(cancelled_error("cancelled", &stream_snapshot));
+                                    }
+                                    _ = emit_run_event_async(&state.message_prefix, EventKind::TaskProgress {
+                                        parent_id: parent_id.to_string(),
+                                        chain: chain.to_string(),
+                                        kind: kind.to_string(),
+                                        call: parent_call.to_string(),
+                                        reasoning: format_tool_call(tc),
+                                        text: String::new(),
+                                        stats: None,
+                                        totals: None,
+                                    }) => {}
                                 }
-                                _ = emit_run_event_async(&state.message_prefix, EventKind::ReasoningChunk {
-                                    text: format_tool_call(tc),
-                                }) => {}
                             }
+                            _ => {}
                         }
-                        _ => {}
+                    } else {
+                        match &chunk {
+                            Item::Event(StreamEvent::Text { ref text, .. }) => {
+                                tokio::select! {
+                                    biased;
+                                    _ = cancel.cancelled() => {
+                                        return Err(cancelled_error("cancelled", &stream_snapshot));
+                                    }
+                                    _ = emit_run_event_async(&state.message_prefix, EventKind::StreamChunk {
+                                        text: text.clone(),
+                                    }) => {}
+                                }
+                            }
+                            Item::Event(StreamEvent::Reasoning { ref text, .. }) => {
+                                tokio::select! {
+                                    biased;
+                                    _ = cancel.cancelled() => {
+                                        return Err(cancelled_error("cancelled", &stream_snapshot));
+                                    }
+                                    _ = emit_run_event_async(&state.message_prefix, EventKind::ReasoningChunk {
+                                        text: text.clone(),
+                                    }) => {}
+                                }
+                            }
+                            Item::Event(StreamEvent::End {
+                                content:
+                                    rig_core::completion::message::AssistantContent::ToolCall(tc),
+                                ..
+                            }) => {
+                                tokio::select! {
+                                    biased;
+                                    _ = cancel.cancelled() => {
+                                        return Err(cancelled_error("cancelled", &stream_snapshot));
+                                    }
+                                    _ = emit_run_event_async(&state.message_prefix, EventKind::ReasoningChunk {
+                                        text: format_tool_call(tc),
+                                    }) => {}
+                                }
+                            }
+                            _ => {}
+                        }
                     }
                 }
                 apply_chunk(

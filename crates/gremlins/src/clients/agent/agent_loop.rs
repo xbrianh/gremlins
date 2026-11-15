@@ -262,6 +262,11 @@ impl LoopState {
         prefix: &str,
         idle_timeout: f64,
         nested: bool,
+        wants_events: bool,
+        parent_id: &str,
+        parent_call: &str,
+        kind: &str,
+        chain: &str,
         turn_retry_backoff: &[f64],
         timeout_retry_backoff: &[f64],
     ) -> Result<StreamTurnOutcome, ClientError> {
@@ -336,6 +341,11 @@ impl LoopState {
                 prefix,
                 idle_timeout,
                 nested,
+                wants_events,
+                parent_id,
+                parent_call,
+                kind,
+                chain,
                 timeout_retry_backoff,
                 turn_retry_backoff,
             )
@@ -399,6 +409,11 @@ impl LoopState {
         prefix: &str,
         idle_timeout: f64,
         nested: bool,
+        wants_events: bool,
+        parent_id: &str,
+        parent_call: &str,
+        kind: &str,
+        chain: &str,
         timeout_retry_backoff: &[f64],
         turn_retry_backoff: &[f64],
     ) -> Result<StreamAccumulator, ClientError> {
@@ -412,6 +427,11 @@ impl LoopState {
             prefix,
             idle_timeout,
             nested,
+            wants_events,
+            parent_id,
+            parent_call,
+            kind,
+            chain,
             timeout_retry_backoff,
             turn_retry_backoff,
         )
@@ -756,6 +776,11 @@ impl LoopState {
         raw: &mut Option<std::fs::File>,
         captured: &mut Option<Vec<serde_json::Value>>,
         prefix: &str,
+        wants_events: bool,
+        parent_id: &str,
+        parent_call: &str,
+        kind: &str,
+        chain: &str,
     ) -> Result<(), ClientError> {
         super::turn_flow::emit_turn_artifacts(
             self,
@@ -774,6 +799,11 @@ impl LoopState {
             raw,
             captured,
             prefix,
+            wants_events,
+            parent_id,
+            parent_call,
+            kind,
+            chain,
         )
         .await
     }
@@ -1116,6 +1146,7 @@ pub(crate) async fn run_agent_loop(
     );
     tool_ctx.task_fn = Some(runner);
 
+    let wants_events = interactive.is_some();
     run_agent_loop_core(
         &model,
         prompt,
@@ -1135,6 +1166,11 @@ pub(crate) async fn run_agent_loop(
         ctx.completion_nudge_budget,
         interactive,
         ctx.prepopulated_conversation.clone(),
+        wants_events,
+        "",
+        "",
+        "",
+        "",
     )
     .await
 }
@@ -1161,6 +1197,9 @@ pub(crate) async fn run_agent_loop_nested(
     extra: Option<serde_json::Value>,
     preserve_reasoning_in_history: bool,
     prepopulated_conversation: Box<dyn Conversation>,
+    parent_id: &str,
+    parent_call: &str,
+    kind: &str,
 ) -> Result<CompletedRun, ClientError> {
     let opts = LoopOpts {
         extra,
@@ -1191,6 +1230,7 @@ pub(crate) async fn run_agent_loop_nested(
     } else {
         format!("{id_chain}.")
     };
+    let wants_events = !nested_tool_ctx.message_prefix.is_empty();
     log::info!("{prefix}task: begin (max_turns={max_turns})");
     if !nested_tool_ctx.message_prefix.is_empty() {
         emit_event(EventKind::LogLine {
@@ -1217,6 +1257,11 @@ pub(crate) async fn run_agent_loop_nested(
         completion_nudge_budget,
         None,
         prepopulated_conversation,
+        wants_events,
+        parent_id,
+        parent_call,
+        kind,
+        id_chain,
     )
     .await;
     log::info!("{prefix}task: end");
@@ -1278,6 +1323,11 @@ pub(crate) async fn run_agent_loop_core(
     completion_nudge_budget: usize,
     interactive: Option<InteractiveSession>,
     prepopulated_conversation: Box<dyn Conversation>,
+    wants_events: bool,
+    parent_id: &str,
+    parent_call: &str,
+    kind: &str,
+    chain: &str,
 ) -> Result<CompletedRun, ClientError> {
     let mut state = LoopState::new(
         system_prompt,
@@ -1321,6 +1371,11 @@ pub(crate) async fn run_agent_loop_core(
                 prefix,
                 idle_timeout,
                 nested,
+                wants_events,
+                parent_id,
+                parent_call,
+                kind,
+                chain,
                 &turn_retry_backoff,
                 &timeout_retry_backoff,
             )
@@ -1403,6 +1458,11 @@ pub(crate) async fn run_agent_loop_core(
                 raw,
                 captured,
                 prefix,
+                wants_events,
+                parent_id,
+                parent_call,
+                kind,
+                chain,
             )
             .await?;
 
@@ -4796,6 +4856,11 @@ mod tests {
                 0,
                 Some(session),
                 Box::new(ConversationStub::new("hi")),
+                false,
+                "",
+                "",
+                "",
+                "",
             )
             .await
         });
@@ -4905,6 +4970,11 @@ mod tests {
                 0,
                 Some(session),
                 Box::new(ConversationStub::new("hi")),
+                true,
+                "",
+                "",
+                "",
+                "",
             )
             .await
         });
@@ -5003,6 +5073,11 @@ mod tests {
                 0,
                 Some(session),
                 Box::new(ConversationStub::new("hi")),
+                false,
+                "",
+                "",
+                "",
+                "",
             )
             .await
         });
@@ -5086,6 +5161,11 @@ mod tests {
                 0,
                 Some(session),
                 Box::new(ConversationStub::new("hi")),
+                false,
+                "",
+                "",
+                "",
+                "",
             )
             .await
         });
@@ -5245,6 +5325,11 @@ mod tests {
             0,
             None,
             Box::new(ConversationStub::new("hi")),
+            false,
+            "",
+            "",
+            "",
+            "",
         )
         .await
         .unwrap();
@@ -5329,6 +5414,11 @@ mod tests {
             // Run against the shipped implementation, not the stub: this test
             // guards the prompt-commit invariant in `StandardConversation`.
             crate::conversation::new_blank_conversation("hi", false, None),
+            false,
+            "",
+            "",
+            "",
+            "",
         )
         .await
         .unwrap();

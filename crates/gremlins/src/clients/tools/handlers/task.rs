@@ -2,6 +2,7 @@ use crate::task_kind::TaskKind;
 use async_trait::async_trait;
 
 use crate::clients::conversation::Conversation;
+use crate::clients::format::format_tool_call_parts;
 use crate::clients::tools::registry::{str_detail, ToolHandler};
 use crate::clients::tools::runtime::{AgentLoopRuntime, ToolOutcome};
 use crate::clients::tools::util::{parse_args, preview_str};
@@ -23,7 +24,7 @@ impl ToolHandler for TaskTool {
 
     async fn invoke(
         &self,
-        _id: &str,
+        id: &str,
         ctx: &AgentLoopRuntime,
         conv: &dyn Conversation,
         args_json: &str,
@@ -63,7 +64,9 @@ impl ToolHandler for TaskTool {
         } else {
             conv.spawn_child(prompt)
         };
-        let child_outcome = f(kind, prompt.to_string(), conversation).await;
+        let parent_id = format!("{}{}", ctx.id_prefix, id);
+        let call = format_tool_call_parts("Task", &args);
+        let child_outcome = f(kind, prompt.to_string(), conversation, parent_id, call).await;
         // Label the result so concurrent Task outputs can be told apart.
         let final_output = format!("# {kind}\n\n{}", child_outcome.output);
         log::info!(

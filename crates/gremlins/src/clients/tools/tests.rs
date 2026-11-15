@@ -2925,7 +2925,7 @@ async fn task_callback_called_when_set() {
     let dir = tmp();
     let called = Arc::new(std::sync::Mutex::new(false));
     let called2 = called.clone();
-    let task_fn: TaskFn = Arc::new(move |kind, prompt, _history| {
+    let task_fn: TaskFn = Arc::new(move |kind, prompt, _history, _parent_id, _parent_call| {
         *called2.lock().unwrap() = true;
         Box::pin(async move { ToolOutcome::text(format!("task result: {kind} / {prompt}")) })
     });
@@ -2953,7 +2953,7 @@ async fn task_callback_called_when_set() {
 #[tokio::test]
 async fn task_empty_prompt_returns_error() {
     let dir = tmp();
-    let task_fn: TaskFn = Arc::new(|_kind, _prompt, _history| {
+    let task_fn: TaskFn = Arc::new(|_kind, _prompt, _history, _parent_id, _parent_call| {
         Box::pin(async move { ToolOutcome::text("should not be called") })
     });
     let c = AgentLoopRuntime {
@@ -2986,7 +2986,7 @@ async fn task_unknown_kind_rejected_before_callback() {
     let dir = tmp();
     let called = Arc::new(std::sync::Mutex::new(false));
     let called2 = called.clone();
-    let task_fn: TaskFn = Arc::new(move |_kind, _prompt, _history| {
+    let task_fn: TaskFn = Arc::new(move |_kind, _prompt, _history, _parent_id, _parent_call| {
         *called2.lock().unwrap() = true;
         Box::pin(async move { ToolOutcome::text("should not be called") })
     });
@@ -3017,8 +3017,9 @@ async fn task_unknown_kind_rejected_before_callback() {
 #[tokio::test]
 async fn task_result_is_headered_with_kind() {
     let dir = tmp();
-    let task_fn: TaskFn =
-        Arc::new(|_k, _p, _history| Box::pin(async move { ToolOutcome::text("body") }));
+    let task_fn: TaskFn = Arc::new(|_k, _p, _history, _parent_id, _parent_call| {
+        Box::pin(async move { ToolOutcome::text("body") })
+    });
     let c = AgentLoopRuntime {
         cwd: Some(dir.clone()),
         extra_env: None,
@@ -3464,8 +3465,9 @@ async fn invoke_does_not_cap_done() {
 async fn invoke_does_not_cap_task() {
     let _env = crate::test_support::EnvGuard::lock();
     let dir = tmp();
-    let task_fn: TaskFn =
-        Arc::new(|_k, _p, _history| Box::pin(async move { ToolOutcome::text("x".repeat(500)) }));
+    let task_fn: TaskFn = Arc::new(|_k, _p, _history, _parent_id, _parent_call| {
+        Box::pin(async move { ToolOutcome::text("x".repeat(500)) })
+    });
     let c = AgentLoopRuntime {
         cwd: Some(dir.clone()),
         extra_env: None,

@@ -41,8 +41,17 @@ impl ToolOutcome {
 /// The third parameter carries the parent's conversation.
 /// Fork receives a clone of the parent conversation; Scout/Implement
 /// receive a fresh conversation seeded from the parent's contexts.
-pub(crate) type TaskFn =
-    Arc<dyn Fn(TaskKind, String, Box<dyn Conversation>) -> ToolFuture + Send + Sync>;
+pub(crate) type TaskFn = Arc<
+    dyn Fn(
+            TaskKind,
+            String,
+            Box<dyn Conversation>,
+            String, // parent tool-call id (with id_prefix applied)
+            String, // formatted tool call for title row
+        ) -> ToolFuture
+        + Send
+        + Sync,
+>;
 
 /// How tool-path sandboxing is applied for a stage's agent loop.
 ///

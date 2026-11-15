@@ -2507,6 +2507,16 @@ async fn run_app(live_area: &mut LiveArea) -> io::Result<()> {
             Some(event) = chat_rx.recv() => {
                 // Drop events that belong to a superseded turn (a turn that
                 // was cancelled by Esc or replaced by a newer submit).
+                // TaskProgress events are keyed by parent tool-call id, not by
+                // turn, and are handled before the turn filter below.
+                if let ChatEvent::TaskProgress { parent_id, chain, kind, call, reasoning, text, stats, total } = &event {
+                    log::debug!(
+                        "TaskProgress parent_id={parent_id} kind={kind} chain={chain} reasoning_len={} text_len={}",
+                        reasoning.len(), text.len()
+                    );
+                    live_area.push_task_progress(parent_id, kind, call, reasoning, text, stats.as_ref(), total.as_ref());
+                    continue;
+                }
                 let event_turn = match &event {
                     ChatEvent::StreamChunk { turn, .. }
                     | ChatEvent::ReasoningChunk { turn, .. }
@@ -2517,6 +2527,7 @@ async fn run_app(live_area: &mut LiveArea) -> io::Result<()> {
                     | ChatEvent::Ended { turn, .. }
                     | ChatEvent::Error { turn, .. }
                     | ChatEvent::SystemWarning { turn, .. } => turn.clone(),
+                    ChatEvent::TaskProgress { .. } => unreachable!("handled above"),
                 };
                 match (&active_turn, &event_turn) {
                     (Some(active), Some(ev)) if active != ev => {
@@ -2669,6 +2680,7 @@ async fn run_app(live_area: &mut LiveArea) -> io::Result<()> {
                         let full = format!("⚠ {msg}");
                         live_area.push_transcript_line(full);
                     }
+                    ChatEvent::TaskProgress { .. } => unreachable!("handled above"),
                 }
             }
 

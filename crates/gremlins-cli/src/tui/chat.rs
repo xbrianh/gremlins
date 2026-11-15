@@ -49,6 +49,27 @@ pub enum ChatEvent {
         /// reasoning-stream stats title.
         loop_turn: Option<usize>,
     },
+    /// Live progress from a running Task tool (Scout/Implement/Fork).
+    /// Keyed by the parent tool-call id so the slot matches the eventual
+    /// [`ToolResult`](ChatEvent::ToolResult) commit.
+    TaskProgress {
+        /// Parent tool-call id (prefixed when nested) — the slot key.
+        parent_id: String,
+        /// Task chain segment (e.g. "a3f1"), informational.
+        chain: String,
+        /// Task kind: "Scout", "Implement", or "Fork".
+        kind: String,
+        /// Formatted tool call for the title row.
+        call: String,
+        /// Streamed reasoning delta (empty when not a reasoning chunk).
+        reasoning: String,
+        /// Streamed text delta (empty when not a text chunk).
+        text: String,
+        /// Per-turn token stats (present in turn-summary events).
+        stats: Option<Value>,
+        /// Conversation-wide cumulative totals (present in turn-summary events).
+        total: Option<Value>,
+    },
     Done {
         text: String,
         /// The `Done` tool's `summary` argument, appended to the turn's
@@ -165,6 +186,40 @@ pub(crate) fn parse_chat_event(value: &Value) -> Option<ChatEvent> {
                 .get("loop_turn")
                 .and_then(|v| v.as_u64())
                 .map(|n| n as usize),
+        }),
+        Some("task_progress") => Some(ChatEvent::TaskProgress {
+            parent_id: value
+                .get("parent_id")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string(),
+            chain: value
+                .get("chain")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string(),
+            kind: value
+                .get("kind")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string(),
+            call: value
+                .get("call")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string(),
+            reasoning: value
+                .get("reasoning")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string(),
+            text: value
+                .get("text")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string(),
+            stats: value.get("stats").filter(|v| !v.is_null()).cloned(),
+            total: value.get("totals").filter(|v| !v.is_null()).cloned(),
         }),
         Some("done") => Some(ChatEvent::Done {
             text: value
