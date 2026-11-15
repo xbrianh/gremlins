@@ -85,7 +85,6 @@ pub mod blob_io;
 pub mod bootstrap;
 pub mod exec_runner;
 pub mod gremlin;
-pub mod live_usage;
 pub mod parallel;
 pub mod run;
 pub mod run_agent;

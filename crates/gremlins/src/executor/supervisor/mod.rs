@@ -43,7 +43,7 @@ pub(crate) use crate::clients::interactive::InteractiveHandle;
 pub(crate) use crate::clients::interactive::{InteractiveChannels, InteractiveCommand};
 
 // Items consumed by mod.rs itself.
-pub(crate) use self::chat::{add_usage_stats, base_process_env, usage_stats_from_state};
+pub(crate) use self::chat::base_process_env;
 pub(crate) use self::debug::handle_debug;
 pub(crate) use self::lifecycle::{launch_child, stop_child, LaunchResult, LogRelay};
 pub(crate) use self::log_handler::handle_log;

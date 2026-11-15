@@ -219,41 +219,47 @@ pub(crate) async fn run_agent(
         conv.set_compaction_threshold_tokens(t);
     }
 
-    // ── Live usage tracker for failure persistence ─────
-    // Stores (combined_usage, stage_local_usage, cost_usd).
-    // `combined_usage` = baseline + current stage (emitted to live UI).
-    // `stage_local_usage` = just the current stage's delta (used on
-    // failure to avoid double-counting the baseline).
-    let live_usage = std::sync::Arc::new(std::sync::Mutex::new(
-        None::<(
-            crate::clients::protocol::UsageStats,
-            crate::clients::protocol::UsageStats,
-            Option<f64>,
-        )>,
-    ));
-
-    // ── Bus subscriber for prompt-debug dumps and live usage ─────
-    // The agent loop emits run-scoped `PromptRequest` and `TokenUsage`
-    // events. This subscriber folds them into the on-disk prompt dumps and
-    // the live-usage snapshot used to persist partial progress when a stage
-    // fails mid-run. Subscribing before `client.run` keeps the first turn's
-    // events from being missed.
-    let baseline_usage = crate::executor::supervisor::usage_stats_from_state(
-        gremlin.state.read_field("token_usage").as_ref(),
-    );
-    let cost_client = client.clone();
-    // Session cost is read from the backend client at each TokenUsage
-    // event; the fold task does not own the client so it receives this
-    // closure instead.
-    let session_cost_fn: Box<dyn Fn() -> Option<f64> + Send> =
-        Box::new(move || cost_client.total_cost_usd());
-    let fold = crate::executor::live_usage::spawn_live_usage_fold(
-        gremlin.id.as_str(),
-        gremlin.state.store_handle(),
-        live_usage.clone(),
-        session_cost_fn,
-        baseline_usage,
-    );
+    // ── Bus subscriber for prompt-debug dumps ─────
+    // The agent loop emits run-scoped `PromptRequest` events. Subscribe
+    // before `client.run` so the first turn's dump is not missed.
+    let (prompt_dumper_guard, prompt_dumper_task) = {
+        use gremlins_magic_bus::{subscribe_run, Recv};
+        let (sub, mut rx) = subscribe_run(gremlin.id.as_str());
+        let guard = gremlins_magic_bus::connection::BusSubGuard::new(sub);
+        let store = gremlin.state.store_handle();
+        let prompt_gremlin_id = gremlin.id.to_string();
+        let task = tokio::spawn(async move {
+            loop {
+                match rx.recv().await {
+                    Recv::Event(dispatch) => {
+                        if let EventKind::PromptRequest { id, json } = dispatch.kind() {
+                            if *id == prompt_gremlin_id
+                                && crate::core::logging::log_level_threshold()
+                                    >= log::LevelFilter::Debug
+                            {
+                                let ts = state::now_stamp_millis()
+                                    .trim_matches(|c: char| c == '[' || c == ']')
+                                    .replace(':', "-");
+                                let name = format!("prompt_{ts}.txt");
+                                match store.open(&name, state::BlobMode::Write) {
+                                    Ok(mut blob) => {
+                                        let _ = std::io::Write::write_all(&mut blob, json.as_bytes());
+                                        let _ = std::io::Write::write_all(&mut blob, b"\n");
+                                    }
+                                    Err(e) => {
+                                        log::warn!("prompt dump: failed to open {name}: {e}");
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    Recv::Lagged(_) => continue,
+                    Recv::Closed => break,
+                }
+            }
+        });
+        (guard, task)
+    };
     let prepopulated_conversation: Box<dyn crate::clients::conversation::Conversation> =
         Box::new(conv);
 
@@ -339,39 +345,14 @@ pub(crate) async fn run_agent(
     );
 
     let run_result = client.run(params, interactive).await;
-    // Close our subscription so the fold task drains any already-buffered
-    // events (notably the final turn's `TokenUsage`) and then exits, rather
-    // than racing an abort that could drop them.
-    drop(fold.guard);
-    // Bound the drain so a stuck fold task can never stall the stage.
-    let _ = tokio::time::timeout(std::time::Duration::from_secs(5), fold.task).await;
+    // Close our subscription so the prompt-dump task drains any
+    // already-buffered events and then exits.
+    drop(prompt_dumper_guard);
+    let _ = tokio::time::timeout(std::time::Duration::from_secs(5), prompt_dumper_task).await;
 
     let completed = match run_result {
         Ok(c) => c,
         Err(error) => {
-            // Persist the live usage counters from partial (failed) agent-loop
-            // turns so the Gremlin::finish() snapshot has accurate token
-            // totals rather than the previous stage's stale values.
-            if let Some((_combined, stage_local, _cost_usd)) = live_usage.lock().unwrap().take() {
-                let mut delta: HashMap<String, i64> = HashMap::new();
-                delta.insert("turns".to_string(), stage_local.turns as i64);
-                delta.extend(
-                    [
-                        ("prompt_tokens", stage_local.prompt_tokens),
-                        ("completion_tokens", stage_local.completion_tokens),
-                        ("cached_input_tokens", stage_local.cached_input_tokens),
-                        (
-                            "cache_creation_input_tokens",
-                            stage_local.cache_creation_input_tokens,
-                        ),
-                        ("reasoning_tokens", stage_local.reasoning_tokens),
-                    ]
-                    .into_iter()
-                    .filter_map(|(k, v)| v.map(|v| (k.to_string(), v as i64))),
-                );
-                gremlin.state.accumulate_token_usage(&delta);
-                state::emit_stage_token_usage(gremlin.state.store_ref(), &stage_path, &delta);
-            }
             return Err(client_run_err(error, &prepared.name));
         }
     };
