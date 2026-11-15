@@ -86,7 +86,6 @@ fn ctx(cwd: &Path) -> AgentLoopRuntime {
         audit_lock: None,
         id_prefix: String::new(),
         message_prefix: "test.".to_string(),
-        active_skills: None,
         skills_available: false,
         discovered_skills: None,
         path_context: crate::clients::path_context::PathContext::default(),
@@ -378,7 +377,6 @@ async fn bash_invoke_respects_cwd() {
         audit_lock: None,
         id_prefix: String::new(),
         message_prefix: String::new(),
-        active_skills: None,
         skills_available: false,
         discovered_skills: None,
         path_context: crate::clients::path_context::PathContext::default(),
@@ -415,7 +413,6 @@ async fn bash_invoke_cwd_none_uses_project_root() {
         audit_lock: None,
         id_prefix: String::new(),
         message_prefix: String::new(),
-        active_skills: None,
         skills_available: false,
         discovered_skills: None,
         path_context: crate::clients::path_context::PathContext::default(),
@@ -450,7 +447,6 @@ async fn bash_invoke_cwd_none_diverges_from_process_cwd() {
         audit_lock: None,
         id_prefix: String::new(),
         message_prefix: String::new(),
-        active_skills: None,
         skills_available: false,
         discovered_skills: None,
         path_context: crate::clients::path_context::PathContext::default(),
@@ -893,7 +889,6 @@ async fn mischief_invoke_blocked_in_headless() {
         audit_lock: None,
         id_prefix: String::new(),
         message_prefix: String::new(),
-        active_skills: None,
         skills_available: false,
         discovered_skills: None,
         path_context: crate::clients::path_context::PathContext::default(),
@@ -921,7 +916,6 @@ async fn websearch_invoke_blocked_in_headless() {
         audit_lock: None,
         id_prefix: String::new(),
         message_prefix: String::new(),
-        active_skills: None,
         skills_available: false,
         discovered_skills: None,
         path_context: crate::clients::path_context::PathContext::default(),
@@ -955,7 +949,6 @@ async fn websearch_invoke_blocked_in_headless_no_filter() {
         audit_lock: None,
         id_prefix: String::new(),
         message_prefix: String::new(),
-        active_skills: None,
         skills_available: false,
         discovered_skills: None,
         path_context: crate::clients::path_context::PathContext::default(),
@@ -989,7 +982,6 @@ async fn websearch_invoke_blocked_in_headless_explicit_allowlist() {
         audit_lock: None,
         id_prefix: String::new(),
         message_prefix: String::new(),
-        active_skills: None,
         skills_available: false,
         discovered_skills: None,
         path_context: crate::clients::path_context::PathContext::default(),
@@ -1023,7 +1015,6 @@ async fn mischief_invoke_allowed_in_chat() {
         audit_lock: None,
         id_prefix: String::new(),
         message_prefix: String::new(),
-        active_skills: Some(Arc::new(std::sync::Mutex::new(vec![]))),
         skills_available: true,
         discovered_skills: None,
         path_context: crate::clients::path_context::PathContext::default(),
@@ -1094,7 +1085,6 @@ fn load_skill_unknown_name() {
     let _lock = EnvGuard::lock();
     let mut c = ctx(&tmp());
     c.discovered_skills = Some(Arc::new(vec![]));
-    c.active_skills = Some(Arc::new(std::sync::Mutex::new(vec![])));
     c.skills_available = true;
     let result = load_skill_invoke(&c, &serde_json::json!({"name": "nonexistent"}));
     assert!(
@@ -1107,7 +1097,6 @@ fn load_skill_unknown_name() {
 fn load_skill_rejects_disable_model_invocation() {
     let _lock = EnvGuard::lock();
     let mut c = ctx(&tmp());
-    c.active_skills = Some(Arc::new(std::sync::Mutex::new(vec![])));
     let skill = crate::skills::Skill {
         name: "secret-ops".into(),
         description: "operator-only skill".into(),
@@ -1137,7 +1126,6 @@ fn load_skill_success_body_free() {
     // the next turn boundary, not written into the transcript.
     let _lock = EnvGuard::lock();
     let mut c = ctx(&tmp());
-    c.active_skills = Some(Arc::new(std::sync::Mutex::new(vec![])));
     let skill = crate::skills::Skill {
         name: "pdf".into(),
         description: "PDF skill".into(),
@@ -1970,7 +1958,6 @@ async fn filtered_tool_does_not_mutate_or_spawn() {
         audit_lock: None,
         id_prefix: String::new(),
         message_prefix: String::new(),
-        active_skills: None,
         skills_available: false,
         discovered_skills: None,
         path_context: crate::clients::path_context::PathContext::default(),
@@ -2921,7 +2908,6 @@ async fn task_no_callback_returns_error() {
         audit_lock: None,
         id_prefix: String::new(),
         message_prefix: String::new(),
-        active_skills: None,
         skills_available: false,
         discovered_skills: None,
         path_context: crate::clients::path_context::PathContext::default(),
@@ -2951,7 +2937,6 @@ async fn task_callback_called_when_set() {
         audit_lock: None,
         id_prefix: String::new(),
         message_prefix: String::new(),
-        active_skills: None,
         skills_available: false,
         discovered_skills: None,
         path_context: crate::clients::path_context::PathContext::default(),
@@ -2979,7 +2964,6 @@ async fn task_empty_prompt_returns_error() {
         audit_lock: None,
         id_prefix: String::new(),
         message_prefix: String::new(),
-        active_skills: None,
         skills_available: false,
         discovered_skills: None,
         path_context: crate::clients::path_context::PathContext::default(),
@@ -3014,7 +2998,6 @@ async fn task_unknown_kind_rejected_before_callback() {
         audit_lock: None,
         id_prefix: String::new(),
         message_prefix: String::new(),
-        active_skills: None,
         skills_available: false,
         discovered_skills: None,
         path_context: crate::clients::path_context::PathContext::default(),
@@ -3045,7 +3028,6 @@ async fn task_result_is_headered_with_kind() {
         audit_lock: None,
         id_prefix: String::new(),
         message_prefix: String::new(),
-        active_skills: None,
         skills_available: false,
         discovered_skills: None,
         path_context: crate::clients::path_context::PathContext::default(),
@@ -3494,7 +3476,6 @@ async fn invoke_does_not_cap_task() {
         audit_lock: None,
         id_prefix: String::new(),
         message_prefix: String::new(),
-        active_skills: None,
         skills_available: false,
         discovered_skills: None,
         path_context: crate::clients::path_context::PathContext::default(),
@@ -3526,7 +3507,6 @@ fn allow_all_ctx(cwd: &Path) -> AgentLoopRuntime {
         audit_lock: None,
         id_prefix: String::new(),
         message_prefix: String::new(),
-        active_skills: None,
         skills_available: false,
         discovered_skills: None,
         path_context: crate::clients::path_context::PathContext::default(),

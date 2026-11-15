@@ -187,17 +187,22 @@ pub(crate) async fn handle_chat(
     //    Skills are discovered from the project root on each turn so newly
     //    added skills take effect without a daemon restart. Discovery runs in
     //    spawn_blocking so filesystem I/O does not stall the async executor.
+    //
+    //    Operator-requested skills are stored in the session. Model-loaded
+    //    skills arrive via SkillLoaded bus events during the turn and are
+    //    appended to the session by run_chat_turn. At turn start we read both
+    //    to build the combined active set.
     let project_root_for_skills = project_root.clone();
     let all_skills =
         tokio::task::spawn_blocking(move || crate::skills::discover(&project_root_for_skills))
             .await
             .unwrap_or_default();
-    // The actor merges the operator toggles into the session's active set and
-    // returns the resulting names plus the shared `Arc` the agent loop reads.
-    let (active_skills, active_skills_arc) = match client
-        .session_update_skills(session_id, requested_skills.clone())
-        .await
-    {
+    // Store the operator's requested skill set in the session.
+    client
+        .session_set_operator_skills(session_id, requested_skills.clone())
+        .await;
+    // Read the combined active set: operator-requested + model-loaded.
+    let active_skills = match client.session_get_combined_skills(session_id).await {
         Some(skills) => skills,
         None => {
             let resp = error_response("session closed");
@@ -309,7 +314,6 @@ pub(crate) async fn handle_chat(
     // replace the one captured at creation rather than freeze at first contact.
     gremlin.env = env;
     // Wire up skills for the LoadSkill tool.
-    gremlin.active_skills = Some(active_skills_arc);
     gremlin.discovered_skills = Some(Arc::new(all_skills));
 
     // Point the run-map handle's cancel token at this turn so `stop` cancels
@@ -581,6 +585,10 @@ async fn run_chat_turn(
         (result, gremlin)
     });
 
+    // Pre-construct the actor client so SkillLoaded events don't clone
+    // the sender on every occurrence.
+    let actor_client = Client::new(ctx.actor_tx.clone());
+
     // Forward stream events until a terminal event, a write error, or a
     // cancellation.
     loop {
@@ -651,6 +659,16 @@ async fn run_chat_turn(
                     }
                     EventKind::Ready { .. } => {
                         // Ignore Ready in chat mode.
+                    }
+                    EventKind::SkillLoaded { name, .. } => {
+                        // Append the model-loaded skill to the session so the
+                        // next turn's system prompt picks it up.
+                        actor_client
+                            .session_append_model_skills(
+                                &ctx.session_id,
+                                vec![name],
+                            )
+                            .await;
                     }
                     // Other run-scoped events (log lines, token usage, run
                     // lifecycle) are not part of the chat stream protocol.
@@ -953,7 +971,6 @@ pub(crate) fn create_chat_gremlin(
         enclosing_task_models: None,
         enclosing_model: None,
         discovered_skills: None,
-        active_skills: None,
         extra_sandbox_roots: Vec::new(),
     })
 }

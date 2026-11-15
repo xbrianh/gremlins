@@ -31,7 +31,8 @@ fn event_run_id(kind: &EventKind) -> Option<&str> {
         | EventKind::Bail { id, .. }
         | EventKind::LogLine { id, .. }
         | EventKind::StageBoundary { id, .. }
-        | EventKind::ExecOutput { id, .. } => Some(id.as_str()),
+        | EventKind::ExecOutput { id, .. }
+        | EventKind::SkillLoaded { id, .. } => Some(id.as_str()),
         _ => None,
     }
 }

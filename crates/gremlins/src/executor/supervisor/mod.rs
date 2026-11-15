@@ -272,6 +272,7 @@ async fn handle_connection(
                             // `run_agent`; they are never part of the client
                             // protocol and can be large.
                             | EventKind::PromptRequest { .. }
+                            | EventKind::SkillLoaded { .. }
                     ) {
                         continue;
                     }

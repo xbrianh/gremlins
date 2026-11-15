@@ -15,7 +15,7 @@ use crate::clients::cancel::CancelToken;
 use crate::executor::gremlin::Gremlin;
 
 use super::actor::ActorMsg;
-use super::actor::{self, ActiveSkills, TurnSnapshot};
+use super::actor::{self, TurnSnapshot};
 use super::CurrentTurn;
 
 /// Lightweight handle wrapping the actor's mailbox sender.
@@ -198,16 +198,52 @@ impl Client {
         rx.await.ok().flatten()
     }
 
-    pub(crate) async fn session_update_skills(
+    pub(crate) async fn session_append_model_skills(
         &self,
         session_id: &str,
-        requested: Vec<String>,
-    ) -> Option<ActiveSkills> {
+        skill_names: Vec<String>,
+    ) {
+        let (respond, rx) = oneshot::channel();
+        if self
+            .tx
+            .send(ActorMsg::SessionAppendModelSkills {
+                session_id: session_id.to_string(),
+                skill_names,
+                respond,
+            })
+            .is_ok()
+        {
+            let _ = rx.await;
+        }
+    }
+
+    pub(crate) async fn session_set_operator_skills(
+        &self,
+        session_id: &str,
+        skill_names: Vec<String>,
+    ) {
+        let (respond, rx) = oneshot::channel();
+        if self
+            .tx
+            .send(ActorMsg::SessionSetOperatorSkills {
+                session_id: session_id.to_string(),
+                skill_names,
+                respond,
+            })
+            .is_ok()
+        {
+            let _ = rx.await;
+        }
+    }
+
+    pub(crate) async fn session_get_combined_skills(
+        &self,
+        session_id: &str,
+    ) -> Option<Vec<String>> {
         let (respond, rx) = oneshot::channel();
         self.tx
-            .send(ActorMsg::SessionUpdateSkills {
+            .send(ActorMsg::SessionGetCombinedSkills {
                 session_id: session_id.to_string(),
-                requested,
                 respond,
             })
             .ok()?;

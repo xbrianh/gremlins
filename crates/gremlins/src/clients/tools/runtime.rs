@@ -98,10 +98,6 @@ pub(crate) struct AgentLoopRuntime {
     /// Run-scoped id (gremlin_id) used for direct bus emission of log lines
     /// and stream events. Empty in tests / naked runs.
     pub(crate) message_prefix: String,
-    /// Shared mutable reference to session active skill names.
-    /// The LoadSkill tool pushes names here; the supervisor reads them
-    /// at the next turn boundary.
-    pub(crate) active_skills: Option<Arc<std::sync::Mutex<Vec<String>>>>,
     /// Whether skills are available (chat-only). Doubles as the canonical
     /// chat predicate for tool gates (Mischief bypass, LoadSkill inclusion).
     pub(crate) skills_available: bool,

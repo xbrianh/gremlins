@@ -491,7 +491,6 @@ mod tests {
             audit_lock: None,
             id_prefix: String::new(),
             message_prefix: String::new(),
-            active_skills: None,
             skills_available: false,
             discovered_skills: None,
             path_context: crate::clients::path_context::PathContext::default(),

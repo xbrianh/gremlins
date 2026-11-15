@@ -1,5 +1,8 @@
 use async_trait::async_trait;
 
+use gremlins_magic_bus::emit_event;
+use gremlins_magic_bus::EventKind;
+
 use crate::clients::conversation::Conversation;
 use crate::clients::tools::registry::ToolHandler;
 use crate::clients::tools::runtime::{AgentLoopRuntime, ToolOutcome};
@@ -38,9 +41,6 @@ pub(crate) fn load_skill_invoke(ctx: &AgentLoopRuntime, args: &serde_json::Value
     let Some(discovered) = ctx.discovered_skills.as_ref() else {
         return "Error: LoadSkill is only available in chat sessions".to_string();
     };
-    let Some(active) = &ctx.active_skills else {
-        return "Error: LoadSkill is only available in chat sessions".to_string();
-    };
     // Look up the skill by name.
     let loaded = match crate::skills::find_skill(discovered, name, true) {
         Some(l) => l,
@@ -56,18 +56,18 @@ pub(crate) fn load_skill_invoke(ctx: &AgentLoopRuntime, args: &serde_json::Value
         return format!("Error: skill {name:?} is not available for model invocation");
     }
 
-    // Single critical section: check containment AND push so two
-    // concurrent LoadSkill calls for the same name cannot both pass
-    // the check and both push.
-    let mut active_guard = match active.lock() {
-        Ok(g) => g,
-        Err(e) => return format!("Error: internal lock error: {e}"),
-    };
-    if active_guard.contains(&name.to_string()) {
-        return format!("Skill {name:?} is already active.");
-    }
-    active_guard.push(name.to_string());
-    drop(active_guard);
+    // Announce the activation on the bus. The supervisor subscribes and
+    // folds the skill body into the next turn's system prompt. The actor
+    // deduplicates by name, so repeated LoadSkill calls for the same skill
+    // are idempotent (though the model receives a success acknowledgement
+    // each time — there is no "already active" error in this design).
+    //
+    // Emit the canonical name from the resolved skill, not the raw
+    // invocation argument, in case find_skill resolved an alias.
+    emit_event(EventKind::SkillLoaded {
+        id: ctx.message_prefix.clone(),
+        name: loaded.skill.name.clone(),
+    });
 
     // Return a body-free acknowledgement. The skill body is injected as a
     // trusted system-prompt amendment at the next turn boundary, not written

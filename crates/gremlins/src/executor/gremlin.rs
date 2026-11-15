@@ -293,8 +293,6 @@ pub struct Gremlin {
     pub(crate) enclosing_model: Option<ModelURI>,
     /// Skills discovered at turn start (chat-only).
     pub(crate) discovered_skills: Option<Arc<Vec<crate::skills::LoadedSkill>>>,
-    /// Active skill names — shared with LoadSkill tool and supervisor session.
-    pub(crate) active_skills: Option<Arc<std::sync::Mutex<Vec<String>>>>,
     /// Additional sandbox roots carried forward from [`GremlinConfig`].
     /// Threaded through [`Gremlin::cwd_extra_sandbox_roots`] →
     /// [`crate::clients::backend::RunParams::extra_sandbox_roots`] →
@@ -497,7 +495,6 @@ impl Gremlin {
             enclosing_task_models: None,
             enclosing_model: None,
             discovered_skills: None,
-            active_skills: None,
             extra_sandbox_roots: config.extra_sandbox_roots.clone(),
         };
 
@@ -631,7 +628,6 @@ impl Gremlin {
             enclosing_task_models: None,
             enclosing_model: None,
             discovered_skills: None,
-            active_skills: None,
             extra_sandbox_roots: Vec::new(),
         })
     }
@@ -1009,7 +1005,6 @@ impl Gremlin {
             enclosing_task_models: self.enclosing_task_models.clone(),
             enclosing_model: effective_model.cloned(),
             discovered_skills: None,
-            active_skills: None,
             extra_sandbox_roots: self.extra_sandbox_roots.clone(),
         })
     }
@@ -2256,7 +2251,6 @@ mod tests {
             enclosing_task_models: None,
             enclosing_model: None,
             discovered_skills: None,
-            active_skills: None,
             extra_sandbox_roots: Vec::new(),
         }
     }

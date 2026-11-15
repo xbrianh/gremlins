@@ -1119,7 +1119,6 @@ pub(crate) async fn run_agent_loop(
         audit_lock: Some(Arc::new(std::sync::Mutex::new(()))),
         id_prefix: String::new(),
         message_prefix: message_prefix.clone(),
-        active_skills: ctx.params.active_skills.clone(),
         skills_available: ctx.params.skills_available,
         discovered_skills: ctx.params.discovered_skills.clone(),
         path_context: ctx.params.path_context.clone(),
@@ -1216,13 +1215,16 @@ pub(crate) async fn run_agent_loop_nested(
         single_turn: false,
     };
     // Nested loops never expose LoadSkill even when the parent has skills.
+    // Clear both skills_available (gates chat-only tools) and
+    // discovered_skills (gates LoadSkill's own lookup) so a sub-agent
+    // cannot emit SkillLoaded attributed to the parent run.
     let is_chat = false;
     let tool_defs = tools::tool_definitions(tool_filter, is_chat, ToolMode::Full);
     let mut raw: Option<std::fs::File> = None;
     let mut captured: Option<Vec<serde_json::Value>> = None;
     let mut nested_tool_ctx = tool_ctx.clone();
     nested_tool_ctx.skills_available = false;
-    nested_tool_ctx.active_skills = None;
+    nested_tool_ctx.discovered_skills = None;
     // Nested loops keep the parent's stream (so their `ToolResult` events reach
     // the parent TUI) via the same `message_prefix`.
     // Prefix this task's tool call IDs with its chain so two tasks that reuse a
@@ -1730,7 +1732,6 @@ pub(crate) fn test_ctx(
             prepopulated_conversation: conv.clone(),
             skills_available: false,
             discovered_skills: None,
-            active_skills: None,
             extra_sandbox_roots: Vec::new(),
             path_context: PathContext::default(),
         },
@@ -1756,7 +1757,6 @@ pub(crate) fn test_tool_ctx() -> crate::clients::tools::AgentLoopRuntime {
         audit_lock: Some(std::sync::Arc::new(std::sync::Mutex::new(()))),
         id_prefix: String::new(),
         message_prefix: String::new(),
-        active_skills: None,
         skills_available: false,
         discovered_skills: None,
         path_context: PathContext::default(),

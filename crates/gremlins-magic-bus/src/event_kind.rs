@@ -144,4 +144,10 @@ pub enum EventKind {
         text: String,
         ts: String,
     },
+
+    // ── Skill loading ─────────────────────────────────────────────────
+    /// Emitted by the LoadSkill tool handler when a skill is successfully
+    /// activated. The name is the canonical skill identifier.
+    #[serde(rename = "skill_loaded")]
+    SkillLoaded { id: String, name: String },
 }

@@ -26,7 +26,7 @@ the defaults.
 | `landscape.rs` | Landscape | File/directory structural outline. Delegates to `gremlins-landscape` for the tree-formatted output. |
 | `mischief.rs` | Mischief | Gremlins YAML DSL reference. Chat-only (`chat_only() == true`). Returns the full DSL reference document. |
 | `read.rs` | Read | File reading with 1-based line number prefixes. Supports offset/limit pagination. Has a larger `display_truncation` (500) because its body is a focal artifact. |
-| `skills.rs` | LoadSkill | Skill loading. Chat-only and bypasses the tool filter (`bypass_filter() == true`). Pushes resolved skill names into the session's `active_skills` list. |
+| `skills.rs` | LoadSkill | Skill loading. Chat-only and bypasses the tool filter (`bypass_filter() == true`). Emits `EventKind::SkillLoaded { id, name }` on the bus; the supervisor applies the activation at the next turn boundary. |
 | `task.rs` | Task | Fan-out worker delegation. Dispatches `Fork`/`Scout`/`Implement` tasks via the `task_fn` callback, which spawns nested agent loops. Implements `max_per_message()` to return `TASK_MAX_PER_TURN` (8). |
 | `websearch.rs` | WebSearch | Web page fetching via curl. Chat-only. Formats truncated page text. |
 | `write.rs` | Write | File writing. Creates or overwrites files, creating parent directories as needed. Sandbox-checked via `sandbox_check()`. |
