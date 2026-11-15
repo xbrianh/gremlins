@@ -9,15 +9,20 @@ is to identify structural problems that span files or modules.
 
 Two sources are available:
 
-1. **The diff** — what actually changed in the commit range under QA.
+1. **The diff** — the complete, exhaustive `git diff` of the commit
+   range under QA. Every changed line is present with full surrounding
+   context. New `pub` items, new imports, new trait bounds, new module
+   declarations — they are all here. You can trust this diff as the
+   authoritative record of every change; there is no need to read source
+   files to confirm what is already shown.
+
 2. **The structural report** — the `cargo-modules` analysis: changed
    modules, module trees, and module-level dependency adjacency (edges
    collapsed to `module -> dep1, dep2, …`).
 
-The report is your primary evidence. You may **read source files** to
-confirm a suspected coupling leak or hotspot — the report tells you
-*which* modules to look at, but reading confirms *why*. Do not read
-files that are irrelevant to the changed modules.
+The report is your primary evidence. The diff is exhaustive — treat it as
+ground truth. Only read a source file if the diff is genuinely ambiguous
+about something structural, which should be rare.
 
 ## What you must NOT do
 
