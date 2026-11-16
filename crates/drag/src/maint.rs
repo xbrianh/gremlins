@@ -522,7 +522,7 @@ fn build_multi_dim_prompt(
          Explore the directory source files using Landscape, Read, Grep, and Glob tools.\n\
          Score each of the {n} dimensions above on a 0–4 integer scale.\n\
          Produce a single JSON object with these fields: {dim_keys}.\n\
-         Write the JSON to {{maintainability}}.",
+         Write the JSON to {{maintainability}}, then call Done.",
         preamble = config.preamble,
         n = config.dimensions.len(),
     )
