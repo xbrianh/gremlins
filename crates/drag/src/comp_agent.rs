@@ -383,7 +383,7 @@ async fn run_comp_agent(
              Score {n} dimensions on a 0-4 scale:\n{dim_list}\n\n\
              {generic_anchors}{structural_section}\n\n\
              Produce a JSON object with these fields: {dim_keys}.\n\
-             Write the JSON to {{comprehensibility}}.",
+             Write the JSON to {{comprehensibility}}, then call Done.",
             preamble = comprehensibility_config.preamble,
             n = comprehensibility_config.dimensions.len(),
             generic_anchors = comprehensibility_config.generic_anchors,
