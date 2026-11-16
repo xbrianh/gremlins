@@ -1157,8 +1157,9 @@ pub(crate) fn completion_nudge_budget() -> usize {
 /// Default cap for tool output: 300 000 bytes.
 pub(crate) const DEFAULT_MAX_TOOL_OUTPUT_BYTES: u64 = 300_000;
 
-/// Default headless (pipeline) compaction threshold: 100 000 tokens.
-pub(crate) const DEFAULT_COMPACTION_THRESHOLD_TOKENS: u64 = 150_000;
+/// Default headless (pipeline) compaction threshold: 200 000 total
+/// tokens (input + cached).
+pub(crate) const DEFAULT_COMPACTION_THRESHOLD_TOKENS: u64 = 200_000;
 
 /// Default ceiling for a serialized prompt: 1 MiB.
 pub(crate) const DEFAULT_MAX_PROMPT_BYTES: u64 = 1_048_576;
@@ -1183,7 +1184,7 @@ pub(crate) fn max_prompt_bytes() -> u64 {
 
 /// GREMLINS_COMPACTION_THRESHOLD_TOKENS — trigger automatic compaction when
 /// the previous turn's prompt token count exceeds this many tokens. Default
-/// 150 000. The env var takes precedence over Settings.yaml
+/// 200 000. The env var takes precedence over Settings.yaml
 /// `compaction.threshold-tokens` so the TUI chat gremlin can pin the
 /// threshold to [`u64::MAX`] via its environment.
 pub(crate) fn compaction_threshold_tokens() -> u64 {
@@ -2548,7 +2549,7 @@ model-profiles:
         let mut env = EnvGuard::lock();
         let dir = tempfile::tempdir().unwrap();
         env.set("GREMLINS_SANDBOX_ROOT", dir.path());
-        // No settings.yaml, no env var — should get the 150_000 default.
+        // No settings.yaml, no env var — should get the 200_000 default.
         let cfg = Config::load().unwrap();
         assert_eq!(
             cfg.compaction_threshold_tokens(),

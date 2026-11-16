@@ -1306,6 +1306,16 @@ fn turn_stats(turn: usize, usage: Option<&Usage>) -> Option<TurnStats> {
     })
 }
 
+/// Sum `input_tokens + cached_input_tokens` from a [`Usage`] struct.
+/// Returns `None` only when both fields are `None` (provider reported no usage at
+/// all). When either field is present, absent fields are treated as 0.
+fn total_prompt_tokens(usage: &Usage) -> Option<u64> {
+    match (usage.input_tokens, usage.cached_input_tokens) {
+        (None, None) => None,
+        (a, b) => Some(a.unwrap_or(0) + b.unwrap_or(0)),
+    }
+}
+
 // ── agent loop ────────────────────────────────────────────────────────────
 
 #[allow(clippy::too_many_arguments, clippy::type_complexity)]
@@ -1508,7 +1518,7 @@ pub(crate) async fn run_agent_loop_core(
                 &reasoning,
                 &reasoning_items,
                 expected_artifact_paths,
-                turn_usage.as_ref().and_then(|u| u.input_tokens),
+                turn_usage.as_ref().and_then(|u| total_prompt_tokens(u)),
                 loop_start,
                 raw,
                 captured,
@@ -1523,7 +1533,7 @@ pub(crate) async fn run_agent_loop_core(
             &text,
             &reasoning_items,
             &tool_calls,
-            turn_usage.as_ref().and_then(|u| u.input_tokens),
+            turn_usage.as_ref().and_then(|u| total_prompt_tokens(u)),
         );
 
         state
