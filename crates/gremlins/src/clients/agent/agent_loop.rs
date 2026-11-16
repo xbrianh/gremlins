@@ -1307,6 +1307,11 @@ fn turn_stats(turn: usize, usage: Option<&Usage>) -> Option<TurnStats> {
 }
 
 /// Sum `input_tokens + cached_input_tokens` from a [`Usage`] struct.
+///
+/// `input_tokens` and `cached_input_tokens` are disjoint in `rig_core`'s
+/// [`Usage`] type (every backend reports them independently), so summing
+/// them yields the total prompt token footprint.
+///
 /// Returns `None` only when both fields are `None` (provider reported no usage at
 /// all). When either field is present, absent fields are treated as 0.
 fn total_prompt_tokens(usage: &Usage) -> Option<u64> {
@@ -1855,6 +1860,57 @@ mod tests {
 
         assert!(turn_stats(0, Some(&usage)).is_none());
         assert!(turn_stats(3, None).is_none());
+    }
+
+    #[test]
+    fn total_prompt_tokens_sums_disjoint_fields() {
+        // Both present
+        let u = Usage {
+            input_tokens: Some(10),
+            output_tokens: None,
+            cached_input_tokens: Some(4),
+            cache_creation_input_tokens: None,
+            reasoning_tokens: None,
+            tool_use_prompt_tokens: None,
+            total_tokens: None,
+        };
+        assert_eq!(total_prompt_tokens(&u), Some(14));
+
+        // Only input_tokens
+        let u = Usage {
+            input_tokens: Some(10),
+            output_tokens: None,
+            cached_input_tokens: None,
+            cache_creation_input_tokens: None,
+            reasoning_tokens: None,
+            tool_use_prompt_tokens: None,
+            total_tokens: None,
+        };
+        assert_eq!(total_prompt_tokens(&u), Some(10));
+
+        // Only cached_input_tokens
+        let u = Usage {
+            input_tokens: None,
+            output_tokens: None,
+            cached_input_tokens: Some(4),
+            cache_creation_input_tokens: None,
+            reasoning_tokens: None,
+            tool_use_prompt_tokens: None,
+            total_tokens: None,
+        };
+        assert_eq!(total_prompt_tokens(&u), Some(4));
+
+        // Neither → None
+        let u = Usage {
+            input_tokens: None,
+            output_tokens: None,
+            cached_input_tokens: None,
+            cache_creation_input_tokens: None,
+            reasoning_tokens: None,
+            tool_use_prompt_tokens: None,
+            total_tokens: None,
+        };
+        assert_eq!(total_prompt_tokens(&u), None);
     }
 
     #[test]
