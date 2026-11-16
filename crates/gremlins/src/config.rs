@@ -1160,11 +1160,11 @@ pub(crate) const DEFAULT_MAX_TOOL_OUTPUT_BYTES: u64 = 300_000;
 /// Default headless (pipeline) compaction threshold: 100 000 tokens.
 pub(crate) const DEFAULT_COMPACTION_THRESHOLD_TOKENS: u64 = 150_000;
 
-/// Default ceiling for a serialized prompt: 1 MiB.
-pub(crate) const DEFAULT_MAX_PROMPT_BYTES: u64 = 1_048_576;
+/// Default ceiling for a serialized prompt: 1.5 MiB.
+pub(crate) const DEFAULT_MAX_PROMPT_BYTES: u64 = 1_572_864;
 
 /// GREMLINS_MAX_PROMPT_BYTES — cap a serialized prompt at this many bytes.
-/// Default 1 048 576 (1 MiB). Settings.yaml `max-prompt-bytes` takes
+/// Default 1 572 864 (1.5 MiB). Settings.yaml `max-prompt-bytes` takes
 /// precedence over the env var.
 pub(crate) fn max_prompt_bytes() -> u64 {
     // Test-local override takes highest priority.
@@ -2398,7 +2398,7 @@ model-profiles:
         let mut env = EnvGuard::lock();
         let dir = tempfile::tempdir().unwrap();
         env.set("GREMLINS_SANDBOX_ROOT", dir.path());
-        // No settings.yaml, no env var — should get the 1_048_576 default.
+        // No settings.yaml, no env var — should get the 1_572_864 default.
         let cfg = Config::load().unwrap();
         assert_eq!(cfg.max_prompt_bytes(), DEFAULT_MAX_PROMPT_BYTES);
     }
