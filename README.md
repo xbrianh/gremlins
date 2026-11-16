@@ -738,7 +738,7 @@ relied on in its result when the parent needs it.
 
 Proactive conversation compaction has been removed: a transcript is now
 replayed verbatim for the whole run, so the only ceiling is the hard
-`max-prompt-bytes` limit (default 1 MiB, `GREMLINS_MAX_PROMPT_BYTES`).
+`max-prompt-bytes` limit (default 1.5 MiB, `GREMLINS_MAX_PROMPT_BYTES`).
 Exceeding it fails the request with `PromptTooLarge` rather than silently
 dropping earlier turns.
 
