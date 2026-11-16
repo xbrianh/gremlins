@@ -1157,7 +1157,7 @@ pub(crate) fn completion_nudge_budget() -> usize {
 /// Default cap for tool output: 300 000 bytes.
 pub(crate) const DEFAULT_MAX_TOOL_OUTPUT_BYTES: u64 = 300_000;
 
-/// Default headless (pipeline) compaction threshold: 100 000 tokens.
+/// Default headless (pipeline) compaction threshold: 150 000 tokens.
 pub(crate) const DEFAULT_COMPACTION_THRESHOLD_TOKENS: u64 = 150_000;
 
 /// Default ceiling for a serialized prompt: 1.5 MiB.
