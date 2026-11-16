@@ -1518,7 +1518,7 @@ pub(crate) async fn run_agent_loop_core(
                 &reasoning,
                 &reasoning_items,
                 expected_artifact_paths,
-                turn_usage.as_ref().and_then(|u| total_prompt_tokens(u)),
+                turn_usage.as_ref().and_then(total_prompt_tokens),
                 loop_start,
                 raw,
                 captured,
@@ -1533,7 +1533,7 @@ pub(crate) async fn run_agent_loop_core(
             &text,
             &reasoning_items,
             &tool_calls,
-            turn_usage.as_ref().and_then(|u| total_prompt_tokens(u)),
+            turn_usage.as_ref().and_then(total_prompt_tokens),
         );
 
         state
