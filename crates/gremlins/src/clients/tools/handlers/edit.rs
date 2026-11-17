@@ -1,3 +1,5 @@
+mod repair;
+
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, LazyLock, Mutex};
@@ -52,9 +54,8 @@ impl ToolHandler for EditTool {
         )
     }
 
-    fn repair_args(&self, args: serde_json::Value) -> Option<serde_json::Value> {
-        let repaired = repair_edit_args(args);
-        Some(repaired)
+    fn repair_args(&self, args: &mut serde_json::Value) -> Result<bool, String> {
+        repair::repair_args(args, self.display_truncation())
     }
 
     async fn invoke(
@@ -959,58 +960,6 @@ fn render_success(
     out
 }
 
-/// Silently repair three common JSON malformations before schema validation.
-/// This is a pre-validation pass — if repair fails, existing schema validation
-/// still catches it.
-pub(crate) fn repair_edit_args(args: serde_json::Value) -> serde_json::Value {
-    let mut args = args;
-
-    // Repair 1: `edits` is a JSON-encoded string → parse it
-    if let Some(edits_val) = args.get("edits") {
-        if let Some(s) = edits_val.as_str() {
-            if let Ok(parsed) = serde_json::from_str::<serde_json::Value>(s) {
-                if let Some(obj) = args.as_object_mut() {
-                    obj.insert("edits".to_string(), parsed);
-                }
-            }
-        }
-    }
-
-    // Repair 2: `edits` is an object with `old_string` key (not an array) → wrap in array
-    if let Some(edits_val) = args.get("edits") {
-        if edits_val.is_object() && edits_val.get("old_string").is_some() {
-            if let Some(obj) = args.as_object_mut() {
-                let single = obj.remove("edits").unwrap();
-                obj.insert("edits".to_string(), serde_json::json!([single]));
-            }
-        }
-    }
-
-    // Repair 3: Top-level `old_string` + `new_string` keys exist without `edits` → merge
-    if !args.get("edits").is_some()
-        && args.get("old_string").is_some()
-        && args.get("new_string").is_some()
-    {
-        if let Some(obj) = args.as_object_mut() {
-            let old = obj.remove("old_string").unwrap();
-            let new = obj.remove("new_string").unwrap();
-            let mut edit_obj = serde_json::json!({
-                "old_string": old,
-                "new_string": new,
-            });
-            // Carry over optional scope keys
-            for key in &["start_line", "end_line"] {
-                if let Some(v) = obj.remove(*key) {
-                    edit_obj[key] = v;
-                }
-            }
-            obj.insert("edits".to_string(), serde_json::json!([edit_obj]));
-        }
-    }
-
-    args
-}
-
 const DIFF_LINE_CAP: usize = 60;
 
 /// Compute a simple line-based unified diff between `original` and `updated`.
@@ -1100,11 +1049,13 @@ fn strip_bom(content: &str) -> &str {
 }
 
 pub(crate) fn edit_sync(cwd: Option<&Path>, roots: Option<&[PathBuf]>, args_json: &str) -> String {
-    let args = match parse_args(args_json) {
+    let mut args = match parse_args(args_json) {
         Ok(v) => v,
         Err(e) => return e,
     };
-    let args = repair_edit_args(args);
+    if let Err(error) = EditTool.repair_args(&mut args) {
+        return error;
+    }
     let file_path = match req_str(&args, "file_path") {
         Ok(s) => s,
         Err(e) => return e,

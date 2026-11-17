@@ -40,35 +40,7 @@ pub(crate) async fn invoke_with_conversation(
         }
     }
     let ka = audit_key_arg(args_json);
-    let mut args = match parse_args(args_json) {
-        Ok(v) => v,
-        Err(_) => {
-            audit(
-                ctx.audit_log.as_deref(),
-                ctx.audit_lock.as_deref(),
-                name,
-                &ka,
-                "error",
-            );
-            return ToolOutcome::text("Error: invalid arguments");
-        }
-    };
-
-    // Before schema validation, give the handler a chance to auto-repair
-    // common argument malformations.
-    let mut repaired_args_json = args_json.to_string();
-    if let Some(h) = handler {
-        if let Some(repaired) = h.repair_args(args.clone()) {
-            if repaired != args {
-                repaired_args_json =
-                    serde_json::to_string(&repaired).unwrap_or_else(|_| args_json.to_string());
-                args = repaired;
-            }
-        }
-    }
-
-    // Validate args against the tool's expected schema before dispatching.
-    if let Some(err) = validate_tool_args(name, &args) {
+    let invalid_args = |message: String| {
         audit(
             ctx.audit_log.as_deref(),
             ctx.audit_lock.as_deref(),
@@ -76,7 +48,20 @@ pub(crate) async fn invoke_with_conversation(
             &ka,
             "error",
         );
-        return ToolOutcome::text(err);
+        ToolOutcome::text(message)
+    };
+    let mut args = match parse_args(args_json) {
+        Ok(args) => args,
+        Err(_) => return invalid_args("Error: invalid arguments".into()),
+    };
+    let repaired_json = match handler.map(|h| h.repair_args(&mut args)) {
+        Some(Err(err)) => return invalid_args(err),
+        Some(Ok(true)) => Some(args.to_string()),
+        _ => None,
+    };
+    let args_json = repaired_json.as_deref().unwrap_or(args_json);
+    if let Some(err) = validate_tool_args(name, &args) {
+        return invalid_args(err);
     }
     if let Some(err) = check_tool(name, ctx, &args) {
         audit(
@@ -103,7 +88,7 @@ pub(crate) async fn invoke_with_conversation(
 
     // Dispatch through the registry.
     let mut outcome = match handler {
-        Some(h) => h.invoke(id, ctx, conv, &repaired_args_json).await,
+        Some(h) => h.invoke(id, ctx, conv, args_json).await,
         None => {
             return ToolOutcome::text(format!("Error: unknown tool {name}"));
         }

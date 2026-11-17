@@ -92,11 +92,10 @@ pub(crate) trait ToolHandler: Send + Sync {
         false
     }
 
-    /// Optionally auto-repair common argument malformations before schema
-    /// validation. Returns repaired args, or `None` when no repair logic
-    /// exists. Only Edit implements this.
-    fn repair_args(&self, _args: serde_json::Value) -> Option<serde_json::Value> {
-        None
+    /// Normalize arguments before schema validation. Return whether they changed,
+    /// or a validation diagnostic if they could not be decoded.
+    fn repair_args(&self, _args: &mut serde_json::Value) -> Result<bool, String> {
+        Ok(false)
     }
 
     /// Whether this tool bypasses the tool-filter allowlist. LoadSkill
