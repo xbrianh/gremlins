@@ -4,7 +4,7 @@ use std::time::Duration;
 
 use gremlins_magic_bus::{emit_event, EventKind};
 use serde_json::{json, Value};
-use tokio::io::BufReader;
+use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::net::UnixStream;
 use tokio::sync::mpsc::UnboundedSender;
 use tokio::task::JoinHandle;
@@ -130,6 +130,44 @@ async fn check_snapshot(actor: &UnboundedSender<ActorMsg>, a: &str, b: &str) {
     snapshot.close().await;
 }
 
+async fn check_reused_snapshot(actor: &UnboundedSender<ActorMsg>, a: &str, b: &str) {
+    let mut socket = ControlSocket::connect(actor).await;
+    socket.send(json!({"op": "status", "id": a})).await;
+    assert_eq!(socket.read().await.unwrap()["type"], "ok");
+
+    // Backpressure the writer mid-frame. The unique prefix distinguishes this
+    // broadcast from other tests' events without consuming the rest of the line.
+    let prefix = format!("{b}|");
+    let marker = format!("{prefix}{}", "x".repeat(1024 * 1024));
+    log_line(b, &marker);
+    let mut bytes = Vec::new();
+    timeout(Duration::from_secs(5), async {
+        while !bytes.ends_with(prefix.as_bytes()) {
+            assert_ne!(socket.stream.read_until(b'|', &mut bytes).await.unwrap(), 0);
+        }
+    })
+    .await
+    .expect("broadcast did not start");
+
+    log_line(b, "queued-behind-in-flight-frame");
+    socket
+        .send(json!({"op": "log", "id": a, "follow": false}))
+        .await;
+    timeout(
+        Duration::from_secs(5),
+        socket.stream.read_until(b'\n', &mut bytes),
+    )
+    .await
+    .expect("broadcast did not finish")
+    .unwrap();
+    let frame = bytes.rsplit(|&byte| byte == b'\n').nth(1).unwrap();
+    let frame: Value = serde_json::from_slice(frame).expect("truncated broadcast");
+    assert!(frame == json!({"type": "log_line", "id": b, "line": marker}));
+    socket.expect_line(0, "a-history").await;
+    assert_eq!(socket.read().await, None);
+    socket.close().await;
+}
+
 #[tokio::test]
 async fn control_log_isolated_from_global_broadcasts() {
     let sandbox = Sandbox::new();
@@ -139,6 +177,7 @@ async fn control_log_isolated_from_global_broadcasts() {
     let b = register_run(&actor, &session, sandbox.path(), "b").await;
 
     check_snapshot(&actor, &a, &b).await;
+    check_reused_snapshot(&actor, &a, &b).await;
 
     let mut global = ControlSocket::connect(&actor).await;
     global.send(json!({"op": "status", "id": a})).await;

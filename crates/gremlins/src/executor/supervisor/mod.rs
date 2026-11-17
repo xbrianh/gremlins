@@ -236,13 +236,22 @@ async fn handle_connection(
 
     // Gate the event-forwarding subtask so that one-shot clients always
     // receive their request response before any broadcast events.
-    let (event_start_tx, mut event_start_rx) = tokio::sync::watch::channel(false);
+    let (events_enabled_tx, mut events_enabled_rx) = watch::channel(false);
     let event_writer = writer.clone();
     let event_handle = tokio::spawn(async move {
-        // Wait until the first request has been fully processed.
-        let _ = event_start_rx.wait_for(|v| *v).await;
         loop {
-            match event_rx.recv().await {
+            let enabled = *events_enabled_rx.borrow_and_update();
+            let event = tokio::select! {
+                biased;
+                changed = events_enabled_rx.changed() => {
+                    if changed.is_err() {
+                        break;
+                    }
+                    continue;
+                }
+                event = event_rx.recv(), if enabled => event,
+            };
+            match event {
                 gremlins_magic_bus::Recv::Event(dispatch) => {
                     let kind = dispatch.kind();
                     // Stream events belong to per-run/session subscribers
@@ -294,7 +303,7 @@ async fn handle_connection(
         }
 
         if op == "debug" {
-            let _ = event_start_tx.send(true);
+            let _ = events_enabled_tx.send(true);
             handle_debug(&request, &actor_tx, reader, &writer).await;
             break None;
         }
@@ -306,11 +315,16 @@ async fn handle_connection(
         // probe before the caller's actual request; unblocking here
         // would let a run event arrive before the real response.
         if op != "version" {
-            let _ = event_start_tx.send(true);
+            let _ = events_enabled_tx.send(true);
         }
     };
 
-    event_handle.abort();
+    // On log handoff, finish the current frame but never start a queued one.
+    // On disconnect there is no next writer, so don't wait for a blocked write.
+    drop(events_enabled_tx);
+    if log_request.is_none() {
+        event_handle.abort();
+    }
     init_bus().unsubscribe(&event_sub);
     let _ = event_handle.await;
 
