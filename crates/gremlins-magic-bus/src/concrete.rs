@@ -113,7 +113,8 @@ pub fn emit_event(event: EventKind) {
         | EventKind::PromptRequest { id, .. }
         | EventKind::StageBoundary { id, .. }
         | EventKind::ExecOutput { id, .. }
-        | EventKind::SkillLoaded { id, .. } => {
+        | EventKind::SkillLoaded { id, .. }
+        | EventKind::OperatorMessage { id, .. } => {
             if id.is_empty() {
                 CorrId::new()
             } else {

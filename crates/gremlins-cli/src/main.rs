@@ -1144,9 +1144,11 @@ async fn log_gremlin(id: &str) -> Result<(), String> {
 
 /// Interactive debug session for a running gremlin.
 ///
-/// Connects to the executor socket, sends `{"op": "debug", "id": "..."}`,
-/// and enters an interactive line-based loop. Plain text becomes `{"op": "talk", "text": "..."}`.
-/// Slash commands: `/continue`, `/bail <reason>`, `/quit`.
+/// Connects to the executor socket, sends
+/// `{"op": "attach", "scope": "conversation", "id": "..."}`,
+/// and enters an interactive line-based loop. Plain text becomes
+/// `{"op": "message", "text": "..."}` (deliver and resume autonomously).
+/// Slash commands: `/step`, `/continue`, `/exit`, `/quit [reason]`.
 async fn debug_gremlin(id: &str) -> Result<(), String> {
     config::init_global().map_err(|e| e.to_string())?;
 
@@ -1163,7 +1165,7 @@ async fn debug_gremlin(id: &str) -> Result<(), String> {
 
     spawn::check_version(&mut stream).await?;
 
-    let request = serde_json::json!({"op": "debug", "id": id});
+    let request = serde_json::json!({"op": "attach", "scope": "conversation", "id": id});
     log::debug!("debug: sending request: {request}");
     socket::write_json_line(&mut stream, &request).await?;
     log::debug!("debug: request sent, waiting for agent to pause…");
@@ -1270,17 +1272,21 @@ async fn debug_gremlin(id: &str) -> Result<(), String> {
                 log::debug!("debug: received error: {msg}");
                 return Err(msg.to_string());
             }
+            Some(ref l) if l.get("type").and_then(|v| v.as_str()) == Some("attached") => {
+                log::debug!("debug: received attached for {id}");
+                let scope = l
+                    .get("scope")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("conversation");
+                eprintln!("debug: attached ({scope}) to gremlin {id}");
+                continue;
+            }
             Some(ref l) if l.get("type").and_then(|v| v.as_str()) == Some("ready") => {
                 log::debug!("debug: received ready for {id}");
                 eprintln!("debug: connected to gremlin {id}");
                 break;
             }
             Some(ref other) => {
-                if other.get("type").and_then(|v| v.as_str()) == Some("status") {
-                    let stage = other.get("stage").and_then(|v| v.as_str()).unwrap_or("?");
-                    eprintln!("debug: daemon status: {stage}");
-                    continue;
-                }
                 log::debug!("debug: ignoring message during ready-wait: {other}");
                 continue;
             }
@@ -1313,6 +1319,8 @@ async fn debug_gremlin(id: &str) -> Result<(), String> {
     while stdin_rx.try_recv().is_ok() {}
 
     // Spawn a reader task to print agent events from the socket channel.
+    // Frames are conversation-scoped; the `scope` field is informational
+    // and ignored here.
     let read_handle = tokio::spawn(async move {
         while let Some(Ok(Some(line))) = sock_rx.recv().await {
             let typ = line.get("type").and_then(|v| v.as_str()).unwrap_or("");
@@ -1330,7 +1338,7 @@ async fn debug_gremlin(id: &str) -> Result<(), String> {
                             }
                         }
                     }
-                    eprintln!("debug: turn complete — agent paused");
+                    eprintln!("debug: turn complete");
                 }
                 "done" => {
                     eprintln!("debug: agent called Done");
@@ -1340,14 +1348,24 @@ async fn debug_gremlin(id: &str) -> Result<(), String> {
                     eprintln!("debug: session ended ({reason})");
                     break;
                 }
-                "stream_chunk" => {
-                    // Stream chunks are silently consumed in the debug CLI path;
-                    // the full text arrives in turn_complete.
-                }
                 "error" => {
                     let msg = line.get("message").and_then(|v| v.as_str()).unwrap_or("");
                     eprintln!("debug: error: {msg}");
                     break;
+                }
+                "stream_chunk" => {
+                    // Stream chunks are silently consumed in the debug CLI path;
+                    // the full text arrives in turn_complete.
+                }
+                "reasoning_chunk" | "tool_output_chunk" | "tool_result" | "stream_reset"
+                | "lagged" | "operator_message" | "system_warning" => {
+                    // Additional conversation display frames — not surfaced in
+                    // the debug CLI path.
+                }
+                // A display `ready` frame (carries `turn`) is emitted between
+                // turns; the control `ready` was consumed during the wait above.
+                "ready" | "attached" => {
+                    log::debug!("debug: skipping display frame type={typ} (control variant already consumed)");
                 }
                 _ => {}
             }
@@ -1376,14 +1394,14 @@ async fn debug_gremlin(id: &str) -> Result<(), String> {
         } else if trimmed == "/help" {
             eprintln!("available commands:");
             eprintln!("  /quit [reason]  — bail the stage (default: operator stopped)");
-            eprintln!("  /continue       — exit interactive mode, agent resumes");
+            eprintln!("  /continue       — exit interactive mode, agent resumes autonomously");
             eprintln!("  /exit           — alias for /continue");
             eprintln!("  /step           — run one turn, then re-pause");
             eprintln!("  /help           — show this help");
-            eprintln!("  <anything else> — send message to agent");
+            eprintln!("  <anything else> — send message, then resume autonomously");
             continue;
         } else {
-            serde_json::json!({"op": "talk", "text": trimmed})
+            serde_json::json!({"op": "message", "text": trimmed})
         };
 
         let is_terminal = trimmed == "/quit"

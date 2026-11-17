@@ -8,15 +8,14 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use serde_json::{Map, Value};
-use tokio::sync::{mpsc, oneshot};
 
 use crate::config;
 use crate::executor::gremlin::Gremlin;
 use crate::executor::state::{self, FileSystemStateStore};
 use crate::executor::{null_field, str_field};
 
-use super::actor::ActorMsg;
 use super::error_response;
+use super::run_registry::{self, RunRegistry};
 
 pub(crate) struct StateView {
     id: String,
@@ -52,7 +51,7 @@ impl StateView {
             id: id.to_string(),
             status: "running".to_string(),
             stage: str_field(&tree, "stage"),
-            definition: definition_name_from_tree(&tree),
+            definition: run_registry::definition_name_from_tree(&tree),
             project_root: str_field(&tree, "project_root"),
             workdir: str_field(&tree, "workdir"),
             state_dir: live_state_dir(store, id),
@@ -140,20 +139,9 @@ pub(crate) fn open_persisted_gremlin(id: &str) -> Result<(Gremlin, PathBuf), Val
 
 pub(crate) async fn state_view_for_id(
     id: &str,
-    actor_tx: &mpsc::UnboundedSender<super::actor::ActorMsg>,
+    registry: &Arc<RunRegistry>,
 ) -> Result<StateView, Value> {
-    let (store_tx, store_rx) = oneshot::channel();
-    let live = if actor_tx
-        .send(ActorMsg::GetRunStore {
-            id: id.to_string(),
-            respond: store_tx,
-        })
-        .is_ok()
-    {
-        store_rx.await.ok().flatten()
-    } else {
-        None
-    };
+    let live = registry.get_run_store(id).await;
     if let Some(store) = live {
         return StateView::from_live(id, &store);
     }
@@ -193,16 +181,4 @@ pub(crate) fn definition_display_name(gremlin: &Gremlin) -> String {
         return stem.to_string();
     }
     gremlin.state.read_str("kind")
-}
-
-pub(crate) fn definition_name_from_tree(tree: &Map<String, Value>) -> String {
-    tree.get("definition_path")
-        .and_then(|v| v.as_str())
-        .and_then(|s| {
-            std::path::Path::new(s)
-                .file_stem()
-                .and_then(|s| s.to_str())
-                .map(String::from)
-        })
-        .unwrap_or_else(|| str_field(tree, "kind"))
 }

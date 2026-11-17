@@ -17,25 +17,24 @@ pub(crate) async fn invoke_with_conversation(
     args_json: &str,
     conv: &dyn Conversation,
 ) -> ToolOutcome {
-    // Chat-only tools are never available in headless mode. The registry
-    // provides `chat_only()` as a trait hook so dispatch never names a tool.
-    let chat = ctx.skills_available;
+    // Skills-gated tools are never available when no skills are configured.
+    // The registry provides `skills_gated()` as a trait hook so dispatch never
+    // names a tool.
     let registry = global_registry();
     let handler = registry.handlers.get(name);
     if let Some(h) = handler {
-        if !chat && h.chat_only() {
+        if ctx.discovered_skills.is_none() && h.skills_gated() {
             return ToolOutcome::text(format!("Error: unknown tool {name}"));
         }
     }
 
     if let Some(allowed) = &ctx.allowed_tools {
         // Gate: bypass the filter when the tool is always-available (Task /
-        // Done), has a bypass_filter() hook (LoadSkill), is a chat-only tool
-        // in a chat session, or is explicitly listed in the allowlist.
-        let bypass = handler.map(|h| h.bypass_filter()).unwrap_or(false);
-        let chat_bypass = chat && handler.map(|h| h.chat_only()).unwrap_or(false);
-        if !always_available(name) && !bypass && !chat_bypass && !allowed.iter().any(|n| n == name)
-        {
+        // Done), is a skills-gated tool in a session with skills configured,
+        // or is explicitly listed in the allowlist.
+        let skills_bypass =
+            handler.map(|h| h.skills_gated()).unwrap_or(false) && ctx.discovered_skills.is_some();
+        if !always_available(name) && !skills_bypass && !allowed.iter().any(|n| n == name) {
             return ToolOutcome::text(format!("Error: unknown tool {name}"));
         }
     }
@@ -75,7 +74,7 @@ pub(crate) async fn invoke_with_conversation(
     }
 
     // Short-circuit Landscape when PathContext has a pre-resolved outline
-    // for the requested file path. This runs after chat-only gating,
+    // for the requested file path. This runs after skills-gated gating,
     // argument parsing/validation, and sandbox checks so malformed or
     // out-of-sandbox calls still fail normally; only a call that would
     // otherwise be dispatched is served from the cache (skipping the I/O of

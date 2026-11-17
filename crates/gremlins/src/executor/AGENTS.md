@@ -20,6 +20,7 @@ semantics. Keep those seams intact.
 | `gremlin.rs` | `Gremlin` handle. Identity validation (`GremlinId`), environment assembly (`resolve_env`/`system_env`), and the `init`/`from`/`fork` constructors. Also `GremlinConfig` (ephemeral vs persistent backing) and `init_runtime` — the single place deferred runtime setup happens. |
 | `state.rs` | `state.json` I/O, flock-guarded atomic updates, `StateData`, and the artifact registry. `StateStore` is the unified storage seam; `FileSystemStateStore` is the real implementation. |
 | `run.rs` | The sequential stage loop. `Gremlin::run` walks `next_stage()` in declaration order, drives each through `run_stage_scoped`, and owns attempt/`loop_iter`/bail bookkeeping. `run_stage` dispatches by `ExecutorStage` variant. |
+| `active_leaf.rs` | Resolves the active leaf kind from one run-state snapshot, using the enclosing sequence path for static definitions and generated turn names for chat. |
 | `parallel.rs` | Parallel fan-out/fan-in. Forks one child gremlin per child stage, launches via supervisor, awaits `RunState` channels, applies `ErrorPolicy`, merges artifacts, and cleans up children. |
 | `supervisor/` | Single-instance daemon, split into sub-modules since the `break-executor` refactor. `mod.rs` owns the accept loop, `RunHandle`/`RunState`, and op dispatch. See `supervisor/AGENTS.md` for the full sub-module map. |
 | `agent_runner.rs` | Agent leaf execution: `prepare_agent` (resolve everything without touching the client) and `commit_agent` (verify outputs were produced). |

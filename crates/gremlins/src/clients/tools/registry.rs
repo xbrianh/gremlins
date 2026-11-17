@@ -85,10 +85,11 @@ pub(crate) trait ToolHandler: Send + Sync {
         Vec::new()
     }
 
-    /// Whether this tool is chat-only and should be rejected in headless
-    /// mode. The dispatch layer gates on this instead of comparing tool
-    /// names. Only Mischief and WebSearch return `true`.
-    fn chat_only(&self) -> bool {
+    /// Whether this tool requires skills availability and should be rejected
+    /// when skills are unavailable. The dispatch layer gates on this instead
+    /// of comparing tool names. Mischief, WebSearch, and LoadSkill return
+    /// `true`.
+    fn skills_gated(&self) -> bool {
         false
     }
 
@@ -96,13 +97,6 @@ pub(crate) trait ToolHandler: Send + Sync {
     /// or a validation diagnostic if they could not be decoded.
     fn repair_args(&self, _args: &mut serde_json::Value) -> Result<bool, String> {
         Ok(false)
-    }
-
-    /// Whether this tool bypasses the tool-filter allowlist. LoadSkill
-    /// returns `true` so it is always reachable in chat sessions
-    /// regardless of the configured tool filter.
-    fn bypass_filter(&self) -> bool {
-        false
     }
 }
 

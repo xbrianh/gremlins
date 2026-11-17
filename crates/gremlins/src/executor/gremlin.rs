@@ -31,15 +31,13 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use tokio::sync::mpsc;
-
 use indexmap::IndexMap;
 use serde_json::{Map, Value};
 
 use crate::artifacts::uri::Uri;
 use crate::clients::cancel::CancelToken;
 use crate::clients::client::{Client, ModelURI};
-use crate::clients::interactive::{InteractiveHandle, InteractiveSession};
+use crate::clients::interactive::{InteractiveSession, InteractiveSessionFactory};
 use crate::config;
 use crate::core::proc::{run_logged_commands, sanitize_log_filename};
 use crate::core::{discovery, env_file};
@@ -84,7 +82,7 @@ impl WorkDir {
 
 /// State keys that describe *this* run's live execution and must never leak
 /// into a forked child, which starts its own from scratch.
-pub(crate) const FORK_TRANSIENT: [&str; 13] = [
+pub(crate) const FORK_TRANSIENT: [&str; 14] = [
     "workdir",
     "parallel_attempts",
     "active_children",
@@ -94,6 +92,7 @@ pub(crate) const FORK_TRANSIENT: [&str; 13] = [
     "stage",
     "stage_updated_at",
     "sub_stage",
+    "active_sequence",
     "ended_at",
     "status",
     "pid",
@@ -151,7 +150,7 @@ pub fn validate_gremlin_id(id: &str) -> Result<GremlinId, String> {
 /// Snapshot of process-global configuration needed by the run loop.
 /// Populated once at construction time so multiple `Gremlin::run()`
 /// invocations can coexist in one process without reading global state.
-#[derive(Default)]
+#[derive(Clone, Default)]
 pub(crate) struct RuntimeConfig {
     /// Exact-match stage→client mappings from config.
     pub stage_models_exact: HashMap<String, String>,
@@ -170,28 +169,9 @@ pub(crate) struct RuntimeConfig {
     /// The base process environment captured at startup, before any
     /// bootstrap or system vars are layered on.
     pub base_process_env: HashMap<String, String>,
-    /// Interactive handle (supervisor → agent loop).
-    pub interactive: Option<InteractiveHandle>,
-    /// The actor's mailbox: `launch_child` / `stop_child` reach through this
-    /// to register parallel-executor children in the run map without
-    /// reaching into a global lock.
-    pub actor_tx: Option<mpsc::UnboundedSender<super::supervisor::actor::ActorMsg>>,
-}
-
-impl Clone for RuntimeConfig {
-    fn clone(&self) -> Self {
-        Self {
-            stage_models_exact: self.stage_models_exact.clone(),
-            stage_models_prefix: self.stage_models_prefix.clone(),
-            profile_stage_models_exact: self.profile_stage_models_exact.clone(),
-            profile_stage_models_prefix: self.profile_stage_models_prefix.clone(),
-            default_model: self.default_model.clone(),
-            default_task_models: self.default_task_models.clone(),
-            base_process_env: self.base_process_env.clone(),
-            interactive: self.interactive.clone(),
-            actor_tx: self.actor_tx.clone(),
-        }
-    }
+    /// The run registry: `launch_child` / `stop_child` and the agent loop
+    /// reach through this to register/stop runs without a global lock.
+    pub registry: Option<Arc<crate::executor::supervisor::run_registry::RunRegistry>>,
 }
 
 impl RuntimeConfig {
@@ -242,8 +222,7 @@ impl RuntimeConfig {
             default_model,
             default_task_models,
             base_process_env,
-            interactive: None,
-            actor_tx: None,
+            registry: None,
         }
     }
 }
@@ -274,9 +253,8 @@ pub struct Gremlin {
     /// Supervisor-owned cancel token. When set, the run loop passes it to the
     /// backend so `gremlins stop` cancels in-flight agent loops.
     pub(crate) cancel_token: Option<Arc<CancelToken>>,
-    /// Interactive session, stored at launch time so run_agent can reuse
-    /// the pre-created command receiver for the first agent stage.
-    pub(crate) interactive_session: Option<InteractiveSession>,
+    /// Installed by the supervisor for this run only (never inherited by forks).
+    pub(crate) interactive_sessions: Option<InteractiveSessionFactory>,
     /// Clean commands inherited from the pipeline definition. Forked children
     /// carry a copy so that workspace teardown (e.g. git worktree remove)
     /// runs even though the child's own definition (a StageSpec) has none.
@@ -291,7 +269,7 @@ pub struct Gremlin {
     /// parallel group's `model:` (or its outer composite's `model:`) keeps
     /// beating the selected profile's stage map.
     pub(crate) enclosing_model: Option<ModelURI>,
-    /// Skills discovered at turn start (chat-only).
+    /// Skills discovered at turn start (skills session).
     pub(crate) discovered_skills: Option<Arc<Vec<crate::skills::LoadedSkill>>>,
     /// Additional sandbox roots carried forward from [`GremlinConfig`].
     /// Threaded through [`Gremlin::cwd_extra_sandbox_roots`] →
@@ -301,6 +279,13 @@ pub struct Gremlin {
 }
 
 impl Gremlin {
+    pub(crate) fn next_interactive_session(&mut self) -> InteractiveSession {
+        self.interactive_sessions.as_mut().map_or_else(
+            InteractiveSession::unattached,
+            InteractiveSessionFactory::next_session,
+        )
+    }
+
     /// Start a fresh run: generate an id, reserve the state directory, create
     /// a workspace directory, write `state.json` and a hermetic `definition.json`,
     /// and return a handle ready for [`Gremlin::run`].
@@ -490,7 +475,7 @@ impl Gremlin {
             stage_inputs: stage_inputs.clone(),
             runtime_config,
             cancel_token: None,
-            interactive_session: None,
+            interactive_sessions: None,
             clean_cmds: Vec::new(),
             enclosing_task_models: None,
             enclosing_model: None,
@@ -623,7 +608,7 @@ impl Gremlin {
             stage_inputs,
             runtime_config,
             cancel_token: None,
-            interactive_session: None,
+            interactive_sessions: None,
             clean_cmds: Vec::new(),
             enclosing_task_models: None,
             enclosing_model: None,
@@ -1000,7 +985,7 @@ impl Gremlin {
             stage_inputs: self.stage_inputs.clone(),
             runtime_config: self.runtime_config.clone(),
             cancel_token: self.cancel_token.clone(),
-            interactive_session: None,
+            interactive_sessions: None,
             clean_cmds: self.clean_cmds.clone(),
             enclosing_task_models: self.enclosing_task_models.clone(),
             enclosing_model: effective_model.cloned(),
@@ -2246,7 +2231,7 @@ mod tests {
             stage_inputs: HashMap::new(),
             runtime_config: RuntimeConfig::default(),
             cancel_token: None,
-            interactive_session: None,
+            interactive_sessions: None,
             clean_cmds: Vec::new(),
             enclosing_task_models: None,
             enclosing_model: None,

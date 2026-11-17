@@ -1,21 +1,28 @@
 //! Chat turn lifecycle: chat request handling, turn execution, cancellation,
 //! and chat gremlin lifecycle.
 //!
-//! Terminal-path handling for a turn lives in [`turn_finalizer`].
+//! A session's chat gremlin is driven by a persistent task
+//! ([`turn::spawn_chat_gremlin`]); the session holds a
+//! [`ChatGremlinHandle`] and queues one prompt per operator turn. All
+//! terminal-path handling lives in [`turn`] alongside the task.
 //!
-//! All session and run-map state lives in [`super::actor`]; this module reaches
-//! it exclusively through [`ActorMsg`] messages. There is no shared session
-//! handle and no `RUN_MAP` lock — the actor serializes every transition.
+//! All session state lives in the per-session task
+//! ([`super::session_task`]) and all run-map state in [`super::run_registry`]; this
+//! module reaches them exclusively through [`SessionTaskHandle`] and the
+//! [`RunRegistry`]. There is no shared session handle and no `RUN_MAP`
+//! lock — the session task serializes every session-scoped transition.
 
 mod payload;
 mod turn;
-mod turn_finalizer;
+mod turn_runner;
 
 // Re-exported for the supervisor test module, which reaches these leaf
 // helpers as `super::chat::{add_usage_stats, usage_stats_from_state}`.
+pub(crate) use self::payload::PromptMsg;
+pub(crate) use super::chat_handle::ChatGremlinHandle;
 #[allow(unused_imports)]
 pub(crate) use payload::{add_usage_stats, chat_payload, usage_stats_from_state};
-pub(crate) use turn::{handle_cancel_chat, run_chat_turn, TurnCtx};
+pub(crate) use turn::{handle_cancel_chat, spawn_chat_gremlin};
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -23,23 +30,41 @@ use std::sync::atomic::AtomicBool;
 use std::sync::{Arc, OnceLock};
 
 use serde_json::{Map, Value};
-use tokio::sync::{mpsc, watch};
 
-use crate::clients::cancel::CancelToken;
 use crate::clients::client::{Client as ModelClient, ModelURI};
+use crate::clients::interactive::InteractiveCommand;
 use crate::config;
 use crate::definition::ChatDefinition;
 use crate::executor::gremlin::{validate_gremlin_id, Gremlin};
 use crate::executor::state;
-use gremlins_magic_bus::EventKind;
 
-use super::actor_client::Client;
-use super::{error_response, ok_response, CurrentTurn};
+use super::run_registry::RunRegistry;
+use super::session_task::SessionTaskHandle;
+use super::{error_response, ok_response};
 use gremlins_magic_bus::connection::SharedWriter;
+use tokio::sync::watch;
+
+use crate::clients::cancel::CancelToken;
 
 /// Daemon process environment, captured once at startup. Requests without `env`
 /// fall back to this snapshot.
 static BASE_PROCESS_ENV: OnceLock<HashMap<String, String>> = OnceLock::new();
+
+/// The in-flight chat turn for a connection, if any.
+pub(crate) struct CurrentTurn {
+    pub(crate) id: String,
+    /// Client-generated turn id, used to match a `cancel_chat` to the turn
+    /// it targets so a late cancel cannot hit a subsequent turn.
+    pub(crate) turn: Option<String>,
+    pub(crate) cancel: Arc<CancelToken>,
+    /// Set to `true` once the turn has re-inserted its gremlin (or dropped
+    /// it). A follow-up `chat` for the same id waits on this so it never
+    /// sees the gremlin as "unknown" mid-turn. Waiters clone the receiver;
+    /// the value is sticky so a waiter that subscribes after the turn
+    /// finished still proceeds immediately.
+    pub(crate) done: watch::Receiver<bool>,
+    pub(crate) hard: Arc<AtomicBool>,
+}
 
 pub(crate) fn base_process_env() -> &'static HashMap<String, String> {
     BASE_PROCESS_ENV.get_or_init(|| std::env::vars().collect())
@@ -62,12 +87,10 @@ pub(crate) fn resolve_chat_env(
 pub(crate) async fn handle_chat(
     request: &Value,
     writer: &SharedWriter,
-    actor_tx: &mpsc::UnboundedSender<super::actor::ActorMsg>,
-    session_id: &str,
+    registry: &Arc<RunRegistry>,
+    session_task: &SessionTaskHandle,
 ) {
     log::debug!("handle_chat: received chat request");
-
-    let client = Client::new(actor_tx.clone());
 
     // The daemon owns the conversation; the session owns the gremlin. The
     // front-end never sends a gremlin id — it only addresses the session.
@@ -118,6 +141,152 @@ pub(crate) async fn handle_chat(
         })
         .unwrap_or_default();
 
+    // ── Targeted message (correction for a live execution) ──────────
+    //
+    // When `target` is present the operator wants to correct a specific
+    // in-flight execution without starting a new turn. The message goes
+    // through the run's InteractiveHandle directly — never through the
+    // session's persistent chat-gremlin task queue.
+    if let Some(target_obj) = request.get("target").and_then(|v| v.as_object()) {
+        let target_id = target_obj.get("id").and_then(|v| v.as_str()).unwrap_or("");
+        let target_nonce = target_obj
+            .get("nonce")
+            .and_then(|v| v.as_u64())
+            .unwrap_or(0);
+
+        if target_id.is_empty() {
+            let resp = error_response("target.id is required");
+            let _ = writer.write_json_line(&resp).await;
+            return;
+        }
+        // Nonces start at 1; 0 means the field was missing or the client
+        // is holding a stale (unknown-run) nonce from a failed lookup.
+        if target_nonce == 0 {
+            let resp = error_response("target.nonce is required");
+            let _ = writer.write_json_line(&resp).await;
+            return;
+        }
+
+        // ── Session ownership check ───────────────────────────────────
+        // The session socket provides transport isolation, but also verify
+        // that a chat gremlin target belongs to THIS session — not a
+        // different session's home chat. Pipeline (non-chat) runs are
+        // global and pass through; the nonce guards against stale targets.
+        {
+            let chat_ids = session_task.get_chat_ids().await;
+            if !chat_ids.is_empty() && !chat_ids.iter().any(|id| id == target_id) {
+                // The target is not one of our chat gremlins. If the
+                // registry store records `kind: "chat"`, this is another
+                // session's chat gremlin — reject.
+                if let Some(store) = registry.get_run_store(target_id).await {
+                    if store.read_str("kind") == "chat" {
+                        let resp = error_response(&format!(
+                            "target {}: not owned by this session",
+                            target_id
+                        ));
+                        let _ = writer.write_json_line(&resp).await;
+                        return;
+                    }
+                }
+                // Not a chat gremlin (or not in the registry at all —
+                // the resolve below will surface that). Allow pipeline
+                // runs through.
+            }
+        }
+
+        // Resolve the interactive handle. `attach()` validates the nonce
+        // atomically, so we only need a single coarse liveness gate here.
+        let Some((interactive, _, _)) = registry.get_run_interactive(target_id).await else {
+            let resp = error_response(&format!("gremlin {} is not running", target_id));
+            let _ = writer.write_json_line(&resp).await;
+            return;
+        };
+
+        let debug_target = interactive.target();
+        if debug_target.nonce() != target_nonce {
+            let resp = error_response("execution has been replaced; target is stale");
+            let _ = writer.write_json_line(&resp).await;
+            return;
+        }
+
+        // `attach()` checks the nonce under the slot lock, closing the
+        // TOCTOU window between the coarse check above and actual
+        // attachment.
+        let attachment = match debug_target.attach() {
+            Ok(a) => a,
+            Err(msg) => {
+                let resp = error_response(msg);
+                let _ = writer.write_json_line(&resp).await;
+                return;
+            }
+        };
+
+        // Spawn a task that holds the attachment, waits for Ready, and
+        // delivers the message. The session dispatcher remains responsive
+        // and does not wait for the agent to process the command.
+        let correction_text = text.to_string();
+        let target_id_for_log = target_id.to_string();
+        let writer_for_error = writer.clone();
+        tokio::spawn(async move {
+            // Wait for the agent to accept the pause.
+            let mut attachment = attachment;
+            if (&mut attachment.ready).await.is_err() {
+                log::warn!(
+                    "correction for {}: agent exited before accepting pause",
+                    target_id_for_log
+                );
+                return; // Attachment drop resets the pause slot.
+            }
+            // Deliver the correction without amending the system prompt.
+            if let Err(e) = attachment.try_send(InteractiveCommand::Message(correction_text)) {
+                log::warn!("correction for {}: send failed ({})", target_id_for_log, e);
+                // Notify the owner that the correction was dropped.
+                let payload = serde_json::json!({
+                    "type": "correction_dropped",
+                    "id": target_id_for_log,
+                    "reason": format!("command channel closed: {}", e),
+                });
+                let _ = writer_for_error.write_json_line(&payload).await;
+            }
+            // Let the attachment drop naturally — it resets the pause slot
+            // for the next debugger. The agent has already consumed the
+            // command from its inbox.
+        });
+
+        // Acknowledge immediately: the correction is queued for the agent,
+        // not parked behind the chat-gremlin prompt channel. The spawned
+        // task reports delivery success/failure asynchronously.
+        let resp = ok_response(serde_json::json!({
+            "id": target_id,
+            "status": "queued",
+            "nonce": target_nonce,
+        }));
+        let _ = writer.write_json_line(&resp).await;
+        return;
+    }
+
+    // ── Concurrent submission check ─────────────────────────────────
+    // Fast-path advisory check: reject a second home chat prompt while a
+    // turn is still in-flight. The real atomic gate is `SetCurrentTurn`
+    // inside `run_turn`, which runs under the session task's single
+    // dispatcher — two concurrent submissions cannot both pass that
+    // compare-and-swap. This check merely avoids the wasted work of
+    // config init / client setup when the session is already busy.
+    //
+    // Check `is_closed` first so a dead session gets an accurate message
+    // rather than the misleading "session busy" error.
+    if session_task.is_closed().await {
+        let resp = error_response("session closed");
+        let _ = writer.write_json_line(&resp).await;
+        return;
+    }
+    if !session_task.is_idle_for_chat().await {
+        let resp =
+            error_response("session busy: a turn is in progress; use target for corrections");
+        let _ = writer.write_json_line(&resp).await;
+        return;
+    }
+
     // 1. Init config
     if let Err(e) = config::init_global() {
         let resp = error_response(&format!("config init: {e}"));
@@ -162,260 +331,193 @@ pub(crate) async fn handle_chat(
         }
     };
 
-    // 3. Wait for any in-flight turn to finish so that LoadSkill pushes
-    //    from the running turn are visible in the shared active set before
-    //    we snapshot it. This avoids a race where a queued turn's system
-    //    prompt is built from a stale snapshot.
-    //
-    //    The session owns at most one chat gremlin today, but
-    //    representations keep a map for multiple.
-    let mut id = reusable_chat_gremlin_id(actor_tx, session_id).await;
-    if let Some(existing) = &id {
-        // The gremlin may have been removed from the run map by a control-side
-        // `stop`. Treat it as gone and let the next message start fresh.
-        if !client.contains_run(existing).await {
-            let _ = client.session_take_gremlin(session_id, existing).await;
-            let _ = client.session_remove_chat_id(session_id, existing).await;
-            id = None;
-        }
-    }
-
-    // 4. Update the session's active skill set and build the system prompt.
-    //    The supervisor queues the operator's prompt text onto the ChatDefinition
-    //    before each turn; the definition constructs the Agent stage on demand
-    //    via next_stage().
-    //
-    //    Skills are discovered from the project root on each turn so newly
-    //    added skills take effect without a daemon restart. Discovery runs in
-    //    spawn_blocking so filesystem I/O does not stall the async executor.
-    //
-    //    Operator-requested skills are stored in the session. Model-loaded
-    //    skills arrive via SkillLoaded bus events during the turn and are
-    //    appended to the session by run_chat_turn. At turn start we read both
-    //    to build the combined active set.
+    // 3. Gather per-turn inputs: skills and system prompt.
     let project_root_for_skills = project_root.clone();
-    let all_skills =
+    let all_skills = Arc::new(
         tokio::task::spawn_blocking(move || crate::skills::discover(&project_root_for_skills))
             .await
-            .unwrap_or_default();
-    // Store the operator's requested skill set in the session.
-    client
-        .session_set_operator_skills(session_id, requested_skills.clone())
-        .await;
-    // Read the combined active set: operator-requested + model-loaded.
-    let active_skills = match client.session_get_combined_skills(session_id).await {
-        Some(skills) => skills,
-        None => {
-            let resp = error_response("session closed");
+            .unwrap_or_default(),
+    );
+    let system_prompt =
+        crate::executor::supervisor::chat_system_prompt::chat_system_prompt().to_string();
+
+    // 4. Resolve the session's chat gremlin handle — reuse, resume, or fresh.
+    //    `reusable_chat_gremlin_id` waits for any in-flight turn to finish, so
+    //    model-loaded skills pushed by the running turn are visible before the
+    //    turn task snapshots the active set below.
+    let handle = match resolve_chat_handle(
+        registry,
+        session_task,
+        &chat_model,
+        &system_prompt,
+        &project_root,
+        &env,
+    )
+    .await
+    {
+        Ok(handle) => handle,
+        Err(resp) => {
             let _ = writer.write_json_line(&resp).await;
             return;
         }
     };
-    let (trusted_section, unresolved_skills) =
-        crate::skills::build_system_prompt_section(&all_skills, &active_skills);
-    let system_prompt = crate::clients::agent::system_prompts::chat_system_prompt().to_string();
 
-    // 5. Get or create the session's chat gremlin (id was resolved in step 3
-    //    after waiting for the in-flight turn).
-
-    let id = match id {
-        Some(id) => id,
-        None => {
-            let id = match client.reserve_chat_id().await {
-                Some(id) => id,
-                None => {
-                    let resp = error_response("actor unavailable");
-                    let _ = writer.write_json_line(&resp).await;
-                    return;
-                }
-            };
-            let gremlin =
-                match create_chat_gremlin(&id, &chat_model, &system_prompt, &project_root, &env) {
-                    Ok(g) => g,
-                    Err(e) => {
-                        let resp = error_response(&e);
-                        let _ = writer.write_json_line(&resp).await;
-                        return;
-                    }
-                };
-            if client.session_is_closed(session_id).await {
-                drop(gremlin);
-                let resp = error_response("session closed");
-                let _ = writer.write_json_line(&resp).await;
-                return;
-            }
-            // `register_chat_gremlin` parks the gremlin and installs the
-            // run-map entry; ownership is registered as part of that message.
-            client.register_chat_gremlin(session_id, gremlin).await;
-            id
-        }
-    };
-
-    // Ensure the id is still marked as owned by this session (for the reuse
-    // path it already is, and this keeps the invariant local).
-    if client.session_is_closed(session_id).await {
+    if session_task.is_closed().await {
         let resp = error_response("session closed");
         let _ = writer.write_json_line(&resp).await;
         return;
     }
-    client.session_add_chat_id(session_id, &id).await;
 
-    // 6. Take the gremlin out of the session, install this turn's definition
-    //    and a fresh per-turn cancel token. The session is actor-owned, so
-    //    other ops are never serialized behind a lock here.
-    let turn_cancel = CancelToken::new();
-    let mut gremlin = match client.session_take_gremlin(session_id, &id).await {
-        Some(g) => g,
-        None => {
-            let resp = error_response(&format!("unknown chat gremlin {id:?}"));
-            let _ = writer.write_json_line(&resp).await;
-            return;
-        }
-    };
-    // Rebuild the parsed model handle for the reused gremlin so a `/model`
-    // change takes effect on the next turn rather than only after the chat
-    // gremlin is recreated. Build the client before mutating the gremlin so
-    // a failure re-inserts it unchanged (old definition, old client).
-    let llm_client = match ModelClient::from_uri(chat_model.clone()) {
-        Ok(client) => client,
-        Err(e) => {
-            let _ = client
-                .session_reinsert_gremlin(session_id, &id, gremlin)
-                .await;
-            let resp = error_response(&format!("invalid chat model '{chat_model}': {e}"));
-            let _ = writer.write_json_line(&resp).await;
-            return;
-        }
-    };
-    gremlin.client = llm_client;
-    // Inject the dynamic preamble (repo context + skills) on every turn so
-    // newly activated skills and refreshed repository snapshots reach the model.
-    // The preamble is part of the user turn, not the system prompt, so the
-    // static system prompt stays cache-stable.
-    let mut text = text.to_string();
-    let dynamic_preamble =
-        crate::clients::agent::system_prompts::build_chat_preamble(context, &trusted_section);
-    if !dynamic_preamble.is_empty() {
-        text = format!("{dynamic_preamble}\n---\n{text}");
-    }
-    // Queue this turn's prompt onto the ChatDefinition so that
-    // next_stage() builds the agent stage on demand.
-    gremlin
-        .definition
-        .as_any_mut()
-        .and_then(|a| a.downcast_mut::<ChatDefinition>())
-        .expect("chat gremlin must carry a ChatDefinition")
-        .set_pending(&text, &chat_model, &system_prompt);
-    // Keep the state.json `model` field in sync too.
-    let state_patch = serde_json::json!({"model": chat_model.to_string()});
-    gremlin.state.patch(&[], state_patch.as_object().unwrap());
-    gremlin.cancel_token = Some(turn_cancel.clone());
-    // Refresh the environment on every turn: the chat gremlin is persistent
-    // and reused across turns, so a later turn's operator environment must
-    // replace the one captured at creation rather than freeze at first contact.
-    gremlin.env = env;
-    // Wire up skills for the LoadSkill tool.
-    gremlin.discovered_skills = Some(Arc::new(all_skills));
-
-    // Point the run-map handle's cancel token at this turn so `stop` cancels
-    // the in-flight stage rather than a stale persistent token.
-    client.set_run_cancel(&id, turn_cancel.clone()).await;
-
-    let stage = match gremlin.definition.next_stage().await {
-        Ok(s) => s,
-        Err(e) => {
-            // Re-insert the gremlin (it is still owned by this session)
-            // and report the error. The id remains owned so session
-            // teardown still shuts it down.
-            let _ = client
-                .session_reinsert_gremlin(session_id, &id, gremlin)
-                .await;
-            let resp = error_response(&format!("definition error: {e}"));
-            let _ = writer.write_json_line(&resp).await;
-            return;
-        }
-    };
-
-    // Invalidate the current turn's per-turn artifact for a fresh turn.
-    // After rollback via `goto("chat-0003")`, a stale `conversation/0004.json`
-    // from the abandoned branch would otherwise be loaded by `run_agent` and
-    // leak discarded messages into the replacement turn's context.
-    // Clearing here only affects fresh turns; the cancel path decides
-    // whether to preserve the artifact via `TurnFinalizer::cancel`.
-    if let Some(turn_num) = crate::executor::run_agent::chat_turn_from_stage_name(stage.name()) {
-        crate::executor::run_agent::clear_chat_turn_artifact(&gremlin, turn_num).await;
-    }
-
-    // 7. Run the stage in the background. Events are forwarded as
-    //    unsolicited JSON lines to this connection while the dispatch
-    //    loop stays live for cancel_chat and close_session.
-    let (done_tx, done_rx) = watch::channel(false);
-    let done_tx = Arc::new(done_tx);
-    let hard = Arc::new(AtomicBool::new(false));
-    client
-        .session_set_current_turn(
-            session_id,
-            CurrentTurn {
-                id: id.clone(),
-                turn: turn.clone(),
-                cancel: turn_cancel.clone(),
-                done: done_rx,
-                hard: hard.clone(),
-            },
-        )
-        .await;
-
-    let writer_for_turn = writer.clone();
-    let turn_ctx = TurnCtx {
-        id: id.clone(),
+    // 5. Queue the turn onto the persistent task. The task takes the gremlin
+    //    out of the session, installs a fresh per-turn cancel token, runs the
+    //    stage, and re-parks it. A `false` reply means the task has exited —
+    //    drop the stale handle and report the failure.
+    let prompt = PromptMsg {
+        text: text.to_string(),
+        context: context.to_string(),
         turn: turn.clone(),
-        turn_cancel: turn_cancel.clone(),
-        actor_tx: actor_tx.clone(),
-        session_id: session_id.to_string(),
-        done: done_tx,
-        hard,
+        chat_model: chat_model.clone(),
+        system_prompt,
+        project_root,
+        env,
+        requested_skills,
+        all_skills,
+        writer: writer.clone(),
     };
-    tokio::spawn(async move {
-        run_chat_turn(turn_ctx, stage, gremlin, writer_for_turn).await;
-    });
-
-    // Acknowledge the request so the TUI's `send_request` completes.
-    // Chat events themselves are unsolicited lines written by the task
-    // above and classified separately by the client read loop.
-    let _ = writer
-        .write_json_line(&ok_response(
-            serde_json::json!({"id": id, "status": "streaming"}),
-        ))
-        .await;
-
-    // Surface unresolved skill names as a non-fatal warning so the
-    // operator knows a previously-activated skill is no longer available.
-    if !unresolved_skills.is_empty() {
-        let msg = format!("skill(s) not found: {}", unresolved_skills.join(", "));
-        let payload = chat_payload(
-            &turn,
-            serde_json::to_value(EventKind::SystemWarning {
-                message: msg,
-                turn: turn.clone(),
-            })
-            .unwrap_or_default(),
-        );
-        let _ = writer.write_json_line(&payload).await;
+    if !handle.send(prompt).await {
+        session_task.set_chat_handle(None).await;
+        let resp = error_response("chat gremlin task exited");
+        let _ = writer.write_json_line(&resp).await;
+        return;
     }
+
+    // 6. Acknowledge the request so the TUI's `send_request` completes. Chat
+    //    events themselves are unsolicited lines written by the task above and
+    //    classified separately by the client read loop. Include the current
+    //    execution nonce so the client can target a correction. Omit `nonce`
+    //    when the run is not yet registered (a transient startup window) —
+    //    the client must not conflate a missing lookup with a legitimate
+    //    nonce of 0.
+    let ack = match registry.get_run_nonce(&handle.id).await {
+        Some(nonce) => serde_json::json!({"id": handle.id, "status": "streaming", "nonce": nonce}),
+        None => serde_json::json!({"id": handle.id, "status": "streaming"}),
+    };
+    let _ = writer.write_json_line(&ok_response(ack)).await;
+}
+
+/// Resolve the session's chat gremlin handle — reuse, resume, or fresh.
+///
+/// The decision is a flat early-return chain:
+/// 1. If the session holds a live handle whose task is running and whose id
+///    matches a parked gremlin, return it.
+/// 2. If a parked gremlin id exists but the handle is stale (task exited),
+///    re-drive the parked gremlin under the same id.
+/// 3. Otherwise reserve a fresh id and spawn a brand-new chat gremlin task.
+///
+/// On failure returns the already-formatted error response (the caller
+/// is responsible for writing it).
+#[allow(clippy::too_many_arguments)]
+async fn resolve_chat_handle(
+    registry: &Arc<RunRegistry>,
+    session_task: &SessionTaskHandle,
+    chat_model: &ModelURI,
+    system_prompt: &str,
+    project_root: &Path,
+    env: &HashMap<String, String>,
+) -> Result<ChatGremlinHandle, Value> {
+    // Run-map reads (`contains_run`, `reserve_chat_id`) go through the
+    // registry; every session-scoped operation uses `session_task`.
+    let id = reusable_chat_gremlin_id(session_task).await;
+
+    if let Some(existing_id) = &id {
+        // The gremlin may have been removed from the run map by a control-side
+        // `stop`. Treat it as gone and let the next message start fresh.
+        if !registry.contains_run(existing_id).await {
+            let _ = session_task.take_gremlin(existing_id).await;
+            let _ = session_task.remove_chat_id(existing_id).await;
+            session_task.set_chat_handle(None).await;
+        } else {
+            // Live handle with matching id: reuse.
+            if let Some(handle) = session_task.get_chat_handle().await {
+                if !handle.is_finished() && handle.id == *existing_id {
+                    return Ok(handle);
+                }
+            }
+            // Stale handle (task exited): re-drive the parked gremlin.
+            session_task.set_chat_handle(None).await;
+            if let Some(handle) =
+                spawn_resumed_chat_gremlin(existing_id, session_task, registry).await
+            {
+                return Ok(handle);
+            }
+            // Parked gremlin is gone — remove stale ownership.
+            let _ = session_task.remove_chat_id(existing_id).await;
+        }
+    }
+
+    // Fresh gremlin.
+    spawn_fresh_chat_gremlin(
+        session_task,
+        registry,
+        chat_model,
+        system_prompt,
+        project_root,
+        env,
+    )
+    .await
+}
+
+/// Re-drive a parked chat gremlin whose task has exited.
+///
+/// A permanent cancel ends a task but leaves the gremlin parked (the turn's
+/// terminal path re-inserts it before the loop breaks). Re-driving it under the
+/// same id keeps its run-map entry owned and avoids an orphan. Returns `None`
+/// when no gremlin is parked for `id` (the caller then builds a fresh one).
+async fn spawn_resumed_chat_gremlin(
+    id: &str,
+    session_task: &SessionTaskHandle,
+    registry: &Arc<RunRegistry>,
+) -> Option<ChatGremlinHandle> {
+    let gremlin = session_task.take_gremlin(id).await?;
+    // `spawn_chat_gremlin` re-registers the gremlin (overwriting the stale
+    // run-map entry) and stores a fresh handle on the session.
+    spawn_chat_gremlin(gremlin, Arc::clone(registry), session_task.clone()).await
+}
+
+/// Reserve an id, build a fresh chat gremlin, and spawn its persistent task.
+///
+/// On success the handle is stored on the session and returned. On failure the
+/// already-formatted error response is returned for the caller to write.
+#[allow(clippy::too_many_arguments)]
+async fn spawn_fresh_chat_gremlin(
+    session_task: &SessionTaskHandle,
+    registry: &Arc<RunRegistry>,
+    chat_model: &ModelURI,
+    system_prompt: &str,
+    project_root: &Path,
+    env: &HashMap<String, String>,
+) -> Result<ChatGremlinHandle, Value> {
+    let id = registry.reserve_chat_id().await;
+    let gremlin = create_chat_gremlin(&id, chat_model, system_prompt, project_root, env)
+        .map_err(|e| error_response(&e))?;
+    if session_task.is_closed().await {
+        return Err(error_response("session closed"));
+    }
+    let handle = spawn_chat_gremlin(gremlin, Arc::clone(registry), session_task.clone())
+        .await
+        .ok_or_else(|| error_response("session closed"))?;
+    // Ownership is registered by `spawn_chat_gremlin` as part of parking.
+    Ok(handle)
 }
 
 /// Return the session's parked chat gremlin id, waiting for an in-flight
 /// turn to re-insert.
-pub(crate) async fn reusable_chat_gremlin_id(
-    actor_tx: &mpsc::UnboundedSender<super::actor::ActorMsg>,
-    session_id: &str,
-) -> Option<String> {
+pub(crate) async fn reusable_chat_gremlin_id(session_task: &SessionTaskHandle) -> Option<String> {
     loop {
         // Parked gremlin wins; otherwise look at the in-flight turn.
-        let client = Client::new(actor_tx.clone());
         let (ids, turn) = tokio::join!(
-            client.session_get_chat_gremlin_keys(session_id),
-            client.session_get_current_turn(session_id),
+            session_task.get_chat_gremlin_keys(),
+            session_task.get_current_turn(),
         );
 
         if let Some(id) = ids.into_iter().next() {
@@ -430,13 +532,13 @@ pub(crate) async fn reusable_chat_gremlin_id(
             Some(_) => {
                 // The turn finished but its done watch may have fired
                 // before the gremlin was re-parked. Recheck.
-                let ids = client.session_get_chat_gremlin_keys(session_id).await;
+                let ids = session_task.get_chat_gremlin_keys().await;
                 return ids.into_iter().next();
             }
             None => {
                 // A gremlin may have been parked between the two lookups.
                 // Recheck before giving up.
-                let ids = client.session_get_chat_gremlin_keys(session_id).await;
+                let ids = session_task.get_chat_gremlin_keys().await;
                 return ids.into_iter().next();
             }
         };
@@ -446,8 +548,8 @@ pub(crate) async fn reusable_chat_gremlin_id(
             // Sender dropped without publishing. Re-check the session: the
             // turn may have been cleared by another path and re-inserted the
             // gremlin in the meantime.
-            return Client::new(actor_tx.clone())
-                .session_get_chat_gremlin_keys(session_id)
+            return session_task
+                .get_chat_gremlin_keys()
                 .await
                 .into_iter()
                 .next();
@@ -530,7 +632,7 @@ pub(crate) fn create_chat_gremlin(
         stage_inputs: HashMap::new(),
         runtime_config,
         cancel_token: None,
-        interactive_session: None,
+        interactive_sessions: None,
         clean_cmds: Vec::new(),
         enclosing_task_models: None,
         enclosing_model: None,

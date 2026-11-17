@@ -92,7 +92,7 @@ macro_rules! declare_openai_backend {
             async fn run(
                 &self,
                 params: $crate::clients::backend::RunParams,
-                interactive: Option<$crate::clients::interactive::InteractiveSession>,
+                interactive: $crate::clients::interactive::InteractiveSession,
             ) -> Result<
                 $crate::clients::protocol::CompletedRun,
                 $crate::clients::backend::ClientError,

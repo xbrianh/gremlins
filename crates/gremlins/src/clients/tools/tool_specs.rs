@@ -49,14 +49,14 @@ pub(super) struct ToolSpec {
     pub(super) name: &'static str,
     pub(super) description: &'static str,
     pub(super) fields: &'static [FieldSpec],
-    /// Chat-only tools are omitted from tool definitions in headless mode
-    /// and bypass the tool filter in chat mode. Only LoadSkill and
-    /// WebSearch set this to `true`.
-    pub(super) chat_only: bool,
+    /// Skills-gated tools are omitted from tool definitions when skills are
+    /// unavailable and bypass the tool filter when skills are available. Only
+    /// LoadSkill, WebSearch and Mischief set this to `true`.
+    pub(super) skills_gated: bool,
 }
 
 /// Every tool's contract. The order is the order `tool_definitions`
-/// advertises them; `LoadSkill` is emitted only for chat sessions.
+/// advertises them; `LoadSkill` is emitted only when skills are available.
 pub(super) static TOOL_SPECS: &[ToolSpec] = &[
     ToolSpec {
         name: "Read",
@@ -66,7 +66,7 @@ pub(super) static TOOL_SPECS: &[ToolSpec] = &[
             FieldSpec { name: "limit", description: "Maximum number of lines to read", ty: "integer", required: false, validated: false },
             FieldSpec { name: "offset", description: "Number of lines to skip from the start of the file (0-indexed, default 0)", ty: "integer", required: false, validated: false },
         ],
-        chat_only: false,
+        skills_gated: false,
     },
     ToolSpec {
         name: "Landscape",
@@ -76,7 +76,7 @@ pub(super) static TOOL_SPECS: &[ToolSpec] = &[
             FieldSpec { name: "depth", description: "For directories, how many nested directory levels to descend (default: all levels)", ty: "integer", required: false, validated: true },
             FieldSpec { name: "token_budget", description: "Optional token budget for directory outlines. When set, the tree is trimmed with skeletonization and depth back-off to fit the budget.", ty: "integer", required: false, validated: true },
         ],
-        chat_only: false,
+        skills_gated: false,
     },
     ToolSpec {
         name: "Edit",
@@ -85,7 +85,7 @@ pub(super) static TOOL_SPECS: &[ToolSpec] = &[
             FieldSpec { name: "file_path", description: "Path to the file to edit (relative or absolute)", ty: "string", required: true, validated: true },
             FieldSpec { name: "edits", description: "", ty: "array", required: true, validated: true },
         ],
-        chat_only: false,
+        skills_gated: false,
     },
     ToolSpec {
         name: "Bash",
@@ -94,7 +94,7 @@ pub(super) static TOOL_SPECS: &[ToolSpec] = &[
             FieldSpec { name: "command", description: "Shell command to execute (run via bash -c)", ty: "string", required: true, validated: true },
             FieldSpec { name: "timeout", description: "Timeout in seconds (optional, default 120)", ty: "integer", required: false, validated: false },
         ],
-        chat_only: false,
+        skills_gated: false,
     },
     ToolSpec {
         name: "Write",
@@ -103,7 +103,7 @@ pub(super) static TOOL_SPECS: &[ToolSpec] = &[
             FieldSpec { name: "file_path", description: "Path to the file to write (relative or absolute)", ty: "string", required: true, validated: true },
             FieldSpec { name: "content", description: "Content to write to the file", ty: "string", required: true, validated: true },
         ],
-        chat_only: false,
+        skills_gated: false,
     },
     ToolSpec {
         name: "Grep",
@@ -116,7 +116,7 @@ pub(super) static TOOL_SPECS: &[ToolSpec] = &[
             FieldSpec { name: "context_before", description: "Number of context lines to include before each match (optional, default 0)", ty: "integer", required: false, validated: true },
             FieldSpec { name: "context_after", description: "Number of context lines to include after each match (optional, default 0)", ty: "integer", required: false, validated: true },
         ],
-        chat_only: false,
+        skills_gated: false,
     },
     ToolSpec {
         name: "Glob",
@@ -125,7 +125,7 @@ pub(super) static TOOL_SPECS: &[ToolSpec] = &[
             FieldSpec { name: "pattern", description: "Glob pattern (e.g. `**/*.rs`, `src/**/mod.rs`)", ty: "string", required: true, validated: true },
             FieldSpec { name: "path", description: "Base directory to search in (default: current directory)", ty: "string", required: false, validated: false },
         ],
-        chat_only: false,
+        skills_gated: false,
     },
     ToolSpec {
         name: "WebSearch",
@@ -134,13 +134,13 @@ pub(super) static TOOL_SPECS: &[ToolSpec] = &[
             FieldSpec { name: "url", description: "The URL to fetch (e.g. https://example.com/page)", ty: "string", required: true, validated: true },
             FieldSpec { name: "timeout", description: "Timeout in seconds (optional, default 30)", ty: "integer", required: false, validated: true },
         ],
-        chat_only: true,
+        skills_gated: true,
     },
     ToolSpec {
         name: "Mischief",
         description: "Return the gremlins YAML DSL reference. Call with no arguments to get a complete reference for definition files, stage types, artifact URIs, interpolation, bootstrap, land, and stage definitions.",
         fields: &[],
-        chat_only: true,
+        skills_gated: true,
     },
     ToolSpec {
         name: "Done",
@@ -148,7 +148,7 @@ pub(super) static TOOL_SPECS: &[ToolSpec] = &[
         fields: &[
             FieldSpec { name: "summary", description: "Brief summary of what was accomplished", ty: "string", required: true, validated: true },
         ],
-        chat_only: false,
+        skills_gated: false,
     },
     ToolSpec {
         name: "Task",
@@ -157,7 +157,7 @@ pub(super) static TOOL_SPECS: &[ToolSpec] = &[
             FieldSpec { name: "kind", description: "The kind of task to delegate.", ty: "string", required: true, validated: true },
             FieldSpec { name: "prompt", description: "Full task briefing for the worker. Non-Fork kinds start with a clean conversation context and see nothing from your conversation — include all relevant file contents, diffs, plans, and instructions the worker needs directly in this field. The Fork kind inherits the parent conversation history before this prompt.", ty: "string", required: true, validated: true },
         ],
-        chat_only: false,
+        skills_gated: false,
     },
     ToolSpec {
         name: "LoadSkill",
@@ -165,9 +165,19 @@ pub(super) static TOOL_SPECS: &[ToolSpec] = &[
         fields: &[
             FieldSpec { name: "name", description: "Name of the skill to load", ty: "string", required: true, validated: true },
         ],
-        chat_only: true,
+        skills_gated: true,
     },
 ];
+
+/// Whether a tool is skills-gated, looked up from the [`TOOL_SPECS`] table.
+/// Returns `false` for unknown names.
+pub(super) fn is_skills_gated(name: &str) -> bool {
+    TOOL_SPECS
+        .iter()
+        .find(|s| s.name == name)
+        .map(|s| s.skills_gated)
+        .unwrap_or(false)
+}
 
 /// Used by `validate_tool_args` to produce rich error messages when
 /// the model sends malformed tool-call arguments. The boolean marks whether

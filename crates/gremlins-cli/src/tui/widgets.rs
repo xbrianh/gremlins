@@ -49,6 +49,13 @@ pub struct RenderContext<'a> {
     pub project_name: &'a str,
     /// Cached active chat gremlin model, daemon-derived.
     pub chat_model: Option<&'a str>,
+    /// Short label of the currently selected conversation target (e.g. the
+    /// home chat's `chat` or a stage execution's `<run>:<stage>`).
+    pub target_label: String,
+    /// Whether the selected target is the session's home chat. When false the
+    /// info bar shows the target label instead of presenting the home chat
+    /// model as if it belonged to the pipeline agent.
+    pub target_is_home: bool,
     /// The daemon-derived run table (source of truth for the runs view).
     pub active_runs: &'a HashMap<String, ActiveRun>,
     /// Highlighted gremlin id on the `/watch` screen.
@@ -2752,7 +2759,18 @@ impl LiveAreaWidget for InfoBarWidget {
             Span::styled(ctx.project_name.to_string(), chrome),
         ];
 
-        if let Some(model) = ctx.chat_model {
+        // The selected conversation target. A non-home target is shown
+        // prominently and the home chat model is not presented as if it
+        // belonged to the pipeline agent.
+        if !ctx.target_is_home {
+            spans.push(Span::styled("  ", band));
+            spans.push(Span::styled("target:", nickel));
+            spans.push(Span::styled(" ", band));
+            spans.push(Span::styled(
+                ctx.target_label.clone(),
+                ivory.add_modifier(Modifier::BOLD),
+            ));
+        } else if let Some(model) = ctx.chat_model {
             spans.push(Span::styled("  ", band));
             spans.push(Span::styled("model:", nickel));
             spans.push(Span::styled(" ", band));
@@ -4713,6 +4731,8 @@ mod tests {
             gremlin_count: "0",
             project_name: "",
             chat_model: None,
+            target_label: String::new(),
+            target_is_home: true,
             active_runs: EMPTY.get_or_init(HashMap::new),
             watch_selection: None,
             watch_following: None,

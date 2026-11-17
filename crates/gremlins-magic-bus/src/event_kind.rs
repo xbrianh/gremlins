@@ -151,6 +151,11 @@ pub enum EventKind {
     #[serde(rename = "skill_loaded")]
     SkillLoaded { id: String, name: String },
 
+    // ── Operator messages ─────────────────────────────────────────────
+    /// An operator message (correction) was delivered to the execution.
+    #[serde(rename = "operator_message")]
+    OperatorMessage { id: String, text: String },
+
     // ── Chat error / warning ──────────────────────────────────────────
     #[serde(rename = "error")]
     Error {
@@ -168,6 +173,8 @@ pub enum EventKind {
 
 impl EventKind {
     /// Returns `true` for events that are part of the chat streaming protocol.
+    /// OperatorMessage is included so that a listener watching stream events
+    /// also receives the delivered-message notification.
     pub fn is_chat_event(&self) -> bool {
         matches!(
             self,
@@ -181,11 +188,18 @@ impl EventKind {
                 | EventKind::Ended { .. }
                 | EventKind::Error { .. }
                 | EventKind::SystemWarning { .. }
+                | EventKind::OperatorMessage { .. }
         )
     }
 
     /// Returns `true` for events that should NOT be forwarded on the control socket.
-    /// Includes all stream events (chat + exec output + prompt requests + skill loaded).
+    /// Includes all chat stream events (prompt requests, skill loaded, operator messages).
+    ///
+    /// Exec output events are intentionally excluded so the TUI receives them
+    /// via the control socket for stage-specific transcript routing.
+    ///
+    /// When adding a variant here, also update `conversation_display_event` in
+    /// `crate::executor::supervisor::attachment` and the debug event match.
     pub fn is_stream_event(&self) -> bool {
         matches!(
             self,
@@ -199,11 +213,11 @@ impl EventKind {
                 | EventKind::StreamReset
                 | EventKind::Ready { .. }
                 | EventKind::Ended { .. }
-                | EventKind::ExecOutput { .. }
                 | EventKind::PromptRequest { .. }
                 | EventKind::SkillLoaded { .. }
                 | EventKind::Error { .. }
                 | EventKind::SystemWarning { .. }
+                | EventKind::OperatorMessage { .. }
         )
     }
 }

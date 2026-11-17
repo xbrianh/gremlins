@@ -18,8 +18,8 @@ use indexmap::IndexMap;
 
 use crate::clients::backend::{Backend, ClientError, RunParams};
 use crate::clients::backends;
-use crate::clients::interactive::InteractiveSession;
 use crate::clients::protocol::CompletedRun;
+use crate::clients::InteractiveSession;
 
 use super::agent::agent_loop::{run_agent_loop, LoopOpts, RunContext};
 use super::cancel::CancelToken;
@@ -105,10 +105,11 @@ impl Client {
     }
 
     /// Run one task through this client's backend, building it if needed.
+    /// Use [`InteractiveSession::unattached`] when no operator controls the run.
     pub async fn run(
         &self,
         params: RunParams,
-        interactive: Option<InteractiveSession>,
+        interactive: InteractiveSession,
     ) -> Result<CompletedRun, ClientError> {
         let backend = self
             .get_or_build_backend()
@@ -323,8 +324,7 @@ pub(crate) fn resolve_model(spec: &str) -> Result<super::agent::task::TaskModel,
     })
 }
 
-/// A single-turn completion run with no tools, no system prompt, and no
-/// interactive session.
+/// A single-turn completion run with no tools and no system prompt.
 ///
 /// The caller supplies the full message history, the assistant text trigger
 /// (the next user message that requests the completion), the preamble that
@@ -379,7 +379,7 @@ pub(crate) async fn run_naked(
         ctx,
         cancel,
         opts,
-        None, // no interactive
+        InteractiveSession::unattached(),
     )
     .await?;
 

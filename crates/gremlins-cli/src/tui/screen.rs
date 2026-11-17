@@ -50,7 +50,7 @@ const INITIAL_RESERVED_ROWS: u16 = 2;
 /// transcript's one-cell left inset so its title and body align with the
 /// transcript's own inner margin. Constructed identically in
 /// [`Scene::default`] and [`LiveArea::finish_turn`] so the two cannot drift.
-fn new_reasoning_band() -> StreamingWidget {
+pub(crate) fn new_reasoning_band() -> StreamingWidget {
     StreamingWidget::reasoning(TranscriptWidget::STREAM_MAX_ROWS).with_left_margin(1)
 }
 
@@ -86,6 +86,37 @@ enum ScreenView {
     Debug(DebugWidget),
 }
 
+/// Per-target render state: the transcript, reasoning band, and input draft
+/// that belong to one conversation target. Swapped in/out of the active
+/// [`Scene`] when the selected target changes.
+pub(crate) struct RenderTargetState {
+    transcript: TranscriptWidget,
+    reasoning: StreamingWidget,
+    input: crate::tui::input_buffer::InputBuffer,
+    input_cursor: usize,
+    active_request: bool,
+    chat_model: Option<String>,
+}
+
+impl RenderTargetState {
+    pub(crate) fn new() -> Self {
+        Self {
+            transcript: TranscriptWidget::new(),
+            reasoning: new_reasoning_band(),
+            input: crate::tui::input_buffer::InputBuffer::new(),
+            input_cursor: 0,
+            active_request: false,
+            chat_model: None,
+        }
+    }
+}
+
+impl Default for RenderTargetState {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 /// Owns the main terminal screen with diff-driven double buffering.
 pub struct LiveArea<B: Backend = CrosstermBackend<Stdout>> {
     backend: B,
@@ -109,6 +140,11 @@ pub struct LiveArea<B: Backend = CrosstermBackend<Stdout>> {
     /// Rows occupied by the bottom bars (input + info) in the most recent
     /// frame. These rows are excluded from the scrollback region.
     reserved_rows: u16,
+    /// Per-target render state. The active target's widgets are in `scene`;
+    /// all other targets are stored here.
+    target_states: std::collections::HashMap<crate::tui::app::Target, RenderTargetState>,
+    /// The target whose widgets are currently loaded into `scene`.
+    active_target: crate::tui::app::Target,
 }
 
 impl<B: Backend> LiveArea<B> {
@@ -118,6 +154,8 @@ impl<B: Backend> LiveArea<B> {
     /// allocated for the given dimensions.
     pub fn with_backend(backend: B, cols: u16, rows: u16) -> Self {
         let area = Rect::new(0, 0, cols, rows);
+        let mut target_states = std::collections::HashMap::new();
+        target_states.insert(crate::tui::app::Target::Home, RenderTargetState::new());
         Self {
             backend,
             curr: Buffer::empty(area),
@@ -129,6 +167,8 @@ impl<B: Backend> LiveArea<B> {
             scene: Scene::default(),
             last_screen_was_chat: true,
             reserved_rows: INITIAL_RESERVED_ROWS,
+            target_states,
+            active_target: crate::tui::app::Target::Home,
         }
     }
 
@@ -338,6 +378,8 @@ impl<B: Backend> LiveArea<B> {
             gremlin_count,
             project_name: app.project_name_str(),
             chat_model: app.chat_model.as_deref(),
+            target_label: app.selected_target.label(),
+            target_is_home: app.selected_target.is_home(),
             active_runs: &app.active_runs,
             watch_selection: app.watch_selection.as_deref(),
             watch_following: app.watch_following.as_deref(),
@@ -457,7 +499,120 @@ impl<B: Backend> LiveArea<B> {
         self.scene.screen_view = None;
     }
 
+    // ── Conversation target switch ───────────────────────────────
+
+    /// Switch the active conversation target, saving current widgets and
+    /// loading the new target's state.
+    ///
+    /// Widgets are swapped rather than cloned, so no rendered content is
+    /// lost. Scalar fields (input, cursor, active-request, chat-model) stay
+    /// in the per-target map entry; the caller is responsible for syncing
+    /// App-level state via [`sync_app_state`] before calling this method and
+    /// for restoring via [`copy_app_state_to`] afterwards.
+    pub fn switch_target(&mut self, new_target: crate::tui::app::Target) {
+        if new_target == self.active_target {
+            return;
+        }
+
+        // Phase 1: save current scene widgets into the outgoing target's
+        // map entry — the outgoing target is becoming inactive.
+        let outgoing_key = self.active_target.clone();
+        {
+            let outgoing = self.target_states.entry(outgoing_key).or_default();
+            std::mem::swap(&mut self.scene.transcript, &mut outgoing.transcript);
+            std::mem::swap(&mut self.scene.reasoning, &mut outgoing.reasoning);
+        }
+
+        // Phase 2: load the incoming target's widgets into the scene.
+        {
+            let incoming = self.target_states.entry(new_target.clone()).or_default();
+            std::mem::swap(&mut self.scene.transcript, &mut incoming.transcript);
+            std::mem::swap(&mut self.scene.reasoning, &mut incoming.reasoning);
+        }
+
+        self.active_target = new_target;
+    }
+
     // ── Widget accessors ─────────────────────────────────────────
+
+    /// Sync App-level per-target state into the current target's stored state.
+    ///
+    /// Called before switching away from a target so the next time it's selected
+    /// the operator's draft, cursor position, and turn status are preserved.
+    pub fn sync_app_state(&mut self, app: &App) {
+        let state = self
+            .target_states
+            .entry(self.active_target.clone())
+            .or_default();
+        state.input = app.input.clone();
+        state.input_cursor = app.input_cursor;
+        state.active_request = app.active_request;
+        state.chat_model = app.chat_model.clone();
+    }
+
+    /// Copy the current target's stored state into App-level fields.
+    ///
+    /// Called after switching to a new target so the event loop and render
+    /// context operate on the correct transcript, draft, and status.
+    pub fn copy_app_state_to(&self, app: &mut App) {
+        if let Some(state) = self.target_states.get(&self.active_target) {
+            app.input = state.input.clone();
+            app.input_cursor = state.input_cursor;
+            app.active_request = state.active_request;
+            app.chat_model = state.chat_model.clone();
+        }
+    }
+
+    /// Run `f` against the transcript and reasoning widgets of `target`.
+    ///
+    /// When `target` is the active target the scene is used directly.
+    /// Otherwise the target's stored widgets are temporarily swapped in,
+    /// mutated, and swapped back — the visible scene is never touched.
+    pub fn with_target_transcript(
+        &mut self,
+        target: &crate::tui::app::Target,
+        f: impl FnOnce(&mut TranscriptWidget, &mut StreamingWidget),
+    ) {
+        if *target == self.active_target {
+            f(&mut self.scene.transcript, &mut self.scene.reasoning);
+        } else {
+            let entry = self.target_states.entry(target.clone()).or_default();
+            f(&mut entry.transcript, &mut entry.reasoning);
+        }
+    }
+
+    /// Whether the given target's transcript has an active (pinned) turn.
+    ///
+    /// When `target` is the active target the scene is checked directly;
+    /// otherwise the stored state is consulted.
+    pub fn target_has_current_turn(&self, target: &crate::tui::app::Target) -> bool {
+        if *target == self.active_target {
+            self.scene.transcript.has_current_turn()
+        } else if let Some(state) = self.target_states.get(target) {
+            state.transcript.has_current_turn()
+        } else {
+            false
+        }
+    }
+
+    /// Reset a target's full state — transcript, reasoning widget, input
+    /// buffer, cursor, and turn status — so a later execution of the same
+    /// stage starts with a clean slate.
+    pub fn reset_target_state(&mut self, target: &crate::tui::app::Target) {
+        if *target == self.active_target {
+            self.scene.transcript.clear_scrollable();
+            let fresh = new_reasoning_band();
+            self.scene.reasoning = fresh;
+        } else {
+            if let Some(state) = self.target_states.get_mut(target) {
+                state.transcript.clear_scrollable();
+                state.reasoning = new_reasoning_band();
+                state.input.clear();
+                state.input_cursor = 0;
+                state.active_request = false;
+            }
+        }
+    }
 
     fn transcript_mut(&mut self) -> &mut TranscriptWidget {
         &mut self.scene.transcript
@@ -527,6 +682,7 @@ impl<B: Backend> LiveArea<B> {
     /// immediately instead of waiting for `TurnComplete`. An existing stats
     /// title is left intact so the latest completed agent-loop turn's numbers
     /// stay visible throughout the next agent-loop turn's reasoning.
+    #[allow(dead_code)]
     pub fn push_reasoning_text(&mut self, text: &str) {
         let reasoning = self.reasoning_mut();
         if reasoning.title_is_empty() {
@@ -537,6 +693,7 @@ impl<B: Backend> LiveArea<B> {
 
     /// Replace the reasoning stream's title row with the live
     /// token/cache stats string.
+    #[allow(dead_code)]
     pub fn set_reasoning_title(&mut self, title: &str) {
         self.reasoning_mut().set_title(title);
     }
@@ -544,6 +701,7 @@ impl<B: Backend> LiveArea<B> {
     /// Relabel the current reasoning title's leading word from the active
     /// `clanking` placeholder to the finished `clawnked` label without
     /// disturbing the turn number or trailing token/cache stats.
+    #[allow(dead_code)]
     pub fn relabel_reasoning_title(&mut self) {
         let new_title = self
             .scene
@@ -557,12 +715,14 @@ impl<B: Backend> LiveArea<B> {
 
     /// Append a live tool-output chunk to the transcript's tool stream keyed
     /// by tool-call id.
+    #[allow(dead_code)]
     pub fn push_tool_output_chunk(&mut self, id: &str, call: &str, text: &str) {
         self.transcript_mut().push_tool_output_chunk(id, call, text);
     }
 
     /// Push live progress from a running Task tool into a transcript slot
     /// keyed by the parent tool-call id.
+    #[allow(dead_code)]
     #[allow(clippy::too_many_arguments)]
     pub fn push_task_progress(
         &mut self,
@@ -580,12 +740,14 @@ impl<B: Backend> LiveArea<B> {
 
     /// Commit the finished tool stream (or a single `◆` event line for a
     /// non-streaming tool) into the transcript's permanent tool segment.
+    #[allow(dead_code)]
     pub fn commit_tool_result(&mut self, id: &str, call: &str) {
         self.transcript_mut().commit_tool_result(id, call);
     }
 
     /// Seed the current turn's tool-call list for exactly-once completion
     /// reconciliation.
+    #[allow(dead_code)]
     pub fn reconcile_tool_calls(&mut self, calls: &[String]) {
         self.transcript_mut().reconcile_tool_calls(calls);
     }
@@ -604,17 +766,20 @@ impl<B: Backend> LiveArea<B> {
     }
 
     /// Append streaming response text.
+    #[allow(dead_code)]
     pub fn push_response(&mut self, text: &str) {
         self.transcript_mut().push_response(text);
     }
 
     /// Replace the entire response text (used for Done reconciliation).
+    #[allow(dead_code)]
     pub fn replace_response(&mut self, text: &str) {
         self.transcript_mut().replace_response(text);
     }
 
     /// Reconcile the current turn's streamed response against the
     /// authoritative full text from `TurnComplete`.
+    #[allow(dead_code)]
     pub fn reconcile_response(&mut self, text: &str) {
         self.transcript_mut().reconcile_response(text);
     }
@@ -624,6 +789,7 @@ impl<B: Backend> LiveArea<B> {
     /// body is discarded; after the transcript has rebuilt the response and
     /// reconciled pending tool results, the band's title line is committed as
     /// the final FIFO line of the finished turn.
+    #[allow(dead_code)]
     pub fn finish_turn(&mut self) {
         let stream = std::mem::replace(&mut self.scene.reasoning, new_reasoning_band());
         let had_turn = self.transcript_mut().has_current_turn();
@@ -634,11 +800,13 @@ impl<B: Backend> LiveArea<B> {
     }
 
     /// Whether the current turn has any content.
+    #[allow(dead_code)]
     pub fn has_current_turn(&self) -> bool {
         self.scene.transcript.has_current_turn()
     }
 
     /// Whether the current turn's streaming response is empty.
+    #[allow(dead_code)]
     pub fn response_is_empty(&self) -> bool {
         self.scene.transcript.response_is_empty()
     }
@@ -659,6 +827,7 @@ impl<B: Backend> LiveArea<B> {
     /// The summary is skipped when it is empty or when it already equals the
     /// text now on screen (e.g. the fallback above used it as the response
     /// body), so it is never duplicated.
+    #[allow(dead_code)]
     pub fn finish_response(&mut self, text: &str, summary: &str) {
         if self.response_is_empty() && !text.is_empty() {
             self.replace_response(text);

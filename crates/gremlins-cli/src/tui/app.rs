@@ -34,6 +34,9 @@ pub struct App {
     /// Active screen. Chat is the default; the other variants are full-screen
     /// views entered from slash commands and dismissed with `Esc`.
     pub screen: Screen,
+    /// The conversation target currently selected in the UI. The home chat is
+    /// the default; stage-execution targets are attached from run events.
+    pub selected_target: Target,
     /// Highlighted gremlin id on the `/watch` screen.
     pub watch_selection: Option<String>,
     /// Gremlin whose inline watch stream pane is open, if any.
@@ -159,6 +162,33 @@ impl Screen {
     }
 }
 
+/// Identifies a conversation target in the TUI.
+///
+/// The home chat has a stable identity across prompts and `/clear` cycles.
+/// A stage execution is keyed by run id and stage name.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub enum Target {
+    /// The session's home chat conversation.
+    Home,
+    /// A selected stage execution from a run.
+    StageExecution { run_id: String, stage: String },
+}
+
+impl Target {
+    /// Short label for display in the info bar.
+    pub fn label(&self) -> String {
+        match self {
+            Target::Home => "chat".to_string(),
+            Target::StageExecution { run_id, stage } => format!("{run_id}:{stage}"),
+        }
+    }
+
+    /// Whether this target is the home chat.
+    pub fn is_home(&self) -> bool {
+        matches!(self, Target::Home)
+    }
+}
+
 impl App {
     pub fn new() -> Self {
         let project_name = gremlins::config::project_root()
@@ -176,6 +206,7 @@ impl App {
             active_request: false,
             session_recreating: false,
             screen: Screen::Chat,
+            selected_target: Target::Home,
             watch_selection: None,
             watch_following: None,
             watch_follow_error: None,

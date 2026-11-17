@@ -491,7 +491,6 @@ mod tests {
             audit_lock: None,
             id_prefix: String::new(),
             message_prefix: String::new(),
-            skills_available: false,
             discovered_skills: None,
             path_context: crate::clients::path_context::PathContext::default(),
             root_raw_stream_path: None,
@@ -1285,7 +1284,6 @@ mod tests {
                 audit_lock: None,
                 id_prefix: String::new(),
                 message_prefix: String::new(),
-                skills_available: false,
                 discovered_skills: None,
                 path_context: crate::clients::path_context::PathContext::default(),
                 root_raw_stream_path,
@@ -1896,7 +1894,7 @@ mod tests {
                 ctx,
                 cancel,
                 loop_opts(None),
-                None,
+                crate::clients::interactive::InteractiveSession::unattached(),
             )
             .await
             .expect("outer loop must succeed");

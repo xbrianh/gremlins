@@ -1,4 +1,9 @@
 //! Streaming log handler (`handle_log` op).
+//!
+//! The outer `handle_log` orchestrates three focused stages:
+//! 1. `resolve_log_source` — determines the log source (store vs path).
+//! 2. `replay_history` — replays persisted lines with dedup.
+//! 3. `drain_and_follow` — drains pre-subscription events and streams new ones.
 
 use std::collections::HashSet;
 use std::path::PathBuf;
@@ -6,50 +11,36 @@ use std::sync::Arc;
 
 use serde_json::Value;
 use tokio::io::BufReader;
-use tokio::sync::mpsc;
 
 use crate::config;
 use crate::executor::gremlin::validate_gremlin_id;
 use crate::executor::state::{self, FileSystemStateStore};
 
 use crate::executor::socket;
+use gremlins_magic_bus::connection::SharedWriter;
 use gremlins_magic_bus::Subscriber;
 use gremlins_magic_bus::{init_bus, EventKind};
 
-use super::actor_client::Client;
 use super::error_response;
 use super::ops::resolve_store_for_id;
-use gremlins_magic_bus::connection::SharedWriter;
+use super::run_registry::RunRegistry;
 
-pub(crate) async fn handle_log(
-    request: &Value,
-    actor_tx: &mpsc::UnboundedSender<super::actor::ActorMsg>,
-    mut reader: BufReader<tokio::net::unix::OwnedReadHalf>,
-    writer: &SharedWriter,
-) {
-    let id = request.get("id").and_then(|v| v.as_str()).unwrap_or("");
-    if id.is_empty() {
-        let resp = error_response("missing 'id' field");
-        let _ = writer.write_json_line(&resp).await;
-        return;
-    }
+// ── Log source resolution ───────────────────────────────────────────────
 
-    if validate_gremlin_id(id).is_err() {
-        let resp = error_response(&format!("invalid gremlin id {id:?}"));
-        let _ = writer.write_json_line(&resp).await;
-        return;
-    }
+enum LogSource {
+    Store(Arc<dyn state::StateStore + Send + Sync>),
+    Path(PathBuf),
+}
 
-    // Resolve the log source: for live gremlins (including ephemeral) the
-    // historical log is read through the store's `log` blob; for persisted
-    // gremlins open the store via StateData (matching handle_debug); only
-    // when that fails fall back to direct filesystem read.
-    enum LogSource {
-        Store(Arc<dyn state::StateStore + Send + Sync>),
-        Path(PathBuf),
-    }
-
-    let (source, unknown) = match resolve_store_for_id(id, actor_tx).await {
+/// Resolve the log source: for live gremlins (including ephemeral) the
+/// historical log is read through the store's `log` blob; for persisted
+/// gremlins open the store via StateData; only when that fails fall back to
+/// direct filesystem read.
+async fn resolve_log_source(
+    id: &str,
+    registry: &Arc<RunRegistry>,
+) -> (LogSource, /* unknown: */ bool) {
+    match resolve_store_for_id(id, registry).await {
         Ok(store) => (LogSource::Store(store), false),
         Err(_) => {
             let sd = FileSystemStateStore::open(id)
@@ -61,55 +52,42 @@ pub(crate) async fn handle_log(
                 (LogSource::Path(PathBuf::new()), true)
             }
         }
-    };
-
-    if unknown {
-        let resp = error_response(&format!("unknown gremlin {id:?}"));
-        let _ = writer.write_json_line(&resp).await;
-        return;
     }
+}
 
-    let follow = request
-        .get("follow")
-        .and_then(|v| v.as_bool())
-        .unwrap_or(false);
+// ── History replay ──────────────────────────────────────────────────────
 
-    // Only subscribe for live runs (still in the run map). A finished run
-    // has no more events; subscribing would wait forever on a sender that
-    // already emitted its terminal event. The combined message atomically
-    // checks the run map and subscribes inside the actor, closing the TOCTOU
-    // window that existed when these were two separate messages.
-    let (log_sub, mut log_rx) = if follow {
-        let client = Client::new(actor_tx.clone());
-        let (flush, sub_rx) =
-            if let Some((flush, sub, rx)) = client.get_run_log_flush_and_subscribe(id).await {
-                (Some(flush), (Some(sub), Some(rx)))
-            } else {
-                (None, (None, None))
-            };
-        // Request the log writer flush queued events to disk so
-        // pre-subscription lines are visible in the blob we're about
-        // to read.
-        if let Some(flush) = &flush {
-            let (ack_tx, ack_rx) = tokio::sync::oneshot::channel();
-            let _ = flush.send(ack_tx);
-            let _ = ack_rx.await;
+/// A writer that pushes log_line JSON and an unsubscribe guard, threaded
+/// through the history/follow helpers so the orchestrator doesn't carry them.
+struct LogOutput<'a> {
+    writer: &'a SharedWriter,
+    log_sub: &'a Option<Subscriber<EventKind>>,
+}
+
+impl LogOutput<'_> {
+    /// Send a `{"type":"log_line", "line":…, "offset":…}` JSON payload.
+    /// Returns `true` on success, `false` when the write fails (client gone).
+    async fn send_line(&self, line: &str, offset: &mut u64) -> bool {
+        let payload = serde_json::json!({"type": "log_line", "line": line, "offset": *offset});
+        if self.writer.write_json_line(&payload).await.is_err() {
+            unsubscribe(self.log_sub);
+            return false;
         }
-        sub_rx
-    } else {
-        (None, None)
-    };
+        *offset += 1;
+        true
+    }
+}
 
-    // Clean up the bus subscription on exit so we don't leak a registry
-    // entry; the log_writer subscription and any other per-run subs are
-    // separate.
-    let unsubscribe = |sub: &Option<Subscriber<EventKind>>| {
-        if let Some(ref sub) = sub {
-            init_bus().unsubscribe(sub);
-        }
-    };
+fn unsubscribe(sub: &Option<Subscriber<EventKind>>) {
+    if let Some(ref sub) = sub {
+        init_bus().unsubscribe(sub);
+    }
+}
 
-    // 1. Send historical lines from the log.
+/// Replay persisted log lines, building a dedup set of message bodies.
+/// Returns `None` if the writer reports a disconnected client (caller should
+/// bail out); otherwise `Some((dedup_set, next_offset))`.
+async fn replay_history(source: &LogSource, out: &LogOutput<'_>) -> Option<(HashSet<String>, u64)> {
     let content = match source {
         LogSource::Store(store) => match store.open("log", state::BlobMode::Read) {
             Ok(mut blob) => tokio::task::spawn_blocking(move || {
@@ -128,125 +106,185 @@ pub(crate) async fn handle_log(
     };
 
     let mut offset: u64 = 0;
-    // Forward each line as a JSON log_line event.
-    macro_rules! log_line {
-        ($line:expr) => {
-            let payload = serde_json::json!({"type": "log_line", "line": $line, "offset": offset});
-            if writer.write_json_line(&payload).await.is_err() { unsubscribe(&log_sub); return; }
-            offset += 1;
-        };
-    }
-    // Build a per-line deduplication fingerprint set from the replayed
-    // content. Replayed lines may carry a `[timestamp] message` prefix;
-    // we strip the stamp and normalize to just the message body so the
-    // same message arriving live won't be duplicated. Multiline messages
-    // are split just like the log writer and live path.
     let mut replayed: HashSet<String> = HashSet::new();
     for line in content.lines() {
-        // Strip timestamp prefix if present so we dedupe against the
-        // raw message the bus delivers.
         let body = line.split_once("] ").map(|(_, msg)| msg).unwrap_or(line);
         replayed.insert(body.to_string());
-        log_line!(line);
+        if !out.send_line(line, &mut offset).await {
+            // Client disconnected — signal the orchestrator to bail.
+            return None;
+        }
     }
+    Some((replayed, offset))
+}
 
-    // 2. If follow, drain duplicates (events that arrived during file replay),
-    //    then stream new lines. Monitor the read half for client disconnect.
-    if let Some(ref mut log_rx) = log_rx {
-        // Drain queued events, re-emitting only those whose per-line message
-        // was not already replayed from the file. Bus events arrive at emit
-        // time, so they may precede the log writer's blob flush — discarding
-        // them blindly would lose lines that were never persisted.
-        while let Ok(dispatch) = log_rx.try_recv() {
-            if let EventKind::LogLine { id: line_id, line } = dispatch.kind() {
-                // Ancestor matching delivers child LogLine events (e.g.
-                // `parent:child` → `r:parent`). Drop those — the LogRelay
-                // pathway emits prefixed copies with the parent id set.
-                if line_id != id {
-                    continue;
-                }
-                let ts =
-                    crate::executor::state::stamp_from_epoch_millis(dispatch.ts().wall_millis());
-                for part in line.split('\n') {
-                    let stamped = format!("{ts} {part}");
-                    if !replayed.contains(part) {
-                        log_line!(stamped);
-                    }
+// ── Drain + follow ──────────────────────────────────────────────────────
+
+/// Drain pre-subscription events (deduping against `replayed`), then stream
+/// new LogLine events until the run terminates or the client disconnects.
+async fn drain_and_follow(
+    id: &str,
+    mut log_rx: gremlins_magic_bus::ReceiverHalf<EventKind>,
+    out: &LogOutput<'_>,
+    mut reader: BufReader<tokio::net::unix::OwnedReadHalf>,
+    replayed: &mut HashSet<String>,
+    offset: &mut u64,
+) {
+    // Drain queued events, re-emitting only those whose per-line message
+    // was not already replayed from the file.
+    while let Ok(dispatch) = log_rx.try_recv() {
+        if let EventKind::LogLine { id: line_id, line } = dispatch.kind() {
+            if line_id != id {
+                continue;
+            }
+            let ts = crate::executor::state::stamp_from_epoch_millis(dispatch.ts().wall_millis());
+            for part in line.split('\n') {
+                let stamped = format!("{ts} {part}");
+                if !replayed.contains(part) && !out.send_line(&stamped, offset).await {
+                    return;
                 }
             }
         }
+    }
 
-        loop {
-            tokio::select! {
-                result = log_rx.recv() => {
-                    match result {
-                        gremlins_magic_bus::Recv::Event(dispatch) => {
-                            match dispatch.kind() {
-                                EventKind::LogLine { id: line_id, line } => {
-                                    // Keep only the logged-in run's own lines —
-                                    // child lines arrive via ancestor matching
-                                    // but are served through the LogRelay pathway
-                                    // with a prefix.
-                                    if line_id != id {
-                                        continue;
-                                    }
-                                    let ts = crate::executor::state::stamp_from_epoch_millis(
-                                        dispatch.ts().wall_millis(),
-                                    );
-                                    for part in line.split('\n') {
-                                        let stamped = format!("{ts} {part}");
-                                        log_line!(stamped);
+    loop {
+        tokio::select! {
+            result = log_rx.recv() => {
+                match result {
+                    gremlins_magic_bus::Recv::Event(dispatch) => {
+                        match dispatch.kind() {
+                            EventKind::LogLine { id: line_id, line } => {
+                                if line_id != id {
+                                    continue;
+                                }
+                                let ts = crate::executor::state::stamp_from_epoch_millis(
+                                    dispatch.ts().wall_millis(),
+                                );
+                                for part in line.split('\n') {
+                                    let stamped = format!("{ts} {part}");
+                                    if !out.send_line(&stamped, offset).await {
+                                        return;
                                     }
                                 }
-                                // Terminal event: the run is done. Only break
-                                // when the terminal event's id matches the requested
-                                // run — ancestor matching may deliver child terminal
-                                // events (e.g. `parent:child` completing), but the
-                                // parent follower must continue for siblings and the
-                                // parent's own terminal event.
-                                EventKind::RunCompleted { id: ev_id, .. }
-                                | EventKind::RunFailed { id: ev_id, .. }
-                                | EventKind::RunStopped { id: ev_id }
-                                | EventKind::RunRemoved { id: ev_id }
-                                    if ev_id == id =>
-                                {
-                                    // Unregister so no new events arrive.
-                                    unsubscribe(&log_sub);
-                                    // Drain buffered lines (child relay
-                                    // diagnostics emitted after the terminal
-                                    // event).
-                                    while let Ok(dispatch) = log_rx.try_recv() {
-                                        if let EventKind::LogLine { id: line_id, line } =
-                                            dispatch.kind()
-                                        {
-                                            // Post-terminal drain: same
-                                            // run-scoped filter as above.
-                                            if line_id != id {
-                                                continue;
-                                            }
-                                            let ts = crate::executor::state::stamp_from_epoch_millis(
-                                                dispatch.ts().wall_millis(),
-                                            );
-                                            for part in line.split('\n') {
-                                                let stamped = format!("{ts} {part}");
-                                                log_line!(stamped);
+                            }
+                            EventKind::RunCompleted { id: ev_id, .. }
+                            | EventKind::RunFailed { id: ev_id, .. }
+                            | EventKind::RunStopped { id: ev_id }
+                            | EventKind::RunRemoved { id: ev_id }
+                                if ev_id == id =>
+                            {
+                                // Drain buffered post-terminal lines.
+                                unsubscribe(out.log_sub);
+                                while let Ok(dispatch) = log_rx.try_recv() {
+                                    if let EventKind::LogLine { id: line_id, line } =
+                                        dispatch.kind()
+                                    {
+                                        if line_id != id {
+                                            continue;
+                                        }
+                                        let ts = crate::executor::state::stamp_from_epoch_millis(
+                                            dispatch.ts().wall_millis(),
+                                        );
+                                        for part in line.split('\n') {
+                                            let stamped = format!("{ts} {part}");
+                                            if !out.send_line(&stamped, offset).await {
+                                                return;
                                             }
                                         }
                                     }
-                                    break;
                                 }
-                                _ => continue,
+                                return;
                             }
+                            _ => continue,
                         }
-                        gremlins_magic_bus::Recv::Lagged(n) => {
-                            log_line!(format!("[skipped {n} lines]"));
-                        }
-                        gremlins_magic_bus::Recv::Closed => break,
                     }
+                    gremlins_magic_bus::Recv::Lagged(n) => {
+                        if !out.send_line(
+                            &format!("[skipped {n} lines]"),
+                            offset,
+                        ).await {
+                            return;
+                        }
+                    }
+                    gremlins_magic_bus::Recv::Closed => return,
                 }
-                _ = socket::read_json_line(&mut reader) => { break; }
             }
+            _ = socket::read_json_line(&mut reader) => return,
         }
     }
+}
+
+// ── Orchestrator ─────────────────────────────────────────────────────────
+
+pub(crate) async fn handle_log(
+    request: &Value,
+    registry: &Arc<RunRegistry>,
+    reader: BufReader<tokio::net::unix::OwnedReadHalf>,
+    writer: &SharedWriter,
+) {
+    let id = request.get("id").and_then(|v| v.as_str()).unwrap_or("");
+    if id.is_empty() {
+        let resp = error_response("missing 'id' field");
+        let _ = writer.write_json_line(&resp).await;
+        return;
+    }
+
+    if validate_gremlin_id(id).is_err() {
+        let resp = error_response(&format!("invalid gremlin id {id:?}"));
+        let _ = writer.write_json_line(&resp).await;
+        return;
+    }
+
+    // 1. Resolve the log source.
+    let (source, unknown) = resolve_log_source(id, registry).await;
+    if unknown {
+        let resp = error_response(&format!("unknown gremlin {id:?}"));
+        let _ = writer.write_json_line(&resp).await;
+        return;
+    }
+
+    let follow = request
+        .get("follow")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
+
+    // 2. Subscribe for live runs and flush pre-subscription events.
+    let (log_sub, log_rx) = if follow {
+        let (flush, sub_rx) =
+            if let Some((flush, sub, rx)) = registry.get_run_log_flush_and_subscribe(id).await {
+                (Some(flush), Some((sub, rx)))
+            } else {
+                (None, None)
+            };
+
+        if let Some(flush) = &flush {
+            let (ack_tx, ack_rx) = tokio::sync::oneshot::channel();
+            let _ = flush.send(ack_tx);
+            let _ = ack_rx.await;
+        }
+
+        match sub_rx {
+            Some((sub, rx)) => (Some(sub), Some(rx)),
+            None => (None, None),
+        }
+    } else {
+        (None, None)
+    };
+
+    let out = LogOutput {
+        writer,
+        log_sub: &log_sub,
+    };
+
+    // 3. Replay persisted history. Bail on client disconnect.
+    let Some((mut replayed, mut offset)) = replay_history(&source, &out).await else {
+        return;
+    };
+
+    // 4. Drain and follow live events.
+    if let Some(log_rx) = log_rx {
+        drain_and_follow(id, log_rx, &out, reader, &mut replayed, &mut offset).await;
+    }
+
     unsubscribe(&log_sub);
 }

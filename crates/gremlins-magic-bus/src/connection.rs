@@ -4,7 +4,6 @@ use std::sync::Arc;
 
 use serde_json::Value;
 use tokio::io::AsyncWriteExt;
-use tokio::sync::mpsc;
 
 use crate::event_kind::EventKind;
 use crate::Subscriber;
@@ -75,33 +74,30 @@ impl Drop for BusSubGuard {
 }
 
 // ---------------------------------------------------------------------------
-// Connection guard — RAII counter via the actor
+// Connection guard — RAII closure-based counter
 // ---------------------------------------------------------------------------
 
-/// RAII guard: sends an "up" message on construction and a "down" message on
-/// drop.
-///
-/// Generic over the actor message type `M` so this lives in the bus crate
-/// without depending on any particular actor type.
-pub struct ConnectionGuard<M: Send + 'static> {
-    actor_tx: Option<mpsc::UnboundedSender<M>>,
-    down_msg: Option<M>,
+/// RAII guard: calls an "up" closure on construction and a "down" closure on
+/// drop.  No longer generic over an actor message type — callers pass
+/// arbitrary hooks via closures.
+pub struct ConnectionGuard {
+    down: Option<Box<dyn FnOnce() + Send>>,
 }
 
-impl<M: Send + 'static> ConnectionGuard<M> {
-    pub fn new(actor_tx: &mpsc::UnboundedSender<M>, up_msg: M, down_msg: M) -> Self {
-        let _ = actor_tx.send(up_msg);
+impl ConnectionGuard {
+    /// `up` is called immediately; `down` is called on drop.
+    pub fn new(up: impl FnOnce() + Send + 'static, down: impl FnOnce() + Send + 'static) -> Self {
+        up();
         Self {
-            actor_tx: Some(actor_tx.clone()),
-            down_msg: Some(down_msg),
+            down: Some(Box::new(down)),
         }
     }
 }
 
-impl<M: Send + 'static> Drop for ConnectionGuard<M> {
+impl Drop for ConnectionGuard {
     fn drop(&mut self) {
-        if let (Some(tx), Some(msg)) = (self.actor_tx.take(), self.down_msg.take()) {
-            let _ = tx.send(msg);
+        if let Some(down) = self.down.take() {
+            down();
         }
     }
 }

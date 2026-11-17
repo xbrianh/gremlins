@@ -6,7 +6,6 @@
 use std::sync::Arc;
 
 use serde_json::{Map, Value};
-use tokio::sync::{mpsc, oneshot};
 
 use crate::config;
 use crate::definition::{GremlinDefinition, StaticDefinition};
@@ -14,7 +13,7 @@ use crate::executor::gremlin::Gremlin;
 use crate::executor::state::{self, FileSystemStateStore};
 use crate::executor::str_field;
 
-use super::super::actor::{acquire_id_lock, ActorMsg};
+use super::super::run_registry::RunRegistry;
 use super::super::state_view::state_view_for_id;
 use super::super::{error_response, ok_response, valid_id};
 
@@ -53,24 +52,11 @@ fn extract_token_cost_fields(tree: &Map<String, Value>) -> serde_json::Map<Strin
     fields
 }
 
-pub(crate) async fn handle_ls(
-    _request: &Value,
-    actor_tx: &mpsc::UnboundedSender<super::super::actor::ActorMsg>,
-) -> Value {
+pub(crate) async fn handle_ls(_request: &Value, registry: &Arc<RunRegistry>) -> Value {
     let mut rows: Vec<Value> = Vec::new();
 
-    let (live_ids, pairs): (std::collections::HashSet<String>, Vec<(String, _)>) = {
-        let (tx, rx) = oneshot::channel();
-        let (ids, stores) = if actor_tx
-            .send(ActorMsg::ListRunStoresWithIds { respond: tx })
-            .is_ok()
-        {
-            rx.await.unwrap_or_default()
-        } else {
-            (Vec::new(), Vec::new())
-        };
-        (ids.into_iter().collect(), stores)
-    };
+    let (ids, pairs) = registry.list_run_stores_with_ids().await;
+    let live_ids: std::collections::HashSet<String> = ids.into_iter().collect();
     {
         for (id, store) in &pairs {
             let tree = store.state_tree();
@@ -160,15 +146,12 @@ pub(crate) async fn handle_ls(
 // status
 // ---------------------------------------------------------------------------
 
-pub(crate) async fn handle_status(
-    request: &Value,
-    actor_tx: &mpsc::UnboundedSender<super::super::actor::ActorMsg>,
-) -> Value {
+pub(crate) async fn handle_status(request: &Value, registry: &Arc<RunRegistry>) -> Value {
     let id = match valid_id(request) {
         Ok(id) => id,
         Err(resp) => return resp,
     };
-    match state_view_for_id(id, actor_tx).await {
+    match state_view_for_id(id, registry).await {
         Ok(view) => ok_response(Value::Object(view.common_json())),
         Err(resp) => resp,
     }
@@ -178,15 +161,12 @@ pub(crate) async fn handle_status(
 // info
 // ---------------------------------------------------------------------------
 
-pub(crate) async fn handle_info(
-    request: &Value,
-    actor_tx: &mpsc::UnboundedSender<super::super::actor::ActorMsg>,
-) -> Value {
+pub(crate) async fn handle_info(request: &Value, registry: &Arc<RunRegistry>) -> Value {
     let id = match valid_id(request) {
         Ok(id) => id,
         Err(resp) => return resp,
     };
-    let view = match state_view_for_id(id, actor_tx).await {
+    let view = match state_view_for_id(id, registry).await {
         Ok(view) => view,
         Err(resp) => return resp,
     };
@@ -203,26 +183,16 @@ pub(crate) async fn handle_info(
 // artifact
 // ---------------------------------------------------------------------------
 
-pub(crate) async fn handle_artifact(
-    request: &Value,
-    actor_tx: &mpsc::UnboundedSender<super::super::actor::ActorMsg>,
-) -> Value {
+pub(crate) async fn handle_artifact(request: &Value, registry: &Arc<RunRegistry>) -> Value {
     let id = match valid_id(request) {
         Ok(id) => id,
         Err(resp) => return resp,
     };
 
     if request.get("put").and_then(|v| v.as_str()).is_some() {
-        let _guard = acquire_id_lock(actor_tx, id).await;
+        let _guard = registry.acquire_id_lock(id).await;
 
-        let (contains_tx, contains_rx) = oneshot::channel();
-        let is_running = actor_tx
-            .send(ActorMsg::ContainsRun {
-                id: id.to_string(),
-                respond: contains_tx,
-            })
-            .is_ok()
-            && contains_rx.await.unwrap_or(false);
+        let is_running = registry.contains_run(id).await;
         if is_running {
             return error_response(&format!(
                 "gremlin {id} is running — cannot write artifacts to an active gremlin"
@@ -265,7 +235,7 @@ pub(crate) async fn handle_artifact(
         }
     }
 
-    let store = match resolve_store_for_id(id, actor_tx).await {
+    let store = match resolve_store_for_id(id, registry).await {
         Ok(store) => store,
         Err(resp) => return resp,
     };
@@ -298,16 +268,13 @@ pub(crate) async fn handle_artifact(
 // snapshot
 // ---------------------------------------------------------------------------
 
-pub(crate) async fn handle_snapshot(
-    request: &Value,
-    actor_tx: &mpsc::UnboundedSender<super::super::actor::ActorMsg>,
-) -> Value {
+pub(crate) async fn handle_snapshot(request: &Value, registry: &Arc<RunRegistry>) -> Value {
     let id = match valid_id(request) {
         Ok(id) => id,
         Err(resp) => return resp,
     };
 
-    let _guard = acquire_id_lock(actor_tx, id).await;
+    let _guard = registry.acquire_id_lock(id).await;
 
     if let Err(e) = config::init_global() {
         return error_response(&format!("config init: {e}"));
@@ -381,21 +348,9 @@ pub(crate) async fn handle_snapshot(
 
 pub(crate) async fn resolve_store_for_id(
     id: &str,
-    actor_tx: &mpsc::UnboundedSender<super::super::actor::ActorMsg>,
+    registry: &Arc<RunRegistry>,
 ) -> Result<Arc<dyn state::StateStore + Send + Sync>, Value> {
-    let (store_tx, store_rx) = oneshot::channel();
-    let live = if actor_tx
-        .send(ActorMsg::GetRunStore {
-            id: id.to_string(),
-            respond: store_tx,
-        })
-        .is_ok()
-    {
-        store_rx.await.ok().flatten()
-    } else {
-        None
-    };
-    if let Some(store) = live {
+    if let Some(store) = registry.get_run_store(id).await {
         return Ok(store);
     }
     let state_store = match FileSystemStateStore::open(id) {

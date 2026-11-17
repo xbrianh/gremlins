@@ -1988,28 +1988,42 @@ impl StateData {
     /// for top-level stages).  When non-empty, `state.stage` is pinned to the
     /// display name and `state.sub_stage` holds the leaf name.
     pub fn set_stage(&self, leaf_name: &str, sub_stage: Option<&Value>, display_stage: &str) {
-        if self.gremlin_id.as_deref().unwrap_or("").is_empty() {
-            return;
-        }
-        let scoped = !display_stage.is_empty();
-        let target_stage = if scoped { display_stage } else { leaf_name };
-        if target_stage.is_empty() {
+        let sequences = if display_stage.is_empty() {
+            &[][..]
+        } else {
+            std::slice::from_ref(&display_stage)
+        };
+        self.set_stage_path(leaf_name, sub_stage, sequences);
+    }
+
+    /// Keep the enclosing sequence path in the same snapshot as the displayed
+    /// stage: sibling sequences can each contain a leaf with the same name.
+    pub(crate) fn set_stage_path(&self, leaf: &str, sub_stage: Option<&Value>, sequences: &[&str]) {
+        let stage = sequences.first().copied().unwrap_or(leaf);
+        if self.gremlin_id.as_deref().unwrap_or("").is_empty() || stage.is_empty() {
             return;
         }
         let mut fields = Map::new();
-        fields.insert("stage".into(), Value::String(target_stage.to_string()));
-        fields.insert("stage_updated_at".into(), Value::String(now_stamp()));
-        match if scoped {
-            Some(Value::String(leaf_name.to_string()))
-        } else {
-            sub_stage.cloned()
-        } {
-            Some(sub) => {
-                fields.insert("sub_stage".into(), sub);
-                self.store.patch(&[], &fields);
+        fields.insert("stage".into(), Value::from(stage));
+        fields.insert("stage_updated_at".into(), Value::from(now_stamp()));
+        let mut delete = Vec::new();
+        if sequences.is_empty() {
+            delete.push("active_sequence".into());
+            if let Some(sub_stage) = sub_stage {
+                fields.insert("sub_stage".into(), sub_stage.clone());
+            } else {
+                delete.push("sub_stage".into());
             }
-            None => self.store.patch(&["sub_stage".to_string()], &fields),
+        } else {
+            fields.insert("active_sequence".into(), serde_json::json!(sequences));
+            fields.insert("sub_stage".into(), Value::from(leaf));
         }
+        self.store.patch(&delete, &fields);
+    }
+
+    /// Expire a sequence's active path, leaving the last displayed stage and leaf intact.
+    pub(crate) fn finish_scoped_leaf(&self) {
+        self.store.patch(&["active_sequence".into()], &Map::new());
     }
 
     /// Delete the whole `parallel_attempts` map.
@@ -2713,6 +2727,20 @@ mod tests {
             assert_eq!(raw.get("stage").unwrap(), "reviews");
             assert_eq!(raw.get("sub_stage").unwrap(), "github-review-pull-request");
         });
+    }
+
+    #[test]
+    fn finish_scoped_leaf_expires_path_without_changing_display() {
+        let dir = tempfile::tempdir().unwrap();
+        let state = StateData::with_state_dir(dir.path());
+        state.set_stage_path("work", None, &["pipeline", "review"]);
+        let mut expected = state.state_tree();
+        assert_eq!(
+            expected.remove("active_sequence"),
+            Some(serde_json::json!(["pipeline", "review"]))
+        );
+        state.finish_scoped_leaf();
+        assert_eq!(state.state_tree(), expected);
     }
 
     #[test]

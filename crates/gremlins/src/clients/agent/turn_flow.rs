@@ -21,6 +21,7 @@ use crate::clients::cancel::CancelToken;
 use crate::clients::conversation::Conversation;
 use crate::clients::error::ClientError;
 use crate::clients::format::{format_tool_call, trunc};
+use crate::clients::interactive::DebugOutcome;
 use crate::clients::protocol::{add_opt, CompletedRun, TurnStats, UsageStats};
 use crate::clients::tools::{self, AgentLoopRuntime};
 use gremlins_magic_bus::{emit_run_event_async, EventKind};
@@ -215,6 +216,12 @@ pub(super) async fn handle_done_decision(
                         usage: Some(usage.clone()),
                     }) => {}
                 }
+                if state.interactive.is_attached() {
+                    state.interactive.finish_attachment(DebugOutcome::Done {
+                        text: result_text,
+                        usage: usage.clone(),
+                    });
+                }
             }
             let artifact =
                 state
@@ -249,7 +256,7 @@ pub(super) fn handle_empty_turn(
     captured: &mut Option<Vec<serde_json::Value>>,
     prefix: &str,
 ) -> EmptyTurnAction {
-    if state.interactive_active {
+    if state.interactive.is_attached() {
         return EmptyTurnAction::ContinueLoop;
     }
 

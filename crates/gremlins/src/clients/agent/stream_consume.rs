@@ -1,30 +1,17 @@
-// ── Stream consumption subsystem ─────────────────────────────────────────────
-//
-// consume_stream_events   — drive the model stream to completion
-// finish_stream_turn      — classify the completed stream into a control-flow signal
-//
-// These are free functions (not methods on LoopState) to keep the
-// stream-consumption concern self-contained in its own file while still
-// accessing LoopState fields through pub(super) visibility.
+//! Consume one model stream and report its outcome to the agent loop.
 
 use std::time::{Duration, Instant};
 
 use rig_core::completion::message::{Origin, Reasoning};
-use rig_core::completion::Usage;
-use rig_core::driver::DynModel;
 use rig_core::operation::Completion;
 use rig_core::streaming::{Item, StreamEvent, Streamed};
 
 use crate::clients::cancel::CancelToken;
 use crate::clients::error::ClientError;
 use crate::clients::format::{apply_chunk, format_tool_call};
-use crate::clients::tools::AgentLoopRuntime;
 use gremlins_magic_bus::{emit_run_event_async, EventKind};
 
-use super::agent_loop::{
-    retry_backoff, LoopOpts, LoopState, StreamAccumulator, StreamTurnOutcome, StreamTurnOutput,
-};
-use super::interactive::{maybe_pause, InteractiveLoopResult};
+use super::agent_loop::{retry_backoff, LoopOpts, LoopState, StreamTurnOutcome, StreamTurnOutput};
 
 /// Drive the model stream to completion: forward live deltas, accumulate
 /// assistant content, and handle cancellation, operator pause, idle
@@ -33,8 +20,6 @@ use super::interactive::{maybe_pause, InteractiveLoopResult};
 pub(super) async fn consume_stream_events(
     state: &mut LoopState,
     mut response: Streamed<Completion>,
-    model: &DynModel<Completion>,
-    _tool_ctx: &AgentLoopRuntime,
     cancel: &CancelToken,
     opts: &LoopOpts<'_>,
     prefix: &str,
@@ -47,7 +32,7 @@ pub(super) async fn consume_stream_events(
     chain: &str,
     timeout_retry_backoff: &[f64],
     turn_retry_backoff: &[f64],
-) -> Result<StreamAccumulator, ClientError> {
+) -> Result<StreamTurnOutcome, ClientError> {
     let mut first_token: Option<Instant> = None;
     let mut last_token: Option<Instant> = None;
 
@@ -55,40 +40,24 @@ pub(super) async fn consume_stream_events(
     let mut reasoning = String::new();
     let mut reasoning_items: Vec<Reasoning> = Vec::new();
     let mut tool_calls = Vec::new();
-    let mut ended = false;
-    let mut turn_usage: Option<Usage> = None;
-    let mut origin: Option<Origin> = None;
-    let mut paused_mid_stream = false;
-    let mut retry_turn = false;
-    let mut retry_timeout_turn = false;
+    let origin: Option<Origin>;
 
-    loop {
+    let usage = loop {
         let item = tokio::select! {
+            biased;
             _ = cancel.cancelled() => {
                 state.hook_log(&format!("agent_loop: cancelled mid-stream (label={})", prefix));
                 state.hook_log(&format!("{prefix}exit: cancelled mid-stream"));
                 drop(response);
                 return Err(ClientError::Cancelled);
             }
-            _ = maybe_pause(&state.pause) => {
-                state.hook_log(&format!("agent_loop: paused mid-stream (label={})", prefix));
-                state.hook_log(&format!("{prefix}pause: entering interactive mode (mid-stream)"));
-                drop(response);
-                paused_mid_stream = true;
-                if let Some(ref p) = state.pause {
-                    p.reset();
-                }
-                log::debug!("agent_loop: entering interactive mode mid-stream (label={})", prefix);
-
-                match state.enter_interactive_mode(model, prefix).await? {
-                    InteractiveLoopResult::Resumed => {
-                        state.interactive_active = false;
-                    }
-                    InteractiveLoopResult::RunOneTurn => {
-                        state.pending_run_one_turn = true;
-                    }
-                }
-                break;
+            _ = state.interactive.paused() => {
+                // Rig reconciles ended text parts with their deltas and includes
+                // deltas from open parts. Only sealed reasoning is replayable.
+                return Ok(StreamTurnOutcome::Interrupted {
+                    text: response.partial().text(),
+                    reasoning_items,
+                });
             }
             timed = tokio::time::timeout(
                 Duration::from_secs_f64(idle_timeout),
@@ -106,7 +75,6 @@ pub(super) async fn consume_stream_events(
                     ));
                     state.hook_log(&format!("{prefix}retry: idle timeout, backing off {wait}s"));
                     drop(response);
-                    retry_timeout_turn = true;
                     if retry_backoff(cancel, wait).await {
                         state.hook_log(&format!(
                             "agent_loop: cancelled during timeout backoff (label={})",
@@ -115,18 +83,15 @@ pub(super) async fn consume_stream_events(
                         state.hook_log(&format!("{prefix}exit: cancelled during timeout backoff"));
                         return Err(ClientError::Cancelled);
                     }
-                    break;
+                    return Ok(StreamTurnOutcome::RetryTimeout);
                 }
                 state.exhausted_timeout_retries = true;
                 state.timed_out = true;
-                drop(response);
-                break;
+                return Ok(StreamTurnOutcome::Break);
             }
             Ok(None) => {
-                ended = true;
-                turn_usage = Some(response.partial().usage);
                 origin = Some(response.partial().origin);
-                break;
+                break response.partial().usage;
             }
             Ok(Some(Err(e))) => {
                 if state.turn_retries < turn_retry_backoff.len()
@@ -141,7 +106,6 @@ pub(super) async fn consume_stream_events(
                         "{prefix}retry: transient error, backing off {wait}s"
                     ));
                     drop(response);
-                    retry_turn = true;
                     if retry_backoff(cancel, wait).await {
                         state.hook_log(&format!(
                             "agent_loop: cancelled during retry backoff (label={})",
@@ -150,14 +114,21 @@ pub(super) async fn consume_stream_events(
                         state.hook_log(&format!("{prefix}exit: cancelled during retry backoff"));
                         return Err(ClientError::Cancelled);
                     }
-                    break;
+                    if !nested {
+                        tokio::select! {
+                            biased;
+                            _ = cancel.cancelled() => return Err(ClientError::Cancelled),
+                            _ = emit_run_event_async(&state.message_prefix, EventKind::StreamReset) => {}
+                        }
+                    }
+                    return Ok(StreamTurnOutcome::RetryModelError);
                 }
                 let retryable = crate::clients::cancel::is_retryable(&e, opts.classify_error);
                 if retryable {
                     state.exhausted_turn_retries = true;
                 }
                 state.stream_error = Some(e);
-                break;
+                return Ok(StreamTurnOutcome::Break);
             }
             Ok(Some(Ok(chunk))) => {
                 let now = Instant::now();
@@ -283,66 +254,16 @@ pub(super) async fn consume_stream_events(
                 );
             }
         }
-    }
+    };
 
-    Ok(StreamAccumulator {
+    Ok(StreamTurnOutcome::Output(Box::new(StreamTurnOutput {
         text,
         reasoning,
         reasoning_items,
         tool_calls,
-        ended,
-        turn_usage,
-        paused_mid_stream,
-        retry_turn,
-        retry_timeout_turn,
+        turn_usage: Some(usage),
         first_token,
         last_token,
         origin,
-    })
-}
-
-/// Classify a completed stream into a [`StreamTurnOutcome`], applying the
-/// pause/retry continuations and otherwise packaging the turn output.
-pub(super) async fn finish_stream_turn(
-    state: &mut LoopState,
-    acc: StreamAccumulator,
-    _tool_ctx: &AgentLoopRuntime,
-    cancel: &CancelToken,
-    nested: bool,
-) -> Result<StreamTurnOutcome, ClientError> {
-    if acc.paused_mid_stream {
-        return Ok(StreamTurnOutcome::Continue);
-    }
-
-    if acc.retry_turn {
-        if state.interactive_active {
-            state.pending_run_one_turn = true;
-        }
-        if !nested {
-            tokio::select! {
-                biased;
-                _ = cancel.cancelled() => {
-                    return Err(ClientError::Cancelled);
-                }
-                _ = emit_run_event_async(&state.message_prefix, EventKind::StreamReset) => {}
-            }
-        }
-        return Ok(StreamTurnOutcome::Continue);
-    }
-
-    if acc.retry_timeout_turn {
-        return Ok(StreamTurnOutcome::Continue);
-    }
-
-    Ok(StreamTurnOutcome::Output(Box::new(StreamTurnOutput {
-        text: acc.text,
-        reasoning: acc.reasoning,
-        reasoning_items: acc.reasoning_items,
-        tool_calls: acc.tool_calls,
-        turn_usage: acc.turn_usage,
-        first_token: acc.first_token,
-        last_token: acc.last_token,
-        ended: acc.ended,
-        origin: acc.origin,
     })))
 }

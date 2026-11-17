@@ -86,7 +86,7 @@ impl OpenAiRunState {
 pub(crate) async fn run_openai_compat(
     state: &OpenAiRunState,
     params: RunParams,
-    interactive: Option<InteractiveSession>,
+    interactive: InteractiveSession,
     classify_error: Option<ErrorClassifier>,
     _provider_name: &str, // kept for logging; unused after task-models moved to Backend trait
 ) -> Result<CompletedRun, ClientError> {
@@ -283,7 +283,7 @@ pub(crate) async fn run_with_agent_loop(
     classify_error: Option<ErrorClassifier>,
     temperature: Option<f64>,
     max_tokens: Option<u64>,
-    interactive: Option<InteractiveSession>,
+    interactive: InteractiveSession,
 ) -> Result<CompletedRun, ClientError> {
     let model = client.completion(model_name).erase();
     let mut ctx = ctx.clone();

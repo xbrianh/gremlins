@@ -12,7 +12,7 @@ pub(crate) struct LoadSkillTool;
 
 #[async_trait]
 impl ToolHandler for LoadSkillTool {
-    fn bypass_filter(&self) -> bool {
+    fn skills_gated(&self) -> bool {
         true
     }
 

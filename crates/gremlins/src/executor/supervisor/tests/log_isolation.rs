@@ -6,14 +6,13 @@ use gremlins_magic_bus::{emit_event, EventKind};
 use serde_json::{json, Value};
 use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::net::UnixStream;
-use tokio::sync::mpsc::UnboundedSender;
 use tokio::task::JoinHandle;
 use tokio::time::timeout;
 
-use super::{create_chat_gremlin, create_session, model, spawn_test_actor, teardown_session};
+use super::{create_chat_gremlin, model, spawn_test_actor, TestRegistry};
 use crate::executor::socket;
 use crate::executor::state::{token_hex, BlobMode};
-use crate::executor::supervisor::{actor::ActorMsg, actor_client::Client, handle_connection};
+use crate::executor::supervisor::{handle_connection, CancelToken};
 use crate::test_support::Sandbox;
 
 struct ControlSocket {
@@ -22,11 +21,15 @@ struct ControlSocket {
 }
 
 impl ControlSocket {
-    async fn connect(actor: &UnboundedSender<ActorMsg>) -> Self {
+    async fn connect(registry: &TestRegistry) -> Self {
         let (client, server) = UnixStream::pair().unwrap();
         let mut socket = Self {
             stream: BufReader::new(client),
-            server: tokio::spawn(handle_connection(server, actor.clone())),
+            server: tokio::spawn(handle_connection(
+                server,
+                registry.clone(),
+                Default::default(),
+            )),
         };
         socket.send(json!({"op": "version"})).await;
         assert_eq!(
@@ -78,12 +81,7 @@ impl ControlSocket {
     }
 }
 
-async fn register_run(
-    actor: &UnboundedSender<ActorMsg>,
-    session: &str,
-    project: &Path,
-    name: &str,
-) -> String {
+async fn register_run(registry: &TestRegistry, project: &Path, name: &str) -> String {
     let id = format!("{name}-{}", token_hex(8));
     let gremlin = create_chat_gremlin(
         &id,
@@ -96,8 +94,8 @@ async fn register_run(
     let mut log = gremlin.state.open_blob("log", BlobMode::Write).unwrap();
     writeln!(log, "{name}-history").unwrap();
     drop(log);
-    Client::new(actor.clone())
-        .register_chat_gremlin(session, gremlin)
+    registry
+        .register_chat_gremlin(id.clone(), gremlin, CancelToken::new())
         .await;
     id
 }
@@ -109,18 +107,8 @@ fn log_line(id: &str, marker: &str) {
     });
 }
 
-fn finish_run(actor: &UnboundedSender<ActorMsg>, id: &str) {
-    actor
-        .send(ActorMsg::RunFinished {
-            id: id.into(),
-            result: 0,
-            notify_shutdown: false,
-        })
-        .unwrap();
-}
-
-async fn check_snapshot(actor: &UnboundedSender<ActorMsg>, a: &str, b: &str) {
-    let mut snapshot = ControlSocket::connect(actor).await;
+async fn check_snapshot(registry: &TestRegistry, a: &str, b: &str) {
+    let mut snapshot = ControlSocket::connect(registry).await;
     log_line(b, "b-queued-before-snapshot");
     snapshot
         .send(json!({"op": "log", "id": a, "follow": false}))
@@ -130,8 +118,8 @@ async fn check_snapshot(actor: &UnboundedSender<ActorMsg>, a: &str, b: &str) {
     snapshot.close().await;
 }
 
-async fn check_reused_snapshot(actor: &UnboundedSender<ActorMsg>, a: &str, b: &str) {
-    let mut socket = ControlSocket::connect(actor).await;
+async fn check_reused_snapshot(registry: &TestRegistry, a: &str, b: &str) {
+    let mut socket = ControlSocket::connect(registry).await;
     socket.send(json!({"op": "status", "id": a})).await;
     assert_eq!(socket.read().await.unwrap()["type"], "ok");
 
@@ -171,18 +159,17 @@ async fn check_reused_snapshot(actor: &UnboundedSender<ActorMsg>, a: &str, b: &s
 #[tokio::test]
 async fn control_log_isolated_from_global_broadcasts() {
     let sandbox = Sandbox::new();
-    let (actor, _) = spawn_test_actor().await;
-    let session = create_session(&actor).await;
-    let a = register_run(&actor, &session, sandbox.path(), "a").await;
-    let b = register_run(&actor, &session, sandbox.path(), "b").await;
+    let (registry, _) = spawn_test_actor().await;
+    let a = register_run(&registry, sandbox.path(), "a").await;
+    let b = register_run(&registry, sandbox.path(), "b").await;
 
-    check_snapshot(&actor, &a, &b).await;
-    check_reused_snapshot(&actor, &a, &b).await;
+    check_snapshot(&registry, &a, &b).await;
+    check_reused_snapshot(&registry, &a, &b).await;
 
-    let mut global = ControlSocket::connect(&actor).await;
+    let mut global = ControlSocket::connect(&registry).await;
     global.send(json!({"op": "status", "id": a})).await;
     assert_eq!(global.read().await.unwrap()["type"], "ok");
-    let mut follow = ControlSocket::connect(&actor).await;
+    let mut follow = ControlSocket::connect(&registry).await;
     log_line(&b, "b-queued-before-follow");
     follow
         .send(json!({"op": "log", "id": a, "follow": true}))
@@ -195,13 +182,12 @@ async fn control_log_isolated_from_global_broadcasts() {
     global.expect_broadcast(&b, "b-live").await;
     follow.expect_line(1, "a-live").await;
 
-    finish_run(&actor, &b);
-    assert!(!super::contains_run(&actor, &b).await);
+    registry.handle_run_finished(b.clone(), 0, false).await;
+    assert!(!registry.contains_run(&b).await);
     log_line(&a, "a-after-b-finished");
     follow.expect_line(2, "a-after-b-finished").await;
-    finish_run(&actor, &a);
+    registry.handle_run_finished(a.clone(), 0, false).await;
     assert_eq!(follow.read().await, None);
     follow.close().await;
     global.close().await;
-    teardown_session(&actor, &session).await;
 }
