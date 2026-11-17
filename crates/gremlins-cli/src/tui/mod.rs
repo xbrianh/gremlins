@@ -37,6 +37,8 @@ use crossterm::event::{Event, KeyCode, KeyEventKind};
 use tokio::io::BufReader;
 use tokio::sync::mpsc;
 
+use crate::display;
+
 use app::{App, Screen};
 use commands::{dispatch, CommandResult};
 use editor::{open_editor, ReaderChannels, SuspendHandle};
@@ -2890,6 +2892,12 @@ pub(crate) fn format_cost_usd(v: Option<f64>) -> String {
 }
 
 fn format_ls_response(resp: &serde_json::Value) -> Vec<String> {
+    const LAUNCH_COL: usize = 5;
+    const COL_GAP: usize = 2;
+    /// The transcript widget reserves a one-cell left margin, so /ls rows
+    /// have one fewer usable column than the full terminal width.
+    const TRANSCRIPT_MARGIN: usize = 1;
+
     let gremlins = match resp.get("gremlins").and_then(|v| v.as_array()) {
         Some(g) => g,
         None => return vec!["(no gremlins)".to_string()],
@@ -2958,14 +2966,19 @@ fn format_ls_response(resp: &serde_json::Value) -> Vec<String> {
 
     rows.sort_by(|a, b| a[3].cmp(&b[3]));
 
-    let mut widths: Vec<usize> = headers.iter().map(|h| h.len()).collect();
-    for row in &rows {
-        for (i, cell) in row.iter().enumerate() {
-            if i < widths.len() {
-                widths[i] = widths[i].max(cell.len());
-            }
-        }
-    }
+    let mut widths = display::compute_display_widths(&headers, &rows);
+
+    // When stdout is a terminal, fit the LAUNCH column within the terminal
+    // width so the table never wraps. The transcript widget reserves a
+    // one-cell left margin, so subtract it from the raw terminal width.
+    let term_width = if std::io::stdout().is_terminal() {
+        crossterm::terminal::size()
+            .ok()
+            .map(|(cols, _)| (cols as usize).saturating_sub(TRANSCRIPT_MARGIN))
+    } else {
+        None
+    };
+    display::clamp_launch_column(&mut widths, &mut rows, LAUNCH_COL, COL_GAP, term_width);
 
     let mut lines: Vec<String> = Vec::new();
 
@@ -2974,7 +2987,7 @@ fn format_ls_response(resp: &serde_json::Value) -> Vec<String> {
         .enumerate()
         .map(|(i, h)| {
             let w = widths.get(i).copied().unwrap_or(0);
-            format!("{h:<w$}")
+            display::pad_to_display_width(h, w)
         })
         .collect::<Vec<_>>()
         .join("  ");
@@ -2986,7 +2999,7 @@ fn format_ls_response(resp: &serde_json::Value) -> Vec<String> {
             .enumerate()
             .map(|(i, cell)| {
                 let w = widths.get(i).copied().unwrap_or(0);
-                format!("{cell:<w$}")
+                display::pad_to_display_width(cell, w)
             })
             .collect::<Vec<_>>()
             .join("  ");
