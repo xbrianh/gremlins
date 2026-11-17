@@ -180,7 +180,6 @@ impl Client {
         &self,
         session_id: &str,
         id: Option<&str>,
-        soft: bool,
     ) -> Option<watch::Receiver<bool>> {
         let (respond, rx) = oneshot::channel();
         if self
@@ -188,7 +187,6 @@ impl Client {
             .send(ActorMsg::SessionCancelTurn {
                 session_id: session_id.to_string(),
                 id: id.map(String::from),
-                soft,
                 respond,
             })
             .is_err()
@@ -363,24 +361,6 @@ impl Client {
             task,
             respond,
         });
-    }
-
-    pub(crate) async fn session_reinsert_and_mark_interrupted(
-        &self,
-        session_id: &str,
-        id: &str,
-        gremlin: Gremlin,
-        cancel: Arc<CancelToken>,
-    ) {
-        let (respond, rx) = oneshot::channel();
-        let _ = self.tx.send(ActorMsg::SessionReinsertAndMarkInterrupted {
-            session_id: session_id.to_string(),
-            id: id.to_string(),
-            gremlin,
-            cancel,
-            respond,
-        });
-        let _ = rx.await;
     }
 
     pub(crate) async fn register_chat_gremlin(&self, session_id: &str, mut gremlin: Gremlin) {

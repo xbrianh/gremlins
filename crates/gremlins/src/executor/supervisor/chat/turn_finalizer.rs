@@ -9,14 +9,11 @@
 //! Session and run-map state is actor-owned; the finalizer reaches it through
 //! [`ActorMsg`] messages carried by the [`TurnCtx`](super::TurnCtx) mailbox.
 
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
 use serde_json::Value;
 use tokio::sync::{mpsc, watch};
 use tokio::task::JoinHandle;
-
-use rig_core::completion::Message;
 
 use crate::clients::cancel::CancelToken;
 use crate::definition::ChatDefinition;
@@ -43,7 +40,6 @@ pub(crate) struct TurnFinalizer {
     id: String,
     turn: Option<String>,
     turn_cancel: Arc<CancelToken>,
-    soft_cancel: Arc<AtomicBool>,
     actor_tx: mpsc::UnboundedSender<ActorMsg>,
     session_id: String,
     done: Arc<watch::Sender<bool>>,
@@ -65,7 +61,6 @@ impl TurnFinalizer {
         id: &str,
         turn: &Option<String>,
         turn_cancel: &Arc<CancelToken>,
-        soft_cancel: &Arc<AtomicBool>,
         done: &Arc<watch::Sender<bool>>,
         writer: SharedWriter,
         stream_guard: BusSubGuard,
@@ -74,7 +69,6 @@ impl TurnFinalizer {
             id: id.to_string(),
             turn: turn.clone(),
             turn_cancel: Arc::clone(turn_cancel),
-            soft_cancel: Arc::clone(soft_cancel),
             actor_tx: actor_tx.clone(),
             session_id: session_id.to_string(),
             done: Arc::clone(done),
@@ -106,15 +100,6 @@ impl TurnFinalizer {
         Client::new(self.actor_tx.clone())
             .session_reinsert_gremlin(&self.session_id, &self.id, gremlin)
             .await;
-    }
-
-    /// Re-insert the gremlin when present, then clear the in-flight turn and
-    /// signal completion.
-    pub(crate) async fn reinsert_and_clear(&self, gremlin: Option<Gremlin>) {
-        if let Some(gremlin) = gremlin {
-            self.reinsert(gremlin).await;
-        }
-        self.clear_turn_and_signal().await;
     }
 
     /// Clear the per-turn conversation artifact when a turn number is known.
@@ -151,113 +136,55 @@ impl TurnFinalizer {
         self.write(payload).await;
     }
 
-    /// Hard cancel: clear the per-turn artifact, re-insert the gremlin when we
-    /// have one, clear the in-flight turn + signal, and emit `ended`.
-    pub(crate) async fn hard_cancel(
+    /// Cancel the turn: clear the per-turn artifact (when we have a gremlin
+    /// and a turn number), re-insert the gremlin when present, clear the
+    /// in-flight turn + signal, and emit `ended`.
+    ///
+    /// When `soft` is true, the caller is signalling a soft-interrupt:
+    /// `ChatDefinition` is marked interrupted so the next turn prepends
+    /// an interrupt notice, the per-turn artifact is preserved (not cleared),
+    /// and the terminal reason is `"interrupted"`.
+    pub(crate) async fn cancel(
+        &self,
+        mut gremlin_opt: Option<Gremlin>,
+        chat_turn_num: Option<usize>,
+        soft: bool,
+    ) {
+        if soft {
+            if let Some(ref mut gremlin) = gremlin_opt {
+                if let Some(chat) = gremlin
+                    .definition
+                    .as_any_mut()
+                    .and_then(|a| a.downcast_mut::<ChatDefinition>())
+                {
+                    chat.mark_interrupted();
+                }
+            }
+            self.cancel_inner(gremlin_opt, chat_turn_num, false, "interrupted".to_string())
+                .await;
+        } else {
+            self.cancel_inner(gremlin_opt, chat_turn_num, true, "cancelled".to_string())
+                .await;
+        }
+    }
+
+    /// Shared implementation for [`cancel`] and [`task_fallback`].
+    async fn cancel_inner(
         &self,
         gremlin_opt: Option<Gremlin>,
         chat_turn_num: Option<usize>,
+        clear_artifact_flag: bool,
+        reason: String,
     ) {
         if let Some(gremlin) = gremlin_opt {
-            self.clear_artifact(&gremlin, chat_turn_num).await;
+            if clear_artifact_flag {
+                self.clear_artifact(&gremlin, chat_turn_num).await;
+            }
             self.reinsert(gremlin).await;
         }
         self.clear_turn_and_signal().await;
-        self.write(
-            serde_json::to_value(EventKind::Ended {
-                reason: "cancelled".to_string(),
-            })
-            .unwrap_or_default(),
-        )
-        .await;
-    }
-
-    /// Soft-cancel recovery: persist the partial turn's messages (which are
-    /// already scoped to this turn via `messages_since_boundary`), mark the
-    /// definition interrupted, re-insert the gremlin while keeping
-    /// `current_turn` alive (marked interrupted), signal completion, and emit
-    /// `ended` with reason `interrupted`.
-    ///
-    /// A hard cancel may race the soft path at two points before the final
-    /// section; both are re-checked.
-    pub(crate) async fn soft_interrupt(
-        &self,
-        mut recovered: Gremlin,
-        messages: Option<Vec<Message>>,
-        chat_turn_num: Option<usize>,
-    ) {
-        // Race guard: a hard cancel may have arrived while we were awaiting
-        // the run task. If hard won, discard the partial turn.
-        if !self.soft_cancel.load(Ordering::Acquire) {
-            self.hard_cancel(Some(recovered), chat_turn_num).await;
-            return;
-        }
-
-        // Persist partial messages to the current turn's per-turn artifact.
-        // Messages are already scoped to this turn via `messages_since_boundary`
-        // so no index-based splitting is needed.
-        let mut partial = messages.unwrap_or_default();
-        run_agent::strip_unpaired_tool_messages(&mut partial);
-        if let Some(turn_num) = chat_turn_num {
-            if !partial.is_empty() {
-                run_agent::append_chat_conversation_turn(&recovered, turn_num, &partial).await;
-            }
-        }
-
-        // Race guard: a hard cancel may have arrived during
-        // `append_chat_conversation_turn`. If hard won, clear the artifact and
-        // skip `mark_interrupted()`.
-        if !self.soft_cancel.load(Ordering::Acquire) {
-            self.hard_cancel(Some(recovered), chat_turn_num).await;
-            return;
-        }
-
-        // Mark the definition as interrupted so the next turn injects the
-        // interrupt notice.
-        if let Some(chat) = recovered
-            .definition
-            .as_any_mut()
-            .and_then(|a| a.downcast_mut::<ChatDefinition>())
-        {
-            chat.mark_interrupted();
-        }
-
-        // Re-insert the gremlin, then mark `current_turn` interrupted. The
-        // actor guards the interrupted flip by the turn's cancel token, so a
-        // hard cancel that won the race is not mis-marked.
-        self.reinsert_and_mark_interrupted(recovered, chat_turn_num)
+        self.write(serde_json::to_value(EventKind::Ended { reason }).unwrap_or_default())
             .await;
-    }
-
-    /// Re-insert the gremlin and mark `current_turn.interrupted`. If hard
-    /// cancellation has won, falls back to [`Self::hard_cancel`] instead.
-    async fn reinsert_and_mark_interrupted(&self, gremlin: Gremlin, chat_turn_num: Option<usize>) {
-        // Drop the bus guard before re-inserting the gremlin so the next
-        // turn gets its own subscription. Both the happy path
-        // (session_reinsert_and_mark_interrupted) and the fallback
-        // (hard_cancel -> reinsert) re-insert the gremlin.
-        self.drop_guard();
-        if !self.soft_cancel.load(Ordering::Acquire) {
-            // Hard cancel won while we were re-inserting.
-            self.hard_cancel(Some(gremlin), chat_turn_num).await;
-            return;
-        }
-        Client::new(self.actor_tx.clone())
-            .session_reinsert_and_mark_interrupted(
-                &self.session_id,
-                &self.id,
-                gremlin,
-                Arc::clone(&self.turn_cancel),
-            )
-            .await;
-        let _ = self.done.send(true);
-        self.write(
-            serde_json::to_value(EventKind::Ended {
-                reason: "interrupted".to_string(),
-            })
-            .unwrap_or_default(),
-        )
-        .await;
     }
 
     /// Fallback path when the run task finished without a terminal stream
@@ -269,12 +196,7 @@ impl TurnFinalizer {
         message: String,
         chat_turn_num: Option<usize>,
     ) {
-        if let Some(gremlin) = gremlin_opt {
-            self.clear_artifact(&gremlin, chat_turn_num).await;
-            self.reinsert(gremlin).await;
-        }
-        self.clear_turn_and_signal().await;
-        self.write(serde_json::to_value(EventKind::Ended { reason: message }).unwrap_or_default())
+        self.cancel_inner(gremlin_opt, chat_turn_num, true, message)
             .await;
     }
 }

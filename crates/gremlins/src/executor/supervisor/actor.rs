@@ -122,25 +122,16 @@ impl SessionState {
         }
     }
 
-    /// Cancel the current turn, optionally filtered to `id`. A soft request is
-    /// ignored once the token has already been cancelled so a late soft cancel
-    /// cannot overwrite an earlier hard one.
-    fn cancel_turn(&self, id: Option<&str>, soft: bool) -> Option<watch::Receiver<bool>> {
+    /// Cancel the current turn, optionally filtered to `id`. Returns the
+    /// turn's `done` receiver so the caller can wait for completion.
+    fn cancel_turn(&self, id: Option<&str>) -> Option<watch::Receiver<bool>> {
         let cur = self.current_turn.as_ref()?;
         if let Some(id) = id {
             if cur.id != id {
                 return None;
             }
         }
-        let already_cancelled = cur.cancel.is_cancelled();
-        if soft {
-            if !already_cancelled {
-                cur.soft_cancel.store(true, Ordering::Release);
-            }
-        } else {
-            cur.soft_cancel.store(false, Ordering::Release);
-        }
-        if !already_cancelled {
+        if !cur.cancel.is_cancelled() {
             cur.cancel.cancel();
         }
         Some(cur.done.clone())
@@ -149,12 +140,12 @@ impl SessionState {
 
 /// The fields of a session's in-flight turn that callers outside the actor
 /// need. Deliberately a snapshot: `CurrentTurn` itself stays actor-owned.
+#[allow(dead_code)]
 pub(crate) struct TurnSnapshot {
     pub id: String,
     pub turn: Option<String>,
     pub cancel: Arc<CancelToken>,
     pub done: watch::Receiver<bool>,
-    pub interrupted: bool,
 }
 
 /// Work extracted by `SessionTeardown` and finished by a task spawned from the
@@ -311,21 +302,11 @@ pub(crate) enum ActorMsg {
         cancel: Arc<CancelToken>,
         respond: oneshot::Sender<bool>,
     },
-    /// Cancel a turn: `id` filters by gremlin id, `soft` selects the
-    /// recover-partial-then-end mode. Returns the turn's `done` receiver.
+    /// Cancel a turn: `id` filters by gremlin id. Returns the turn's `done` receiver.
     SessionCancelTurn {
         session_id: String,
         id: Option<String>,
-        soft: bool,
         respond: oneshot::Sender<Option<watch::Receiver<bool>>>,
-    },
-    /// Mark `current_turn.interrupted` (soft-interrupt path), guarded by the
-    /// turn's cancel token.
-    #[allow(dead_code)]
-    SessionMarkInterrupted {
-        session_id: String,
-        cancel: Arc<CancelToken>,
-        respond: oneshot::Sender<bool>,
     },
     SessionIsClosed {
         session_id: String,
@@ -383,15 +364,6 @@ pub(crate) enum ActorMsg {
         session_id: String,
         abort_listener: bool,
         respond: oneshot::Sender<()>,
-    },
-    /// Re-insert a gremlin and mark `current_turn.interrupted` atomically
-    /// (guarded by the turn's cancel token). No TOCTOU window.
-    SessionReinsertAndMarkInterrupted {
-        session_id: String,
-        id: String,
-        gremlin: Gremlin,
-        cancel: Arc<CancelToken>,
-        respond: oneshot::Sender<bool>,
     },
     SessionSetListenerTask {
         session_id: String,
@@ -600,7 +572,6 @@ impl ActorState {
             | ActorMsg::SessionSetCurrentTurn { .. }
             | ActorMsg::SessionClearCurrentTurn { .. }
             | ActorMsg::SessionCancelTurn { .. }
-            | ActorMsg::SessionMarkInterrupted { .. }
             | ActorMsg::SessionIsClosed { .. }
             | ActorMsg::SessionMarkClosed { .. }
             | ActorMsg::SessionContainsChatId { .. }
@@ -612,7 +583,6 @@ impl ActorState {
             | ActorMsg::SessionGetCombinedSkills { .. }
             | ActorMsg::SessionSetOperatorSkills { .. }
             | ActorMsg::SessionTeardown { .. }
-            | ActorMsg::SessionReinsertAndMarkInterrupted { .. }
             | ActorMsg::SessionSetListenerTask { .. }
             | ActorMsg::SessionPushAuxSocket { .. }
             | ActorMsg::SessionGetAll { .. }
@@ -1107,7 +1077,6 @@ impl ActorState {
                         turn: cur.turn.clone(),
                         cancel: Arc::clone(&cur.cancel),
                         done: cur.done.clone(),
-                        interrupted: cur.interrupted,
                     });
                 let _ = respond.send(turn);
             }
@@ -1145,31 +1114,13 @@ impl ActorState {
             ActorMsg::SessionCancelTurn {
                 session_id,
                 id,
-                soft,
                 respond,
             } => {
                 let done = self
                     .sessions
                     .get(&session_id)
-                    .and_then(|session| session.cancel_turn(id.as_deref(), soft));
+                    .and_then(|session| session.cancel_turn(id.as_deref()));
                 let _ = respond.send(done);
-            }
-
-            ActorMsg::SessionMarkInterrupted {
-                session_id,
-                cancel,
-                respond,
-            } => {
-                let mut marked = false;
-                if let Some(session) = self.sessions.get_mut(&session_id) {
-                    if let Some(cur) = session.current_turn.as_mut() {
-                        if Arc::ptr_eq(&cur.cancel, &cancel) {
-                            cur.interrupted = true;
-                            marked = true;
-                        }
-                    }
-                }
-                let _ = respond.send(marked);
             }
 
             ActorMsg::SessionIsClosed {
@@ -1314,35 +1265,6 @@ impl ActorState {
                 });
             }
 
-            ActorMsg::SessionReinsertAndMarkInterrupted {
-                session_id,
-                id,
-                gremlin,
-                cancel,
-                respond,
-            } => {
-                let mut done = false;
-                if let Some(session) = self.sessions.get_mut(&session_id) {
-                    if session.chat_ids.contains(&id) && self.runs.contains_key(&id) {
-                        session.chat_gremlins.insert(id.clone(), gremlin);
-                        if let Some(cur) = session.current_turn.as_mut() {
-                            if Arc::ptr_eq(&cur.cancel, &cancel) {
-                                // Only mark interrupted if the cancel was a
-                                // soft cancel. A hard cancel that wins the
-                                // race after the caller checked soft_cancel
-                                // should reinsert the gremlin without
-                                // parking the partial turn.
-                                if cur.soft_cancel.load(std::sync::atomic::Ordering::Acquire) {
-                                    cur.interrupted = true;
-                                }
-                            }
-                        }
-                        done = true;
-                    }
-                }
-                let _ = respond.send(done);
-            }
-
             ActorMsg::SessionSetListenerTask {
                 session_id,
                 task,
@@ -1467,7 +1389,7 @@ impl ActorState {
 
         // Cancel (and get a handle on) the in-flight turn before dropping
         // the session — the turn task signals `done` through its own `Arc`.
-        let turn_done = session.cancel_turn(None, false);
+        let turn_done = session.cancel_turn(None);
 
         let chat_ids: Vec<String> = session.chat_ids.drain().collect();
         let chat_gremlins = std::mem::take(&mut session.chat_gremlins);

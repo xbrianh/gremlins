@@ -98,20 +98,12 @@ pub(crate) struct CurrentTurn {
     /// it targets so a late cancel cannot hit a subsequent turn.
     pub(crate) turn: Option<String>,
     pub(crate) cancel: Arc<CancelToken>,
-    /// Set when the latest `cancel_chat` requested a soft interrupt. The
-    /// forwarding task reads this when its cancel token fires to decide
-    /// between recovering the partial turn and discarding it.
-    pub(crate) soft_cancel: Arc<AtomicBool>,
     /// Set to `true` once the turn has re-inserted its gremlin (or dropped
     /// it). A follow-up `chat` for the same id waits on this so it never
     /// sees the gremlin as "unknown" mid-turn. Waiters clone the receiver;
     /// the value is sticky so a waiter that subscribes after the turn
     /// finished still proceeds immediately.
     pub(crate) done: watch::Receiver<bool>,
-    /// True when a soft-interrupt has already emitted `ended` for this
-    /// turn. The turn stays alive so a hard cancel within the double-press
-    /// window can still clean up the partial artifact and interrupt flag.
-    pub(crate) interrupted: bool,
 }
 
 // ---------------------------------------------------------------------------

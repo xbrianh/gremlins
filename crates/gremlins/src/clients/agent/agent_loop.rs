@@ -46,10 +46,9 @@ pub(crate) use super::run_context::{LoopOpts, RunContext};
 // Supporting types: ToolJob, StreamAccumulator, StreamTurnOutcome,
 // LoopOpts, InteractiveSession, TurnFlow, etc.
 // ────────────────────────────────────────────────────────────────────────────
-pub(super) fn cancelled_error(message: impl Into<String>, messages: Vec<Message>) -> ClientError {
+pub(super) fn cancelled_error(message: impl Into<String>) -> ClientError {
     ClientError::Cancelled {
         message: message.into(),
-        messages: Some(messages),
     }
 }
 
@@ -278,7 +277,7 @@ impl LoopState {
         let builder = tokio::select! {
             biased;
             _ = cancel.cancelled() => {
-                return Err(cancelled_error("cancelled during request preparation", self.conv.messages_since_boundary()));
+                return Err(cancelled_error("cancelled during request preparation"));
             }
             b = self.prepare_stream_request(tool_defs, opts, nested) => b?,
         };
@@ -313,7 +312,7 @@ impl LoopState {
                     ));
                     if retry_backoff(cancel, wait).await {
                         self.hook_log(&format!("{prefix}exit: cancelled during retry backoff"));
-                        return Err(cancelled_error("cancelled", self.conv.messages_since_boundary()));
+                        return Err(cancelled_error("cancelled"));
                     }
                     // Preserve the pending one-turn state only when
                     // already interactive — otherwise an unconditional
@@ -586,7 +585,7 @@ impl LoopState {
                 // to complete.
                 self.hook_log(&format!("agent_loop: cancelled mid-tool (label={})", prefix));
                 self.hook_log(&format!("{prefix}exit: cancelled mid-tool"));
-                return Err(cancelled_error("cancelled", self.conv.messages_since_boundary()));
+                return Err(cancelled_error("cancelled"));
             }
             _ = maybe_pause(&self.pause) => {
                 // Operator triggered debug mid-tool — drop the join_all future
@@ -655,7 +654,7 @@ impl LoopState {
             tokio::select! {
                 biased;
                 _ = cancel.cancelled() => {
-                    return Err(cancelled_error("cancelled", self.conv.messages_since_boundary()));
+                    return Err(cancelled_error("cancelled"));
                 }
                 _ = emit_run_event_async(&self.message_prefix, EventKind::ToolResult {
                     id: format!("{}{}", tool_ctx.id_prefix, job.id),
@@ -1354,7 +1353,7 @@ pub(crate) async fn run_agent_loop_core(
         if cancel.is_cancelled() {
             log::info!("agent_loop: cancelled before turn (label={})", prefix);
             state.hook_log(&format!("{prefix}exit: cancelled before turn"));
-            return Err(cancelled_error("cancelled", state.conv.messages_since_boundary()));
+            return Err(cancelled_error("cancelled"));
         }
 
         match state.await_interactive_turn(model, prefix).await? {

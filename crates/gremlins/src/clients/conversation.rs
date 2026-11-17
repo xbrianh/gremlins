@@ -115,6 +115,7 @@ pub(crate) trait Conversation: Send + Sync {
     /// Messages appended to durable history since the most recent
     /// [`finish_turn`] call. Returns the partial turn that was in
     /// flight when cancellation occurred.
+    #[allow(dead_code)]
     fn messages_since_boundary(&self) -> Vec<rig_core::completion::Message>;
 
     /// Drop the most recent assistant turn from history so the turn can be

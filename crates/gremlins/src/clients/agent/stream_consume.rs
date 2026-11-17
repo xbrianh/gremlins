@@ -68,7 +68,7 @@ pub(super) async fn consume_stream_events(
                 state.hook_log(&format!("agent_loop: cancelled mid-stream (label={})", prefix));
                 state.hook_log(&format!("{prefix}exit: cancelled mid-stream"));
                 drop(response);
-                return Err(cancelled_error("cancelled", state.conv.messages_since_boundary()));
+                return Err(cancelled_error("cancelled"));
             }
             _ = maybe_pause(&state.pause) => {
                 state.hook_log(&format!("agent_loop: paused mid-stream (label={})", prefix));
@@ -113,7 +113,7 @@ pub(super) async fn consume_stream_events(
                             prefix
                         ));
                         state.hook_log(&format!("{prefix}exit: cancelled during timeout backoff"));
-                        return Err(cancelled_error("cancelled", state.conv.messages_since_boundary()));
+                        return Err(cancelled_error("cancelled"));
                     }
                     break;
                 }
@@ -147,7 +147,7 @@ pub(super) async fn consume_stream_events(
                             prefix
                         ));
                         state.hook_log(&format!("{prefix}exit: cancelled during retry backoff"));
-                        return Err(cancelled_error("cancelled", state.conv.messages_since_boundary()));
+                        return Err(cancelled_error("cancelled"));
                     }
                     break;
                 }
@@ -174,7 +174,7 @@ pub(super) async fn consume_stream_events(
                                 tokio::select! {
                                     biased;
                                     _ = cancel.cancelled() => {
-                                        return Err(cancelled_error("cancelled", state.conv.messages_since_boundary()));
+                                        return Err(cancelled_error("cancelled"));
                                     }
                                     _ = emit_run_event_async(&state.message_prefix, EventKind::TaskProgress {
                                         parent_id: parent_id.to_string(),
@@ -192,7 +192,7 @@ pub(super) async fn consume_stream_events(
                                 tokio::select! {
                                     biased;
                                     _ = cancel.cancelled() => {
-                                        return Err(cancelled_error("cancelled", state.conv.messages_since_boundary()));
+                                        return Err(cancelled_error("cancelled"));
                                     }
                                     _ = emit_run_event_async(&state.message_prefix, EventKind::TaskProgress {
                                         parent_id: parent_id.to_string(),
@@ -214,7 +214,7 @@ pub(super) async fn consume_stream_events(
                                 tokio::select! {
                                     biased;
                                     _ = cancel.cancelled() => {
-                                        return Err(cancelled_error("cancelled", state.conv.messages_since_boundary()));
+                                        return Err(cancelled_error("cancelled"));
                                     }
                                     _ = emit_run_event_async(&state.message_prefix, EventKind::TaskProgress {
                                         parent_id: parent_id.to_string(),
@@ -236,7 +236,7 @@ pub(super) async fn consume_stream_events(
                                 tokio::select! {
                                     biased;
                                     _ = cancel.cancelled() => {
-                                        return Err(cancelled_error("cancelled", state.conv.messages_since_boundary()));
+                                        return Err(cancelled_error("cancelled"));
                                     }
                                     _ = emit_run_event_async(&state.message_prefix, EventKind::StreamChunk {
                                         text: text.clone(),
@@ -247,7 +247,7 @@ pub(super) async fn consume_stream_events(
                                 tokio::select! {
                                     biased;
                                     _ = cancel.cancelled() => {
-                                        return Err(cancelled_error("cancelled", state.conv.messages_since_boundary()));
+                                        return Err(cancelled_error("cancelled"));
                                     }
                                     _ = emit_run_event_async(&state.message_prefix, EventKind::ReasoningChunk {
                                         text: text.clone(),
@@ -262,7 +262,7 @@ pub(super) async fn consume_stream_events(
                                 tokio::select! {
                                     biased;
                                     _ = cancel.cancelled() => {
-                                        return Err(cancelled_error("cancelled", state.conv.messages_since_boundary()));
+                                        return Err(cancelled_error("cancelled"));
                                     }
                                     _ = emit_run_event_async(&state.message_prefix, EventKind::ReasoningChunk {
                                         text: format_tool_call(tc),
@@ -320,7 +320,7 @@ pub(super) async fn finish_stream_turn(
             tokio::select! {
                 biased;
                 _ = cancel.cancelled() => {
-                    return Err(cancelled_error("cancelled", state.conv.messages_since_boundary()));
+                    return Err(cancelled_error("cancelled"));
                 }
                 _ = emit_run_event_async(&state.message_prefix, EventKind::StreamReset) => {}
             }

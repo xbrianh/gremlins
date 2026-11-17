@@ -8,7 +8,7 @@ handling, gremlin creation/reuse, turn execution, cancellation, and cleanup.
 | File | Role |
 |---|---|
 | `mod.rs` | Chat turn entry point: `handle_chat` (the op handler), `run_chat_turn` (the core turn loop), `chat_payload`, gremlin lifecycle (`create_chat_gremlin`, `register_chat_gremlin`, `cleanup_chat_gremlin`, `reusable_chat_gremlin_id`, `reinsert_chat_gremlin`), env resolution (`base_process_env`, `resolve_chat_env`), and usage accounting (`usage_stats_from_state`, `add_usage_stats`). |
-| `turn_finalizer.rs` | `TurnFinalizer`: owns the terminal-path resources for one turn. Consolidates re-insert-gremlin + clear-current-turn + signal-done + write-terminal-event into a single struct so every exit path doesn't repeat the same dance. Also handles `hard_cancel`, `soft_interrupt`, and `task_fallback`. |
+| `turn_finalizer.rs` | `TurnFinalizer`: owns the terminal-path resources for one turn. Consolidates re-insert-gremlin + clear-current-turn + signal-done + write-terminal-event into a single struct so every exit path doesn't repeat the same dance. Also handles `cancel` and `task_fallback`. |
 
 ## Architecture
 
@@ -39,10 +39,12 @@ returns the gremlin to the session map after a turn.
 
 ### Cancellation
 
-- **Soft cancel** (`soft_interrupt`): sets `soft_cancel` on the turn,
-  which the agent loop checks between iterations.
-- **Hard cancel** (`hard_cancel`): aborts the run task via the cancel
-  token, reaps the gremlin, and signals done immediately.
+- **Cancel**: the caller (`handle_cancel_chat`) signals the cancel token;
+  `run_chat_turn` catches the cancellation and calls `TurnFinalizer::cancel`
+  to clear the per-turn artifact, re-insert the gremlin, and emit `ended`.
+- **Interrupted turns**: `cancel_interrupted_turn` (free function in `mod.rs`)
+  handles cleanup for turns whose task has already returned — takes the
+  parked gremlin, clears the artifact and interrupt flag, and emits `ended`.
 - `TurnFinalizer::task_fallback` handles the case where the run task is
   already gone when cancellation arrives.
 
@@ -62,15 +64,15 @@ process environment captured once at startup.
   done by hand.
 - **Model changes force client rebuild.** If the TUI's chat model changes,
   the parked gremlin is invalidated and a new one is created.
-- **Soft cancel is advisory.** The agent loop checks `soft_cancel` at
-  iteration boundaries; it does not preempt an in-flight LLM call.
+- **Cancel is token-driven.** The agent loop checks the cancel token
+  at iteration boundaries; it does not preempt an in-flight LLM call.
 
 ## Where to look for…
 
 | You want to … | Look at |
 |---|---|
 | Change the turn loop | `mod.rs::run_chat_turn` + `TurnCtx` |
-| Change cancellation behavior | `turn_finalizer.rs` — `soft_interrupt`, `hard_cancel`, `task_fallback` |
+| Change cancellation behavior | `turn_finalizer.rs` — `cancel`, `task_fallback`; `mod.rs` — `cancel_interrupted_turn` |
 | Change gremlin reuse policy | `mod.rs::reusable_chat_gremlin_id`, `reinsert_chat_gremlin` |
 | Change env resolution | `mod.rs::resolve_chat_env` |
 | Change usage/cost tracking | `mod.rs::usage_stats_from_state`, `add_usage_stats` |

@@ -320,11 +320,7 @@ pub(crate) fn exec_commit_err(error: ExecError, name: &str) -> RunError {
 pub(crate) fn client_run_err(error: ClientError, name: &str) -> RunError {
     match error {
         ClientError::Bail { reason } => RunError::Bail { reason },
-        ClientError::Cancelled { message, messages } => RunError::Cancelled { message, messages },
-        ClientError::Runtime { message } if message == "cancelled" => RunError::Cancelled {
-            message,
-            messages: None,
-        },
+        ClientError::Cancelled { message } => RunError::Cancelled { message },
         other => stage_failed(name, other),
     }
 }

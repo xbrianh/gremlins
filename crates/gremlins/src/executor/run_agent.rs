@@ -550,6 +550,7 @@ pub(crate) async fn read_chat_conversation(
 }
 
 /// Append messages to a per-turn conversation artifact.
+#[allow(dead_code)] // test helper
 pub(crate) async fn append_chat_conversation_turn(
     gremlin: &Gremlin,
     turn: usize,
@@ -627,6 +628,7 @@ pub(crate) async fn persist_compacted_conversation(
 }
 
 /// Strip trailing messages left dangling by a mid-tool-call cancellation.
+#[allow(dead_code)] // test helper
 pub(crate) fn strip_unpaired_tool_messages(messages: &mut Vec<Message>) {
     fn count_tool_calls(m: &Message) -> (bool, usize) {
         if let Message::Assistant { content, .. } = m {

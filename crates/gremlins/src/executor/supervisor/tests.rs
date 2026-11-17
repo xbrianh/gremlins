@@ -16,7 +16,6 @@ use gremlins_magic_bus::connection::SharedWriter;
 use serde_json::Value;
 use std::collections::HashMap;
 use std::path::PathBuf;
-use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::{mpsc, oneshot, watch};
@@ -130,9 +129,7 @@ async fn reusable_chat_gremlin_id_returns_none_when_done_turn_has_no_gremlin() {
         id: "grem-1".to_string(),
         turn: Some("1".to_string()),
         cancel: super::CancelToken::new(),
-        soft_cancel: Arc::new(AtomicBool::new(false)),
         done: rx,
-        interrupted: true,
     };
     let (respond, rx) = oneshot::channel();
     actor_tx
@@ -1196,9 +1193,7 @@ async fn chat_model_falls_back_to_run_map_while_turn_is_in_flight() {
         id: id.clone(),
         turn: Some("1".to_string()),
         cancel: super::CancelToken::new(),
-        soft_cancel: Arc::new(AtomicBool::new(false)),
         done: done_rx,
-        interrupted: false,
     };
     let (respond, rx) = oneshot::channel();
     actor_tx
@@ -1377,9 +1372,7 @@ async fn stop_session_chat_gremlin_removes_ownership_and_cancels_turn() {
         id: "chat-stop".to_string(),
         turn: Some("1".to_string()),
         cancel: cancel.clone(),
-        soft_cancel: Arc::new(AtomicBool::new(false)),
         done: done_rx,
-        interrupted: false,
     };
     let (respond, rx) = oneshot::channel();
     actor_tx
