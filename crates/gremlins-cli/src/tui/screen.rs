@@ -3087,12 +3087,12 @@ mod tests {
 
     // ── Blank-entry suppression ────────────────────────────────────
 
-    #[test]
-    fn watch_pane_suppresses_whitespace_only_entries() {
-        let mut live = new_live(50, 12);
+    /// Shared setup for watch-pane tests: creates a live area, an app with
+    /// one running gremlin, and activates the watch stream pane.
+    fn setup_watch_test(cols: u16, rows: u16) -> (LiveArea<TestBackend>, App) {
+        let live = new_live(cols, rows);
         let mut app = App::new();
         app.project_name = "gremlins".to_string();
-
         app.active_runs.insert(
             "g1".to_string(),
             ActiveRun {
@@ -3112,10 +3112,15 @@ mod tests {
                 last_cached_input_tokens: None,
             },
         );
-
         app.screen = Screen::Runs;
         app.watch_selection = Some("g1".to_string());
         app.watch_following = Some("g1".to_string());
+        (live, app)
+    }
+
+    #[test]
+    fn watch_pane_suppresses_whitespace_only_entries() {
+        let (mut live, app) = setup_watch_test(50, 12);
         live.show_runs();
 
         // Push two visible messages separated by blank entries.
@@ -3182,44 +3187,13 @@ mod tests {
 
     #[test]
     fn watch_pane_coalesces_space_fragment_with_adjacent_text() {
-        let mut live = new_live(50, 12);
-        let mut app = App::new();
-        app.project_name = "gremlins".to_string();
-
-        app.active_runs.insert(
-            "g1".to_string(),
-            ActiveRun {
-                status: "running".to_string(),
-                stage: "build".to_string(),
-                sub_stage: String::new(),
-                definition: "def".to_string(),
-                project: "gremlins".to_string(),
-                prompt_tokens: None,
-                completion_tokens: None,
-                reasoning_tokens: None,
-                cached_input_tokens: None,
-                cache_creation_input_tokens: None,
-                turns: None,
-                cost_usd: None,
-                last_prompt_tokens: None,
-                last_cached_input_tokens: None,
-            },
-        );
-
-        app.screen = Screen::Runs;
-        app.watch_selection = Some("g1".to_string());
-        app.watch_following = Some("g1".to_string());
+        // "hello", " ", "world" as separate fragments simulate
+        // streaming word-by-word via push_watch_line -> push_stream_line.
+        // Since the space fragment has no newline, the tail stays open
+        // and the three fragments coalesce into one stream line.
+        let (mut live, app) = setup_watch_test(50, 12);
         live.show_runs();
 
-        // Stream "hello", a space-only fragment, and "world" as separate
-        // fragments to simulate streaming word-by-word. The first fragment
-        // is pushed via push_watch_line, the space and "world" are pushed
-        // via emit_text_lines coalescing.
-        //
-        // Since push_watch_line → push_stream_line, text chunks coalesce
-        // when the kind and tail state match. A space-only fragment
-        // (" ") has no newline, so the tail stays open and "world"
-        // appends to form "hello world".
         live.push_watch_line(
             serde_json::json!({"type":"stage_stream_line","kind":"text","text":"hello"})
                 .to_string(),
@@ -3235,7 +3209,9 @@ mod tests {
         live.compose(&app).unwrap();
 
         let visible = dump_buffer(live.backend().buffer());
-        // The coalesced result should be "hello world" (space merged in).
+        // The filter suppresses blank-only entries. Coalescing merges
+        // "hello" + " " + "world" into one line, so "hello world" appears.
+        // Assert both words are present with no blank row between them.
         assert!(
             visible.contains("hello world"),
             "Coalesced text should show 'hello world'.\nBuffer:\n{visible}"
@@ -3244,37 +3220,14 @@ mod tests {
 
     #[test]
     fn watch_pane_trailing_whitespace_only_does_not_scroll_visible_out() {
-        let mut live = new_live(40, 10);
-        let mut app = App::new();
-        app.project_name = "gremlins".to_string();
-
-        app.active_runs.insert(
-            "g1".to_string(),
-            ActiveRun {
-                status: "running".to_string(),
-                stage: "build".to_string(),
-                sub_stage: String::new(),
-                definition: "def".to_string(),
-                project: "gremlins".to_string(),
-                prompt_tokens: None,
-                completion_tokens: None,
-                reasoning_tokens: None,
-                cached_input_tokens: None,
-                cache_creation_input_tokens: None,
-                turns: None,
-                cost_usd: None,
-                last_prompt_tokens: None,
-                last_cached_input_tokens: None,
-            },
-        );
-
-        app.screen = Screen::Runs;
-        app.watch_selection = Some("g1".to_string());
-        app.watch_following = Some("g1".to_string());
+        let (mut live, app) = setup_watch_test(40, 10);
         live.show_runs();
 
-        // Fill the viewport with visible lines, then push trailing blanks.
-        for i in 0..4 {
+        // The stream pane body has 8 rows (10 - 2 header - 0 footer).
+        // Push body_rows visible lines so the anchor sits at the edge
+        // of the viewport, then trailing blanks would scroll it out
+        // without the filter but leave it visible with the filter.
+        for i in 0..8 {
             live.push_watch_line(
                 serde_json::json!({"type":"stage_stream_line","kind":"text","text":format!("line {i}")}).to_string(),
             );
@@ -3283,8 +3236,10 @@ mod tests {
         live.push_watch_line(
             serde_json::json!({"type":"stage_stream_line","kind":"text","text":anchor}).to_string(),
         );
-        // Push trailing whitespace-only entries that should consume no rows.
-        for _ in 0..8 {
+        // Push enough trailing whitespace-only entries that, without
+        // the filter, the combined row count exceeds body_rows and the
+        // anchor scrolls out of the rendered tail.
+        for _ in 0..12 {
             live.push_watch_line(
                 serde_json::json!({"type":"stage_stream_line","kind":"log","text":"   "})
                     .to_string(),
