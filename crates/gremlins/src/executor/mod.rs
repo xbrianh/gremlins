@@ -65,8 +65,8 @@ pub enum RunError {
     Client(#[from] ClientError),
 
     /// The operator cancelled the agent loop.
-    #[error("{message}")]
-    Cancelled { message: String },
+    #[error("cancelled")]
+    Cancelled,
 
     /// `state.json` I/O failed.
     #[error(transparent)]

@@ -4,7 +4,7 @@ pub enum ClientError {
     ApiServerError { message: String },
     RetryExhausted { message: String },
     Runtime { message: String },
-    Cancelled { message: String },
+    Cancelled,
     Bail { reason: String },
     PromptTooLarge { limit: u64, actual: u64 },
 }
@@ -16,7 +16,7 @@ impl std::fmt::Display for ClientError {
             ClientError::ApiServerError { message } => write!(f, "{message}"),
             ClientError::RetryExhausted { message } => write!(f, "{message}"),
             ClientError::Runtime { message } => write!(f, "{message}"),
-            ClientError::Cancelled { message } => write!(f, "{message}"),
+            ClientError::Cancelled => write!(f, "cancelled"),
             ClientError::Bail { reason } => write!(f, "{reason}"),
             ClientError::PromptTooLarge { limit, actual } => write!(
                 f,

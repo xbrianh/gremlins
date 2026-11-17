@@ -320,7 +320,7 @@ pub(crate) fn exec_commit_err(error: ExecError, name: &str) -> RunError {
 pub(crate) fn client_run_err(error: ClientError, name: &str) -> RunError {
     match error {
         ClientError::Bail { reason } => RunError::Bail { reason },
-        ClientError::Cancelled { message } => RunError::Cancelled { message },
+        ClientError::Cancelled => RunError::Cancelled,
         other => stage_failed(name, other),
     }
 }
@@ -728,14 +728,12 @@ pub(crate) fn truncate_tail(text: &str, max: usize) -> String {
 mod tests {
     use super::*;
     use crate::executor::run_agent::{
-        append_chat_conversation_turn, chat_turn_from_stage_name, clear_chat_turn_artifact,
-        messages_from_conversation, persist_chat_conversation_turn, persist_compacted_conversation,
-        read_chat_conversation, resolve_task_models, strip_unpaired_tool_messages,
+        chat_turn_from_stage_name, clear_chat_turn_artifact, messages_from_conversation,
+        persist_chat_conversation_turn, persist_compacted_conversation, read_chat_conversation,
+        resolve_task_models,
     };
     use crate::executor::state::FileSystemStateStore;
     use crate::task_kind::TaskKind;
-    use rig_core::completion::message::AssistantContent;
-    use rig_core::completion::Message;
 
     use crate::artifacts::uri::Uri;
     use crate::builders::agent::AgentBuilder;
@@ -1038,43 +1036,6 @@ mod tests {
             round_tripped.is_empty(),
             "empty diff must produce an empty artifact array"
         );
-    }
-
-    #[tokio::test]
-    async fn append_chat_conversation_turn_only_writes_to_current_turn() {
-        use rig_core::completion::Message;
-
-        let (_sandbox, gremlin) = test_gremlin(vec![], "cmd/true");
-
-        // Write turn 1 with one message.
-        let turn1 = vec![Message::user("hello".to_string())];
-        persist_chat_conversation_turn(&gremlin, 1, &turn1)
-            .await
-            .unwrap();
-
-        // Append a partial message to turn 2 only.
-        let partial = vec![Message::user("partial".to_string())];
-        append_chat_conversation_turn(&gremlin, 2, &partial).await;
-
-        // Turn 1 must be unchanged.
-        let json1 = gremlin
-            .state
-            .content("artifact://conversation/0001.json", None)
-            .await
-            .expect("turn 1 must be readable");
-        let msgs1: Vec<Message> = serde_json::from_str(&json1).unwrap();
-        assert_eq!(msgs1.len(), 1, "turn 1 must not have duplicated messages");
-        assert_eq!(msgs1[0], turn1[0]);
-
-        // Turn 2 must have only the partial message (no turn 1 messages).
-        let json2 = gremlin
-            .state
-            .content("artifact://conversation/0002.json", None)
-            .await
-            .expect("turn 2 must be readable");
-        let msgs2: Vec<Message> = serde_json::from_str(&json2).unwrap();
-        assert_eq!(msgs2.len(), 1, "turn 2 must have only its own messages");
-        assert_eq!(msgs2[0], partial[0]);
     }
 
     #[tokio::test]
@@ -2081,104 +2042,6 @@ mod tests {
         assert_eq!(code, 0);
         assert_eq!(raw["status"], "done");
         assert_eq!(raw["exit_code"], 0);
-    }
-
-    // ── strip_unpaired_tool_messages ──
-
-    use rig_core::completion::message::{CallId, ToolCall, ToolFunction, ToolName};
-
-    fn tool_call_msg(id: &str, name: &str, args: serde_json::Value) -> Message {
-        let tc = ToolCall::from_dual_wire(
-            "".to_string(),
-            id.to_string(),
-            ToolFunction::new(ToolName::new(name.to_string()).unwrap(), args),
-        );
-        Message::Assistant {
-            id: None,
-            content: vec![AssistantContent::ToolCall(tc)],
-        }
-    }
-
-    fn tool_result_msg(call_id: &str, name: &str, output: &str) -> Message {
-        Message::tool_result(
-            CallId::from_wire(call_id.to_string()),
-            ToolName::new(name.to_string()).unwrap(),
-            output.to_string(),
-        )
-    }
-
-    #[test]
-    fn strip_unpaired_empty_is_noop() {
-        let mut messages: Vec<Message> = Vec::new();
-        strip_unpaired_tool_messages(&mut messages);
-        assert!(messages.is_empty());
-    }
-
-    #[test]
-    fn strip_unpaired_paired_calls_and_results_are_kept() {
-        let mut messages = vec![
-            Message::user("hello".to_string()),
-            tool_call_msg("call_1", "bash", serde_json::json!({"cmd": "ls"})),
-            tool_result_msg("call_1", "bash", "ok"),
-        ];
-        let len_before = messages.len();
-        strip_unpaired_tool_messages(&mut messages);
-        assert_eq!(messages.len(), len_before);
-    }
-
-    #[test]
-    fn strip_unpaired_trailing_assistant_with_tool_calls_is_removed() {
-        let mut messages = vec![
-            Message::user("hello".to_string()),
-            tool_call_msg("call_1", "bash", serde_json::json!({"cmd": "ls"})),
-        ];
-        strip_unpaired_tool_messages(&mut messages);
-        assert_eq!(messages.len(), 1);
-    }
-
-    #[test]
-    fn strip_unpaired_orphaned_tool_results_are_removed() {
-        let mut messages = vec![
-            Message::user("hello".to_string()),
-            Message::assistant("done".to_string()),
-            tool_result_msg("call_orphan", "bash", "orphan"),
-        ];
-        strip_unpaired_tool_messages(&mut messages);
-        assert_eq!(messages.len(), 2);
-    }
-
-    #[test]
-    fn strip_unpaired_partial_results_are_removed() {
-        let tc1 = ToolCall::from_dual_wire(
-            "".to_string(),
-            "call_1".to_string(),
-            ToolFunction::new(
-                ToolName::new("bash".to_string()).unwrap(),
-                serde_json::json!({"cmd": "ls"}),
-            ),
-        );
-        let tc2 = ToolCall::from_dual_wire(
-            "".to_string(),
-            "call_2".to_string(),
-            ToolFunction::new(
-                ToolName::new("read".to_string()).unwrap(),
-                serde_json::json!({"path": "f.txt"}),
-            ),
-        );
-        let mut messages = vec![
-            Message::user("hello".to_string()),
-            Message::Assistant {
-                id: None,
-                content: vec![
-                    AssistantContent::ToolCall(tc1),
-                    AssistantContent::ToolCall(tc2),
-                ],
-            },
-            tool_result_msg("call_1", "bash", "ok"),
-        ];
-        assert_eq!(messages.len(), 3);
-        strip_unpaired_tool_messages(&mut messages);
-        assert_eq!(messages.len(), 1);
     }
 
     #[test]

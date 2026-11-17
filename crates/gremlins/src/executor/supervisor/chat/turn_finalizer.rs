@@ -15,17 +15,50 @@ use serde_json::Value;
 use tokio::sync::{mpsc, watch};
 use tokio::task::JoinHandle;
 
+use super::payload::chat_payload;
 use crate::clients::cancel::CancelToken;
 use crate::definition::ChatDefinition;
 use crate::executor::gremlin::Gremlin;
 use crate::executor::run_agent;
-use crate::executor::supervisor::chat::chat_payload;
 use crate::executor::RunError;
 use gremlins_magic_bus::connection::{BusSubGuard, SharedWriter};
 use gremlins_magic_bus::EventKind;
 
 use crate::executor::supervisor::actor::ActorMsg;
 use crate::executor::supervisor::actor_client::Client;
+
+/// Classifies how a chat turn ended, so the finalizer maps each outcome
+/// to its artifact/reinsert/terminal-event behavior without boolean plumbing.
+#[derive(Debug)]
+pub(crate) enum TurnEnd {
+    /// Agent loop returned `Cancelled` on its own. The `ChatDefinition` is
+    /// marked interrupted so the next turn prepends an interrupt notice.
+    /// The per-turn artifact is preserved (not cleared).
+    Soft,
+    /// Agent completed or errored non-cancel, or the run task itself failed.
+    /// The per-turn artifact is cleared.
+    Hard,
+    /// Run task finished without a terminal stream event (error/panic).
+    /// The artifact is cleared and `reason` becomes the `Ended` payload.
+    Fallback { reason: String },
+}
+
+impl TurnEnd {
+    /// Whether the per-turn conversation artifact must be cleared. Only a
+    /// soft interrupt preserves it.
+    fn clear_artifact(&self) -> bool {
+        !matches!(self, TurnEnd::Soft)
+    }
+
+    /// Terminal reason written into the `Ended` event.
+    fn reason(&self) -> &str {
+        match self {
+            TurnEnd::Soft => "interrupted",
+            TurnEnd::Hard => "cancelled",
+            TurnEnd::Fallback { reason } => reason,
+        }
+    }
+}
 
 /// Handle returned by the task that runs a chat stage, carrying the stage
 /// result and the gremlin back to the forwarding task.
@@ -136,21 +169,15 @@ impl TurnFinalizer {
         self.write(payload).await;
     }
 
-    /// Cancel the turn: clear the per-turn artifact (when we have a gremlin
-    /// and a turn number), re-insert the gremlin when present, clear the
-    /// in-flight turn + signal, and emit `ended`.
-    ///
-    /// When `soft` is true, the caller is signalling a soft-interrupt:
-    /// `ChatDefinition` is marked interrupted so the next turn prepends
-    /// an interrupt notice, the per-turn artifact is preserved (not cleared),
-    /// and the terminal reason is `"interrupted"`.
+    /// Cancel the turn: clear or preserve the per-turn artifact, re-insert
+    /// the gremlin, clear the in-flight turn + signal, and emit `ended`.
     pub(crate) async fn cancel(
         &self,
         mut gremlin_opt: Option<Gremlin>,
         chat_turn_num: Option<usize>,
-        soft: bool,
+        end: TurnEnd,
     ) {
-        if soft {
+        if matches!(&end, TurnEnd::Soft) {
             if let Some(ref mut gremlin) = gremlin_opt {
                 if let Some(chat) = gremlin
                     .definition
@@ -160,43 +187,31 @@ impl TurnFinalizer {
                     chat.mark_interrupted();
                 }
             }
-            self.cancel_inner(gremlin_opt, chat_turn_num, false, "interrupted".to_string())
-                .await;
-        } else {
-            self.cancel_inner(gremlin_opt, chat_turn_num, true, "cancelled".to_string())
-                .await;
         }
+        self.cancel_inner(gremlin_opt, chat_turn_num, &end).await;
     }
 
-    /// Shared implementation for [`cancel`] and [`task_fallback`].
+    /// Shared implementation for the [`cancel`] paths. Artifact/terminal
+    /// behavior comes from the [`TurnEnd`] variant, not loose flags.
     async fn cancel_inner(
         &self,
         gremlin_opt: Option<Gremlin>,
         chat_turn_num: Option<usize>,
-        clear_artifact_flag: bool,
-        reason: String,
+        end: &TurnEnd,
     ) {
         if let Some(gremlin) = gremlin_opt {
-            if clear_artifact_flag {
+            if end.clear_artifact() {
                 self.clear_artifact(&gremlin, chat_turn_num).await;
             }
             self.reinsert(gremlin).await;
         }
         self.clear_turn_and_signal().await;
-        self.write(serde_json::to_value(EventKind::Ended { reason }).unwrap_or_default())
-            .await;
-    }
-
-    /// Fallback path when the run task finished without a terminal stream
-    /// event: clear the artifact, re-insert the gremlin when we have one,
-    /// clear the in-flight turn + signal, and emit `ended` with `message`.
-    pub(crate) async fn task_fallback(
-        &self,
-        gremlin_opt: Option<Gremlin>,
-        message: String,
-        chat_turn_num: Option<usize>,
-    ) {
-        self.cancel_inner(gremlin_opt, chat_turn_num, true, message)
-            .await;
+        self.write(
+            serde_json::to_value(EventKind::Ended {
+                reason: end.reason().to_string(),
+            })
+            .unwrap_or_default(),
+        )
+        .await;
     }
 }

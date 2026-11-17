@@ -140,11 +140,9 @@ impl SessionState {
 
 /// The fields of a session's in-flight turn that callers outside the actor
 /// need. Deliberately a snapshot: `CurrentTurn` itself stays actor-owned.
-#[allow(dead_code)]
 pub(crate) struct TurnSnapshot {
     pub id: String,
     pub turn: Option<String>,
-    pub cancel: Arc<CancelToken>,
     pub done: watch::Receiver<bool>,
 }
 
@@ -1075,7 +1073,6 @@ impl ActorState {
                     .map(|cur| TurnSnapshot {
                         id: cur.id.clone(),
                         turn: cur.turn.clone(),
-                        cancel: Arc::clone(&cur.cancel),
                         done: cur.done.clone(),
                     });
                 let _ = respond.send(turn);

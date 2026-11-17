@@ -75,9 +75,6 @@ pub(crate) struct StandardConversation {
     /// but may be overridden per-conversation (e.g. TUI chat pins it to
     /// [`u64::MAX`] via request env).
     compaction_threshold_tokens: u64,
-    /// Marks the index into [`history`] where the most recent turn began.
-    /// Set by [`finish_turn`] and read by [`messages_since_boundary`].
-    turn_boundary: usize,
 }
 
 impl StandardConversation {
@@ -100,7 +97,6 @@ impl StandardConversation {
             backend,
             compacted_prefix: false,
             compaction_threshold_tokens: threshold,
-            turn_boundary: 0,
         }
     }
 
@@ -218,7 +214,6 @@ impl Conversation for StandardConversation {
             compacted_prefix: self.compacted_prefix,
             compaction_threshold_tokens: self.compaction_threshold_tokens,
             backend: self.backend.clone(),
-            turn_boundary: self.turn_boundary,
         })
     }
 
@@ -251,15 +246,6 @@ impl Conversation for StandardConversation {
     fn finish_turn(&mut self, results: Vec<Message>) {
         self.history.extend(results);
         self.begin_next_turn();
-        self.turn_boundary = self.history.len();
-    }
-
-    fn messages_since_boundary(&self) -> Vec<Message> {
-        let mut msgs = self.history[self.turn_boundary..].to_vec();
-        if !self.prompt_committed {
-            msgs.push(self.next_prompt.clone());
-        }
-        msgs
     }
 
     fn pop_last_assistant_turn(&mut self) {
@@ -401,7 +387,6 @@ impl Conversation for StandardConversation {
             compacted_prefix: false,
             compaction_threshold_tokens: self.compaction_threshold_tokens,
             backend: self.backend.clone(),
-            turn_boundary: 0,
         })
     }
 

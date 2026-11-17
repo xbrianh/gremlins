@@ -73,10 +73,6 @@ impl Conversation for NakedConversation {
         unreachable!("NakedConversation: finish_turn called in multi-turn path")
     }
 
-    fn messages_since_boundary(&self) -> Vec<rig_core::completion::Message> {
-        self.messages()
-    }
-
     fn pop_last_assistant_turn(&mut self) {
         unreachable!("NakedConversation: pop_last_assistant_turn called in retry path")
     }
