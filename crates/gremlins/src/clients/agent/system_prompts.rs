@@ -282,6 +282,21 @@ mod tests {
         );
     }
 
+    #[test]
+    fn chat_system_prompt_requires_an_answer_before_done() {
+        let prompt = chat_system_prompt();
+        assert!(prompt.contains("Before calling `Done`, give the operator the answer or outcome in ordinary assistant text"));
+        assert!(prompt.contains("`Done.summary` a short description of the work performed"));
+        assert!(prompt.contains("answer must stand on its own without the summary"));
+    }
+
+    #[test]
+    fn chat_system_prompt_allows_text_but_no_other_tool_calls_with_done() {
+        let prompt = chat_system_prompt();
+        assert!(prompt.contains("answer text can accompany `Done` in the same response"));
+        assert!(prompt.contains("`Done` must be the only tool call in that response"));
+    }
+
     // -- chat-specific tests moved from supervisor.rs ------------------------
 
     #[test]
