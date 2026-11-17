@@ -1873,7 +1873,6 @@ fn definition_display_name(state: &StateData) -> String {
 
 fn print_table(headers: &[&str], rows: &mut [Vec<String>]) {
     const LAUNCH_COL: usize = 5;
-    const MIN_LAUNCH_WIDTH: usize = 15;
     const COL_GAP: usize = 2;
 
     let mut widths = display::compute_display_widths(headers, rows);
@@ -1887,14 +1886,7 @@ fn print_table(headers: &[&str], rows: &mut [Vec<String>]) {
     } else {
         None
     };
-    display::clamp_launch_column(
-        &mut widths,
-        rows,
-        LAUNCH_COL,
-        MIN_LAUNCH_WIDTH,
-        COL_GAP,
-        term_width,
-    );
+    display::clamp_launch_column(&mut widths, rows, LAUNCH_COL, COL_GAP, term_width);
 
     let last = widths.len().saturating_sub(1);
 
@@ -1906,7 +1898,7 @@ fn print_table(headers: &[&str], rows: &mut [Vec<String>]) {
                 header.to_string()
             } else {
                 let width = widths.get(index).copied().unwrap_or(0);
-                format!("{header:<width$}")
+                display::pad_to_display_width(header, width)
             }
         })
         .collect::<Vec<_>>()
@@ -1922,7 +1914,7 @@ fn print_table(headers: &[&str], rows: &mut [Vec<String>]) {
                     cell.clone()
                 } else {
                     let width = widths.get(index).copied().unwrap_or(0);
-                    format!("{cell:<width$}")
+                    display::pad_to_display_width(cell, width)
                 }
             })
             .collect::<Vec<_>>()
