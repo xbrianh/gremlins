@@ -1129,6 +1129,8 @@ impl RunsView {
                     return;
                 }
                 Some("log") => {
+                    self.stream_tail_kind = None;
+                    self.stream_tail_open = false;
                     self.stream_lines.push_back(line);
                     self.trim_stream_lines();
                     return;
@@ -1138,6 +1140,8 @@ impl RunsView {
                 | Some("tool_call")
                 | Some("turn_complete")
                 | Some("stage_boundary") => {
+                    self.stream_tail_kind = None;
+                    self.stream_tail_open = false;
                     self.stream_lines.push_back(line);
                     self.trim_stream_lines();
                     return;
@@ -1159,6 +1163,8 @@ impl RunsView {
             }
         }
 
+        self.stream_tail_kind = None;
+        self.stream_tail_open = false;
         self.stream_lines.push_back(line);
         self.trim_stream_lines();
     }
@@ -1187,9 +1193,29 @@ impl RunsView {
             return;
         }
 
+        // Accumulate the raw fragment so streamed_agent_text matches the
+        // agent's true output and dedup against Done.text works correctly.
+        if kind == "text" {
+            self.streamed_agent_text.push_str(text);
+        }
+
+        // A leading newline terminates the prior open line — "a" + "\n\nb"
+        // should render as two lines, not "ab".
+        if coalesce && text.starts_with('\n') {
+            self.stream_tail_open = false;
+        } else if !coalesce {
+            self.stream_tail_kind = None;
+            self.stream_tail_open = false;
+        }
+
         let ends_with_newline = text.ends_with('\n');
         let parts: Vec<&str> = text.split('\n').filter(|p| !p.is_empty()).collect();
+
         if parts.is_empty() {
+            // The payload was only newlines — treat as a line terminator.
+            if coalesce && ends_with_newline {
+                self.stream_tail_open = false;
+            }
             return;
         }
 
@@ -1201,36 +1227,7 @@ impl RunsView {
                     && self.stream_tail_kind.as_deref() == Some(kind)
                     && self.stream_tail_open
                 {
-                    // Append to the last stream line when it matches.
-                    if let Some(last) = self.stream_lines.back_mut() {
-                        if let Ok(mut obj) = serde_json::from_str::<serde_json::Value>(last) {
-                            if obj.get("kind").and_then(|v| v.as_str()) == Some(kind) {
-                                let combined = format!(
-                                    "{}{}",
-                                    obj.get("text").and_then(|v| v.as_str()).unwrap_or(""),
-                                    part
-                                );
-                                if let Some(map) = obj.as_object_mut() {
-                                    map.insert(
-                                        "text".to_string(),
-                                        serde_json::Value::String(combined.clone()),
-                                    );
-                                }
-                                *last = serde_json::to_string(&obj).unwrap_or(combined);
-                            } else {
-                                self.stream_lines.push_back(
-                                    serde_json::json!({"kind": kind, "text": part}).to_string(),
-                                );
-                            }
-                        } else {
-                            self.stream_lines.push_back(
-                                serde_json::json!({"kind": kind, "text": part}).to_string(),
-                            );
-                        }
-                    } else {
-                        self.stream_lines
-                            .push_back(serde_json::json!({"kind": kind, "text": part}).to_string());
-                    }
+                    self.append_to_last_line(kind, part);
                 } else {
                     self.stream_lines
                         .push_back(serde_json::json!({"kind": kind, "text": part}).to_string());
@@ -1238,21 +1235,45 @@ impl RunsView {
 
                 self.stream_tail_kind = Some(kind.to_string());
                 self.stream_tail_open = !line_terminated;
-
-                if kind == "text" {
-                    self.streamed_agent_text.push_str(part);
-                    if line_terminated {
-                        self.streamed_agent_text.push('\n');
-                    }
-                }
             } else {
-                // Non-coalescing: each part is standalone, reset tail state.
                 self.stream_tail_kind = None;
                 self.stream_tail_open = false;
                 self.stream_lines
                     .push_back(serde_json::json!({"kind": kind, "text": part}).to_string());
             }
         }
+    }
+
+    /// Append `text` to the last stream line when its kind matches.
+    ///
+    /// The inner kind check is load-bearing: the event arms for `log`,
+    /// `tool_call`, `turn_complete`, and `stage_boundary` do not reset
+    /// `stream_tail_kind` / `stream_tail_open`, so a stale tail may point
+    /// at a non-text entry.  Re-checking the last entry's actual kind
+    /// prevents coalescing text into e.g. a `log` line.
+    fn append_to_last_line(&mut self, kind: &str, text: &str) {
+        if let Some(last) = self.stream_lines.back_mut() {
+            if let Ok(mut obj) = serde_json::from_str::<serde_json::Value>(last) {
+                if obj.get("kind").and_then(|v| v.as_str()) == Some(kind) {
+                    let combined = format!(
+                        "{}{}",
+                        obj.get("text").and_then(|v| v.as_str()).unwrap_or(""),
+                        text
+                    );
+                    if let Some(map) = obj.as_object_mut() {
+                        map.insert(
+                            "text".to_string(),
+                            serde_json::Value::String(combined.clone()),
+                        );
+                    }
+                    *last = serde_json::to_string(&obj).unwrap_or(combined);
+                    return;
+                }
+            }
+        }
+        // Fall through: push a new line.
+        self.stream_lines
+            .push_back(serde_json::json!({"kind": kind, "text": text}).to_string());
     }
 
     fn push_done_line(&mut self, obj: &serde_json::Value, raw: String) {
