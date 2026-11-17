@@ -1220,7 +1220,7 @@ pub(crate) async fn run_agent_loop_nested(
     let tool_defs = tools::tool_definitions(tool_filter, is_chat, ToolMode::Full);
     // Open a per-task raw stream file when the root stream path is available.
     // Derive the sibling filename from the root stream stem and the task id
-    // chain, e.g. stream-implement-task.0001.jsonl.  Create exclusively; if
+    // chain, e.g. stream-implement.task.0001.jsonl.  Create exclusively; if
     // the name already exists, insert a numbered suffix (-0001, -0002, …)
     // between the chain and .jsonl and retry (bounded).  The suffix uses a
     // leading hyphen so it can never collide with a real id-chain segment
@@ -1239,7 +1239,7 @@ pub(crate) async fn run_agent_loop_nested(
                 }
             };
             let parent_dir = root.parent().unwrap_or(std::path::Path::new("."));
-            let base = format!("{}-task.{}.jsonl", stem.to_string_lossy(), id_chain);
+            let base = format!("{}.task.{}.jsonl", stem.to_string_lossy(), id_chain);
             let candidate = parent_dir.join(&base);
 
             // Try `create_new` in a bounded retry loop.  This avoids the
@@ -1266,7 +1266,7 @@ pub(crate) async fn run_agent_loop_nested(
                             });
                         }
                         current = parent_dir.join(format!(
-                            "{}-task.{}-{:04}.jsonl",
+                            "{}.task.{}-{:04}.jsonl",
                             stem.to_string_lossy(),
                             id_chain,
                             suffix

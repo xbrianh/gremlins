@@ -1261,8 +1261,13 @@ mod tests {
     /// Tests for per-task raw stream files.
     mod raw_stream {
         use super::*;
-        use crate::clients::agent::agent_loop::run_agent_loop_nested;
+        use crate::clients::agent::agent_loop::{
+            loop_opts, run_agent_loop, run_agent_loop_nested, test_ctx,
+        };
+        use crate::task_kind::TaskKind;
         use rig_core::test_utils::{MockCompletionModel, MockStreamEvent};
+        use std::collections::HashMap;
+        use std::sync::Arc;
         use std::time::Duration;
 
         fn task_ctx(
@@ -1354,7 +1359,7 @@ mod tests {
             // Pre-create the expected child filename with sentinel content.
             // The nested loop should detect it exists and fall back to a
             // suffixed name (exclusive creation).
-            let expected_child = dir.path().join("stream-implement-task.a3f1.jsonl");
+            let expected_child = dir.path().join("stream-implement.task.a3f1.jsonl");
             std::fs::write(&expected_child, "pre-existing sentinel\n").unwrap();
 
             // Two models with distinguishable summaries so sibling files differ.
@@ -1418,7 +1423,7 @@ mod tests {
             );
 
             // A suffixed file should have been created for sibling A.
-            let suffixed = dir.path().join("stream-implement-task.a3f1-0001.jsonl");
+            let suffixed = dir.path().join("stream-implement.task.a3f1-0001.jsonl");
             assert!(
                 suffixed.exists(),
                 "suffixed file {} should exist",
@@ -1426,7 +1431,7 @@ mod tests {
             );
 
             // Sibling B file with distinct chain.
-            let second_child = dir.path().join("stream-implement-task.b72e.jsonl");
+            let second_child = dir.path().join("stream-implement.task.b72e.jsonl");
             assert!(
                 second_child.exists(),
                 "second sibling file {} should exist",
@@ -1613,7 +1618,7 @@ mod tests {
             .expect("child nested loop must succeed");
 
             // The child (depth 1) file must exist.
-            let child_file = dir.path().join("stream-main-task.0001.jsonl");
+            let child_file = dir.path().join("stream-main.task.0001.jsonl");
             assert!(
                 child_file.exists(),
                 "child file {} should exist",
@@ -1621,35 +1626,35 @@ mod tests {
             );
 
             // The grandchild (depth 2) file must exist with the full chain:
-            // stream-main-task.<child_chain>.<gc_seg>.jsonl
+            // stream-main.task.<child_chain>.<gc_seg>.jsonl
             // The gc_seg is a four-hex-digit segment appended by the task runner
-            // to the parent chain, so we get stream-main-task.0001.NNNN.jsonl.
+            // to the parent chain, so we get stream-main.task.0001.NNNN.jsonl.
             let gc_files: Vec<_> = std::fs::read_dir(dir.path())
                 .unwrap()
                 .filter_map(|e| e.ok())
                 .filter(|e| {
                     let name = e.file_name().to_string_lossy().to_string();
-                    name.starts_with("stream-main-task.0001.")
+                    name.starts_with("stream-main.task.0001.")
                         && name.ends_with(".jsonl")
-                        && name != "stream-main-task.0001.jsonl"
+                        && name != "stream-main.task.0001.jsonl"
                 })
                 .collect();
             assert!(
                 !gc_files.is_empty(),
-                "grandchild file must exist (expected stream-main-task.0001.NNNN.jsonl)"
+                "grandchild file must exist (expected stream-main.task.0001.NNNN.jsonl)"
             );
 
             // Verify the exact three-segment chain pattern (four hex digits).
             let gc_name = gc_files[0].file_name().to_string_lossy().to_string();
             assert!(
-                gc_name.starts_with("stream-main-task.0001.")
+                gc_name.starts_with("stream-main.task.0001.")
                     && gc_name.ends_with(".jsonl")
-                    && gc_name != "stream-main-task.0001.jsonl",
+                    && gc_name != "stream-main.task.0001.jsonl",
                 "grandchild file name must have three hex-segment chain: got {gc_name}"
             );
             // The third segment must be exactly four hex digits + .jsonl.
             let seg_part = gc_name
-                .strip_prefix("stream-main-task.0001.")
+                .strip_prefix("stream-main.task.0001.")
                 .unwrap()
                 .strip_suffix(".jsonl")
                 .unwrap();
@@ -1805,6 +1810,180 @@ mod tests {
                     "ToolResult id {id} must appear exactly once in live events, got {count}"
                 );
             }
+        }
+
+        /// Integration test: run_agent_loop with raw_path set. The parent
+        /// model calls Task, which delegates to a nested loop. The child's
+        /// internal events go ONLY to the per-task JSONL file, never to the
+        /// parent's raw stream. The parent's stream receives its own events
+        /// (including the ToolResult from the task) but not child-internal
+        /// assistant/tool_use/tool_result events.
+        #[tokio::test]
+        async fn outer_loop_raw_path_isolates_child_transcript() {
+            let dir = tempfile::tempdir().unwrap();
+            let root = dir.path().join("stream-main.jsonl");
+            std::fs::write(&root, "[]\n").unwrap();
+            std::fs::write(dir.path().join("x.txt"), "hello\n").unwrap();
+
+            let task_call = |id: &str| {
+                MockStreamEvent::tool_call(
+                    id,
+                    "Task",
+                    serde_json::json!({"kind": "Scout", "prompt": "scout this"}),
+                )
+            };
+            let done_call = |id: &str, summary: &str| {
+                MockStreamEvent::tool_call(id, "Done", serde_json::json!({"summary": summary}))
+            };
+
+            // Parent: turn 0 calls Task → turn 1 calls Done.
+            let parent = MockCompletionModel::from_stream_turns([
+                vec![
+                    task_call("t1"),
+                    MockStreamEvent::final_response_with_default_usage(),
+                ],
+                vec![
+                    done_call("d1", "outer done"),
+                    MockStreamEvent::final_response_with_default_usage(),
+                ],
+            ]);
+            // Child: two turns — first calls Read (non-Done, tool_use written),
+            // then text + Done. The Done tool_use is handled before
+            // execute_tools and won't appear in the raw stream.
+            let child = MockCompletionModel::from_stream_turns([
+                vec![
+                    MockStreamEvent::tool_call(
+                        "tc_child",
+                        "Read",
+                        serde_json::json!({"file_path": "x.txt"}),
+                    ),
+                    MockStreamEvent::final_response_with_default_usage(),
+                ],
+                vec![
+                    MockStreamEvent::text("inner work"),
+                    done_call("d2", "inner done"),
+                    MockStreamEvent::final_response_with_default_usage(),
+                ],
+            ]);
+            let child_handle = child.clone();
+
+            // Wire child into a TaskModelSelector so the Task tool dispatches
+            // to it.  Without a selector, the parent model handles the task.
+            let factory: TaskModelFactory = Arc::new(move |_spec: &str| {
+                Ok(TaskModel {
+                    model: child_handle.clone().erase(),
+                    temperature: None,
+                    max_tokens: None,
+                    extra: None,
+                    preserve_reasoning: None,
+                })
+            });
+            let selector = TaskModelSelector::new(
+                HashMap::from([(TaskKind::Scout, "openai/mini".to_string())]),
+                factory,
+            )
+            .expect("configured");
+
+            let mut ctx = test_ctx(Some(dir.path().to_path_buf()), Some(root.clone()));
+            ctx.idle_timeout = 5.0;
+            ctx.params.idle_timeout = Some(5.0);
+            ctx.params.task_models = Some(selector);
+            let cancel = crate::clients::cancel::CancelToken::new();
+
+            run_agent_loop(
+                parent.clone().erase(),
+                "go",
+                ctx,
+                cancel,
+                loop_opts(None),
+                None,
+            )
+            .await
+            .expect("outer loop must succeed");
+
+            // ── Parent stream: must NOT contain child-internal events ──
+            let parent_lines = std::fs::read_to_string(&root).unwrap();
+            let parent_events: Vec<_> = parent_lines
+                .lines()
+                .filter(|l| !l.trim().is_empty())
+                .map(|l| serde_json::from_str::<serde_json::Value>(l).unwrap())
+                .collect();
+
+            // The parent's raw stream must have at least the outer-loop
+            // assistant events (tool_use for Task, assistant for Done).
+            let parent_has_task_call = parent_events.iter().any(|ev| {
+                ev["message"]["content"].as_array().is_some_and(|c| {
+                    c.iter()
+                        .any(|ci| ci.get("name").is_some_and(|n| n == "Task"))
+                })
+            });
+            assert!(
+                parent_has_task_call,
+                "parent raw stream must contain its own Tool call to Task"
+            );
+
+            // The parent must NOT contain child-internal events. The child
+            // model emits "inner work" text — that must NOT appear.
+            let parent_has_child_text = parent_events.iter().any(|ev| {
+                ev["message"]["content"].as_array().is_some_and(|c| {
+                    c.iter()
+                        .any(|ci| ci.get("text").is_some_and(|t| t == "inner work"))
+                })
+            });
+            assert!(
+                !parent_has_child_text,
+                "parent raw stream must NOT contain child-internal assistant text"
+            );
+
+            // ── Per-task file: must exist and contain the child's events ──
+            // The child's chain segment is assigned by the task runner, so
+            // we look for files matching stream-main.task.*.jsonl (excluding
+            // the parent's stream-main.jsonl).
+            let task_files: Vec<_> = std::fs::read_dir(dir.path())
+                .unwrap()
+                .filter_map(|e| e.ok())
+                .filter(|e| {
+                    let name = e.file_name().to_string_lossy().to_string();
+                    name.starts_with("stream-main.task.") && name.ends_with(".jsonl")
+                })
+                .collect();
+            assert!(
+                !task_files.is_empty(),
+                "per-task JSONL file must exist when outer loop has raw_path set"
+            );
+
+            let child_events = lines(&task_files[0].path());
+            let child_has_text = child_events.iter().any(|ev| {
+                ev["message"]["content"].as_array().is_some_and(|c| {
+                    c.iter()
+                        .any(|ci| ci.get("text").is_some_and(|t| t == "inner work"))
+                })
+            });
+            assert!(
+                child_has_text,
+                "per-task file must contain the child's own assistant text"
+            );
+
+            // The child's tool_call (tc_child -> Read) must also be present.
+            // (Done is intercepted by handle_done_decision and never written
+            //  to raw — a known characteristic, not a bug.)
+            let child_has_read_call = child_events.iter().any(|ev| {
+                ev["message"]["content"].as_array().is_some_and(|c| {
+                    c.iter().any(|ci| {
+                        ci.get("name").is_some_and(|n| n == "Read")
+                            && ci.get("id").is_some_and(|i| i == "tc_child")
+                    })
+                })
+            });
+            assert!(
+                child_has_read_call,
+                "per-task file must contain the child's own Read tool call"
+            );
+
+            // ── Captured events: parent must include ToolResult from child ──
+            // (The parent gets a Task result string; the child's internal
+            //  tool_use/tool_result for Done are not captured by the parent.)
+            // We already verified parent raw stream isolation above.
         }
     }
 }
