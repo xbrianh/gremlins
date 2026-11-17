@@ -1203,15 +1203,11 @@ impl RunsView {
                 {
                     // Append to the last stream line when it matches.
                     if let Some(last) = self.stream_lines.back_mut() {
-                        if let Ok(mut obj) =
-                            serde_json::from_str::<serde_json::Value>(last)
-                        {
+                        if let Ok(mut obj) = serde_json::from_str::<serde_json::Value>(last) {
                             if obj.get("kind").and_then(|v| v.as_str()) == Some(kind) {
                                 let combined = format!(
                                     "{}{}",
-                                    obj.get("text")
-                                        .and_then(|v| v.as_str())
-                                        .unwrap_or(""),
+                                    obj.get("text").and_then(|v| v.as_str()).unwrap_or(""),
                                     part
                                 );
                                 if let Some(map) = obj.as_object_mut() {
@@ -1223,25 +1219,21 @@ impl RunsView {
                                 *last = serde_json::to_string(&obj).unwrap_or(combined);
                             } else {
                                 self.stream_lines.push_back(
-                                    serde_json::json!({"kind": kind, "text": part})
-                                        .to_string(),
+                                    serde_json::json!({"kind": kind, "text": part}).to_string(),
                                 );
                             }
                         } else {
                             self.stream_lines.push_back(
-                                serde_json::json!({"kind": kind, "text": part})
-                                    .to_string(),
+                                serde_json::json!({"kind": kind, "text": part}).to_string(),
                             );
                         }
                     } else {
-                        self.stream_lines.push_back(
-                            serde_json::json!({"kind": kind, "text": part}).to_string(),
-                        );
+                        self.stream_lines
+                            .push_back(serde_json::json!({"kind": kind, "text": part}).to_string());
                     }
                 } else {
-                    self.stream_lines.push_back(
-                        serde_json::json!({"kind": kind, "text": part}).to_string(),
-                    );
+                    self.stream_lines
+                        .push_back(serde_json::json!({"kind": kind, "text": part}).to_string());
                 }
 
                 self.stream_tail_kind = Some(kind.to_string());
@@ -1257,9 +1249,8 @@ impl RunsView {
                 // Non-coalescing: each part is standalone, reset tail state.
                 self.stream_tail_kind = None;
                 self.stream_tail_open = false;
-                self.stream_lines.push_back(
-                    serde_json::json!({"kind": kind, "text": part}).to_string(),
-                );
+                self.stream_lines
+                    .push_back(serde_json::json!({"kind": kind, "text": part}).to_string());
             }
         }
     }
