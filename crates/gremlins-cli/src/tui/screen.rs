@@ -3120,7 +3120,8 @@ mod tests {
 
         // Push two visible messages separated by blank entries.
         live.push_watch_line(
-            serde_json::json!({"type":"stage_stream_line","kind":"text","text":"first visible"}).to_string(),
+            serde_json::json!({"type":"stage_stream_line","kind":"text","text":"first visible"})
+                .to_string(),
         );
         // Whitespace-only text line (spaces).
         live.push_watch_line(
@@ -3140,7 +3141,8 @@ mod tests {
         );
         // Second message.
         live.push_watch_line(
-            serde_json::json!({"type":"stage_stream_line","kind":"text","text":"last visible"}).to_string(),
+            serde_json::json!({"type":"stage_stream_line","kind":"text","text":"last visible"})
+                .to_string(),
         );
 
         live.compose(&app).unwrap();
@@ -3161,8 +3163,14 @@ mod tests {
         // The blank entries must not add gap rows between messages.
         // The two text messages should occupy adjacent terminal rows.
         let lines: Vec<&str> = visible.lines().collect();
-        let first_idx = lines.iter().position(|l| l.contains("first visible")).unwrap();
-        let last_idx = lines.iter().position(|l| l.contains("last visible")).unwrap();
+        let first_idx = lines
+            .iter()
+            .position(|l| l.contains("first visible"))
+            .unwrap();
+        let last_idx = lines
+            .iter()
+            .position(|l| l.contains("last visible"))
+            .unwrap();
         // The done row may sit between them, so last should be at most
         // one row away if done is in between, otherwise adjacent.
         let gap = last_idx.saturating_sub(first_idx);
@@ -3213,13 +3221,15 @@ mod tests {
         // (" ") has no newline, so the tail stays open and "world"
         // appends to form "hello world".
         live.push_watch_line(
-            serde_json::json!({"type":"stage_stream_line","kind":"text","text":"hello"}).to_string(),
+            serde_json::json!({"type":"stage_stream_line","kind":"text","text":"hello"})
+                .to_string(),
         );
         live.push_watch_line(
             serde_json::json!({"type":"stage_stream_line","kind":"text","text":" "}).to_string(),
         );
         live.push_watch_line(
-            serde_json::json!({"type":"stage_stream_line","kind":"text","text":"world"}).to_string(),
+            serde_json::json!({"type":"stage_stream_line","kind":"text","text":"world"})
+                .to_string(),
         );
 
         live.compose(&app).unwrap();
@@ -3276,7 +3286,8 @@ mod tests {
         // Push trailing whitespace-only entries that should consume no rows.
         for _ in 0..8 {
             live.push_watch_line(
-                serde_json::json!({"type":"stage_stream_line","kind":"log","text":"   "}).to_string(),
+                serde_json::json!({"type":"stage_stream_line","kind":"log","text":"   "})
+                    .to_string(),
             );
         }
 
