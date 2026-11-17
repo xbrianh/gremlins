@@ -4,13 +4,14 @@
 //! Request handling and gremlin lifecycle live in [`super`]; terminal-path
 //! resources live in [`turn_finalizer`].
 
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
 use serde_json::Value;
 use tokio::sync::{mpsc, watch};
 
 use crate::clients::cancel::CancelToken;
-use crate::definition::ExecutorStage;
+use crate::definition::{ChatDefinition, ExecutorStage};
 use crate::executor::gremlin::Gremlin;
 use crate::executor::run::run_stage;
 use crate::executor::run_agent;
@@ -34,6 +35,7 @@ pub(crate) struct TurnCtx {
     pub(crate) actor_tx: mpsc::UnboundedSender<ActorMsg>,
     pub(crate) session_id: String,
     pub(crate) done: Arc<watch::Sender<bool>>,
+    pub(crate) hard: Arc<AtomicBool>,
 }
 
 pub(crate) async fn run_chat_turn(
@@ -195,11 +197,19 @@ pub(crate) async fn run_chat_turn(
                 // per-turn artifact (typically absent on this path) is preserved
                 // rather than cleared.
                 match run_task.await {
-                    Ok((Err(RunError::Cancelled), recovered)) => {
-                        // Soft path: agent loop returned Cancelled on its own.
-                        // Partial messages are in-memory only and lost on cancel,
-                        // but the prior turn's per-turn artifact is preserved.
-                        finalizer.cancel(Some(recovered), chat_turn_num, TurnEnd::Soft).await;
+                    Ok((Err(RunError::Cancelled), mut recovered)) => {
+                        // Check the hard flag: hard cancel (double-Esc) discards
+                        // the turn; soft cancel (single Esc) marks interrupted.
+                        if ctx.hard.load(Ordering::Relaxed) {
+                            if let Some(chat) = recovered.definition.as_any_mut()
+                                .and_then(|a| a.downcast_mut::<ChatDefinition>())
+                            {
+                                chat.clear_interrupted();
+                            }
+                            finalizer.cancel(Some(recovered), chat_turn_num, TurnEnd::Hard).await;
+                        } else {
+                            finalizer.cancel(Some(recovered), chat_turn_num, TurnEnd::Soft).await;
+                        }
                         return;
                     }
                     Ok((_, gremlin)) => {
@@ -215,9 +225,8 @@ pub(crate) async fn run_chat_turn(
                         } else {
                             format!("agent task cancelled: {join_err}")
                         };
-                        finalizer.cancel(None, chat_turn_num, TurnEnd::Hard).await;
                         finalizer
-                            .write(serde_json::json!({"type": "error", "id": id, "reason": message}))
+                            .cancel(None, chat_turn_num, TurnEnd::Fallback { reason: message })
                             .await;
                         return;
                     }
@@ -270,10 +279,14 @@ pub(crate) async fn run_chat_turn(
     log::debug!("handle_chat: done forwarding for {id}");
 }
 
-/// Cancel the in-flight chat turn. The caller no longer distinguishes
-/// soft vs hard — `run_chat_turn` decides based on what the agent loop
-/// returns. Turn id matching prevents late cancels from hitting
-/// subsequent turns.
+/// Cancel the in-flight chat turn. The `mode` field determines soft vs
+/// hard: "hard" (double-Esc) clears any interrupted flag and discards the
+/// turn; "soft" (single Esc) marks the ChatDefinition interrupted so the
+/// next prompt prepends an interrupt notice.
+///
+/// After soft finalization has already cleared `current_turn`, a late hard
+/// cancel still clears the interrupted flag on parked chat gremlins so the
+/// next "start typing" does not see a stale interruption.
 pub(crate) async fn handle_cancel_chat(
     request: &Value,
     writer: &SharedWriter,
@@ -284,6 +297,10 @@ pub(crate) async fn handle_cancel_chat(
         .get("turn")
         .and_then(|v| v.as_str())
         .map(String::from);
+    let mode = request
+        .get("mode")
+        .and_then(|v| v.as_str())
+        .unwrap_or("soft");
 
     let client = Client::new(actor_tx.clone());
     let snapshot = client.session_get_current_turn(session_id).await;
@@ -294,6 +311,24 @@ pub(crate) async fn handle_cancel_chat(
         None => false,
     };
     if !matches {
+        if mode == "hard" {
+            // Clear any lingering interrupted flag from a prior soft cancel.
+            let keys = client.session_get_chat_gremlin_keys(session_id).await;
+            for id in keys {
+                if let Some(mut gremlin) = client.session_take_gremlin(session_id, &id).await {
+                    if let Some(chat) = gremlin
+                        .definition
+                        .as_any_mut()
+                        .and_then(|a| a.downcast_mut::<ChatDefinition>())
+                    {
+                        chat.clear_interrupted();
+                    }
+                    let _ = client
+                        .session_reinsert_gremlin(session_id, &id, gremlin)
+                        .await;
+                }
+            }
+        }
         let _ = writer
             .write_json_line(&ok_response(serde_json::json!({})))
             .await;
@@ -301,8 +336,12 @@ pub(crate) async fn handle_cancel_chat(
     }
     let cur = snapshot.expect("matched turn is present");
 
-    // Cancel the in-flight turn's token. `run_chat_turn` handles soft vs
-    // hard inside its cancel arm based on what the agent returned.
+    // Hard cancel: communicate the intent to `run_chat_turn` through the
+    // shared atomic flag before signalling the cancel token.
+    if mode == "hard" {
+        client.session_set_turn_hard(session_id).await;
+    }
+
     let _ = client.session_cancel_turn(session_id, Some(&cur.id)).await;
 
     let _ = writer

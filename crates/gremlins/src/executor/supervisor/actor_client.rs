@@ -196,6 +196,20 @@ impl Client {
         rx.await.ok().flatten()
     }
 
+    pub(crate) async fn session_set_turn_hard(&self, session_id: &str) {
+        let (respond, rx) = oneshot::channel();
+        if self
+            .tx
+            .send(ActorMsg::SetTurnHard {
+                session_id: session_id.to_string(),
+                respond,
+            })
+            .is_ok()
+        {
+            let _ = rx.await;
+        }
+    }
+
     pub(crate) async fn session_append_model_skills(
         &self,
         session_id: &str,

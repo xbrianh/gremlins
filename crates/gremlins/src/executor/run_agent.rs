@@ -11,7 +11,7 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 
 use crate::artifacts::uri::Uri;
-use crate::clients::backend::RunParams;
+use crate::clients::backend::{ClientError, RunParams};
 use crate::clients::client::ModelURI;
 use crate::config;
 use crate::definition::ExecutorStage;
@@ -391,6 +391,19 @@ pub(crate) async fn run_agent(
                 );
                 gremlin.state.accumulate_token_usage(&delta);
                 state::emit_stage_token_usage(gremlin.state.store_ref(), &stage_path, &delta);
+            }
+            // On cancellation, persist the conversation so the next turn
+            // can recover the interrupted task's context.
+            if matches!(&error, ClientError::Cancelled) && is_chat {
+                if let Some(turn_num) = chat_turn {
+                    let mut messages = canonical_prefix;
+                    messages.push(Message::user(prepared.user_prompt(is_chat)));
+                    if let Err(e) =
+                        persist_chat_conversation_turn(gremlin, turn_num, &messages).await
+                    {
+                        log::warn!("chat: failed to persist conversation on cancel: {e}");
+                    }
+                }
             }
             return Err(client_run_err(error, &prepared.name));
         }

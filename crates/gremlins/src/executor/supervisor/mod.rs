@@ -104,6 +104,7 @@ pub(crate) struct CurrentTurn {
     /// the value is sticky so a waiter that subscribes after the turn
     /// finished still proceeds immediately.
     pub(crate) done: watch::Receiver<bool>,
+    pub(crate) hard: Arc<AtomicBool>,
 }
 
 // ---------------------------------------------------------------------------

@@ -306,6 +306,12 @@ pub(crate) enum ActorMsg {
         id: Option<String>,
         respond: oneshot::Sender<Option<watch::Receiver<bool>>>,
     },
+    /// Set the hard-cancel flag on the session's current turn so
+    /// `run_chat_turn` knows the operator hit double-Esc (hard).
+    SetTurnHard {
+        session_id: String,
+        respond: oneshot::Sender<()>,
+    },
     SessionIsClosed {
         session_id: String,
         respond: oneshot::Sender<bool>,
@@ -570,6 +576,7 @@ impl ActorState {
             | ActorMsg::SessionSetCurrentTurn { .. }
             | ActorMsg::SessionClearCurrentTurn { .. }
             | ActorMsg::SessionCancelTurn { .. }
+            | ActorMsg::SetTurnHard { .. }
             | ActorMsg::SessionIsClosed { .. }
             | ActorMsg::SessionMarkClosed { .. }
             | ActorMsg::SessionContainsChatId { .. }
@@ -1118,6 +1125,18 @@ impl ActorState {
                     .get(&session_id)
                     .and_then(|session| session.cancel_turn(id.as_deref()));
                 let _ = respond.send(done);
+            }
+
+            ActorMsg::SetTurnHard {
+                session_id,
+                respond,
+            } => {
+                if let Some(session) = self.sessions.get(&session_id) {
+                    if let Some(ref turn) = session.current_turn {
+                        turn.hard.store(true, std::sync::atomic::Ordering::Relaxed);
+                    }
+                }
+                let _ = respond.send(());
             }
 
             ActorMsg::SessionIsClosed {

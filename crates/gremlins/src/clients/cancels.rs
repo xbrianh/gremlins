@@ -17,8 +17,8 @@ impl CancelsMap {
     /// The check and insert are atomic under the same lock so `reap_all`
     /// cannot remove a gremlin entry between the check and the insert.
     ///
-    /// Returns `Err(ClientError::Runtime { message: "cancelled" })` if the
-    /// token has already been cancelled.
+    /// Returns `Err(ClientError::Cancelled)` if the token has already been
+    /// cancelled.
     pub(crate) fn insert(
         &self,
         gremlin_id: &str,
@@ -27,9 +27,7 @@ impl CancelsMap {
     ) -> Result<(), ClientError> {
         let mut guard = self.0.lock().unwrap();
         if token.is_cancelled() {
-            return Err(ClientError::Runtime {
-                message: "cancelled".into(),
-            });
+            return Err(ClientError::Cancelled);
         }
         guard
             .entry(gremlin_id.to_string())
@@ -141,7 +139,7 @@ mod tests {
         let token = CancelToken::new();
         token.cancel();
         let err = map.insert("gr-a", 1, token).unwrap_err();
-        assert!(matches!(err, ClientError::Runtime { .. }));
+        assert!(matches!(err, ClientError::Cancelled));
         assert!(!map.contains("gr-a"));
     }
 

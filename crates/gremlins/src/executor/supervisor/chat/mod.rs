@@ -19,6 +19,7 @@ pub(crate) use turn::{handle_cancel_chat, run_chat_turn, TurnCtx};
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::AtomicBool;
 use std::sync::{Arc, OnceLock};
 
 use serde_json::{Map, Value};
@@ -350,6 +351,7 @@ pub(crate) async fn handle_chat(
     //    loop stays live for cancel_chat and close_session.
     let (done_tx, done_rx) = watch::channel(false);
     let done_tx = Arc::new(done_tx);
+    let hard = Arc::new(AtomicBool::new(false));
     client
         .session_set_current_turn(
             session_id,
@@ -358,6 +360,7 @@ pub(crate) async fn handle_chat(
                 turn: turn.clone(),
                 cancel: turn_cancel.clone(),
                 done: done_rx,
+                hard: hard.clone(),
             },
         )
         .await;
@@ -370,6 +373,7 @@ pub(crate) async fn handle_chat(
         actor_tx: actor_tx.clone(),
         session_id: session_id.to_string(),
         done: done_tx,
+        hard,
     };
     tokio::spawn(async move {
         run_chat_turn(turn_ctx, stage, gremlin, writer_for_turn).await;

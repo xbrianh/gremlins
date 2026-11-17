@@ -19,7 +19,7 @@
   //   diff                      (optional)  path to a diff file (e.g. from another branch)
   //                                         injected into the planning prompt so the planner
   //                                         can focus on the changed code
-  //   base_ref                  (optional)  git ref to check out for the isolated worktree (default: HEAD)
+  //   base_ref                  (optional)  git ref for diff comparison base (worktree always checks out HEAD; default: HEAD)
   //   estimates-per-survey      (optional)  number of LLM estimates per survey (default: 5)
   //
   // NOTE: the bootstrap source is named `drag-model` (not `model`) because `model`
@@ -86,7 +86,7 @@
       'printf "%s" {estimates-per-survey} > "$GREMLINS_STATE_DIR/artifacts/comp_estimates.txt"',
       'printf "%s" {p} > "$GREMLINS_STATE_DIR/artifacts/p.txt"',
       'printf "%s" {skip-maintainability} > "$GREMLINS_STATE_DIR/artifacts/skip_maint.txt"',
-      'BASE_REF={base_ref} && SHA=$(git -C "$GREMLINS_PROJECT_ROOT" rev-parse --verify "${BASE_REF:-HEAD}") && git -C "$GREMLINS_PROJECT_ROOT" worktree add --detach "$GREMLIN_WORKDIR" "$SHA" && printf "%s" "$SHA" > "$GREMLINS_STATE_DIR/artifacts/base_sha"',
+      'BASE_REF={base_ref} && BASE_SHA=$(git -C "$GREMLINS_PROJECT_ROOT" rev-parse --verify "${BASE_REF:-HEAD}") && HEAD_SHA=$(git -C "$GREMLINS_PROJECT_ROOT" rev-parse --verify HEAD) && git -C "$GREMLINS_PROJECT_ROOT" worktree add --detach "$GREMLIN_WORKDIR" "$HEAD_SHA" && printf "%s" "$BASE_SHA" > "$GREMLINS_STATE_DIR/artifacts/base_sha"',
       // Build the drag config JSON file.  Scoring parameters come from the
       // project config (or --drag-config override) with bootstrap overrides.
       // Written directly into artifacts/; GREMLINS_DRAG_CLI_CONFIG points to
