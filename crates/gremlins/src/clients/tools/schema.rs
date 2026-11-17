@@ -26,43 +26,6 @@ fn describe_edit_provided_fields(obj: &serde_json::Map<String, serde_json::Value
     }
 }
 
-/// Serde reports a one-based byte column in the decoded JSON text.
-fn json_error_offset(text: &str, error: &serde_json::Error) -> usize {
-    if error.is_eof() {
-        return text.len();
-    }
-    let line_start: usize = text
-        .split_inclusive('\n')
-        .take(error.line().saturating_sub(1))
-        .map(str::len)
-        .sum();
-    text.floor_char_boundary(line_start + error.column().saturating_sub(1))
-}
-
-/// Count source bytes that fit on one side of the fault after escaping.
-fn context_bytes(chars: impl Iterator<Item = char>, budget: usize) -> usize {
-    chars
-        .scan(0, |width, c| {
-            *width += c.escape_debug().len();
-            (*width <= budget).then_some(c.len_utf8())
-        })
-        .sum()
-}
-
-fn quoted_edits_error(text: &str) -> Option<String> {
-    const PREVIEW_CHARS: usize = 200;
-    const RETRY: &str = "\"; pass the array directly, not as a quoted string";
-
-    let error = serde_json::from_str::<serde_json::Value>(text).err()?;
-    let prefix = format!("Error: Edit.edits: {error} near \"");
-    let radius = PREVIEW_CHARS.saturating_sub(prefix.chars().count() + RETRY.len()) / 2;
-    let offset = json_error_offset(text, &error);
-    let left = context_bytes(text[..offset].chars().rev(), radius);
-    let right = context_bytes(text[offset..].chars(), radius);
-    let excerpt = text[offset - left..offset + right].escape_debug();
-    Some(format!("{prefix}{excerpt}{RETRY}"))
-}
-
 /// Check that all required tool arguments are present and have the correct types.
 /// Returns an error message string on failure, or `None` if valid.
 pub(crate) fn validate_tool_args(name: &str, args: &serde_json::Value) -> Option<String> {
@@ -122,11 +85,6 @@ pub(crate) fn validate_tool_args(name: &str, args: &serde_json::Value) -> Option
                     _ => true,
                 };
                 if !ok {
-                    if name == "Edit" && *field == "edits" && *expected_type == "array" {
-                        if let Some(error) = val.as_str().and_then(quoted_edits_error) {
-                            return Some(error);
-                        }
-                    }
                     let actual = if val.is_string() {
                         "string"
                     } else if val.is_array() {
