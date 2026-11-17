@@ -1272,11 +1272,10 @@ fn validate_tool_args_optional_field_wrong_type() {
 fn validate_tool_args_wrong_type() {
     let err = validate_tool_args(
         "Edit",
-        &serde_json::json!({"file_path": "foo.py", "edits": "not-an-array"}),
+        &serde_json::json!({"file_path": "foo.py", "edits": 42}),
     )
     .unwrap();
-    assert!(err.contains("'edits'"));
-    assert!(err.contains("must be array"));
+    assert_eq!(err, "Error: 'edits' for Edit must be array, got number");
 }
 
 #[test]
