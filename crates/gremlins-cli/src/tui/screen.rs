@@ -3125,16 +3125,18 @@ mod tests {
 
         // Push two visible messages separated by blank entries.
         live.push_watch_line(
-            serde_json::json!({"type":"stage_stream_line","kind":"text","text":"first visible"})
+            serde_json::json!({"type":"stage_stream_line","kind":"text","text":"first visible\n"})
                 .to_string(),
         );
         // Whitespace-only text line (spaces).
         live.push_watch_line(
-            serde_json::json!({"type":"stage_stream_line","kind":"text","text":"   "}).to_string(),
+            serde_json::json!({"type":"stage_stream_line","kind":"text","text":"   \n"})
+                .to_string(),
         );
         // Whitespace-only text line (tabs).
         live.push_watch_line(
-            serde_json::json!({"type":"stage_stream_line","kind":"text","text":"\t\t"}).to_string(),
+            serde_json::json!({"type":"stage_stream_line","kind":"text","text":"\t\t\n"})
+                .to_string(),
         );
         // Blank operational log entry.
         live.push_watch_line(
@@ -3229,7 +3231,7 @@ mod tests {
         // without the filter but leave it visible with the filter.
         for i in 0..8 {
             live.push_watch_line(
-                serde_json::json!({"type":"stage_stream_line","kind":"text","text":format!("line {i}")}).to_string(),
+                serde_json::json!({"type":"stage_stream_line","kind":"text","text":format!("line {i}\n")}).to_string(),
             );
         }
         let anchor = "ANCHOR_TAIL_LINE";
