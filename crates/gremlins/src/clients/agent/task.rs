@@ -1263,6 +1263,7 @@ mod tests {
         use super::*;
         use crate::clients::agent::agent_loop::run_agent_loop_nested;
         use rig_core::test_utils::{MockCompletionModel, MockStreamEvent};
+        use std::time::Duration;
 
         fn task_ctx(
             dir: std::path::PathBuf,
@@ -1417,7 +1418,7 @@ mod tests {
             );
 
             // A suffixed file should have been created for sibling A.
-            let suffixed = dir.path().join("stream-implement-task.a3f1.0001.jsonl");
+            let suffixed = dir.path().join("stream-implement-task.a3f1-0001.jsonl");
             assert!(
                 suffixed.exists(),
                 "suffixed file {} should exist",
@@ -1608,7 +1609,8 @@ mod tests {
                 "Task Scout 0001",
                 "Scout",
             )
-            .await;
+            .await
+            .expect("child nested loop must succeed");
 
             // The child (depth 1) file must exist.
             let child_file = dir.path().join("stream-main-task.0001.jsonl");
@@ -1620,17 +1622,45 @@ mod tests {
 
             // The grandchild (depth 2) file must exist with the full chain:
             // stream-main-task.<child_chain>.<gc_seg>.jsonl
+            // The gc_seg is a four-hex-digit segment appended by the task runner
+            // to the parent chain, so we get stream-main-task.0001.NNNN.jsonl.
             let gc_files: Vec<_> = std::fs::read_dir(dir.path())
                 .unwrap()
                 .filter_map(|e| e.ok())
                 .filter(|e| {
                     let name = e.file_name().to_string_lossy().to_string();
-                    name.starts_with("stream-main-task.") && name != "stream-main-task.0001.jsonl"
+                    name.starts_with("stream-main-task.0001.")
+                        && name.ends_with(".jsonl")
+                        && name != "stream-main-task.0001.jsonl"
                 })
                 .collect();
             assert!(
                 !gc_files.is_empty(),
                 "grandchild file must exist (expected stream-main-task.0001.NNNN.jsonl)"
+            );
+
+            // Verify the exact three-segment chain pattern (four hex digits).
+            let gc_name = gc_files[0].file_name().to_string_lossy().to_string();
+            assert!(
+                gc_name.starts_with("stream-main-task.0001.")
+                    && gc_name.ends_with(".jsonl")
+                    && gc_name != "stream-main-task.0001.jsonl",
+                "grandchild file name must have three hex-segment chain: got {gc_name}"
+            );
+            // The third segment must be exactly four hex digits + .jsonl.
+            let seg_part = gc_name
+                .strip_prefix("stream-main-task.0001.")
+                .unwrap()
+                .strip_suffix(".jsonl")
+                .unwrap();
+            assert_eq!(
+                seg_part.len(),
+                4,
+                "third segment must be four hex digits, got {seg_part}"
+            );
+            assert!(
+                seg_part.chars().all(|c| c.is_ascii_hexdigit()),
+                "third segment must be hex, got {seg_part}"
             );
 
             // The grandchild file must be valid JSONL.
@@ -1654,7 +1684,7 @@ mod tests {
 
             let model = done_model("done").erase();
 
-            let _ = run_agent_loop_nested(
+            let result = run_agent_loop_nested(
                 model,
                 "task",
                 Some("system".to_string()),
@@ -1676,6 +1706,7 @@ mod tests {
                 "Scout",
             )
             .await;
+            result.expect("nested loop with no root stream must succeed");
 
             // No task-*.jsonl files must exist.
             let task_files: Vec<_> = std::fs::read_dir(dir.path())
@@ -1688,6 +1719,92 @@ mod tests {
                 "no task files should be created when root_raw_stream_path is None, got {:?}",
                 task_files.iter().map(|e| e.file_name()).collect::<Vec<_>>()
             );
+        }
+
+        /// When the root stream is disabled (None), child tool results must
+        /// still reach the live event consumer exactly once.
+        #[tokio::test]
+        async fn no_root_stream_child_tool_results_reach_live_events_once() {
+            gremlins_magic_bus::init_bus();
+            let _env = crate::test_support::EnvGuard::lock();
+            let dir = tempfile::tempdir().unwrap();
+            let run_id = "raw_stream_live_event_test";
+
+            let mut ctx = task_ctx(dir.path().to_path_buf(), None);
+            ctx.message_prefix = run_id.to_string();
+
+            let collected = Arc::new(std::sync::Mutex::new(
+                Vec::<gremlins_magic_bus::EventKind>::new(),
+            ));
+            let sink = collected.clone();
+            let (_sub, mut bus_rx) = gremlins_magic_bus::subscribe_run(run_id);
+            let drain = tokio::spawn(async move {
+                loop {
+                    match bus_rx.recv().await {
+                        gremlins_magic_bus::Recv::Event(e) => {
+                            sink.lock().unwrap().push(e.into_kind());
+                        }
+                        gremlins_magic_bus::Recv::Closed => break,
+                        gremlins_magic_bus::Recv::Lagged(_) => continue,
+                    }
+                }
+            });
+
+            // Use a model that makes a Read call, so we get ToolResult events.
+            let model = read_then_done_model("a.txt", "finished").erase();
+
+            let result = run_agent_loop_nested(
+                model,
+                "task",
+                Some("system".to_string()),
+                &ctx,
+                &crate::clients::cancel::CancelToken::new(),
+                None,
+                "[task]",
+                "0001",
+                5.0,
+                10,
+                0,
+                None,
+                None,
+                None,
+                false,
+                Box::new(ConversationStub::new("")),
+                "p1",
+                "c1",
+                "Scout",
+            )
+            .await;
+            result.expect("nested loop must succeed");
+
+            let _ = tokio::time::timeout(Duration::from_secs(2), drain).await;
+
+            let events = collected.lock().unwrap().clone();
+
+            // There must be at least one ToolResult for the Read call.
+            let tool_results: Vec<_> = events
+                .iter()
+                .filter(|e| matches!(e, gremlins_magic_bus::EventKind::ToolResult { .. }))
+                .collect();
+            assert!(
+                !tool_results.is_empty(),
+                "child tool results must be delivered via live events even without root stream"
+            );
+
+            // Each tool result id must appear exactly once.
+            let mut id_counts: std::collections::HashMap<String, usize> =
+                std::collections::HashMap::new();
+            for e in &events {
+                if let gremlins_magic_bus::EventKind::ToolResult { id, .. } = e {
+                    *id_counts.entry(id.clone()).or_insert(0) += 1;
+                }
+            }
+            for (id, count) in &id_counts {
+                assert_eq!(
+                    *count, 1,
+                    "ToolResult id {id} must appear exactly once in live events, got {count}"
+                );
+            }
         }
     }
 }

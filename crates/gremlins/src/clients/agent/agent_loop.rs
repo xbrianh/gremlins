@@ -1220,44 +1220,69 @@ pub(crate) async fn run_agent_loop_nested(
     let tool_defs = tools::tool_definitions(tool_filter, is_chat, ToolMode::Full);
     // Open a per-task raw stream file when the root stream path is available.
     // Derive the sibling filename from the root stream stem and the task id
-    // chain, e.g. stream-implement.task.0001.jsonl.  Create exclusively; if
-    // the name already exists, insert a numbered suffix (0001, 0002, …)
-    // before .jsonl and retry.  Other open errors surface as task errors.
+    // chain, e.g. stream-implement-task.0001.jsonl.  Create exclusively; if
+    // the name already exists, insert a numbered suffix (-0001, -0002, …)
+    // between the chain and .jsonl and retry (bounded).  The suffix uses a
+    // leading hyphen so it can never collide with a real id-chain segment
+    // (all segments are dot-separated hex).
     let mut raw: Option<std::fs::File> = match &tool_ctx.root_raw_stream_path {
         Some(root) => {
-            let stem = root.file_stem().unwrap_or_default();
-            let parent_dir = root.parent().unwrap_or(std::path::Path::new("."));
-            let base = format!("{}-task.{}.jsonl", stem.to_string_lossy(), id_chain);
-            let mut candidate = parent_dir.join(&base);
-            if candidate.exists() {
-                for n in 1u64.. {
-                    let alt = format!(
-                        "{}-task.{}.{:04}.jsonl",
-                        stem.to_string_lossy(),
-                        id_chain,
-                        n
-                    );
-                    candidate = parent_dir.join(&alt);
-                    if !candidate.exists() {
-                        break;
-                    }
-                }
-            }
-            match std::fs::OpenOptions::new()
-                .create_new(true)
-                .write(true)
-                .open(&candidate)
-            {
-                Ok(f) => Some(f),
-                Err(e) => {
+            let stem = match root.file_stem() {
+                Some(s) => s,
+                None => {
                     return Err(ClientError::Runtime {
                         message: format!(
-                            "task: failed to create raw stream file {}: {e}",
-                            candidate.display()
+                            "task: root raw stream path has no file stem: {}",
+                            root.display()
                         ),
                     });
                 }
-            }
+            };
+            let parent_dir = root.parent().unwrap_or(std::path::Path::new("."));
+            let base = format!("{}-task.{}.jsonl", stem.to_string_lossy(), id_chain);
+            let candidate = parent_dir.join(&base);
+
+            // Try `create_new` in a bounded retry loop.  This avoids the
+            // TOCTOU gap between a separate exists check and the open.
+            const MAX_SUFFIX: u64 = 1000;
+            let mut current = candidate;
+            let mut suffix: u64 = 0;
+            let file = loop {
+                match std::fs::OpenOptions::new()
+                    .create_new(true)
+                    .write(true)
+                    .open(&current)
+                {
+                    Ok(f) => break f,
+                    Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
+                        suffix += 1;
+                        if suffix > MAX_SUFFIX {
+                            return Err(ClientError::Runtime {
+                                message: format!(
+                                    "task: exhausted {MAX_SUFFIX} suffix retries for \
+                                     raw stream file (base {})",
+                                    current.display()
+                                ),
+                            });
+                        }
+                        current = parent_dir.join(format!(
+                            "{}-task.{}-{:04}.jsonl",
+                            stem.to_string_lossy(),
+                            id_chain,
+                            suffix
+                        ));
+                    }
+                    Err(e) => {
+                        return Err(ClientError::Runtime {
+                            message: format!(
+                                "task: failed to create raw stream file {}: {e}",
+                                current.display()
+                            ),
+                        });
+                    }
+                }
+            };
+            Some(file)
         }
         None => None,
     };
