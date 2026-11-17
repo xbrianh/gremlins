@@ -508,11 +508,11 @@ impl LoopState {
                 )
             );
             self.hook_log(&format!("{prefix}{tool_msg}"));
+            let id_str = tc.id.to_string();
+            let tool_evt =
+                tool_use_event(&id_str, tc.function.name.as_str(), &tc.function.arguments);
+            write_raw(raw, &tool_evt);
             if !nested {
-                let id_str = tc.id.to_string();
-                let tool_evt =
-                    tool_use_event(&id_str, tc.function.name.as_str(), &tc.function.arguments);
-                write_raw(raw, &tool_evt);
                 if let Some(evts) = captured.as_mut() {
                     evts.push(tool_evt);
                 }
@@ -639,9 +639,9 @@ impl LoopState {
             let exit_code = outcome.exit_code;
             let result_msg = format!("result: {}", trunc(&output, 200));
             self.hook_log(&format!("{prefix}{result_msg}"));
+            let result_evt = tool_result_event(&job.id, &output, exit_code);
+            write_raw(raw, &result_evt);
             if !nested {
-                let result_evt = tool_result_event(&job.id, &output, exit_code);
-                write_raw(raw, &result_evt);
                 if let Some(evts) = captured.as_mut() {
                     evts.push(result_evt);
                 }
@@ -1119,6 +1119,7 @@ pub(crate) async fn run_agent_loop(
         skills_available: ctx.params.skills_available,
         discovered_skills: ctx.params.discovered_skills.clone(),
         path_context: ctx.params.path_context.clone(),
+        root_raw_stream_path: raw_path.clone(),
     };
     let tool_defs = tools::tool_definitions(
         opts.tool_filter,
@@ -1217,7 +1218,49 @@ pub(crate) async fn run_agent_loop_nested(
     // cannot emit SkillLoaded attributed to the parent run.
     let is_chat = false;
     let tool_defs = tools::tool_definitions(tool_filter, is_chat, ToolMode::Full);
-    let mut raw: Option<std::fs::File> = None;
+    // Open a per-task raw stream file when the root stream path is available.
+    // Derive the sibling filename from the root stream stem and the task id
+    // chain, e.g. stream-implement.task.0001.jsonl.  Create exclusively; if
+    // the name already exists, insert a numbered suffix (0001, 0002, …)
+    // before .jsonl and retry.  Other open errors surface as task errors.
+    let mut raw: Option<std::fs::File> = match &tool_ctx.root_raw_stream_path {
+        Some(root) => {
+            let stem = root.file_stem().unwrap_or_default();
+            let parent_dir = root.parent().unwrap_or(std::path::Path::new("."));
+            let base = format!("{}-task.{}.jsonl", stem.to_string_lossy(), id_chain);
+            let mut candidate = parent_dir.join(&base);
+            if candidate.exists() {
+                for n in 1u64.. {
+                    let alt = format!(
+                        "{}-task.{}.{:04}.jsonl",
+                        stem.to_string_lossy(),
+                        id_chain,
+                        n
+                    );
+                    candidate = parent_dir.join(&alt);
+                    if !candidate.exists() {
+                        break;
+                    }
+                }
+            }
+            match std::fs::OpenOptions::new()
+                .create_new(true)
+                .write(true)
+                .open(&candidate)
+            {
+                Ok(f) => Some(f),
+                Err(e) => {
+                    return Err(ClientError::Runtime {
+                        message: format!(
+                            "task: failed to create raw stream file {}: {e}",
+                            candidate.display()
+                        ),
+                    });
+                }
+            }
+        }
+        None => None,
+    };
     let mut captured: Option<Vec<serde_json::Value>> = None;
     let mut nested_tool_ctx = tool_ctx.clone();
     nested_tool_ctx.skills_available = false;
@@ -1757,6 +1800,7 @@ pub(crate) fn test_tool_ctx() -> crate::clients::tools::AgentLoopRuntime {
         skills_available: false,
         discovered_skills: None,
         path_context: PathContext::default(),
+        root_raw_stream_path: None,
     }
 }
 

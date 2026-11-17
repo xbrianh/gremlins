@@ -469,10 +469,12 @@ pub(super) async fn emit_turn_artifacts(
         let msg = format!("text: {}", trunc(text, 200));
         state.hook_log(&format!("{prefix}{msg}"));
     }
-    if !nested && !text.is_empty() {
+    if !text.is_empty() {
         write_raw(raw, &assistant_text_event(text));
-        if let Some(evts) = captured.as_mut() {
-            evts.push(assistant_text_event(text));
+        if !nested {
+            if let Some(evts) = captured.as_mut() {
+                evts.push(assistant_text_event(text));
+            }
         }
     }
     state.conv.record_prose(text);
