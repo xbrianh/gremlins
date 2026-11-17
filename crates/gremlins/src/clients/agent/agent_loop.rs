@@ -508,11 +508,11 @@ impl LoopState {
                 )
             );
             self.hook_log(&format!("{prefix}{tool_msg}"));
+            let id_str = tc.id.to_string();
+            let tool_evt =
+                tool_use_event(&id_str, tc.function.name.as_str(), &tc.function.arguments);
+            write_raw(raw, &tool_evt);
             if !nested {
-                let id_str = tc.id.to_string();
-                let tool_evt =
-                    tool_use_event(&id_str, tc.function.name.as_str(), &tc.function.arguments);
-                write_raw(raw, &tool_evt);
                 if let Some(evts) = captured.as_mut() {
                     evts.push(tool_evt);
                 }
@@ -639,9 +639,9 @@ impl LoopState {
             let exit_code = outcome.exit_code;
             let result_msg = format!("result: {}", trunc(&output, 200));
             self.hook_log(&format!("{prefix}{result_msg}"));
+            let result_evt = tool_result_event(&job.id, &output, exit_code);
+            write_raw(raw, &result_evt);
             if !nested {
-                let result_evt = tool_result_event(&job.id, &output, exit_code);
-                write_raw(raw, &result_evt);
                 if let Some(evts) = captured.as_mut() {
                     evts.push(result_evt);
                 }
@@ -1119,6 +1119,7 @@ pub(crate) async fn run_agent_loop(
         skills_available: ctx.params.skills_available,
         discovered_skills: ctx.params.discovered_skills.clone(),
         path_context: ctx.params.path_context.clone(),
+        root_raw_stream_path: raw_path.clone(),
     };
     let tool_defs = tools::tool_definitions(
         opts.tool_filter,
@@ -1217,7 +1218,74 @@ pub(crate) async fn run_agent_loop_nested(
     // cannot emit SkillLoaded attributed to the parent run.
     let is_chat = false;
     let tool_defs = tools::tool_definitions(tool_filter, is_chat, ToolMode::Full);
-    let mut raw: Option<std::fs::File> = None;
+    // Open a per-task raw stream file when the root stream path is available.
+    // Derive the sibling filename from the root stream stem and the task id
+    // chain, e.g. stream-implement.task.0001.jsonl.  Create exclusively; if
+    // the name already exists, insert a numbered suffix (-0001, -0002, …)
+    // between the chain and .jsonl and retry (bounded).  The suffix uses a
+    // leading hyphen so it can never collide with a real id-chain segment
+    // (all segments are dot-separated hex).
+    let mut raw: Option<std::fs::File> = match &tool_ctx.root_raw_stream_path {
+        Some(root) => {
+            let stem = match root.file_stem() {
+                Some(s) => s,
+                None => {
+                    return Err(ClientError::Runtime {
+                        message: format!(
+                            "task: root raw stream path has no file stem: {}",
+                            root.display()
+                        ),
+                    });
+                }
+            };
+            let parent_dir = root.parent().unwrap_or(std::path::Path::new("."));
+            let base = format!("{}.task.{}.jsonl", stem.to_string_lossy(), id_chain);
+            let candidate = parent_dir.join(&base);
+
+            // Try `create_new` in a bounded retry loop.  This avoids the
+            // TOCTOU gap between a separate exists check and the open.
+            const MAX_SUFFIX: u64 = 1000;
+            let mut current = candidate;
+            let mut suffix: u64 = 0;
+            let file = loop {
+                match std::fs::OpenOptions::new()
+                    .create_new(true)
+                    .write(true)
+                    .open(&current)
+                {
+                    Ok(f) => break f,
+                    Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
+                        suffix += 1;
+                        if suffix > MAX_SUFFIX {
+                            return Err(ClientError::Runtime {
+                                message: format!(
+                                    "task: exhausted {MAX_SUFFIX} suffix retries for \
+                                     raw stream file (base {})",
+                                    current.display()
+                                ),
+                            });
+                        }
+                        current = parent_dir.join(format!(
+                            "{}.task.{}-{:04}.jsonl",
+                            stem.to_string_lossy(),
+                            id_chain,
+                            suffix
+                        ));
+                    }
+                    Err(e) => {
+                        return Err(ClientError::Runtime {
+                            message: format!(
+                                "task: failed to create raw stream file {}: {e}",
+                                current.display()
+                            ),
+                        });
+                    }
+                }
+            };
+            Some(file)
+        }
+        None => None,
+    };
     let mut captured: Option<Vec<serde_json::Value>> = None;
     let mut nested_tool_ctx = tool_ctx.clone();
     nested_tool_ctx.skills_available = false;
@@ -1757,6 +1825,7 @@ pub(crate) fn test_tool_ctx() -> crate::clients::tools::AgentLoopRuntime {
         skills_available: false,
         discovered_skills: None,
         path_context: PathContext::default(),
+        root_raw_stream_path: None,
     }
 }
 

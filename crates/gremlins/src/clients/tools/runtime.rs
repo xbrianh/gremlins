@@ -108,6 +108,12 @@ pub(crate) struct AgentLoopRuntime {
     /// Populated by the chat supervisor from the operator prompt and project
     /// root; empty for headless pipelines.
     pub(crate) path_context: PathContext,
+    /// The outer stage's raw-stream path, carried independently of
+    /// `audit_log`.  Each nested task loop derives its own transcript path
+    /// from this stem + the task id chain.  `None` when there is no root
+    /// stream (naked runs / tests) — in that case no per-task files are
+    /// created.
+    pub(crate) root_raw_stream_path: Option<PathBuf>,
 }
 
 impl AgentLoopRuntime {
