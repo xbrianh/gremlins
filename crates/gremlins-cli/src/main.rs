@@ -24,8 +24,8 @@ use gremlins::executor::state::{self, BlobMode, StateData, StateStore};
 use gremlins::executor::supervisor;
 use gremlins::schemas::bootstrap;
 use serde_json::Value;
-use unicode_width::UnicodeWidthStr;
 
+mod display;
 mod spawn;
 mod tui;
 
@@ -1868,39 +1868,6 @@ fn definition_display_name(state: &StateData) -> String {
 }
 
 // ---------------------------------------------------------------------------
-// Column truncation helper
-// ---------------------------------------------------------------------------
-
-/// Truncate `s` to fit within `target_width` display columns, appending a
-/// single Unicode ellipsis `…` (U+2026) when truncated. Returns the original
-/// string unchanged when it already fits.
-fn truncate_to_width(s: &str, target_width: usize) -> String {
-    let s_width = UnicodeWidthStr::width(s);
-    if s_width <= target_width {
-        return s.to_string();
-    }
-    let ellipsis = "…";
-    let ellipsis_width = UnicodeWidthStr::width(ellipsis);
-    if target_width <= ellipsis_width {
-        return ellipsis.to_string();
-    }
-    let available = target_width - ellipsis_width;
-    let mut result = String::with_capacity(s.len());
-    let mut current_width = 0usize;
-    for ch in s.chars() {
-        let ch_str = ch.to_string();
-        let ch_width = UnicodeWidthStr::width(ch_str.as_str());
-        if current_width + ch_width > available {
-            break;
-        }
-        current_width += ch_width;
-        result.push(ch);
-    }
-    result.push_str(ellipsis);
-    result
-}
-
-// ---------------------------------------------------------------------------
 // print_table
 // ---------------------------------------------------------------------------
 
@@ -1909,40 +1876,25 @@ fn print_table(headers: &[&str], rows: &mut [Vec<String>]) {
     const MIN_LAUNCH_WIDTH: usize = 15;
     const COL_GAP: usize = 2;
 
-    let mut widths: Vec<usize> = headers.iter().map(|header| header.len()).collect();
-    for row in rows.iter() {
-        for (index, cell) in row.iter().enumerate() {
-            if index < widths.len() {
-                widths[index] = widths[index].max(cell.len());
-            }
-        }
-    }
+    let mut widths = display::compute_display_widths(headers, rows);
 
     // When stdout is a terminal, fit the LAUNCH column within the terminal
     // width so the table never wraps.
-    if std::io::stdout().is_terminal() {
-        if let Ok((term_cols, _)) = crossterm::terminal::size() {
-            let term_width = term_cols as usize;
-            let total: usize = widths.iter().sum::<usize>() + (widths.len() - 1) * COL_GAP;
-            if total > term_width && LAUNCH_COL < widths.len() {
-                let without_launch: usize = total - widths[LAUNCH_COL];
-                let available = term_width.saturating_sub(without_launch);
-                widths[LAUNCH_COL] = available.max(MIN_LAUNCH_WIDTH);
-            }
-        }
-    }
-
-    // Truncate LAUNCH column cells that exceed the allocated width.
-    {
-        let launch_w = widths.get(LAUNCH_COL).copied().unwrap_or(0);
-        for row in rows.iter_mut() {
-            if let Some(cell) = row.get_mut(LAUNCH_COL) {
-                if UnicodeWidthStr::width(cell.as_str()) > launch_w {
-                    *cell = truncate_to_width(cell, launch_w);
-                }
-            }
-        }
-    }
+    let term_width = if std::io::stdout().is_terminal() {
+        crossterm::terminal::size()
+            .ok()
+            .map(|(cols, _)| cols as usize)
+    } else {
+        None
+    };
+    display::clamp_launch_column(
+        &mut widths,
+        rows,
+        LAUNCH_COL,
+        MIN_LAUNCH_WIDTH,
+        COL_GAP,
+        term_width,
+    );
 
     let last = widths.len().saturating_sub(1);
 

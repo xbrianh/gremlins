@@ -36,7 +36,8 @@ use std::time::{Duration, Instant};
 use crossterm::event::{Event, KeyCode, KeyEventKind};
 use tokio::io::BufReader;
 use tokio::sync::mpsc;
-use unicode_width::UnicodeWidthStr;
+
+use crate::display;
 
 use app::{App, Screen};
 use commands::{dispatch, CommandResult};
@@ -2963,40 +2964,25 @@ fn format_ls_response(resp: &serde_json::Value) -> Vec<String> {
 
     rows.sort_by(|a, b| a[3].cmp(&b[3]));
 
-    let mut widths: Vec<usize> = headers.iter().map(|h| h.len()).collect();
-    for row in &rows {
-        for (i, cell) in row.iter().enumerate() {
-            if i < widths.len() {
-                widths[i] = widths[i].max(cell.len());
-            }
-        }
-    }
+    let mut widths = display::compute_display_widths(&headers, &rows);
 
     // When stdout is a terminal, fit the LAUNCH column within the terminal
     // width so the table never wraps.
-    if std::io::stdout().is_terminal() {
-        if let Ok((term_cols, _)) = crossterm::terminal::size() {
-            let term_width = term_cols as usize;
-            let total: usize = widths.iter().sum::<usize>() + (widths.len() - 1) * COL_GAP;
-            if total > term_width && LAUNCH_COL < widths.len() {
-                let without_launch: usize = total - widths[LAUNCH_COL];
-                let available = term_width.saturating_sub(without_launch);
-                widths[LAUNCH_COL] = available.max(MIN_LAUNCH_WIDTH);
-            }
-        }
-    }
-
-    // Truncate LAUNCH column cells that exceed the allocated width.
-    {
-        let launch_w = widths.get(LAUNCH_COL).copied().unwrap_or(0);
-        for row in rows.iter_mut() {
-            if let Some(cell) = row.get_mut(LAUNCH_COL) {
-                if UnicodeWidthStr::width(cell.as_str()) > launch_w {
-                    *cell = truncate_to_width(cell, launch_w);
-                }
-            }
-        }
-    }
+    let term_width = if std::io::stdout().is_terminal() {
+        crossterm::terminal::size()
+            .ok()
+            .map(|(cols, _)| cols as usize)
+    } else {
+        None
+    };
+    display::clamp_launch_column(
+        &mut widths,
+        &mut rows,
+        LAUNCH_COL,
+        MIN_LAUNCH_WIDTH,
+        COL_GAP,
+        term_width,
+    );
 
     let mut lines: Vec<String> = Vec::new();
 
@@ -3025,35 +3011,6 @@ fn format_ls_response(resp: &serde_json::Value) -> Vec<String> {
     }
 
     lines
-}
-
-/// Truncate `s` to fit within `target_width` display columns, appending a
-/// single Unicode ellipsis `…` (U+2026) when truncated. Returns the original
-/// string unchanged when it already fits.
-fn truncate_to_width(s: &str, target_width: usize) -> String {
-    let s_width = UnicodeWidthStr::width(s);
-    if s_width <= target_width {
-        return s.to_string();
-    }
-    let ellipsis = "…";
-    let ellipsis_width = UnicodeWidthStr::width(ellipsis);
-    if target_width <= ellipsis_width {
-        return ellipsis.to_string();
-    }
-    let available = target_width - ellipsis_width;
-    let mut result = String::with_capacity(s.len());
-    let mut current_width = 0usize;
-    for ch in s.chars() {
-        let ch_str = ch.to_string();
-        let ch_width = UnicodeWidthStr::width(ch_str.as_str());
-        if current_width + ch_width > available {
-            break;
-        }
-        current_width += ch_width;
-        result.push(ch);
-    }
-    result.push_str(ellipsis);
-    result
 }
 
 #[cfg(test)]
