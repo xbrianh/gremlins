@@ -1810,6 +1810,15 @@ impl RunsView {
                     ))
                 }
             })
+            .filter(|line| {
+                // Suppress blank entries: a line whose visible text is
+                // empty or all whitespace must consume no viewport rows.
+                // Structural events (done, stage_boundary, etc.) always
+                // carry a visible label so they are never filtered here.
+                line.spans
+                    .iter()
+                    .any(|s| !s.content.as_ref().trim().is_empty())
+            })
             .collect();
 
         // Tail-anchored by wrapped terminal rows, so a long wrapping entry
@@ -3073,6 +3082,210 @@ mod tests {
         assert!(
             visible.contains("NEWEST"),
             "The newest log line should remain visible after wrapping.\nBuffer:\n{visible}"
+        );
+    }
+
+    // ── Blank-entry suppression ────────────────────────────────────
+
+    #[test]
+    fn watch_pane_suppresses_whitespace_only_entries() {
+        let mut live = new_live(50, 12);
+        let mut app = App::new();
+        app.project_name = "gremlins".to_string();
+
+        app.active_runs.insert(
+            "g1".to_string(),
+            ActiveRun {
+                status: "running".to_string(),
+                stage: "build".to_string(),
+                sub_stage: String::new(),
+                definition: "def".to_string(),
+                project: "gremlins".to_string(),
+                prompt_tokens: None,
+                completion_tokens: None,
+                reasoning_tokens: None,
+                cached_input_tokens: None,
+                cache_creation_input_tokens: None,
+                turns: None,
+                cost_usd: None,
+                last_prompt_tokens: None,
+                last_cached_input_tokens: None,
+            },
+        );
+
+        app.screen = Screen::Runs;
+        app.watch_selection = Some("g1".to_string());
+        app.watch_following = Some("g1".to_string());
+        live.show_runs();
+
+        // Push two visible messages separated by blank entries.
+        live.push_watch_line(
+            serde_json::json!({"type":"stage_stream_line","kind":"text","text":"first visible"}).to_string(),
+        );
+        // Whitespace-only text line (spaces).
+        live.push_watch_line(
+            serde_json::json!({"type":"stage_stream_line","kind":"text","text":"   "}).to_string(),
+        );
+        // Whitespace-only text line (tabs).
+        live.push_watch_line(
+            serde_json::json!({"type":"stage_stream_line","kind":"text","text":"\t\t"}).to_string(),
+        );
+        // Blank operational log entry.
+        live.push_watch_line(
+            serde_json::json!({"type":"stage_stream_line","kind":"log","text":"  "}).to_string(),
+        );
+        // A done event — must still be visible.
+        live.push_watch_line(
+            serde_json::json!({"type":"stage_stream_line","kind":"done"}).to_string(),
+        );
+        // Second message.
+        live.push_watch_line(
+            serde_json::json!({"type":"stage_stream_line","kind":"text","text":"last visible"}).to_string(),
+        );
+
+        live.compose(&app).unwrap();
+
+        let visible = dump_buffer(live.backend().buffer());
+        assert!(
+            visible.contains("first visible"),
+            "First message should be visible.\nBuffer:\n{visible}"
+        );
+        assert!(
+            visible.contains("last visible"),
+            "Last message should be visible.\nBuffer:\n{visible}"
+        );
+        assert!(
+            visible.contains("── done"),
+            "Done event should remain visible.\nBuffer:\n{visible}"
+        );
+        // The blank entries must not add gap rows between messages.
+        // The two text messages should occupy adjacent terminal rows.
+        let lines: Vec<&str> = visible.lines().collect();
+        let first_idx = lines.iter().position(|l| l.contains("first visible")).unwrap();
+        let last_idx = lines.iter().position(|l| l.contains("last visible")).unwrap();
+        // The done row may sit between them, so last should be at most
+        // one row away if done is in between, otherwise adjacent.
+        let gap = last_idx.saturating_sub(first_idx);
+        assert!(
+            gap <= 2,
+            "first and last visible should be at most 2 rows apart (with done between), got {gap}.\nBuffer:\n{visible}"
+        );
+    }
+
+    #[test]
+    fn watch_pane_coalesces_space_fragment_with_adjacent_text() {
+        let mut live = new_live(50, 12);
+        let mut app = App::new();
+        app.project_name = "gremlins".to_string();
+
+        app.active_runs.insert(
+            "g1".to_string(),
+            ActiveRun {
+                status: "running".to_string(),
+                stage: "build".to_string(),
+                sub_stage: String::new(),
+                definition: "def".to_string(),
+                project: "gremlins".to_string(),
+                prompt_tokens: None,
+                completion_tokens: None,
+                reasoning_tokens: None,
+                cached_input_tokens: None,
+                cache_creation_input_tokens: None,
+                turns: None,
+                cost_usd: None,
+                last_prompt_tokens: None,
+                last_cached_input_tokens: None,
+            },
+        );
+
+        app.screen = Screen::Runs;
+        app.watch_selection = Some("g1".to_string());
+        app.watch_following = Some("g1".to_string());
+        live.show_runs();
+
+        // Stream "hello", a space-only fragment, and "world" as separate
+        // fragments to simulate streaming word-by-word. The first fragment
+        // is pushed via push_watch_line, the space and "world" are pushed
+        // via emit_text_lines coalescing.
+        //
+        // Since push_watch_line → push_stream_line, text chunks coalesce
+        // when the kind and tail state match. A space-only fragment
+        // (" ") has no newline, so the tail stays open and "world"
+        // appends to form "hello world".
+        live.push_watch_line(
+            serde_json::json!({"type":"stage_stream_line","kind":"text","text":"hello"}).to_string(),
+        );
+        live.push_watch_line(
+            serde_json::json!({"type":"stage_stream_line","kind":"text","text":" "}).to_string(),
+        );
+        live.push_watch_line(
+            serde_json::json!({"type":"stage_stream_line","kind":"text","text":"world"}).to_string(),
+        );
+
+        live.compose(&app).unwrap();
+
+        let visible = dump_buffer(live.backend().buffer());
+        // The coalesced result should be "hello world" (space merged in).
+        assert!(
+            visible.contains("hello world"),
+            "Coalesced text should show 'hello world'.\nBuffer:\n{visible}"
+        );
+    }
+
+    #[test]
+    fn watch_pane_trailing_whitespace_only_does_not_scroll_visible_out() {
+        let mut live = new_live(40, 10);
+        let mut app = App::new();
+        app.project_name = "gremlins".to_string();
+
+        app.active_runs.insert(
+            "g1".to_string(),
+            ActiveRun {
+                status: "running".to_string(),
+                stage: "build".to_string(),
+                sub_stage: String::new(),
+                definition: "def".to_string(),
+                project: "gremlins".to_string(),
+                prompt_tokens: None,
+                completion_tokens: None,
+                reasoning_tokens: None,
+                cached_input_tokens: None,
+                cache_creation_input_tokens: None,
+                turns: None,
+                cost_usd: None,
+                last_prompt_tokens: None,
+                last_cached_input_tokens: None,
+            },
+        );
+
+        app.screen = Screen::Runs;
+        app.watch_selection = Some("g1".to_string());
+        app.watch_following = Some("g1".to_string());
+        live.show_runs();
+
+        // Fill the viewport with visible lines, then push trailing blanks.
+        for i in 0..4 {
+            live.push_watch_line(
+                serde_json::json!({"type":"stage_stream_line","kind":"text","text":format!("line {i}")}).to_string(),
+            );
+        }
+        let anchor = "ANCHOR_TAIL_LINE";
+        live.push_watch_line(
+            serde_json::json!({"type":"stage_stream_line","kind":"text","text":anchor}).to_string(),
+        );
+        // Push trailing whitespace-only entries that should consume no rows.
+        for _ in 0..8 {
+            live.push_watch_line(
+                serde_json::json!({"type":"stage_stream_line","kind":"log","text":"   "}).to_string(),
+            );
+        }
+
+        live.compose(&app).unwrap();
+
+        let visible = dump_buffer(live.backend().buffer());
+        assert!(
+            visible.contains(anchor),
+            "Anchor line should remain visible — trailing blanks must not scroll it out.\nBuffer:\n{visible}"
         );
     }
 
