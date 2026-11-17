@@ -232,7 +232,7 @@ async fn handle_connection(
 
     // Subscribe to the event broadcast *before* spawning so that no
     // events are lost between connection acceptance and task scheduling.
-    let (_event_sub, mut event_rx) = subscribe_all();
+    let (event_sub, mut event_rx) = subscribe_all();
 
     // Gate the event-forwarding subtask so that one-shot clients always
     // receive their request response before any broadcast events.
@@ -271,13 +271,13 @@ async fn handle_connection(
         }
     });
 
-    loop {
+    let log_request = loop {
         let request = match socket::read_json_line(&mut reader).await {
             Ok(Some(v)) => v,
-            Ok(None) => break,
+            Ok(None) => break None,
             Err(e) => {
                 log::warn!("supervisor: read error: {e}");
-                break;
+                break None;
             }
         };
 
@@ -288,19 +288,15 @@ async fn handle_connection(
             .to_string();
         log::debug!("supervisor: received op={op:?}");
 
-        // Streaming pipeline ops take ownership of the connection; handle
-        // them directly so they can monitor the read half for disconnect.
         if op == "log" {
-            // Unblock events now that the streaming op is starting.
-            let _ = event_start_tx.send(true);
-            handle_log(&request, &actor_tx, reader, &writer).await;
-            break;
+            // The run-scoped log handler takes over after global forwarding stops.
+            break Some((request, reader));
         }
 
         if op == "debug" {
             let _ = event_start_tx.send(true);
             handle_debug(&request, &actor_tx, reader, &writer).await;
-            break;
+            break None;
         }
 
         dispatch_op(&op, &request, &actor_tx, &writer).await;
@@ -312,15 +308,15 @@ async fn handle_connection(
         if op != "version" {
             let _ = event_start_tx.send(true);
         }
-    }
+    };
 
-    // Abort the event-forwarding subtask so it doesn't leak the write
-    // half or linger waiting for broadcasts after the client is gone.
     event_handle.abort();
+    init_bus().unsubscribe(&event_sub);
+    let _ = event_handle.await;
 
-    // Unregister the bus subscription so repeated control connections don't
-    // accumulate permanent work for each emission.
-    init_bus().unsubscribe(&_event_sub);
+    if let Some((request, reader)) = log_request {
+        handle_log(&request, &actor_tx, reader, &writer).await;
+    }
 
     // After this connection drops the `ConnectionGuard` will fire a
     // `ConnectionDown` message, which triggers idle-shutdown inside the actor.
