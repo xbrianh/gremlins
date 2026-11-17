@@ -1111,37 +1111,24 @@ impl RunsView {
             match kind.as_deref() {
                 Some("text") => {
                     let text = obj.get("text").and_then(|v| v.as_str()).unwrap_or("");
-                    self.push_text_fragment("text", text);
+                    self.emit_text_lines("text", text, true);
                     self.trim_stream_lines();
                     return;
                 }
                 Some("reasoning") => {
                     let text = obj.get("text").and_then(|v| v.as_str()).unwrap_or("");
-                    self.push_text_fragment("reasoning", text);
+                    self.emit_text_lines("reasoning", text, true);
                     self.trim_stream_lines();
                     return;
                 }
                 Some("stdout") | Some("stderr") => {
                     let text = obj.get("text").and_then(|v| v.as_str()).unwrap_or("");
-                    // Exec output is line-oriented; push each line as a
-                    // standalone entry for clean rendering.
                     let k = kind.as_deref().unwrap_or("stdout");
-                    for part in text.split('\n') {
-                        let sl = serde_json::json!({"kind": k, "text": part}).to_string();
-                        // Reset tail state so exec lines don't coalesce into
-                        // the last agent text fragment.
-                        self.stream_tail_kind = None;
-                        self.stream_tail_open = false;
-                        self.stream_lines.push_back(sl);
-                    }
+                    self.emit_text_lines(k, text, false);
                     self.trim_stream_lines();
                     return;
                 }
                 Some("log") => {
-                    // Operational-log line — store as raw (the render closure
-                    // pulls text/line from the JSON).
-                    self.stream_tail_kind = None;
-                    self.stream_tail_open = false;
                     self.stream_lines.push_back(line);
                     self.trim_stream_lines();
                     return;
@@ -1151,10 +1138,6 @@ impl RunsView {
                 | Some("tool_call")
                 | Some("turn_complete")
                 | Some("stage_boundary") => {
-                    // Discrete events — push verbatim; the render closure
-                    // formats them.
-                    self.stream_tail_kind = None;
-                    self.stream_tail_open = false;
                     self.stream_lines.push_back(line);
                     self.trim_stream_lines();
                     return;
@@ -1176,8 +1159,6 @@ impl RunsView {
             }
         }
 
-        self.stream_tail_kind = None;
-        self.stream_tail_open = false;
         self.stream_lines.push_back(line);
         self.trim_stream_lines();
     }
@@ -1190,61 +1171,97 @@ impl RunsView {
         self.streamed_agent_text.clear();
     }
 
-    /// Append a `text`/`reasoning` delta, splitting on embedded newlines and
-    /// continuing the previous logical line when it has not been terminated.
-    fn push_text_fragment(&mut self, kind: &str, text: &str) {
+    /// Emit text lines for a given kind, optionally coalescing adjacent
+    /// same-kind fragments.
+    ///
+    /// When `coalesce` is true (text/reasoning), the first non-empty part
+    /// is merged with the most recent stream line when its kind matches and
+    /// the line has not been terminated by a newline.  When `coalesce` is
+    /// false (stdout/stderr), every non-empty part is pushed as a standalone
+    /// line with tail state reset.
+    ///
+    /// Empty parts produced by consecutive or trailing newlines are always
+    /// dropped so the renderer never draws blank rows.
+    fn emit_text_lines(&mut self, kind: &str, text: &str, coalesce: bool) {
         if text.is_empty() {
             return;
         }
 
         let ends_with_newline = text.ends_with('\n');
-        let mut parts: Vec<&str> = text.split('\n').collect();
-        if ends_with_newline {
-            parts.pop();
+        let parts: Vec<&str> = text.split('\n').filter(|p| !p.is_empty()).collect();
+        if parts.is_empty() {
+            return;
         }
 
         for (idx, part) in parts.iter().enumerate() {
             let line_terminated = idx + 1 < parts.len() || ends_with_newline;
-            if idx == 0 && self.stream_tail_kind.as_deref() == Some(kind) && self.stream_tail_open {
-                self.append_fragment_to_last(kind, part);
-            } else {
-                self.stream_lines
-                    .push_back(serde_json::json!({ "kind": kind, "text": part }).to_string());
-            }
-            self.stream_tail_kind = Some(kind.to_string());
-            self.stream_tail_open = !line_terminated;
 
-            if kind == "text" {
-                self.streamed_agent_text.push_str(part);
-                if line_terminated {
-                    self.streamed_agent_text.push('\n');
-                }
-            }
-        }
-    }
-
-    fn append_fragment_to_last(&mut self, kind: &str, text: &str) {
-        if let Some(last) = self.stream_lines.back_mut() {
-            if let Ok(mut obj) = serde_json::from_str::<serde_json::Value>(last) {
-                if obj.get("kind").and_then(|v| v.as_str()) == Some(kind) {
-                    let combined = format!(
-                        "{}{}",
-                        obj.get("text").and_then(|v| v.as_str()).unwrap_or(""),
-                        text
-                    );
-                    if let Some(map) = obj.as_object_mut() {
-                        map.insert(
-                            "text".to_string(),
-                            serde_json::Value::String(combined.clone()),
+            if coalesce {
+                if idx == 0
+                    && self.stream_tail_kind.as_deref() == Some(kind)
+                    && self.stream_tail_open
+                {
+                    // Append to the last stream line when it matches.
+                    if let Some(last) = self.stream_lines.back_mut() {
+                        if let Ok(mut obj) =
+                            serde_json::from_str::<serde_json::Value>(last)
+                        {
+                            if obj.get("kind").and_then(|v| v.as_str()) == Some(kind) {
+                                let combined = format!(
+                                    "{}{}",
+                                    obj.get("text")
+                                        .and_then(|v| v.as_str())
+                                        .unwrap_or(""),
+                                    part
+                                );
+                                if let Some(map) = obj.as_object_mut() {
+                                    map.insert(
+                                        "text".to_string(),
+                                        serde_json::Value::String(combined.clone()),
+                                    );
+                                }
+                                *last = serde_json::to_string(&obj).unwrap_or(combined);
+                            } else {
+                                self.stream_lines.push_back(
+                                    serde_json::json!({"kind": kind, "text": part})
+                                        .to_string(),
+                                );
+                            }
+                        } else {
+                            self.stream_lines.push_back(
+                                serde_json::json!({"kind": kind, "text": part})
+                                    .to_string(),
+                            );
+                        }
+                    } else {
+                        self.stream_lines.push_back(
+                            serde_json::json!({"kind": kind, "text": part}).to_string(),
                         );
                     }
-                    *last = serde_json::to_string(&obj).unwrap_or(combined);
-                    return;
+                } else {
+                    self.stream_lines.push_back(
+                        serde_json::json!({"kind": kind, "text": part}).to_string(),
+                    );
                 }
+
+                self.stream_tail_kind = Some(kind.to_string());
+                self.stream_tail_open = !line_terminated;
+
+                if kind == "text" {
+                    self.streamed_agent_text.push_str(part);
+                    if line_terminated {
+                        self.streamed_agent_text.push('\n');
+                    }
+                }
+            } else {
+                // Non-coalescing: each part is standalone, reset tail state.
+                self.stream_tail_kind = None;
+                self.stream_tail_open = false;
+                self.stream_lines.push_back(
+                    serde_json::json!({"kind": kind, "text": part}).to_string(),
+                );
             }
         }
-        self.stream_lines
-            .push_back(serde_json::json!({ "kind": kind, "text": text }).to_string());
     }
 
     fn push_done_line(&mut self, obj: &serde_json::Value, raw: String) {
@@ -1260,7 +1277,7 @@ impl RunsView {
         // the Done summary in `Done.text`. Surface that final answer instead
         // of discarding it behind the `── done` delimiter.
         if self.streamed_agent_text.is_empty() && !fallback.is_empty() {
-            self.push_text_fragment("text", fallback);
+            self.emit_text_lines("text", fallback, true);
         }
         if !summary.is_empty() && summary != fallback {
             self.stream_tail_kind = None;
