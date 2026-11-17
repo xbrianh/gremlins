@@ -108,7 +108,7 @@ pub(crate) trait Conversation: Send + Sync {
     );
 
     /// Record tool-result messages into history.
-    fn record_tool_results(&mut self, results: Vec<rig_core::completion::Message>);
+    fn finish_turn(&mut self, results: Vec<rig_core::completion::Message>);
 
     /// Drop the most recent assistant turn from history so the turn can be
     /// re-executed cleanly.
@@ -385,7 +385,7 @@ impl Conversation for ConversationStub {
         ));
     }
 
-    fn record_tool_results(&mut self, results: Vec<rig_core::completion::Message>) {
+    fn finish_turn(&mut self, results: Vec<rig_core::completion::Message>) {
         self.history.extend(results);
         self.begin_next_turn();
     }

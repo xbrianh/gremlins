@@ -47,7 +47,7 @@ pub(crate) struct StandardConversation {
     /// completed turns.
     history: Vec<Message>,
     /// The harness's next user message — committed into [`history`] by
-    /// [`record_turn`] and [`done_rejected`], replaced by [`record_tool_results`]
+    /// [`record_turn`] and [`done_rejected`], replaced by [`finish_turn`]
     /// and [`set_next_prompt`].
     next_prompt: Message,
     /// When `true`, `record_turn` has already committed the prompt into
@@ -243,7 +243,7 @@ impl Conversation for StandardConversation {
         self.last_prompt_tokens = input_tokens;
     }
 
-    fn record_tool_results(&mut self, results: Vec<Message>) {
+    fn finish_turn(&mut self, results: Vec<Message>) {
         self.history.extend(results);
         self.begin_next_turn();
     }

@@ -46,11 +46,8 @@ pub(crate) use super::run_context::{LoopOpts, RunContext};
 // Supporting types: ToolJob, StreamAccumulator, StreamTurnOutcome,
 // LoopOpts, InteractiveSession, TurnFlow, etc.
 // ────────────────────────────────────────────────────────────────────────────
-pub(super) fn cancelled_error(message: impl Into<String>, history: &[Message]) -> ClientError {
-    ClientError::Cancelled {
-        message: message.into(),
-        messages: Some(history.to_vec()),
-    }
+pub(super) fn cancelled_error() -> ClientError {
+    ClientError::Cancelled
 }
 
 /// Sleep for the turn-level backoff, aborting early when the cancel token is
@@ -278,7 +275,7 @@ impl LoopState {
         let builder = tokio::select! {
             biased;
             _ = cancel.cancelled() => {
-                return Err(cancelled_error("cancelled during request preparation", &self.conv.messages()));
+                return Err(cancelled_error());
             }
             b = self.prepare_stream_request(tool_defs, opts, nested) => b?,
         };
@@ -313,7 +310,7 @@ impl LoopState {
                     ));
                     if retry_backoff(cancel, wait).await {
                         self.hook_log(&format!("{prefix}exit: cancelled during retry backoff"));
-                        return Err(cancelled_error("cancelled", &self.conv.messages()));
+                        return Err(cancelled_error());
                     }
                     // Preserve the pending one-turn state only when
                     // already interactive — otherwise an unconditional
@@ -586,7 +583,7 @@ impl LoopState {
                 // to complete.
                 self.hook_log(&format!("agent_loop: cancelled mid-tool (label={})", prefix));
                 self.hook_log(&format!("{prefix}exit: cancelled mid-tool"));
-                return Err(cancelled_error("cancelled", &self.conv.messages()));
+                return Err(cancelled_error());
             }
             _ = maybe_pause(&self.pause) => {
                 // Operator triggered debug mid-tool — drop the join_all future
@@ -655,7 +652,7 @@ impl LoopState {
             tokio::select! {
                 biased;
                 _ = cancel.cancelled() => {
-                    return Err(cancelled_error("cancelled", &self.conv.messages()));
+                    return Err(cancelled_error());
                 }
                 _ = emit_run_event_async(&self.message_prefix, EventKind::ToolResult {
                     id: format!("{}{}", tool_ctx.id_prefix, job.id),
@@ -674,7 +671,7 @@ impl LoopState {
         self.turns += job_count;
         // Every tool result lands in history so the results stay adjacent to
         // the assistant tool_calls message.
-        self.conv.record_tool_results(result_msgs);
+        self.conv.finish_turn(result_msgs);
         self.remaining_turns -= 1;
         Ok(())
     }
@@ -1354,7 +1351,7 @@ pub(crate) async fn run_agent_loop_core(
         if cancel.is_cancelled() {
             log::info!("agent_loop: cancelled before turn (label={})", prefix);
             state.hook_log(&format!("{prefix}exit: cancelled before turn"));
-            return Err(cancelled_error("cancelled", &state.conv.messages()));
+            return Err(cancelled_error());
         }
 
         match state.await_interactive_turn(model, prefix).await? {
@@ -2400,7 +2397,7 @@ mod tests {
             .expect("cancel must unblock the agent loop promptly")
             .unwrap();
         match result {
-            Err(ClientError::Cancelled { message, .. }) => assert_eq!(message, "cancelled"),
+            Err(ClientError::Cancelled) => {}
             other => panic!("expected Cancelled, got: {other:?}"),
         }
 
@@ -3042,9 +3039,7 @@ mod tests {
 
         let result = handle.await.unwrap();
         match result {
-            Err(ClientError::Cancelled { message, .. }) => {
-                assert_eq!(message, "cancelled");
-            }
+            Err(ClientError::Cancelled) => {}
             other => panic!("expected cancellation, got: {other:?}"),
         }
     }
@@ -3203,9 +3198,7 @@ mod tests {
 
         let result = handle.await.unwrap();
         match result {
-            Err(ClientError::Cancelled { message, .. }) => {
-                assert_eq!(message, "cancelled");
-            }
+            Err(ClientError::Cancelled) => {}
             other => panic!("expected cancellation, got: {other:?}"),
         }
     }

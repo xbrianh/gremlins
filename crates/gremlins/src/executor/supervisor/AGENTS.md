@@ -104,7 +104,7 @@ and emits the terminal `DaemonEvent`.
 | Change child launch/stop | `lifecycle.rs::launch_child` / `stop_child` |
 | Change the event bus | `gremlins_magic_bus::concrete` (`init_bus`, `subscribe_run`, `emit_event`) |
 | Understand session lifecycle | `session.rs::run_session_listener` / `handle_session_main`; state in `actor.rs::SessionState` |
-| Debug a chat turn | `chat/mod.rs::run_chat_turn` + `chat/turn_finalizer.rs` |
+| Debug a chat turn | `chat/turn.rs::run_chat_turn` + `chat/turn_finalizer.rs` |
 | Understand the interactive debug flow | `debug.rs::handle_debug` |
 | Read gremlin state for a query | `state_view.rs::state_view_for_id` |
 | Change socket/lock protocol | `supervisor` delegates to `crate::executor::socket` |

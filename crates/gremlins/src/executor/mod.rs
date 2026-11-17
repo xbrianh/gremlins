@@ -9,8 +9,6 @@
 use serde_json::{Map, Value};
 use thiserror::Error;
 
-use rig_core::completion::Message;
-
 use crate::clients::backend::ClientError;
 use crate::executor::state::StateError;
 
@@ -66,14 +64,9 @@ pub enum RunError {
     #[error(transparent)]
     Client(#[from] ClientError),
 
-    /// The operator cancelled the agent loop. Carries the loop's accumulated
-    /// message history when the backend captured it before unwinding; chat
-    /// soft-interrupt recovery uses this to reconstruct the partial turn.
-    #[error("{message}")]
-    Cancelled {
-        message: String,
-        messages: Option<Vec<Message>>,
-    },
+    /// The operator cancelled the agent loop.
+    #[error("cancelled")]
+    Cancelled,
 
     /// `state.json` I/O failed.
     #[error(transparent)]

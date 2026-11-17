@@ -31,10 +31,7 @@ pub(crate) async fn handle_session_stop(
         let client = Client::new(actor_tx.clone());
         client.session_remove_chat_id(session_id, id).await;
         client.session_take_gremlin(session_id, id).await;
-        if let Some(mut done) = client
-            .session_cancel_turn(session_id, Some(id), false)
-            .await
-        {
+        if let Some(mut done) = client.session_cancel_turn(session_id, Some(id)).await {
             let _ = done.wait_for(|v| *v).await;
         }
     }
@@ -54,9 +51,7 @@ pub(crate) async fn stop_session_chat_gremlin(
             continue;
         }
         client.session_take_gremlin(&session_id, id).await;
-        let done = client
-            .session_cancel_turn(&session_id, Some(id), false)
-            .await;
+        let done = client.session_cancel_turn(&session_id, Some(id)).await;
         if live {
             if let Some(mut done) = done {
                 let _ = done.wait_for(|v| *v).await;

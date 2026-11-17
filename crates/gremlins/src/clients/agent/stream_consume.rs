@@ -10,20 +10,19 @@
 use std::time::{Duration, Instant};
 
 use rig_core::completion::message::{Reasoning, Sealed};
-use rig_core::completion::{Message, Usage};
+use rig_core::completion::Usage;
 use rig_core::driver::DynModel;
 use rig_core::operation::Completion;
 use rig_core::streaming::{Item, StreamEvent, Streamed};
 
 use crate::clients::cancel::CancelToken;
 use crate::clients::error::ClientError;
-use crate::clients::format::{apply_chunk, assistant_tool_message, format_tool_call};
+use crate::clients::format::{apply_chunk, format_tool_call};
 use crate::clients::tools::AgentLoopRuntime;
 use gremlins_magic_bus::{emit_run_event_async, EventKind};
 
 use super::agent_loop::{
-    cancelled_error, retry_backoff, LoopOpts, LoopState, StreamAccumulator, StreamTurnOutcome,
-    StreamTurnOutput,
+    retry_backoff, LoopOpts, LoopState, StreamAccumulator, StreamTurnOutcome, StreamTurnOutput,
 };
 use super::interactive::{maybe_pause, InteractiveLoopResult};
 
@@ -62,15 +61,13 @@ pub(super) async fn consume_stream_events(
     let mut retry_turn = false;
     let mut retry_timeout_turn = false;
 
-    let mut stream_snapshot: Vec<Message> = state.conv.messages();
-
     loop {
         let item = tokio::select! {
             _ = cancel.cancelled() => {
                 state.hook_log(&format!("agent_loop: cancelled mid-stream (label={})", prefix));
                 state.hook_log(&format!("{prefix}exit: cancelled mid-stream"));
                 drop(response);
-                return Err(cancelled_error("cancelled", &stream_snapshot));
+                return Err(ClientError::Cancelled);
             }
             _ = maybe_pause(&state.pause) => {
                 state.hook_log(&format!("agent_loop: paused mid-stream (label={})", prefix));
@@ -115,7 +112,7 @@ pub(super) async fn consume_stream_events(
                             prefix
                         ));
                         state.hook_log(&format!("{prefix}exit: cancelled during timeout backoff"));
-                        return Err(cancelled_error("cancelled", &state.conv.messages()));
+                        return Err(ClientError::Cancelled);
                     }
                     break;
                 }
@@ -149,7 +146,7 @@ pub(super) async fn consume_stream_events(
                             prefix
                         ));
                         state.hook_log(&format!("{prefix}exit: cancelled during retry backoff"));
-                        return Err(cancelled_error("cancelled", &state.conv.messages()));
+                        return Err(ClientError::Cancelled);
                     }
                     break;
                 }
@@ -176,7 +173,7 @@ pub(super) async fn consume_stream_events(
                                 tokio::select! {
                                     biased;
                                     _ = cancel.cancelled() => {
-                                        return Err(cancelled_error("cancelled", &stream_snapshot));
+                                        return Err(ClientError::Cancelled);
                                     }
                                     _ = emit_run_event_async(&state.message_prefix, EventKind::TaskProgress {
                                         parent_id: parent_id.to_string(),
@@ -194,7 +191,7 @@ pub(super) async fn consume_stream_events(
                                 tokio::select! {
                                     biased;
                                     _ = cancel.cancelled() => {
-                                        return Err(cancelled_error("cancelled", &stream_snapshot));
+                                        return Err(ClientError::Cancelled);
                                     }
                                     _ = emit_run_event_async(&state.message_prefix, EventKind::TaskProgress {
                                         parent_id: parent_id.to_string(),
@@ -216,7 +213,7 @@ pub(super) async fn consume_stream_events(
                                 tokio::select! {
                                     biased;
                                     _ = cancel.cancelled() => {
-                                        return Err(cancelled_error("cancelled", &stream_snapshot));
+                                        return Err(ClientError::Cancelled);
                                     }
                                     _ = emit_run_event_async(&state.message_prefix, EventKind::TaskProgress {
                                         parent_id: parent_id.to_string(),
@@ -238,7 +235,7 @@ pub(super) async fn consume_stream_events(
                                 tokio::select! {
                                     biased;
                                     _ = cancel.cancelled() => {
-                                        return Err(cancelled_error("cancelled", &stream_snapshot));
+                                        return Err(ClientError::Cancelled);
                                     }
                                     _ = emit_run_event_async(&state.message_prefix, EventKind::StreamChunk {
                                         text: text.clone(),
@@ -249,7 +246,7 @@ pub(super) async fn consume_stream_events(
                                 tokio::select! {
                                     biased;
                                     _ = cancel.cancelled() => {
-                                        return Err(cancelled_error("cancelled", &stream_snapshot));
+                                        return Err(ClientError::Cancelled);
                                     }
                                     _ = emit_run_event_async(&state.message_prefix, EventKind::ReasoningChunk {
                                         text: text.clone(),
@@ -264,7 +261,7 @@ pub(super) async fn consume_stream_events(
                                 tokio::select! {
                                     biased;
                                     _ = cancel.cancelled() => {
-                                        return Err(cancelled_error("cancelled", &stream_snapshot));
+                                        return Err(ClientError::Cancelled);
                                     }
                                     _ = emit_run_event_async(&state.message_prefix, EventKind::ReasoningChunk {
                                         text: format_tool_call(tc),
@@ -282,20 +279,6 @@ pub(super) async fn consume_stream_events(
                     &mut reasoning_items,
                     &mut tool_calls,
                 );
-                while stream_snapshot
-                    .last()
-                    .is_some_and(|m| matches!(m, Message::Assistant { .. }))
-                {
-                    stream_snapshot.pop();
-                }
-                if !text.is_empty() || !reasoning_items.is_empty() || !tool_calls.is_empty() {
-                    stream_snapshot.push(assistant_tool_message(
-                        &text,
-                        &reasoning_items,
-                        &tool_calls,
-                        true,
-                    ));
-                }
             }
         }
     }
@@ -336,7 +319,7 @@ pub(super) async fn finish_stream_turn(
             tokio::select! {
                 biased;
                 _ = cancel.cancelled() => {
-                    return Err(cancelled_error("cancelled", &state.conv.messages()));
+                    return Err(ClientError::Cancelled);
                 }
                 _ = emit_run_event_async(&state.message_prefix, EventKind::StreamReset) => {}
             }

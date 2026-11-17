@@ -11,7 +11,7 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 
 use crate::artifacts::uri::Uri;
-use crate::clients::backend::RunParams;
+use crate::clients::backend::{ClientError, RunParams};
 use crate::clients::client::ModelURI;
 use crate::config;
 use crate::definition::ExecutorStage;
@@ -23,7 +23,6 @@ use crate::executor::RunError;
 use crate::task_kind::TaskKind;
 use gremlins_magic_bus::{emit_event, EventKind};
 use indexmap::IndexMap;
-use rig_core::completion::message::{AssistantContent, UserContent};
 use rig_core::completion::Message;
 
 use crate::executor::run::{
@@ -393,6 +392,19 @@ pub(crate) async fn run_agent(
                 gremlin.state.accumulate_token_usage(&delta);
                 state::emit_stage_token_usage(gremlin.state.store_ref(), &stage_path, &delta);
             }
+            // On cancellation, persist the conversation so the next turn
+            // can recover the interrupted task's context.
+            if matches!(&error, ClientError::Cancelled) && is_chat {
+                if let Some(turn_num) = chat_turn {
+                    let mut messages = canonical_prefix;
+                    messages.push(Message::user(prepared.user_prompt(is_chat)));
+                    if let Err(e) =
+                        persist_chat_conversation_turn(gremlin, turn_num, &messages).await
+                    {
+                        log::warn!("chat: failed to persist conversation on cancel: {e}");
+                    }
+                }
+            }
             return Err(client_run_err(error, &prepared.name));
         }
     };
@@ -549,43 +561,6 @@ pub(crate) async fn read_chat_conversation(
     all_msgs
 }
 
-/// Append messages to a per-turn conversation artifact.
-pub(crate) async fn append_chat_conversation_turn(
-    gremlin: &Gremlin,
-    turn: usize,
-    messages: &[Message],
-) {
-    if messages.is_empty() {
-        return;
-    }
-    let uri_str = conversation_uri(turn);
-    let mut existing = match gremlin.state.content(&uri_str, None).await {
-        Ok(json) => {
-            match messages_from_conversation(&json) {
-                Ok(msgs) => msgs,
-                Err(e) => {
-                    log::warn!("chat: current-turn artifact {uri_str} unparseable; refusing to append: {e}");
-                    return;
-                }
-            }
-        }
-        Err(e)
-            if e.downcast_ref::<crate::executor::state::MissingArtifact>()
-                .is_some() =>
-        {
-            Vec::new()
-        }
-        Err(e) => {
-            log::warn!("chat: failed to read current-turn artifact for append: {e}");
-            return;
-        }
-    };
-    existing.extend_from_slice(messages);
-    if let Err(e) = persist_chat_conversation_turn(gremlin, turn, &existing).await {
-        log::warn!("chat: failed to persist current-turn artifact after append: {e}");
-    }
-}
-
 /// Overwrite per-turn conversation artifacts from a compacted conversation.
 ///
 /// Writes the full compacted history as turn 0001 and clears every other
@@ -624,65 +599,4 @@ pub(crate) async fn persist_compacted_conversation(
         gremlin.state.write_into_registry(&uri, "[]").await?;
     }
     Ok(())
-}
-
-/// Strip trailing messages left dangling by a mid-tool-call cancellation.
-pub(crate) fn strip_unpaired_tool_messages(messages: &mut Vec<Message>) {
-    fn count_tool_calls(m: &Message) -> (bool, usize) {
-        if let Message::Assistant { content, .. } = m {
-            let n = content
-                .iter()
-                .filter(|i| matches!(i, AssistantContent::ToolCall(_)))
-                .count();
-            (n > 0, n)
-        } else {
-            (false, 0)
-        }
-    }
-    fn count_tool_results(m: &Message) -> (bool, usize) {
-        if let Message::User { content } = m {
-            let n = content
-                .iter()
-                .filter(|i| matches!(i, UserContent::ToolResult(_)))
-                .count();
-            (n > 0, n)
-        } else {
-            (false, 0)
-        }
-    }
-    loop {
-        let before = messages.len();
-        if let Some(last) = messages.last() {
-            if count_tool_calls(last).0 {
-                messages.pop();
-                continue;
-            }
-        }
-        if messages.last().is_some_and(|m| count_tool_results(m).0) {
-            let mut idx = messages.len();
-            let mut result_count = 0;
-            while idx > 0 {
-                let (is_result, n) = count_tool_results(&messages[idx - 1]);
-                if !is_result {
-                    break;
-                }
-                result_count += n;
-                idx -= 1;
-            }
-            if idx > 0 {
-                let (has_call, call_count) = count_tool_calls(&messages[idx - 1]);
-                if has_call && call_count == result_count {
-                    break;
-                }
-                if has_call {
-                    idx -= 1;
-                }
-            }
-            messages.truncate(idx);
-            continue;
-        }
-        if messages.len() == before {
-            break;
-        }
-    }
 }
