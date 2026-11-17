@@ -965,15 +965,14 @@ fn render_success(
 pub(crate) fn repair_edit_args(args: serde_json::Value) -> serde_json::Value {
     let mut args = args;
 
-    // Repair 1: `edits` is a JSON-encoded string → parse it
-    if let Some(edits_val) = args.get("edits") {
-        if let Some(s) = edits_val.as_str() {
-            if let Ok(parsed) = serde_json::from_str::<serde_json::Value>(s) {
-                if let Some(obj) = args.as_object_mut() {
-                    obj.insert("edits".to_string(), parsed);
-                }
-            }
-        }
+    // Repair 1: decode quoted JSON. If it encodes another string, keep the
+    // original so validation sees valid JSON of the wrong type, not its contents.
+    let decoded = args
+        .get("edits")
+        .and_then(|v| v.as_str())
+        .and_then(|s| serde_json::from_str::<serde_json::Value>(s).ok());
+    if let Some(value) = decoded.filter(|v| !v.is_string()) {
+        args["edits"] = value;
     }
 
     // Repair 2: `edits` is an object with `old_string` key (not an array) → wrap in array

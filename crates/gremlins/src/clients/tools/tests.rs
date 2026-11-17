@@ -211,6 +211,96 @@ async fn edit_replaces_unique() {
     );
 }
 
+async fn dispatch_edit(c: &AgentLoopRuntime, edits: impl Into<serde_json::Value>) -> String {
+    let edits = edits.into();
+    let args = serde_json::json!({"file_path": "target.txt", "edits": edits});
+    invoke("tool-test-id", "Edit", c, &args.to_string()).await
+}
+
+const QUOTED_EDIT_HINT: &str = "pass the array directly, not as a quoted string";
+
+#[tokio::test]
+async fn edit_quoted_missing_separator_locates_the_fault_in_the_result_preview() {
+    let dir = tmp();
+    let path = dir.join("target.txt");
+    std::fs::write(&path, "original").unwrap();
+    let log = dir.join("audit.jsonl");
+    let mut c = ctx(&dir);
+    c.audit_log = Some(log.clone());
+
+    let padding = "界".repeat(300);
+    let tabs = "\t".repeat(50);
+    let edits = format!(
+        "[\n{{\"old_string\":\"original\",\"new_string\":\"payload-start\"}},\n\
+         {{\"old_string\":\"{padding}fault-left\"\t\"new_string\":{tabs}\"x\"}}]"
+    );
+    let error = serde_json::from_str::<serde_json::Value>(&edits).unwrap_err();
+    let result = dispatch_edit(&c, edits).await;
+    let preview: String = result.chars().take(200).collect();
+    assert!(preview.starts_with("Error: Edit.edits:"), "{preview}");
+    assert!(preview.contains(&error.to_string()), "{preview}");
+    assert!(preview.contains("fault-left"), "{preview}");
+    assert!(preview.contains("new_string"), "{preview}");
+    assert!(!preview.contains("payload-start"), "{preview}");
+    assert!(!preview.chars().any(char::is_control), "{preview:?}");
+    assert!(preview.contains(QUOTED_EDIT_HINT), "{preview}");
+    assert_eq!(std::fs::read_to_string(path).unwrap(), "original");
+
+    let entry: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(log).unwrap()).unwrap();
+    assert_eq!(entry["tool"], "Edit");
+    assert_eq!(entry["status"], "error");
+}
+
+#[tokio::test]
+async fn edit_quoted_unexpected_eof_shows_trailing_context_even_at_a_multibyte_boundary() {
+    let c = ctx(&tmp());
+    let unfinished = format!("[\n{{\"old_string\":\"{}tail-marker界", "界".repeat(300));
+    for edits in [unfinished.as_str(), ""] {
+        let error = serde_json::from_str::<serde_json::Value>(edits).unwrap_err();
+        let result = dispatch_edit(&c, edits).await;
+        let preview: String = result.chars().take(200).collect();
+        assert!(preview.starts_with("Error: Edit.edits:"), "{preview}");
+        assert!(preview.contains(&error.to_string()), "{preview}");
+        assert!(preview.contains(QUOTED_EDIT_HINT), "{preview}");
+        if !edits.is_empty() {
+            assert!(preview.contains("tail-marker"), "{preview}");
+        }
+    }
+}
+
+#[tokio::test]
+async fn edit_quoted_array_and_single_edit_object_match_a_direct_array() {
+    let dir = tmp();
+    let c = ctx(&dir);
+    let path = dir.join("target.txt");
+    let single = serde_json::json!({"old_string": "before", "new_string": "after"});
+    let array = serde_json::json!([single]);
+    for edits in [
+        array.to_string().into(),
+        array,
+        single.to_string().into(),
+        single,
+    ] {
+        std::fs::write(&path, "before").unwrap();
+        let result = dispatch_edit(&c, edits).await;
+        assert!(result.contains("Applied 1 edit"), "{result}");
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "after");
+    }
+}
+
+#[tokio::test]
+async fn edit_quoted_valid_json_of_the_wrong_type_remains_a_type_error() {
+    let c = ctx(&tmp());
+    for (edits, actual) in [("42", "number"), (r#""not an array""#, "string")] {
+        let result = dispatch_edit(&c, edits).await;
+        assert_eq!(
+            result,
+            format!("Error: 'edits' for Edit must be array, got {actual}")
+        );
+    }
+}
+
 #[tokio::test]
 async fn bash_echo_and_env() {
     let dir = tmp();
