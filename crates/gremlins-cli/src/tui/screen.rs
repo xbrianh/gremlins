@@ -3559,6 +3559,220 @@ Buffer:
         );
     }
 
+    // ── push_stream_line tests ──────────────────────────────────
+
+    /// Extract the text field from every stream line that carries a kind of
+    /// text, reasoning, stdout, or stderr.
+    fn stream_texts(view: &RunsView) -> Vec<String> {
+        view.stream_lines
+            .iter()
+            .filter_map(|line| {
+                let obj = serde_json::from_str::<serde_json::Value>(line).ok()?;
+                let kind = obj.get("kind")?.as_str()?;
+                match kind {
+                    "text" | "reasoning" | "stdout" | "stderr" => {
+                        Some(obj.get("text")?.as_str()?.to_string())
+                    }
+                    _ => None,
+                }
+            })
+            .collect()
+    }
+
+    #[test]
+    fn push_stream_line_exec_consecutive_newlines_drops_empty_parts() {
+        let mut v = RunsView::new();
+        v.push_stream_line(
+            serde_json::json!({"type":"exec_output","is_stderr":false,"text":"a\n\nb"}).to_string(),
+        );
+        assert_eq!(v.stream_lines.len(), 2);
+        assert_eq!(stream_texts(&v), vec!["a", "b"]);
+        let obj = serde_json::from_str::<serde_json::Value>(&v.stream_lines[0]).unwrap();
+        assert_eq!(obj["kind"].as_str(), Some("stdout"));
+    }
+
+    #[test]
+    fn push_stream_line_exec_trailing_newline_no_blank_extras() {
+        let mut v = RunsView::new();
+        v.push_stream_line(
+            serde_json::json!({"type":"exec_output","is_stderr":false,"text":"a\n"}).to_string(),
+        );
+        assert_eq!(v.stream_lines.len(), 1);
+        assert_eq!(stream_texts(&v), vec!["a"]);
+    }
+
+    #[test]
+    fn push_stream_line_exec_newline_only_produces_nothing() {
+        let mut v = RunsView::new();
+        v.push_stream_line(
+            serde_json::json!({"type":"exec_output","is_stderr":false,"text":"\n\n"}).to_string(),
+        );
+        assert_eq!(v.stream_lines.len(), 0);
+    }
+
+    #[test]
+    fn push_stream_line_agent_text_newline_only_accumulates_raw_text() {
+        let mut v = RunsView::new();
+        v.push_stream_line(serde_json::json!({"type":"stream_chunk","text":"\n\n"}).to_string());
+        // No stream lines emitted — all parts are empty after splitting.
+        assert_eq!(v.stream_lines.len(), 0);
+        // Raw text accumulates so Done-dedup still works.
+        assert_eq!(v.streamed_agent_text, "\n\n");
+    }
+
+    #[test]
+    fn push_stream_line_agent_chunks_coalesce_abc() {
+        let mut v = RunsView::new();
+        v.push_stream_line(serde_json::json!({"type":"stream_chunk","text":"a"}).to_string());
+        v.push_stream_line(serde_json::json!({"type":"stream_chunk","text":"\n\n"}).to_string());
+        v.push_stream_line(serde_json::json!({"type":"stream_chunk","text":"b"}).to_string());
+        v.push_stream_line(serde_json::json!({"type":"stream_chunk","text":"c"}).to_string());
+
+        // Raw accumulated text preserves everything faithfully.
+        assert_eq!(v.streamed_agent_text, "a\n\nbc");
+
+        // stream_lines has exactly "a" and "bc" — no empty entries, and
+        // "bc" is coalesced from "b" + "c".
+        assert_eq!(stream_texts(&v), vec!["a", "bc"]);
+        assert_eq!(v.stream_lines.len(), 2);
+    }
+
+    #[test]
+    fn push_stream_line_reasoning_newline_closes_tail() {
+        let mut v = RunsView::new();
+        v.push_stream_line(
+            serde_json::json!({"type":"reasoning_chunk","text":"think\n"}).to_string(),
+        );
+        // Tail was closed by the trailing newline — next fragment starts a
+        // new line rather than appending.
+        v.push_stream_line(serde_json::json!({"type":"reasoning_chunk","text":"more"}).to_string());
+
+        assert_eq!(v.stream_lines.len(), 2);
+        assert_eq!(stream_texts(&v), vec!["think", "more"]);
+    }
+
+    #[test]
+    fn push_stream_line_done_fallback_when_no_agent_text() {
+        let mut v = RunsView::new();
+        v.push_stream_line(
+            serde_json::json!({
+                "type": "stage_stream_line",
+                "kind": "done",
+                "text": "result without streaming",
+                "summary": "finished"
+            })
+            .to_string(),
+        );
+
+        // streamed_agent_text empty → fallback emits the done text as a
+        // visible text line.  summary differs → done_summary entry pushed.
+        // Plus the raw done line.
+        assert_eq!(v.stream_lines.len(), 3);
+        assert_eq!(stream_texts(&v), vec!["result without streaming"]);
+        assert!(
+            v.stream_lines[1].contains("\"done_summary\""),
+            "expected done_summary: {}",
+            v.stream_lines[1]
+        );
+    }
+
+    #[test]
+    fn push_stream_line_done_no_duplicate_when_already_streamed() {
+        let mut v = RunsView::new();
+        v.push_stream_line(
+            serde_json::json!({"type":"stream_chunk","text":"streamed result"}).to_string(),
+        );
+
+        v.push_stream_line(
+            serde_json::json!({
+                "type": "stage_stream_line",
+                "kind": "done",
+                "text": "streamed result",
+                "summary": "did it"
+            })
+            .to_string(),
+        );
+
+        // streamed_agent_text is non-empty → fallback NOT re-emitted.
+        // summary differs → done_summary pushed.
+        // Plus the raw done line.
+        assert_eq!(v.stream_lines.len(), 3);
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(&v.stream_lines[0]).unwrap()["text"].as_str(),
+            Some("streamed result")
+        );
+        assert!(
+            v.stream_lines[1].contains("\"done_summary\""),
+            "expected done_summary: {}",
+            v.stream_lines[1]
+        );
+    }
+
+    #[test]
+    fn push_stream_line_stream_reset_clears_accumulated_agent_text() {
+        let mut v = RunsView::new();
+        v.push_stream_line(
+            serde_json::json!({"type":"stream_chunk","text":"some agent text"}).to_string(),
+        );
+        assert_eq!(v.streamed_agent_text, "some agent text");
+
+        v.push_stream_line(
+            serde_json::json!({"type":"stage_stream_line","kind":"stream_reset"}).to_string(),
+        );
+        assert_eq!(v.streamed_agent_text, "");
+
+        // The stream_reset line itself is retained in the buffer.
+        assert!(v.stream_lines.iter().any(|l| l.contains("stream_reset")));
+    }
+
+    #[test]
+    fn push_stream_line_stderr_filters_empty_like_stdout() {
+        let mut v = RunsView::new();
+        v.push_stream_line(
+            serde_json::json!({"type":"exec_output","is_stderr":true,"text":"err\n\nout"})
+                .to_string(),
+        );
+        assert_eq!(v.stream_lines.len(), 2);
+        assert_eq!(stream_texts(&v), vec!["err", "out"]);
+    }
+
+    #[test]
+    fn push_stream_line_non_json_passthrough() {
+        let mut v = RunsView::new();
+        v.push_stream_line("not json at all".to_string());
+        assert_eq!(v.stream_lines.len(), 1);
+        assert_eq!(v.stream_lines[0], "not json at all");
+    }
+
+    #[test]
+    fn push_stream_line_log_resets_tail_state() {
+        let mut v = RunsView::new();
+        v.push_stream_line(serde_json::json!({"type":"stream_chunk","text":"hello"}).to_string());
+        assert!(v.stream_tail_open);
+
+        v.push_stream_line(
+            serde_json::json!({"type":"log_line","line":"system message"}).to_string(),
+        );
+        assert!(!v.stream_tail_open);
+        assert!(v.stream_tail_kind.is_none());
+    }
+
+    #[test]
+    fn push_stream_line_clear_stream_resets_all_state() {
+        let mut v = RunsView::new();
+        v.push_stream_line(serde_json::json!({"type":"stream_chunk","text":"hello"}).to_string());
+        v.push_stream_line(serde_json::json!({"type":"log_line","line":"msg"}).to_string());
+        assert!(!v.stream_lines.is_empty());
+        assert!(!v.streamed_agent_text.is_empty());
+
+        v.clear_stream();
+
+        assert!(v.stream_lines.is_empty());
+        assert!(v.streamed_agent_text.is_empty());
+        assert!(v.stream_tail_kind.is_none());
+        assert!(!v.stream_tail_open);
+    }
+
     // ── classify_stream_value tests ─────────────────────────────
 
     #[test]
