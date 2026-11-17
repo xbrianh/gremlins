@@ -21,6 +21,8 @@ use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::{mpsc, oneshot, watch};
 
+mod log_isolation;
+
 fn model(spec: &str) -> ModelURI {
     ModelURI::parse(spec).unwrap()
 }

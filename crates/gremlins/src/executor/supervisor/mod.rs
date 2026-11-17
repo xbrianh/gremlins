@@ -232,17 +232,26 @@ async fn handle_connection(
 
     // Subscribe to the event broadcast *before* spawning so that no
     // events are lost between connection acceptance and task scheduling.
-    let (_event_sub, mut event_rx) = subscribe_all();
+    let (event_sub, mut event_rx) = subscribe_all();
 
     // Gate the event-forwarding subtask so that one-shot clients always
     // receive their request response before any broadcast events.
-    let (event_start_tx, mut event_start_rx) = tokio::sync::watch::channel(false);
+    let (events_enabled_tx, mut events_enabled_rx) = watch::channel(false);
     let event_writer = writer.clone();
     let event_handle = tokio::spawn(async move {
-        // Wait until the first request has been fully processed.
-        let _ = event_start_rx.wait_for(|v| *v).await;
         loop {
-            match event_rx.recv().await {
+            let enabled = *events_enabled_rx.borrow_and_update();
+            let event = tokio::select! {
+                biased;
+                changed = events_enabled_rx.changed() => {
+                    if changed.is_err() {
+                        break;
+                    }
+                    continue;
+                }
+                event = event_rx.recv(), if enabled => event,
+            };
+            match event {
                 gremlins_magic_bus::Recv::Event(dispatch) => {
                     let kind = dispatch.kind();
                     // Stream events belong to per-run/session subscribers
@@ -271,13 +280,13 @@ async fn handle_connection(
         }
     });
 
-    loop {
+    let log_request = loop {
         let request = match socket::read_json_line(&mut reader).await {
             Ok(Some(v)) => v,
-            Ok(None) => break,
+            Ok(None) => break None,
             Err(e) => {
                 log::warn!("supervisor: read error: {e}");
-                break;
+                break None;
             }
         };
 
@@ -288,19 +297,15 @@ async fn handle_connection(
             .to_string();
         log::debug!("supervisor: received op={op:?}");
 
-        // Streaming pipeline ops take ownership of the connection; handle
-        // them directly so they can monitor the read half for disconnect.
         if op == "log" {
-            // Unblock events now that the streaming op is starting.
-            let _ = event_start_tx.send(true);
-            handle_log(&request, &actor_tx, reader, &writer).await;
-            break;
+            // The run-scoped log handler takes over after global forwarding stops.
+            break Some((request, reader));
         }
 
         if op == "debug" {
-            let _ = event_start_tx.send(true);
+            let _ = events_enabled_tx.send(true);
             handle_debug(&request, &actor_tx, reader, &writer).await;
-            break;
+            break None;
         }
 
         dispatch_op(&op, &request, &actor_tx, &writer).await;
@@ -310,17 +315,22 @@ async fn handle_connection(
         // probe before the caller's actual request; unblocking here
         // would let a run event arrive before the real response.
         if op != "version" {
-            let _ = event_start_tx.send(true);
+            let _ = events_enabled_tx.send(true);
         }
+    };
+
+    // On log handoff, finish the current frame but never start a queued one.
+    // On disconnect there is no next writer, so don't wait for a blocked write.
+    drop(events_enabled_tx);
+    if log_request.is_none() {
+        event_handle.abort();
     }
+    init_bus().unsubscribe(&event_sub);
+    let _ = event_handle.await;
 
-    // Abort the event-forwarding subtask so it doesn't leak the write
-    // half or linger waiting for broadcasts after the client is gone.
-    event_handle.abort();
-
-    // Unregister the bus subscription so repeated control connections don't
-    // accumulate permanent work for each emission.
-    init_bus().unsubscribe(&_event_sub);
+    if let Some((request, reader)) = log_request {
+        handle_log(&request, &actor_tx, reader, &writer).await;
+    }
 
     // After this connection drops the `ConnectionGuard` will fire a
     // `ConnectionDown` message, which triggers idle-shutdown inside the actor.
