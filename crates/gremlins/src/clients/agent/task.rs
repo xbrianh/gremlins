@@ -1353,9 +1353,7 @@ mod tests {
             // Pre-create the expected child filename with sentinel content.
             // The nested loop should detect it exists and fall back to a
             // suffixed name (exclusive creation).
-            let expected_child = dir
-                .path()
-                .join("stream-implement-task.a3f1.jsonl");
+            let expected_child = dir.path().join("stream-implement-task.a3f1.jsonl");
             std::fs::write(&expected_child, "pre-existing sentinel\n").unwrap();
 
             // Two models with distinguishable summaries so sibling files differ.
@@ -1419,9 +1417,7 @@ mod tests {
             );
 
             // A suffixed file should have been created for sibling A.
-            let suffixed = dir
-                .path()
-                .join("stream-implement-task.a3f1.0001.jsonl");
+            let suffixed = dir.path().join("stream-implement-task.a3f1.0001.jsonl");
             assert!(
                 suffixed.exists(),
                 "suffixed file {} should exist",
@@ -1429,9 +1425,7 @@ mod tests {
             );
 
             // Sibling B file with distinct chain.
-            let second_child = dir
-                .path()
-                .join("stream-implement-task.b72e.jsonl");
+            let second_child = dir.path().join("stream-implement-task.b72e.jsonl");
             assert!(
                 second_child.exists(),
                 "second sibling file {} should exist",
@@ -1447,8 +1441,9 @@ mod tests {
             // Each file must contain the assistant text event for its sibling.
             let first_has_text = first_events.iter().any(|ev| {
                 ev["type"] == "assistant"
-                    && ev["message"]["content"].as_array().map_or(false, |c| {
-                        c.iter().any(|ci| ci.get("text").map_or(false, |t| t == "alpha"))
+                    && ev["message"]["content"].as_array().is_some_and(|c| {
+                        c.iter()
+                            .any(|ci| ci.get("text").is_some_and(|t| t == "alpha"))
                     })
             });
             assert!(first_has_text, "first sibling must contain 'alpha' text");
@@ -1460,24 +1455,22 @@ mod tests {
             );
             let second_has_text = second_events.iter().any(|ev| {
                 ev["type"] == "assistant"
-                    && ev["message"]["content"].as_array().map_or(false, |c| {
-                        c.iter().any(|ci| ci.get("text").map_or(false, |t| t == "beta"))
+                    && ev["message"]["content"].as_array().is_some_and(|c| {
+                        c.iter()
+                            .any(|ci| ci.get("text").is_some_and(|t| t == "beta"))
                     })
             });
             assert!(second_has_text, "second sibling must contain 'beta' text");
 
             // Each sibling's tool_use event must have a matching tool_result.
-            for (events, label) in
-                [(&first_events, "first"), (&second_events, "second")]
-            {
+            for (events, label) in [(&first_events, "first"), (&second_events, "second")] {
                 let calls: std::collections::HashSet<String> = events
                     .iter()
                     .filter(|ev| {
-                        ev["message"]["content"]
-                            .as_array()
-                            .map_or(false, |c| {
-                                c.iter().any(|ci| ci.get("type").map_or(false, |t| t == "tool_use"))
-                            })
+                        ev["message"]["content"].as_array().is_some_and(|c| {
+                            c.iter()
+                                .any(|ci| ci.get("type").is_some_and(|t| t == "tool_use"))
+                        })
                     })
                     .map(|ev| {
                         ev["message"]["content"][0]["id"]
@@ -1489,11 +1482,10 @@ mod tests {
                 let results: std::collections::HashSet<String> = events
                     .iter()
                     .filter(|ev| {
-                        ev["message"]["content"]
-                            .as_array()
-                            .map_or(false, |c| {
-                                c.iter().any(|ci| ci.get("type").map_or(false, |t| t == "tool_result"))
-                            })
+                        ev["message"]["content"].as_array().is_some_and(|c| {
+                            c.iter()
+                                .any(|ci| ci.get("type").is_some_and(|t| t == "tool_result"))
+                        })
                     })
                     .map(|ev| {
                         ev["message"]["content"][0]["tool_use_id"]
@@ -1503,7 +1495,10 @@ mod tests {
                     })
                     .collect();
                 assert!(!calls.is_empty(), "{label} sibling must have tool calls");
-                assert!(!results.is_empty(), "{label} sibling must have tool results");
+                assert!(
+                    !results.is_empty(),
+                    "{label} sibling must have tool results"
+                );
                 for call_id in &calls {
                     assert!(
                         results.contains(call_id),
@@ -1630,8 +1625,7 @@ mod tests {
                 .filter_map(|e| e.ok())
                 .filter(|e| {
                     let name = e.file_name().to_string_lossy().to_string();
-                    name.starts_with("stream-main-task.")
-                        && name != "stream-main-task.0001.jsonl"
+                    name.starts_with("stream-main-task.") && name != "stream-main-task.0001.jsonl"
                 })
                 .collect();
             assert!(
@@ -1641,18 +1635,13 @@ mod tests {
 
             // The grandchild file must be valid JSONL.
             let gc_events = lines(&gc_files[0].path());
-            assert!(
-                !gc_events.is_empty(),
-                "grandchild file must contain events"
-            );
+            assert!(!gc_events.is_empty(), "grandchild file must contain events");
             // Must have tool call + result pair.
             let has_call = gc_events.iter().any(|ev| {
-                ev["message"]["content"]
-                    .as_array()
-                    .map_or(false, |c| {
-                        c.iter()
-                            .any(|ci| ci.get("type").map_or(false, |t| t == "tool_use"))
-                    })
+                ev["message"]["content"].as_array().is_some_and(|c| {
+                    c.iter()
+                        .any(|ci| ci.get("type").is_some_and(|t| t == "tool_use"))
+                })
             });
             assert!(has_call, "grandchild file must contain a tool_use event");
         }
@@ -1692,11 +1681,7 @@ mod tests {
             let task_files: Vec<_> = std::fs::read_dir(dir.path())
                 .unwrap()
                 .filter_map(|e| e.ok())
-                .filter(|e| {
-                    e.file_name()
-                        .to_string_lossy()
-                        .contains("task.")
-                })
+                .filter(|e| e.file_name().to_string_lossy().contains("task."))
                 .collect();
             assert!(
                 task_files.is_empty(),
