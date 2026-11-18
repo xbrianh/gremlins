@@ -34,6 +34,14 @@ pub fn provider_names() -> impl Iterator<Item = &'static str> {
     backends::registry().into_iter().map(|entry| entry.name)
 }
 
+/// Backend names that provide model catalog discovery.
+pub fn model_catalog_names() -> impl Iterator<Item = &'static str> {
+    backends::registry()
+        .into_iter()
+        .filter(|entry| entry.list_models.is_some())
+        .map(|entry| entry.name)
+}
+
 /// Why model discovery produced no list.
 #[derive(Debug)]
 pub enum ListModelsError {

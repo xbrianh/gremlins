@@ -160,9 +160,9 @@ enum Cmds {
     },
     /// List the models a backend offers to your account, one model URI per line.
     ///
-    /// Example: gremlins list-models chatgpt
+    /// Examples: gremlins list-models chatgpt; gremlins list-models copilot
     ListModels {
-        /// Backend name (currently only `chatgpt` supports listing).
+        /// Backend name (`chatgpt` or `copilot` supports listing).
         backend: String,
     },
     /// Manage provider authentication credentials.
@@ -2393,7 +2393,11 @@ async fn list_models_cmd(backend: &str) -> Result<(), String> {
             registered.join(", ")
         )),
         Err(ListModelsError::Unsupported { backend }) => Err(format!(
-            "listing models is not supported for '{backend}'; it is currently available only for 'chatgpt'"
+            "listing models is not supported for '{backend}'; supported backends: {}",
+            gremlins::clients::model_catalog_names()
+                .map(|name| format!("'{name}'"))
+                .collect::<Vec<_>>()
+                .join(", ")
         )),
         Err(ListModelsError::Failed(message)) => Err(message),
     }

@@ -189,7 +189,7 @@ macro_rules! backends {
 
 backends! {
     cmd: "cmd" => cmd::CmdBackend::build,
-    copilot: "copilot" => copilot::CopilotBackend::build,
+    copilot: "copilot" => copilot::CopilotBackend::build; list = copilot::list_models,
     chatgpt: "chatgpt" => chatgpt::ChatGptBackend::build; list = chatgpt::list_models,
     openai: "openai" => openai::OpenAiBackend::build,
     xai: "xai" => xai::XaiBackend::build,
