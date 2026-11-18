@@ -4,7 +4,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use futures::future::join_all;
-use rig_core::completion::message::{CallId, Reasoning, Sealed, ToolCall, ToolName};
+use rig_core::completion::message::{CallId, Origin, Reasoning, ToolCall, ToolName};
 use rig_core::completion::{CompletionRequest, Message, ToolDefinition, Usage};
 use rig_core::driver::DynModel;
 use rig_core::error::ProviderError;
@@ -113,7 +113,7 @@ pub(super) struct LoopState {
 pub(super) struct StreamAccumulator {
     pub(super) text: String,
     pub(super) reasoning: String,
-    pub(super) reasoning_items: Vec<Sealed<Reasoning>>,
+    pub(super) reasoning_items: Vec<Reasoning>,
     pub(super) tool_calls: Vec<ToolCall>,
     pub(super) ended: bool,
     pub(super) turn_usage: Option<Usage>,
@@ -122,6 +122,9 @@ pub(super) struct StreamAccumulator {
     pub(super) retry_timeout_turn: bool,
     pub(super) first_token: Option<Instant>,
     pub(super) last_token: Option<Instant>,
+    /// Origin reported by the provider for this stream, used to preserve
+    /// native metadata for same-model replay.
+    pub(super) origin: Option<Origin>,
 }
 
 /// Result of streaming one turn's request: the accumulated assistant content
@@ -129,12 +132,15 @@ pub(super) struct StreamAccumulator {
 pub(super) struct StreamTurnOutput {
     pub(super) text: String,
     pub(super) reasoning: String,
-    pub(super) reasoning_items: Vec<Sealed<Reasoning>>,
+    pub(super) reasoning_items: Vec<Reasoning>,
     pub(super) tool_calls: Vec<ToolCall>,
     pub(super) turn_usage: Option<Usage>,
     pub(super) first_token: Option<Instant>,
     pub(super) last_token: Option<Instant>,
     pub(super) ended: bool,
+    /// Origin of the response that produced this turn, threaded into history
+    /// so same-model replay keeps provider-native items.
+    pub(super) origin: Option<Origin>,
 }
 
 /// Control-flow signal returned by [`LoopState::stream_turn`].
@@ -503,14 +509,17 @@ impl LoopState {
                 "tool: {} {}",
                 tc.function.name,
                 trunc(
-                    &enrich_log_line(&tc.function.name, &tc.function.arguments),
+                    &enrich_log_line(&tc.function.name, &tc.function.arguments_value()),
                     200
                 )
             );
             self.hook_log(&format!("{prefix}{tool_msg}"));
             let id_str = tc.id.to_string();
-            let tool_evt =
-                tool_use_event(&id_str, tc.function.name.as_str(), &tc.function.arguments);
+            let tool_evt = tool_use_event(
+                &id_str,
+                tc.function.name.as_str(),
+                &tc.function.arguments_value(),
+            );
             write_raw(raw, &tool_evt);
             if !nested {
                 if let Some(evts) = captured.as_mut() {
@@ -521,7 +530,7 @@ impl LoopState {
                 id: tc.id.to_string(),
                 name: tc.function.name.to_string(),
                 args: args_json,
-                call: format_tool_call_parts(&tc.function.name, &tc.function.arguments),
+                call: format_tool_call_parts(&tc.function.name, &tc.function.arguments_value()),
                 over_cap: tools::max_per_message(tc.function.name.as_str()).and_then(|cap| {
                     task_count += 1;
                     (task_count > cap).then(|| {
@@ -815,7 +824,7 @@ impl LoopState {
         cancel: &CancelToken,
         nested: bool,
         text: &str,
-        reasoning_items: &[Sealed<Reasoning>],
+        reasoning_items: &[Reasoning],
         tool_calls: &[ToolCall],
         expected_artifact_paths: &[PathBuf],
         captured: &mut Option<Vec<serde_json::Value>>,
@@ -846,7 +855,7 @@ impl LoopState {
         nested: bool,
         text: &str,
         reasoning: &str,
-        reasoning_items: &[Sealed<Reasoning>],
+        reasoning_items: &[Reasoning],
         expected_artifact_paths: &[PathBuf],
         input_tokens: Option<u64>,
         loop_start: Instant,
@@ -873,9 +882,10 @@ impl LoopState {
     fn commit_turn_to_history(
         &mut self,
         text: &str,
-        reasoning_items: &[Sealed<Reasoning>],
+        reasoning_items: &[Reasoning],
         tool_calls: &[ToolCall],
         input_tokens: Option<u64>,
+        origin: Option<Origin>,
     ) {
         super::turn_flow::commit_turn_to_history(
             self,
@@ -883,6 +893,7 @@ impl LoopState {
             reasoning_items,
             tool_calls,
             input_tokens,
+            origin,
         )
     }
 
@@ -1464,6 +1475,7 @@ pub(crate) async fn run_agent_loop_core(
             first_token,
             last_token,
             ended,
+            origin,
         } = out;
 
         if state.timed_out || state.stream_error.is_some() {
@@ -1589,6 +1601,7 @@ pub(crate) async fn run_agent_loop_core(
             &reasoning_items,
             &tool_calls,
             turn_usage.as_ref().and_then(|u| u.input_tokens),
+            origin,
         );
 
         state
@@ -1845,7 +1858,7 @@ mod tests {
     use gremlins_magic_bus::{self, Recv};
     use http::StatusCode;
     use rig_core::completion::message::AssistantContent;
-    use rig_core::message::{Issuer, Reasoning, ReasoningContent, ToolFunction, UserContent};
+    use rig_core::completion::message::{Reasoning, ToolFunction, UserContent};
     use rig_core::operation::Completion;
     use std::collections::HashMap;
     use std::sync::atomic::{AtomicBool, Ordering};
@@ -1877,15 +1890,10 @@ mod tests {
 
     #[test]
     fn turn_stats_passes_through_partial_usage_without_zero_filling() {
-        let usage = Usage {
-            input_tokens: Some(10),
-            output_tokens: None,
-            cached_input_tokens: Some(4),
-            cache_creation_input_tokens: None,
-            reasoning_tokens: Some(3),
-            tool_use_prompt_tokens: None,
-            total_tokens: None,
-        };
+        let usage = Usage::default()
+            .input_tokens(10)
+            .cached_input_tokens(4)
+            .reasoning_tokens(3);
 
         let stats = turn_stats(1, Some(&usage)).unwrap();
 
@@ -1899,15 +1907,7 @@ mod tests {
 
     #[test]
     fn turn_stats_none_when_usage_block_is_entirely_absent() {
-        let usage = Usage {
-            input_tokens: None,
-            output_tokens: None,
-            cached_input_tokens: None,
-            cache_creation_input_tokens: None,
-            reasoning_tokens: None,
-            tool_use_prompt_tokens: None,
-            total_tokens: None,
-        };
+        let usage = Usage::default();
 
         assert!(turn_stats(0, Some(&usage)).is_none());
         assert!(turn_stats(3, None).is_none());
@@ -2572,16 +2572,12 @@ mod tests {
     #[test]
     fn assistant_tool_message_retains_reasoning_items() {
         let reasoning = Reasoning {
-            id: Some("rs_reasoning_item".to_string()),
-            content: vec![ReasoningContent::Text {
-                text: "thinking hard".to_string(),
-                signature: None,
-            }],
-        }
-        .sealed("openai");
-        let call = ToolCall::from_dual_wire(
+            text: "thinking hard".to_string(),
+            redacted: false,
+            native: None,
+        };
+        let call = ToolCall::from_wire(
             "fc_item",
-            "call_1",
             ToolFunction::new(
                 ToolName::new("Read").unwrap(),
                 serde_json::json!({ "file_path": "/tmp/x" }),
@@ -2593,31 +2589,28 @@ mod tests {
             std::slice::from_ref(&reasoning),
             std::slice::from_ref(&call),
             true,
+            None,
         );
 
-        let Message::Assistant { content, .. } = message else {
+        let Message::Assistant(ref msg) = message else {
             panic!("expected an assistant message");
         };
-        assert_eq!(content.len(), 2);
-        match &content[0] {
-            AssistantContent::Reasoning(sealed) => {
-                let opened = sealed
-                    .open(&Issuer::from("openai"))
-                    .expect("issuer preserved");
-                assert_eq!(opened.id.as_deref(), Some("rs_reasoning_item"));
+        assert_eq!(msg.content.len(), 2);
+        match &msg.content[0] {
+            AssistantContent::Reasoning(r) => {
+                assert_eq!(r.text, "thinking hard");
             }
             other => panic!("first item must be reasoning, got {other:?}"),
         }
-        // The referencing `function_call` must stay beside its reasoning item,
-        // with its provider `item_id` naming that reasoning id so the replayed
-        // `input` array does not orphan it.
-        match &content[1] {
+        // The wire-form tool call must carry its provider id ("fc_item") so
+        // the back half of the test can assert it round-trips correctly.
+        match &msg.content[1] {
             AssistantContent::ToolCall(tc) => {
                 let provider = tc
                     .id
                     .provider()
-                    .expect("dual-wire call keeps a provider id");
-                assert_eq!(provider.item_id.as_deref(), Some("fc_item"));
+                    .expect("wire-form call retains its provider id");
+                assert_eq!(provider.as_str(), "fc_item");
             }
             other => panic!("second item must be the tool call, got {other:?}"),
         }
@@ -2626,16 +2619,12 @@ mod tests {
     #[test]
     fn assistant_tool_message_omits_reasoning_items_when_false() {
         let reasoning = Reasoning {
-            id: Some("rs_skip".to_string()),
-            content: vec![ReasoningContent::Text {
-                text: "should be excluded".to_string(),
-                signature: None,
-            }],
-        }
-        .sealed("openai");
-        let call = ToolCall::from_dual_wire(
+            text: "should be excluded".to_string(),
+            redacted: false,
+            native: None,
+        };
+        let call = ToolCall::from_wire(
             "fc_item",
-            "call_1",
             ToolFunction::new(
                 ToolName::new("Read").unwrap(),
                 serde_json::json!({ "file_path": "/tmp/x" }),
@@ -2647,17 +2636,18 @@ mod tests {
             std::slice::from_ref(&reasoning),
             std::slice::from_ref(&call),
             false,
+            None,
         );
 
-        let Message::Assistant { content, .. } = message else {
+        let Message::Assistant(ref msg) = message else {
             panic!("expected an assistant message");
         };
-        assert_eq!(content.len(), 2, "text and tool call, no reasoning");
-        match &content[0] {
+        assert_eq!(msg.content.len(), 2, "text and tool call, no reasoning");
+        match &msg.content[0] {
             AssistantContent::Text(t) => assert_eq!(&t.text, "some text"),
             other => panic!("first item must be text, got {other:?}"),
         }
-        match &content[1] {
+        match &msg.content[1] {
             AssistantContent::ToolCall(_) => {}
             other => panic!("second item must be tool call, got {other:?}"),
         }
@@ -2724,28 +2714,35 @@ mod tests {
         let assistant = second
             .chat_history
             .iter()
-            .find(|m| matches!(m, Message::Assistant { .. }))
+            .find(|m| matches!(m.as_ref(), Message::Assistant(_)))
             .expect("second request carries the prior assistant turn");
-        let Message::Assistant { content, .. } = assistant else {
+        let Message::Assistant(ref msg) = assistant.as_ref() else {
             unreachable!()
         };
-        let reasoning = content.iter().find_map(|c| match c {
-            AssistantContent::Reasoning(sealed) => {
-                sealed.open(&Issuer::from("mock")).map(|r| r.id.clone())
-            }
+        // rig 0.46 replays another provider's reasoning block as plain text
+        // unless the wire accepts foreign reasoning; either way the reasoning
+        // text must lead the replayed turn. Pin the match to the expected
+        // text so a regression that drops reasoning while emitting unrelated
+        // text cannot pass.
+        let reasoning = msg.content.first().and_then(|c| match c {
+            AssistantContent::Reasoning(r) => Some(r.text.clone()),
+            AssistantContent::Text(t) if t.text == "thinking" => Some(t.text.clone()),
             _ => None,
         });
         assert_eq!(
-            reasoning.flatten().as_deref(),
-            Some("rs_1"),
-            "reasoning item id must survive into the replay"
+            reasoning.as_deref(),
+            Some("thinking"),
+            "reasoning text must survive into the replay: {msg:#?}"
         );
         // The reasoning item must precede the referencing function_call in the
-        // replayed content so the call is not orphaned.
-        let reasoning_at = content
-            .iter()
-            .position(|c| matches!(c, AssistantContent::Reasoning(_)));
-        let call_at = content
+        // replayed content so the call is not orphaned. Pin to the known
+        // reasoning text to prevent a false pass if reasoning is dropped.
+        let reasoning_at = msg.content.iter().position(|c| {
+            matches!(c, AssistantContent::Reasoning(_))
+                || matches!(c, AssistantContent::Text(t) if t.text == "thinking")
+        });
+        let call_at = msg
+            .content
             .iter()
             .position(|c| matches!(c, AssistantContent::ToolCall(_)));
         assert!(
@@ -2819,21 +2816,22 @@ mod tests {
         let assistant = second
             .chat_history
             .iter()
-            .find(|m| matches!(m, Message::Assistant { .. }))
+            .find(|m| matches!(m.as_ref(), Message::Assistant(_)))
             .expect("second request carries the prior assistant turn");
-        let Message::Assistant { content, .. } = assistant else {
+        let Message::Assistant(ref msg) = assistant.as_ref() else {
             unreachable!()
         };
 
         // The reasoning item must NOT appear in the replayed history.
         assert!(
-            !content
+            !msg.content
                 .iter()
                 .any(|c| matches!(c, AssistantContent::Reasoning(_))),
             "flag=false must omit reasoning items from replayed history"
         );
         // The tool call must still be present.
-        let call = content
+        let call = msg
+            .content
             .iter()
             .find(|c| matches!(c, AssistantContent::ToolCall(_)));
         assert!(call.is_some(), "tool call must survive into the replay");
@@ -2947,6 +2945,8 @@ mod tests {
         type Op = Completion;
         type Payload = CompletionRequest;
         type Frame = rig_core::test_utils::MockFrame;
+        type Event = rig_core::test_utils::MockFrame;
+        type Reassembler = rig_core::test_utils::MockDocument;
         type Decoder<'id> = rig_core::test_utils::MockDecoder<'id>;
 
         fn describe(&self) -> rig_core::wire::Descriptor<'_> {
@@ -3490,7 +3490,7 @@ mod tests {
             .unwrap();
         assert!(content.contains("unknown tool"));
         let reqs = model.requests();
-        let history: Vec<&Message> = reqs[1].chat_history.iter().collect();
+        let history: Vec<&Message> = reqs[1].chat_history.iter().map(|m| m.as_ref()).collect();
         // Denied calls appear in history as tool results.
         let history_debug = format!("{:?}", history);
         assert!(
@@ -3780,7 +3780,7 @@ mod tests {
         let requests = model.requests();
         assert!(!requests.is_empty());
         for req in requests {
-            match req.chat_history.first() {
+            match req.chat_history.first().map(|m| m.as_ref()) {
                 Some(Message::System { content }) => assert_eq!(content, "you are a harness"),
                 other => panic!("system prompt must lead the history, got: {other:?}"),
             }
@@ -3831,7 +3831,7 @@ mod tests {
                 "harness must not inject preamble"
             );
             for msg in req.chat_history.iter() {
-                if let Message::System { content } = msg {
+                if let Message::System { content } = msg.as_ref() {
                     panic!("harness injected system message: {content}");
                 }
             }
@@ -4220,7 +4220,7 @@ mod tests {
             .unwrap()
             .chat_history
             .iter()
-            .flat_map(|m| match m {
+            .flat_map(|m| match m.as_ref() {
                 Message::User { content } => content
                     .iter()
                     .filter_map(|c| match c {
@@ -4325,7 +4325,7 @@ mod tests {
         let parent_history = &reqs.last().unwrap().chat_history;
         let task_result = parent_history
             .iter()
-            .flat_map(|m| match m {
+            .flat_map(|m| match m.as_ref() {
                 Message::User { content } => content
                     .iter()
                     .filter_map(|c| match c {
@@ -5461,8 +5461,8 @@ mod tests {
         // message containing a matching ToolResult.
         let mut done_tool_use_seen = false;
         for (i, m) in messages.iter().enumerate() {
-            if let Message::Assistant { content, .. } = m {
-                let has_done = content.iter().any(
+            if let Message::Assistant(ref msg) = m {
+                let has_done = msg.content.iter().any(
                     |c| matches!(c, AssistantContent::ToolCall(tc) if tc.function.name == "Done"),
                 );
                 if has_done {
@@ -5602,8 +5602,8 @@ mod tests {
         // assistant message pair in the persisted history.
         // Count how many times the Done tool_use appears.
         let done_count = messages.iter().filter(|m| {
-            matches!(m, Message::Assistant { content, .. }
-                if content.iter().any(|c| matches!(c, AssistantContent::ToolCall(tc) if tc.function.name == "Done")))
+            matches!(m, Message::Assistant(ref msg)
+                if msg.content.iter().any(|c| matches!(c, AssistantContent::ToolCall(tc) if tc.function.name == "Done")))
         }).count();
         assert_eq!(
             done_count, 1,

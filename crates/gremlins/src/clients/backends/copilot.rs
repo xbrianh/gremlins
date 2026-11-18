@@ -6,18 +6,16 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use async_trait::async_trait;
 use rig_core::http_client::middleware::HttpMiddleware;
 use rig_core::http_client::{
-    Error as HttpError, HeaderMap, HeaderValue, Method, Result as HttpResult, Uri,
+    Error as HttpError, HeaderMap, HeaderValue, Result as HttpResult,
 };
-use rig_core::providers::copilot::{Copilot, CopilotConfig, CopilotIntent};
-use rig_core::wasm_compat::WasmBoxedFuture;
-use serde::Deserialize;
+use rig_core::providers::copilot::DIALECT as COPILOT_DIALECT;
+use rig_core::providers::openai::{OpenAI, OpenAIConfig};
 
 use crate::clients::backend::{Backend, ClientError, RunParams};
 use crate::clients::cancel::CancelToken;
 use crate::clients::cancels::CancelsMap;
 use crate::clients::github_auth;
 use crate::clients::interactive::InteractiveSession;
-
 use crate::clients::native::NativeRunState;
 use crate::clients::openai_protocol;
 use crate::clients::params::{self, ResolvedParams};
@@ -25,6 +23,8 @@ use crate::clients::protocol::CompletedRun;
 use crate::clients::token_provider::{TokenProvider, TokenProviderError};
 use rig_core::driver::DynModel;
 use rig_core::operation::Completion;
+use rig_core::wasm_compat::WasmBoxedFuture;
+use serde::Deserialize;
 
 const PROVIDER_NAME: &str = "copilot";
 const DEFAULT_MODEL: &str = "gpt-4o";
@@ -68,16 +68,16 @@ struct CopilotSession {
 /// pre-exchanged session token.
 fn resolve_auth(
     make_exchanger: impl FnOnce() -> Result<Arc<dyn CopilotTokenExchanger>, String>,
-) -> Result<Copilot, String> {
+) -> Result<OpenAI, String> {
     // 1. GITHUB_COPILOT_API_KEY / COPILOT_API_KEY env vars
     if let Some(key) = crate::config::copilot_api_key() {
-        return Ok(CopilotConfig::new(key).client());
+        return Ok(OpenAIConfig::with_key(&COPILOT_DIALECT, key).client());
     }
     // Load providers.yaml once for steps 2 and 3.
     let providers = crate::clients::config::Providers::load();
     // 2. providers.yaml copilot.api-key
     if let Some(key) = providers.get(PROVIDER_NAME) {
-        return Ok(CopilotConfig::new(key.to_string()).client());
+        return Ok(OpenAIConfig::with_key(&COPILOT_DIALECT, key.to_string()).client());
     }
     // 3. providers.yaml copilot.client-id + copilot.refresh-token
     if let (Some(client_id), Some(refresh_token)) = (
@@ -128,7 +128,7 @@ fn resolve_auth(
 fn copilot_client_from_static_token(
     exchanger: Arc<dyn CopilotTokenExchanger>,
     access_token: String,
-) -> Result<Copilot, String> {
+) -> Result<OpenAI, String> {
     let session = exchange_github_token_sync(exchanger.clone(), &access_token)?;
     let token_provider = Arc::new(StaticTokenProvider {
         token: access_token,
@@ -408,8 +408,7 @@ impl CopilotTokenRefreshMiddleware {
 impl HttpMiddleware for CopilotTokenRefreshMiddleware {
     fn before_request_headers<'a>(
         &'a self,
-        _method: &'a Method,
-        _uri: &'a Uri,
+        _exchange: rig_core::http_client::Exchange<'a>,
         headers: &'a mut HeaderMap,
     ) -> WasmBoxedFuture<'a, HttpResult<()>> {
         Box::pin(async move {
@@ -449,10 +448,10 @@ fn token_exchange_error_detail(body: &str) -> String {
 fn copilot_client_with_session(
     session: CopilotSession,
     middleware: CopilotTokenRefreshMiddleware,
-) -> Copilot {
+) -> OpenAI {
     let transport = rig_core::http_client::DynHttpClient::new(rig_reqwest::shared())
         .with_middleware(middleware);
-    let config = CopilotConfig::new(session.token);
+    let config = OpenAIConfig::with_key(&COPILOT_DIALECT, session.token);
     let config = match session.api_base {
         Some(api_base) => config.with_base_url(api_base),
         None => config,
@@ -463,8 +462,7 @@ fn copilot_client_with_session(
 // ── CopilotRunState ──────────────────────────────────────────────────────
 
 struct CopilotRunState {
-    client: Copilot,
-    intent: Option<CopilotIntent>,
+    client: OpenAI,
     strict_tools: bool,
     tool_result_array_content: bool,
     native: NativeRunState<()>,
@@ -472,24 +470,20 @@ struct CopilotRunState {
 
 /// Parse Copilot-specific typed flags from the model-spec parameter map.
 ///
-/// `intent` accepts `edits` or `panel`; `strict_tools` and
-/// `tool_result_array_content` are strict bools.  A malformed value is a
-/// build-time error, never a silent fallback.
+/// `strict_tools` and `tool_result_array_content` are strict bools.  A
+/// malformed value is a build-time error, never a silent fallback.
+///
+/// The Copilot `intent` (edits/panel) concept was removed in rig 0.46:
+/// Copilot is now configured as an `OpenAI` provider with the copilot dialect.
 fn parse_extra_params(
     extra_params: &indexmap::IndexMap<String, String>,
-) -> Result<(Option<CopilotIntent>, bool, bool), String> {
-    let intent = match extra_params.get("intent") {
-        Some(v) => match v.as_str() {
-            "edits" => Some(CopilotIntent::Edits),
-            "panel" => Some(CopilotIntent::Panel),
-            _ => {
-                return Err(format!(
-                    "copilot: invalid value {v:?} for client param \"intent\": expected one of edits, panel"
-                ))
-            }
-        },
-        None => None,
-    };
+) -> Result<(bool, bool), String> {
+    if let Some(v) = extra_params.get("intent") {
+        return Err(format!(
+            "copilot: the \"intent\" client param ({v:?}) was removed in rig 0.46; \
+             Copilot is now configured as an OpenAI provider with the copilot dialect"
+        ));
+    }
     let strict_tools = match extra_params.get("strict_tools") {
         Some(v) => params::parse_bool("copilot", "strict_tools", v)?,
         None => false,
@@ -498,7 +492,7 @@ fn parse_extra_params(
         Some(v) => params::parse_bool("copilot", "tool_result_array_content", v)?,
         None => false,
     };
-    Ok((intent, strict_tools, tool_result_array_content))
+    Ok((strict_tools, tool_result_array_content))
 }
 
 // ── CopilotBackend ───────────────────────────────────────────────────────
@@ -548,13 +542,11 @@ impl CopilotBackend {
         let tool_filter = openai_protocol::tool_filter(native_block);
 
         let resolved = Self::resolve_params(extra_params)?;
-        let (intent, strict_tools, tool_result_array_content) =
-            parse_extra_params(extra_params)?;
+        let (strict_tools, tool_result_array_content) = parse_extra_params(extra_params)?;
 
         Ok(Arc::new(Self {
             state: CopilotRunState {
                 client,
-                intent,
                 strict_tools,
                 tool_result_array_content,
                 native: NativeRunState {
@@ -578,9 +570,6 @@ impl Backend for CopilotBackend {
         let (provider, model) = openai_protocol::provider_and_model(spec)?;
         if provider == PROVIDER_NAME {
             let mut mdl = self.state.client.completion(&model);
-            if let Some(intent) = self.state.intent {
-                mdl.wire = mdl.wire.with_intent(intent);
-            }
             if self.state.strict_tools {
                 mdl.wire = mdl.wire.with_strict_tools();
             }
@@ -603,15 +592,11 @@ impl Backend for CopilotBackend {
         let model_name = self.state.native.effective_model(ctx.params.model.as_deref());
 
         let client = &self.state.client;
-        let intent = self.state.intent;
         let strict_tools = self.state.strict_tools;
         let tool_result_array_content = self.state.tool_result_array_content;
 
         let make_model = async move {
             let mut mdl = client.completion(&model_name);
-            if let Some(intent) = intent {
-                mdl.wire = mdl.wire.with_intent(intent);
-            }
             if strict_tools {
                 mdl.wire = mdl.wire.with_strict_tools();
             }
@@ -678,6 +663,7 @@ impl Backend for CopilotBackend {
 mod tests {
     use crate::clients::cancel::CancelToken;
     use super::*;
+    use rig_core::http_client::{HttpClientExt, Method, Uri};
     use crate::test_support::EnvGuard;
     use std::io::{Read, Write};
     use std::net::TcpListener;
@@ -704,7 +690,7 @@ mod tests {
         guard
     }
 
-    fn resolve_auth_unreachable() -> Result<Copilot, String> {
+    fn resolve_auth_unreachable() -> Result<OpenAI, String> {
         resolve_auth(|| Ok(unreachable_exchanger()))
     }
 
@@ -797,7 +783,7 @@ mod tests {
 
     #[test]
     fn reap_all_cancels_only_own_tokens() {
-        let client = Copilot::new("tid=1;exp=9999999999");
+        let client = OpenAIConfig::with_key(&COPILOT_DIALECT, "tid=1;exp=9999999999").client();
         let backlog = CancelsMap::default();
         let a = CancelToken::new();
         let b = CancelToken::new();
@@ -809,7 +795,6 @@ mod tests {
         let backend = CopilotBackend {
             state: CopilotRunState {
                 client,
-                intent: None,
                 strict_tools: false,
                 tool_result_array_content: false,
                 native: NativeRunState {
@@ -1084,19 +1069,25 @@ mod tests {
             fresh_session(i64::MAX),
         );
         let middleware = CopilotTokenRefreshMiddleware::new(Arc::new(sessions));
-        let mut headers = HeaderMap::new();
-
-        middleware
-            .before_request_headers(
-                &Method::GET,
-                &Uri::from_static("https://api.githubcopilot.com"),
-                &mut headers,
-            )
-            .await
+        let inner = rig_core::test_utils::RecordingHttpClient::new("");
+        let client =
+            rig_core::http_client::DynHttpClient::new(inner.clone()).with_middleware(middleware);
+        let request = rig_core::http_client::Request::builder()
+            .method(Method::GET)
+            .uri(Uri::from_static("https://api.githubcopilot.com"))
+            .body(rig_core::http_client::NoBody)
             .unwrap();
 
+        client.send::<_, bytes::Bytes>(request).await.unwrap();
+
+        let requests = inner.requests();
         assert_eq!(
-            headers.get(http::header::AUTHORIZATION).unwrap().to_str().unwrap(),
+            requests[0]
+                .headers
+                .get(http::header::AUTHORIZATION)
+                .unwrap()
+                .to_str()
+                .unwrap(),
             "Bearer tid=1;exp=9999999999"
         );
     }
@@ -1110,20 +1101,26 @@ mod tests {
             fresh_session(1),
         );
         let middleware = CopilotTokenRefreshMiddleware::new(Arc::new(sessions));
-        let mut headers = HeaderMap::new();
-
-        middleware
-            .before_request_headers(
-                &Method::GET,
-                &Uri::from_static("https://api.githubcopilot.com"),
-                &mut headers,
-            )
-            .await
+        let inner = rig_core::test_utils::RecordingHttpClient::new("");
+        let client =
+            rig_core::http_client::DynHttpClient::new(inner.clone()).with_middleware(middleware);
+        let request = rig_core::http_client::Request::builder()
+            .method(Method::GET)
+            .uri(Uri::from_static("https://api.githubcopilot.com"))
+            .body(rig_core::http_client::NoBody)
             .unwrap();
 
+        client.send::<_, bytes::Bytes>(request).await.unwrap();
+
         assert_eq!(exchanger.calls.load(AtomicOrdering::SeqCst), 1);
+        let requests = inner.requests();
         assert_eq!(
-            headers.get(http::header::AUTHORIZATION).unwrap().to_str().unwrap(),
+            requests[0]
+                .headers
+                .get(http::header::AUTHORIZATION)
+                .unwrap()
+                .to_str()
+                .unwrap(),
             "Bearer tid=1;exp=9999999999"
         );
     }
@@ -1132,41 +1129,10 @@ mod tests {
     // ── parse_extra_params tests ─────────────────────────────────────
 
     #[test]
-    fn extra_params_intent_edits() {
-        let mut ep: indexmap::IndexMap<String, String> = indexmap::IndexMap::new();
-        ep.insert("intent".into(), "edits".into());
-        let (intent, _, _) = parse_extra_params(&ep).unwrap();
-        assert_eq!(intent, Some(CopilotIntent::Edits));
-    }
-
-    #[test]
-    fn extra_params_intent_panel() {
-        let mut ep: indexmap::IndexMap<String, String> = indexmap::IndexMap::new();
-        ep.insert("intent".into(), "panel".into());
-        let (intent, _, _) = parse_extra_params(&ep).unwrap();
-        assert_eq!(intent, Some(CopilotIntent::Panel));
-    }
-
-    #[test]
-    fn extra_params_intent_bogus_is_error() {
-        let mut ep: indexmap::IndexMap<String, String> = indexmap::IndexMap::new();
-        ep.insert("intent".into(), "bogus".into());
-        let err = parse_extra_params(&ep).unwrap_err();
-        assert!(err.contains("intent"), "{err}");
-        assert!(err.contains("bogus"), "{err}");
-    }
-
-    #[test]
-    fn extra_params_intent_missing_is_none() {
-        let (intent, _, _) = parse_extra_params(&indexmap::IndexMap::new()).unwrap();
-        assert_eq!(intent, None);
-    }
-
-    #[test]
     fn extra_params_strict_tools_true() {
         let mut ep: indexmap::IndexMap<String, String> = indexmap::IndexMap::new();
         ep.insert("strict_tools".into(), "true".into());
-        let (_, strict_tools, _) = parse_extra_params(&ep).unwrap();
+        let (strict_tools, _) = parse_extra_params(&ep).unwrap();
         assert!(strict_tools);
     }
 
@@ -1174,7 +1140,7 @@ mod tests {
     fn extra_params_strict_tools_one() {
         let mut ep: indexmap::IndexMap<String, String> = indexmap::IndexMap::new();
         ep.insert("strict_tools".into(), "1".into());
-        let (_, strict_tools, _) = parse_extra_params(&ep).unwrap();
+        let (strict_tools, _) = parse_extra_params(&ep).unwrap();
         assert!(strict_tools);
     }
 
@@ -1188,7 +1154,7 @@ mod tests {
 
     #[test]
     fn extra_params_strict_tools_false_by_default() {
-        let (_, strict_tools, _) = parse_extra_params(&indexmap::IndexMap::new()).unwrap();
+        let (strict_tools, _) = parse_extra_params(&indexmap::IndexMap::new()).unwrap();
         assert!(!strict_tools);
     }
 
@@ -1196,7 +1162,7 @@ mod tests {
     fn extra_params_tool_result_array_content_true() {
         let mut ep: indexmap::IndexMap<String, String> = indexmap::IndexMap::new();
         ep.insert("tool_result_array_content".into(), "true".into());
-        let (_, _, tool_result_array_content) = parse_extra_params(&ep).unwrap();
+        let (_, tool_result_array_content) = parse_extra_params(&ep).unwrap();
         assert!(tool_result_array_content);
     }
 
@@ -1204,14 +1170,23 @@ mod tests {
     fn extra_params_tool_result_array_content_one() {
         let mut ep: indexmap::IndexMap<String, String> = indexmap::IndexMap::new();
         ep.insert("tool_result_array_content".into(), "1".into());
-        let (_, _, tool_result_array_content) = parse_extra_params(&ep).unwrap();
+        let (_, tool_result_array_content) = parse_extra_params(&ep).unwrap();
         assert!(tool_result_array_content);
     }
 
     #[test]
     fn extra_params_tool_result_array_content_false_by_default() {
-        let (_, _, tool_result_array_content) =
+        let (_, tool_result_array_content) =
             parse_extra_params(&indexmap::IndexMap::new()).unwrap();
         assert!(!tool_result_array_content);
+    }
+
+    #[test]
+    fn extra_params_intent_rejected_with_helpful_error() {
+        let mut ep: indexmap::IndexMap<String, String> = indexmap::IndexMap::new();
+        ep.insert("intent".into(), "edits".into());
+        let err = parse_extra_params(&ep).unwrap_err();
+        assert!(err.contains("intent"), "{err}");
+        assert!(err.contains("removed in rig 0.46"), "{err}");
     }
 }

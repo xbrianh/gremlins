@@ -24,7 +24,7 @@
 //! byte-size gate.
 
 use async_trait::async_trait;
-use rig_core::completion::message::{Reasoning, Sealed, ToolCall};
+use rig_core::completion::message::{Origin, Reasoning, ToolCall};
 use rig_core::completion::Message;
 use std::sync::Arc;
 
@@ -156,7 +156,7 @@ impl StandardConversation {
                 Ok(Some(r)) if r.block.is_some() => {
                     let signed = r.block.unwrap();
                     let mut new_history = Vec::with_capacity(1 + kept.len());
-                    new_history.push(compaction_block_as_message(&signed));
+                    new_history.push(compaction_block_as_message(&signed, backend.model()));
                     new_history.extend_from_slice(&kept);
                     self.history = new_history;
                     return Some(CompactionReport {
@@ -226,9 +226,10 @@ impl Conversation for StandardConversation {
     fn record_turn(
         &mut self,
         text: &str,
-        reasoning_items: &[Sealed<Reasoning>],
+        reasoning_items: &[Reasoning],
         tool_calls: &[ToolCall],
         input_tokens: Option<u64>,
+        origin: Option<Origin>,
     ) {
         // Commit the pending user prompt before the assistant message.
         let prompt = self.next_prompt.clone();
@@ -239,6 +240,7 @@ impl Conversation for StandardConversation {
             reasoning_items,
             tool_calls,
             self.preserve_reasoning_in_history,
+            origin,
         ));
         self.last_prompt_tokens = input_tokens;
     }
@@ -250,7 +252,7 @@ impl Conversation for StandardConversation {
 
     fn pop_last_assistant_turn(&mut self) {
         // Pop the assistant message.
-        if matches!(self.history.last(), Some(Message::Assistant { .. })) {
+        if matches!(self.history.last(), Some(Message::Assistant(_))) {
             self.history.pop();
         }
         // Pop the preceding user prompt (the one committed by record_turn)
@@ -314,7 +316,7 @@ impl Conversation for StandardConversation {
         &mut self,
         turn: usize,
         text: &str,
-        reasoning_items: &[Sealed<Reasoning>],
+        reasoning_items: &[Reasoning],
         done: Option<&ToolCall>,
     ) -> RunArtifact {
         let mut messages = self.history.clone();
@@ -337,6 +339,7 @@ impl Conversation for StandardConversation {
             reasoning_items,
             tool_slice,
             self.preserve_reasoning_in_history,
+            None,
         ));
         if let Some(done_tc) = done {
             let done_ledger = format!(
@@ -370,7 +373,7 @@ impl Conversation for StandardConversation {
         // tool results would leave an unmatched assistant tool-use, so drop only
         // the assistant message — the preceding user prompt (the original task)
         // must stay so the child receives the promised parent context.
-        if matches!(history.last(), Some(Message::Assistant { .. })) {
+        if matches!(history.last(), Some(Message::Assistant(_))) {
             history.pop();
         }
         Box::new(Self {
@@ -417,19 +420,15 @@ impl Conversation for StandardConversation {
             if has_tool_result {
                 // Append to the pending tool-result user message.
                 let mut merged = existing;
-                merged.push(UserContent::Text(Text {
-                    text: format!("[operator]: {text}"),
-                    additional_params: None,
-                }));
+                merged.push(UserContent::Text(Text::new(format!("[operator]: {text}"))));
                 self.next_prompt = Message::User { content: merged };
             } else {
                 // Append the operator note to the pending user prompt so
                 // the original task is not discarded.
                 let mut merged = existing;
-                merged.push(UserContent::Text(Text {
-                    text: format!("\n\n[operator]: {text}"),
-                    additional_params: None,
-                }));
+                merged.push(UserContent::Text(Text::new(format!(
+                    "\n\n[operator]: {text}"
+                ))));
                 self.history
                     .push(Message::user(format!("[operator]: {text}")));
                 self.next_prompt = Message::User { content: merged };
@@ -444,7 +443,7 @@ impl Conversation for StandardConversation {
     fn done_rejected(
         &mut self,
         text: &str,
-        reasoning_items: &[Sealed<Reasoning>],
+        reasoning_items: &[Reasoning],
         tool_calls: &[ToolCall],
         results: Vec<Message>,
         next_prompt: Message,
@@ -459,6 +458,7 @@ impl Conversation for StandardConversation {
             reasoning_items,
             tool_calls,
             self.preserve_reasoning_in_history,
+            None,
         ));
         self.history.extend(results);
     }
@@ -481,8 +481,8 @@ impl Conversation for StandardConversation {
 
 #[cfg(test)]
 mod tests {
+    use rig_core::completion::message::{AssistantContent, UserContent};
     use rig_core::completion::Message;
-    use rig_core::message::{AssistantContent, Issuer, UserContent};
 
     use crate::clients::agent::agent_loop::*;
     use crate::clients::cancel::CancelToken;
@@ -582,7 +582,7 @@ mod tests {
             .iter()
             .find(|req| {
                 matches!(
-                    req.chat_history.first(),
+                    req.chat_history.first().map(|m| m.as_ref()),
                     Some(Message::System { content })
                         if content.contains("This is a forked child agent")
                 )
@@ -591,14 +591,13 @@ mod tests {
 
         let history = &fork_req.chat_history;
         // The child inherits the parent's conversation as static history:
-        // [system prompt] + [User(stage_prompt), Assistant(tool_call), User(tool_result),
-        // User(Continue.)] followed by the fork prompt.
-        // That's 6 messages: system + 5 (4 inherited + 1 fork).
-        assert_eq!(history.len(), 6, "unexpected fork history: {history:#?}");
+        // system + User(stage_prompt) + Assistant(tool_call) +
+        // User(tool_result + Continue. + fork prompt) = 4 messages.
+        assert_eq!(history.len(), 4, "unexpected fork history: {history:#?}");
 
         // Fork system prompt leads the child history.
         assert!(matches!(
-            &history[0],
+            history[0].as_ref(),
             Message::System { content }
                 if content.contains("<tools>") && content.contains("Do not call")
         ));
@@ -607,11 +606,11 @@ mod tests {
         assert!(
             history
                 .iter()
-                .any(|m| matches!(m, Message::Assistant { .. })),
+                .any(|m| matches!(m.as_ref(), Message::Assistant(_))),
             "history must contain an assistant message"
         );
         assert!(
-            history.iter().any(|m| matches!(m, Message::User { content } if content.iter().any(|c| matches!(c, UserContent::ToolResult(_))))),
+            history.iter().any(|m| matches!(m.as_ref(), Message::User { content } if content.iter().any(|c| matches!(c, UserContent::ToolResult(_))))),
             "history must contain a tool result"
         );
         // The Fork prompt is the last message in chat_history.
@@ -711,7 +710,7 @@ mod tests {
         let parent_history = &requests.last().unwrap().chat_history;
         let task_result = parent_history
             .iter()
-            .flat_map(|m| match m {
+            .flat_map(|m| match m.as_ref() {
                 Message::User { content } => content
                     .iter()
                     .filter_map(|c| match c {
@@ -758,8 +757,8 @@ mod tests {
 
         // Turn 0: reasoning only (rs_0), no text, no tool call — the loop
         // records the reasoning item and continues with "Continue.".
-        // Turn 1: Done. The second request must carry rs_0 as an assistant
-        // message, not as two consecutive user messages.
+        // Turn 1: Done. The second request must carry the reasoning text as an
+        // assistant message, not as two consecutive user messages.
         let model = rig_core::test_utils::MockCompletionModel::from_stream_turns([
             vec![
                 rig_core::test_utils::MockStreamEvent::reasoning_delta_with_id("rs_0", "thinking"),
@@ -798,28 +797,32 @@ mod tests {
         let assistant = second
             .chat_history
             .iter()
-            .find(|m| matches!(m, Message::Assistant { .. }))
+            .find(|m| matches!(m.as_ref(), Message::Assistant(_)))
             .expect("second request carries the prior assistant turn");
-        let Message::Assistant { content, .. } = assistant else {
+        let Message::Assistant(ref msg) = assistant.as_ref() else {
             unreachable!()
         };
-        let reasoning = content.iter().find_map(|c| match c {
-            AssistantContent::Reasoning(sealed) => {
-                sealed.open(&Issuer::from("mock")).map(|r| r.id.clone())
-            }
+        // rig 0.46 replays another provider's reasoning block as plain text
+        // unless the wire accepts foreign reasoning; either way the reasoning
+        // text must lead the replayed turn. Pin the match to the expected
+        // text so a regression that drops reasoning while emitting unrelated
+        // text cannot pass.
+        let reasoning = msg.content.iter().find_map(|c| match c {
+            AssistantContent::Reasoning(r) => Some(r.text.clone()),
+            AssistantContent::Text(t) if t.text == "thinking" => Some(t.text.clone()),
             _ => None,
         });
         assert_eq!(
-            reasoning.flatten().as_deref(),
-            Some("rs_0"),
-            "reasoning-only turn's structured item must survive into the replay"
+            reasoning.as_deref(),
+            Some("thinking"),
+            "reasoning-only turn's reasoning text must survive into the replay"
         );
 
         // No two consecutive user messages: the assistant turn (with its
         // reasoning item) must sit between the original prompt and "Continue.".
         let mut prev_user = false;
         for m in &second.chat_history {
-            match m {
+            match m.as_ref() {
                 Message::User { .. } => {
                     assert!(
                         !prev_user,

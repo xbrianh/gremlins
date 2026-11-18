@@ -543,7 +543,7 @@ mod tests {
 
         // The task harness prompt must reach the model as a leading system message.
         for req in model.requests() {
-            match req.chat_history.first() {
+            match req.chat_history.first().map(|m| m.as_ref()) {
                 Some(Message::System { content }) => assert!(
                     content.contains("<tools>"),
                     "unexpected system prompt: {content}"

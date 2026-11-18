@@ -2,6 +2,8 @@
 
 use async_trait::async_trait;
 
+use rig_core::completion::message::Origin;
+
 /// The transcript produced for one model turn.
 #[derive(Clone, Debug)]
 pub(crate) struct TurnScript {
@@ -58,13 +60,12 @@ pub(crate) fn message_text_byte_len(message: &rig_core::completion::Message) -> 
                 _ => 0,
             })
             .sum(),
-        rig_core::completion::Message::Assistant { content, .. } => content
+        rig_core::completion::Message::Assistant(ref msg) => msg
+            .content
             .iter()
             .map(|c| match c {
                 AssistantContent::Text(t) => t.text.len() as u64,
-                AssistantContent::ToolCall(call) => {
-                    call.function.arguments.to_string().len() as u64
-                }
+                AssistantContent::ToolCall(call) => call.function.arguments_json().len() as u64,
                 _ => 0,
             })
             .sum(),
@@ -100,11 +101,10 @@ pub(crate) trait Conversation: Send + Sync {
     fn record_turn(
         &mut self,
         text: &str,
-        reasoning_items: &[rig_core::completion::message::Sealed<
-            rig_core::completion::message::Reasoning,
-        >],
+        reasoning_items: &[rig_core::completion::message::Reasoning],
         tool_calls: &[rig_core::completion::message::ToolCall],
         input_tokens: Option<u64>,
+        origin: Option<Origin>,
     );
 
     /// Record tool-result messages into history.
@@ -137,9 +137,7 @@ pub(crate) trait Conversation: Send + Sync {
         &mut self,
         turn: usize,
         text: &str,
-        reasoning_items: &[rig_core::completion::message::Sealed<
-            rig_core::completion::message::Reasoning,
-        >],
+        reasoning_items: &[rig_core::completion::message::Reasoning],
         done: Option<&rig_core::completion::message::ToolCall>,
     ) -> RunArtifact;
 
@@ -161,9 +159,7 @@ pub(crate) trait Conversation: Send + Sync {
     fn done_rejected(
         &mut self,
         text: &str,
-        reasoning_items: &[rig_core::completion::message::Sealed<
-            rig_core::completion::message::Reasoning,
-        >],
+        reasoning_items: &[rig_core::completion::message::Reasoning],
         tool_calls: &[rig_core::completion::message::ToolCall],
         results: Vec<rig_core::completion::Message>,
         next_prompt: rig_core::completion::Message,
@@ -207,8 +203,9 @@ fn collect_tool_evidence(messages: &[rig_core::completion::Message]) -> String {
 
     for message in messages {
         match message {
-            rig_core::completion::Message::Assistant { content, .. } => {
-                pending = content
+            rig_core::completion::Message::Assistant(ref msg) => {
+                pending = msg
+                    .content
                     .iter()
                     .filter_map(|item| match item {
                         AssistantContent::ToolCall(call) => {
@@ -367,11 +364,10 @@ impl Conversation for ConversationStub {
     fn record_turn(
         &mut self,
         text: &str,
-        reasoning_items: &[rig_core::completion::message::Sealed<
-            rig_core::completion::message::Reasoning,
-        >],
+        reasoning_items: &[rig_core::completion::message::Reasoning],
         tool_calls: &[rig_core::completion::message::ToolCall],
         _input_tokens: Option<u64>,
+        origin: Option<Origin>,
     ) {
         // Commit the pending user prompt before the assistant message.
         let prompt = self.next_prompt.clone();
@@ -382,6 +378,7 @@ impl Conversation for ConversationStub {
             reasoning_items,
             tool_calls,
             self.preserve_reasoning,
+            origin,
         ));
     }
 
@@ -394,7 +391,7 @@ impl Conversation for ConversationStub {
         // Pop the assistant message.
         if matches!(
             self.history.last(),
-            Some(rig_core::completion::Message::Assistant { .. })
+            Some(rig_core::completion::Message::Assistant(_))
         ) {
             self.history.pop();
         }
@@ -434,9 +431,7 @@ impl Conversation for ConversationStub {
         &mut self,
         turn: usize,
         text: &str,
-        reasoning_items: &[rig_core::completion::message::Sealed<
-            rig_core::completion::message::Reasoning,
-        >],
+        reasoning_items: &[rig_core::completion::message::Reasoning],
         done: Option<&rig_core::completion::message::ToolCall>,
     ) -> RunArtifact {
         let mut messages = self.history.clone();
@@ -460,6 +455,7 @@ impl Conversation for ConversationStub {
             reasoning_items,
             tool_slice,
             self.preserve_reasoning,
+            None,
         ));
         if let Some(done_tc) = done {
             let done_ledger = format!(
@@ -493,7 +489,7 @@ impl Conversation for ConversationStub {
         // so the child receives the promised parent context.
         if matches!(
             history.last(),
-            Some(rig_core::completion::Message::Assistant { .. })
+            Some(rig_core::completion::Message::Assistant(_))
         ) {
             history.pop();
         }
@@ -522,9 +518,7 @@ impl Conversation for ConversationStub {
     fn done_rejected(
         &mut self,
         text: &str,
-        reasoning_items: &[rig_core::completion::message::Sealed<
-            rig_core::completion::message::Reasoning,
-        >],
+        reasoning_items: &[rig_core::completion::message::Reasoning],
         tool_calls: &[rig_core::completion::message::ToolCall],
         results: Vec<rig_core::completion::Message>,
         next_prompt: rig_core::completion::Message,
@@ -539,6 +533,7 @@ impl Conversation for ConversationStub {
             reasoning_items,
             tool_calls,
             self.preserve_reasoning,
+            None,
         ));
         self.history.extend(results);
     }

@@ -9,7 +9,7 @@
 
 use std::time::{Duration, Instant};
 
-use rig_core::completion::message::{Reasoning, Sealed};
+use rig_core::completion::message::{Origin, Reasoning};
 use rig_core::completion::Usage;
 use rig_core::driver::DynModel;
 use rig_core::operation::Completion;
@@ -53,10 +53,11 @@ pub(super) async fn consume_stream_events(
 
     let mut text = String::new();
     let mut reasoning = String::new();
-    let mut reasoning_items: Vec<Sealed<Reasoning>> = Vec::new();
+    let mut reasoning_items: Vec<Reasoning> = Vec::new();
     let mut tool_calls = Vec::new();
     let mut ended = false;
     let mut turn_usage: Option<Usage> = None;
+    let mut origin: Option<Origin> = None;
     let mut paused_mid_stream = false;
     let mut retry_turn = false;
     let mut retry_timeout_turn = false;
@@ -124,6 +125,7 @@ pub(super) async fn consume_stream_events(
             Ok(None) => {
                 ended = true;
                 turn_usage = Some(response.partial().usage);
+                origin = Some(response.partial().origin);
                 break;
             }
             Ok(Some(Err(e))) => {
@@ -295,6 +297,7 @@ pub(super) async fn consume_stream_events(
         retry_timeout_turn,
         first_token,
         last_token,
+        origin,
     })
 }
 
@@ -340,5 +343,6 @@ pub(super) async fn finish_stream_turn(
         first_token: acc.first_token,
         last_token: acc.last_token,
         ended: acc.ended,
+        origin: acc.origin,
     })))
 }

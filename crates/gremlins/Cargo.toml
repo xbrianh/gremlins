@@ -21,8 +21,8 @@ futures = "0.3"
 glob = "0.3"
 http = "1"
 indexmap = { version = "2", features = ["serde"] }
-rig-core = { version = ">=0.43, <0.44", features = ["derive", "reqwest"] }
-rig-reqwest = "0.43"
+rig-core = { version = ">=0.46, <0.47", features = ["derive", "reqwest"] }
+rig-reqwest = "0.46"
 reqwest = { version = "0.13", features = ["blocking"] }
 bytes = "1"
 azure_identity = { version = "=1.1.0-beta.1", default-features = false, features = ["tokio", "reqwest_rustls"] }
@@ -36,4 +36,4 @@ gremlins-magic-bus = { path = "../gremlins-magic-bus" }
 
 [dev-dependencies]
 tokio = { version = "1", features = ["macros", "rt", "test-util"] }
-rig-core = { version = ">=0.43, <0.44", features = ["test-utils"] }
+rig-core = { version = ">=0.46, <0.47", features = ["test-utils"] }
