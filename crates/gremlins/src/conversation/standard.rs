@@ -587,10 +587,8 @@ mod tests {
 
         let history = &fork_req.chat_history;
         // The child inherits the parent's conversation as static history:
-        // [system prompt] + [User(stage_prompt), Assistant(tool_call),
-        // User(tool_result + Continue. + fork prompt)] followed by the fork
-        // prompt. rig 0.46 shapes the wire history, folding consecutive user
-        // turns into one message: system + 3 (2 inherited + 1 fork).
+        // system + User(stage_prompt) + Assistant(tool_call) +
+        // User(tool_result + Continue. + fork prompt) = 4 messages.
         assert_eq!(history.len(), 4, "unexpected fork history: {history:#?}");
 
         // Fork system prompt leads the child history.
@@ -802,10 +800,12 @@ mod tests {
         };
         // rig 0.46 replays another provider's reasoning block as plain text
         // unless the wire accepts foreign reasoning; either way the reasoning
-        // text must lead the replayed turn.
+        // text must lead the replayed turn. Pin the match to the expected
+        // text so a regression that drops reasoning while emitting unrelated
+        // text cannot pass.
         let reasoning = msg.content.iter().find_map(|c| match c {
             AssistantContent::Reasoning(r) => Some(r.text.clone()),
-            AssistantContent::Text(t) => Some(t.text.clone()),
+            AssistantContent::Text(t) if t.text == "thinking" => Some(t.text.clone()),
             _ => None,
         });
         assert_eq!(

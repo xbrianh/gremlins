@@ -2591,15 +2591,14 @@ mod tests {
             }
             other => panic!("first item must be reasoning, got {other:?}"),
         }
-        // The referencing `function_call` must stay beside its reasoning item,
-        // with its provider `item_id` naming that reasoning id so the replayed
-        // `input` array does not orphan it.
+        // The wire-form tool call must carry its provider id ("fc_item") so
+        // the back half of the test can assert it round-trips correctly.
         match &msg.content[1] {
             AssistantContent::ToolCall(tc) => {
                 let provider = tc
                     .id
                     .provider()
-                    .expect("dual-wire call keeps a provider id");
+                    .expect("wire-form call retains its provider id");
                 assert_eq!(provider.as_str(), "fc_item");
             }
             other => panic!("second item must be the tool call, got {other:?}"),
@@ -2710,10 +2709,12 @@ mod tests {
         };
         // rig 0.46 replays another provider's reasoning block as plain text
         // unless the wire accepts foreign reasoning; either way the reasoning
-        // text must lead the replayed turn.
+        // text must lead the replayed turn. Pin the match to the expected
+        // text so a regression that drops reasoning while emitting unrelated
+        // text cannot pass.
         let reasoning = msg.content.first().and_then(|c| match c {
             AssistantContent::Reasoning(r) => Some(r.text.clone()),
-            AssistantContent::Text(t) => Some(t.text.clone()),
+            AssistantContent::Text(t) if t.text == "thinking" => Some(t.text.clone()),
             _ => None,
         });
         assert_eq!(
@@ -2722,12 +2723,11 @@ mod tests {
             "reasoning text must survive into the replay: {msg:#?}"
         );
         // The reasoning item must precede the referencing function_call in the
-        // replayed content so the call is not orphaned.
+        // replayed content so the call is not orphaned. Pin to the known
+        // reasoning text to prevent a false pass if reasoning is dropped.
         let reasoning_at = msg.content.iter().position(|c| {
-            matches!(
-                c,
-                AssistantContent::Reasoning(_) | AssistantContent::Text(_)
-            )
+            matches!(c, AssistantContent::Reasoning(_))
+                || matches!(c, AssistantContent::Text(t) if t.text == "thinking")
         });
         let call_at = msg
             .content

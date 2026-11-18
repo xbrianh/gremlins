@@ -43,7 +43,7 @@ fn previous_turn_boundary(history: &[Message], mut cut: usize) -> usize {
     // we hit a user message that is NOT a tool result (the turn opener).
     loop {
         // Skip the assistant message.
-        if cut > 0 && matches!(history[cut - 1], Message::Assistant { .. }) {
+        if cut > 0 && matches!(history[cut - 1], Message::Assistant(_)) {
             cut -= 1;
         } else {
             break;

@@ -48,7 +48,7 @@ struct CopilotTokenEndpoints {
     api: Option<String>,
 }
 
-/// A validated OpenAI session credential.
+/// A validated Copilot session credential.
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct CopilotSession {
     token: String,
@@ -56,7 +56,7 @@ struct CopilotSession {
     expires_at: Option<i64>,
 }
 
-/// Resolve credentials and build a OpenAI client.
+/// Resolve credentials and build a Copilot client.
 /// OAuth device-code flow is disabled — gremlins run unattended.
 ///
 /// Auth precedence: `GITHUB_COPILOT_API_KEY` → `COPILOT_API_KEY` →
@@ -89,7 +89,7 @@ fn resolve_auth(
             client_id.clone(),
             refresh_token,
         ));
-        // Exchange eagerly so the OpenAI client is built with the real
+        // Exchange eagerly so the Copilot client is built with the real
         // API base from the token exchange response (some accounts are
         // assigned a non-default endpoint).  This also validates the
         // credential at build time rather than on the first request.
@@ -123,7 +123,7 @@ fn resolve_auth(
     ))
 }
 
-/// Exchange a static GitHub access token for a OpenAI session and build a
+/// Exchange a static GitHub access token for a Copilot session and build a
 /// client that refreshes the session when it expires.
 fn copilot_client_from_static_token(
     exchanger: Arc<dyn CopilotTokenExchanger>,
@@ -144,16 +144,16 @@ fn copilot_client_from_static_token(
     ))
 }
 
-/// Result of validating a OpenAI OAuth credential end-to-end.
+/// Result of validating a Copilot OAuth credential end-to-end.
 #[derive(Debug, Clone)]
 pub struct CopilotCredentialStatus {
-    /// Unix timestamp when the OpenAI session expires, if the server
+    /// Unix timestamp when the Copilot session expires, if the server
     /// returned one.
     pub expires_at: Option<i64>,
 }
 
-/// Validate a OpenAI OAuth credential end-to-end: refresh the GitHub access
-/// token, exchange it for a OpenAI session, and return the session status.
+/// Validate a Copilot OAuth credential end-to-end: refresh the GitHub access
+/// token, exchange it for a Copilot session, and return the session status.
 ///
 /// Uses the persisting provider so the rotated refresh token is saved to
 /// `providers.yaml` — GitHub App refresh tokens are single-use, and
@@ -168,7 +168,7 @@ pub fn check_copilot_oauth_credential(
     status_from_exchange(&BlockingCopilotTokenExchanger::new(), &access_token)
 }
 
-/// Validate a static GitHub access token by exchanging it for a OpenAI
+/// Validate a static GitHub access token by exchanging it for a Copilot
 /// session token and returning the session status.
 pub fn check_copilot_github_token(token: &str) -> Result<CopilotCredentialStatus, String> {
     status_from_exchange(&BlockingCopilotTokenExchanger::new(), token)
@@ -198,10 +198,10 @@ fn github_access_token() -> Option<String> {
     github_access_token_env("GITHUB_TOKEN").or_else(|| github_access_token_env("GH_TOKEN"))
 }
 
-/// Exchange a GitHub access token for a OpenAI session token.
+/// Exchange a GitHub access token for a Copilot session token.
 ///
 /// This mirrors rig's synchronous-free GitHub-token auth request shape: a `GET`
-/// to GitHub OpenAI's token endpoint with the OpenAI editor identity headers
+/// to GitHub Copilot's token endpoint with the Copilot editor identity headers
 /// and the GitHub token in `Authorization: token ...`.
 ///
 /// The blocking request runs on a fresh thread: `reqwest::blocking` uses an
@@ -214,10 +214,10 @@ fn exchange_github_token_sync(
     let access_token = access_token.to_string();
     std::thread::spawn(move || exchanger.exchange(&access_token))
         .join()
-        .map_err(|_| "GitHub OpenAI token exchange panicked".to_string())?
+        .map_err(|_| "GitHub Copilot token exchange panicked".to_string())?
 }
 
-/// Exchange a GitHub access token for a OpenAI session token without blocking
+/// Exchange a GitHub access token for a Copilot session token without blocking
 /// a tokio worker.
 async fn exchange_github_token_async(
     exchanger: Arc<dyn CopilotTokenExchanger>,
@@ -225,7 +225,7 @@ async fn exchange_github_token_async(
 ) -> Result<CopilotSession, String> {
     tokio::task::spawn_blocking(move || exchanger.exchange(&access_token))
         .await
-        .map_err(|err| format!("GitHub OpenAI token exchange task failed: {err}"))?
+        .map_err(|err| format!("GitHub Copilot token exchange task failed: {err}"))?
 }
 
 /// A swappable token exchange, so tests can drive auth without a network.
@@ -261,7 +261,7 @@ impl CopilotTokenExchanger for BlockingCopilotTokenExchanger {
             .timeout(GITHUB_COPILOT_TOKEN_TIMEOUT)
             .build()
             .map_err(|err| {
-                format!("failed to build GitHub OpenAI token exchange client: {err}")
+                format!("failed to build GitHub Copilot token exchange client: {err}")
             })?;
 
         let response = client
@@ -275,19 +275,19 @@ impl CopilotTokenExchanger for BlockingCopilotTokenExchanger {
                 format!("token {access_token}"),
             )
             .send()
-            .map_err(|err| format!("GitHub OpenAI token exchange failed: {err}"))?;
+            .map_err(|err| format!("GitHub Copilot token exchange failed: {err}"))?;
 
         if !response.status().is_success() {
             let status = response.status();
             let body = response.text().unwrap_or_default();
             return Err(format!(
-                "GitHub OpenAI token exchange failed with HTTP {status}{}",
+                "GitHub Copilot token exchange failed with HTTP {status}{}",
                 token_exchange_error_detail(&body)
             ));
         }
 
         let record: CopilotTokenResponse = response.json().map_err(|err| {
-            format!("GitHub OpenAI token exchange response was invalid: {err}")
+            format!("GitHub Copilot token exchange response was invalid: {err}")
         })?;
         session_from_response(record)
     }
@@ -308,7 +308,7 @@ fn session_from_response(record: CopilotTokenResponse) -> Result<CopilotSession,
         .map(|token| token.trim().to_string())
         .filter(|token| !token.is_empty())
         .ok_or_else(|| {
-            "GitHub OpenAI token exchange response did not include a session token".to_string()
+            "GitHub Copilot token exchange response did not include a session token".to_string()
         })?;
     let expires_at = expires_at.or_else(|| parse_expires_at(&session_token));
     Ok(CopilotSession {
@@ -318,7 +318,7 @@ fn session_from_response(record: CopilotTokenResponse) -> Result<CopilotSession,
     })
 }
 
-/// Parse the `exp=` epoch-second segment of a OpenAI session token.
+/// Parse the `exp=` epoch-second segment of a Copilot session token.
 fn parse_expires_at(token: &str) -> Option<i64> {
     token.split(';').find_map(|part| {
         let part = part.trim();
@@ -339,8 +339,8 @@ fn session_expired(session: &CopilotSession) -> bool {
     now >= expires_at.saturating_sub(COPILOT_TOKEN_EXPIRY_SKEW_SECONDS)
 }
 
-/// Resolves a OpenAI session credential from a GitHub access-token provider,
-/// refreshing the exchanged OpenAI session when it expires.
+/// Resolves a Copilot session credential from a GitHub access-token provider,
+/// refreshing the exchanged Copilot session when it expires.
 struct CopilotSessionProvider {
     token_provider: Arc<dyn TokenProvider>,
     exchanger: Arc<dyn CopilotTokenExchanger>,
@@ -392,7 +392,7 @@ impl TokenProvider for StaticTokenProvider {
     }
 }
 
-/// Replaces the bearer credential before every OpenAI request, refreshing the
+/// Replaces the bearer credential before every Copilot request, refreshing the
 /// GitHub-token-backed session when it expires.
 #[derive(Clone)]
 struct CopilotTokenRefreshMiddleware {
@@ -468,16 +468,22 @@ struct CopilotRunState {
     native: NativeRunState<()>,
 }
 
-/// Parse OpenAI-specific typed flags from the model-spec parameter map.
+/// Parse Copilot-specific typed flags from the model-spec parameter map.
 ///
 /// `strict_tools` and `tool_result_array_content` are strict bools.  A
 /// malformed value is a build-time error, never a silent fallback.
 ///
 /// The Copilot `intent` (edits/panel) concept was removed in rig 0.46:
-/// Copilot is now just `OpenAIConfig::with_key(&copilot::DIALECT, token)`.
+/// Copilot is now configured as an `OpenAI` provider with the copilot dialect.
 fn parse_extra_params(
     extra_params: &indexmap::IndexMap<String, String>,
 ) -> Result<(bool, bool), String> {
+    if let Some(v) = extra_params.get("intent") {
+        return Err(format!(
+            "copilot: the \"intent\" client param ({v:?}) was removed in rig 0.46; \
+             Copilot is now configured as an OpenAI provider with the copilot dialect"
+        ));
+    }
     let strict_tools = match extra_params.get("strict_tools") {
         Some(v) => params::parse_bool("copilot", "strict_tools", v)?,
         None => false,
@@ -496,7 +502,7 @@ pub struct CopilotBackend {
 }
 
 impl CopilotBackend {
-    /// Build a OpenAI backend.
+    /// Build a Copilot backend.
     ///
     /// Auth precedence: `GITHUB_COPILOT_API_KEY` → `COPILOT_API_KEY` →
     /// `providers.yaml` `"copilot"` entry → `GITHUB_TOKEN` → `GH_TOKEN` →
@@ -1173,5 +1179,14 @@ mod tests {
         let (_, tool_result_array_content) =
             parse_extra_params(&indexmap::IndexMap::new()).unwrap();
         assert!(!tool_result_array_content);
+    }
+
+    #[test]
+    fn extra_params_intent_rejected_with_helpful_error() {
+        let mut ep: indexmap::IndexMap<String, String> = indexmap::IndexMap::new();
+        ep.insert("intent".into(), "edits".into());
+        let err = parse_extra_params(&ep).unwrap_err();
+        assert!(err.contains("intent"), "{err}");
+        assert!(err.contains("removed in rig 0.46"), "{err}");
     }
 }
