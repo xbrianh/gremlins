@@ -445,33 +445,71 @@ fn token_exchange_error_detail(body: &str) -> String {
     }
 }
 
-pub(super) fn copilot_transport(middleware: CopilotTokenRefreshMiddleware) -> rig_core::http_client::DynHttpClient {
+pub(super) fn copilot_transport(
+    middleware: CopilotTokenRefreshMiddleware,
+) -> rig_core::http_client::DynHttpClient {
     rig_core::http_client::DynHttpClient::new(rig_reqwest::shared()).with_middleware(middleware)
 }
 
 pub(super) fn resolve_catalog_session() -> Result<(CopilotSession, CopilotTokenRefreshMiddleware), String> {
+    // Keep this ordering aligned with `resolve_auth`: pre-exchanged session
+    // credentials always take precedence over GitHub credentials.
     if let Some(token) = crate::config::copilot_api_key() {
-        let session = CopilotSession { token, api_base: None, expires_at: None };
+        let session = static_session(token);
         return Ok((session.clone(), static_session_middleware(session)));
     }
+
     let providers = crate::clients::config::Providers::load();
     if let Some(token) = providers.get(PROVIDER_NAME) {
-        let session = CopilotSession { token: token.to_string(), api_base: None, expires_at: None };
+        let session = static_session(token.to_string());
         return Ok((session.clone(), static_session_middleware(session)));
     }
-    let exchanger: Arc<dyn CopilotTokenExchanger> = Arc::new(BlockingCopilotTokenExchanger::new());
-    let (provider, token) = if let (Some(id), Some(refresh)) = (providers.client_id(PROVIDER_NAME), providers.refresh_token(PROVIDER_NAME)) {
+
+    let exchanger: Arc<dyn CopilotTokenExchanger> =
+        Arc::new(BlockingCopilotTokenExchanger::new());
+    let (provider, github_token) = if let (Some(id), Some(refresh)) = (
+        providers.client_id(PROVIDER_NAME),
+        providers.refresh_token(PROVIDER_NAME),
+    ) {
+        // access_token_sync refreshes stored credentials only; unlike the
+        // device-flow methods, it never starts interactive login.
         let provider = Arc::new(github_auth::GitHubAppTokenProvider::new(id, refresh));
         let token = provider.access_token_sync()?;
         (provider as Arc<dyn TokenProvider>, token)
     } else {
-        let token = providers.github_token(PROVIDER_NAME).map(str::to_string).or_else(github_access_token)
-            .ok_or_else(|| format!("no credentials for provider '{PROVIDER_NAME}': set GITHUB_COPILOT_API_KEY, COPILOT_API_KEY, GITHUB_TOKEN, or GH_TOKEN; or configure copilot credentials in providers.yaml"))?;
-        (Arc::new(StaticTokenProvider { token: token.clone() }) as Arc<dyn TokenProvider>, token)
+        let token = providers
+            .github_token(PROVIDER_NAME)
+            .map(str::to_string)
+            .or_else(github_access_token)
+            .ok_or_else(|| {
+                format!("no Copilot credentials: set GITHUB_COPILOT_API_KEY or \\
+                    COPILOT_API_KEY, configure copilot.api-key, copilot.client-id plus \\
+                    copilot.refresh-token, or copilot.github-token in providers.yaml, \\
+                    or set GITHUB_TOKEN or GH_TOKEN")
+            })?;
+        (
+            Arc::new(StaticTokenProvider { token: token.clone() }) as Arc<dyn TokenProvider>,
+            token,
+        )
     };
-    let session = exchange_github_token_sync(exchanger.clone(), &token)?;
-    let sessions = Arc::new(CopilotSessionProvider::with_session(provider, exchanger, session.clone()));
+
+    let session = exchange_github_token_sync(exchanger.clone(), &github_token)?;
+    let sessions = Arc::new(CopilotSessionProvider::with_session(
+        provider,
+        exchanger,
+        session.clone(),
+    ));
     Ok((session, CopilotTokenRefreshMiddleware::new(sessions)))
+}
+
+fn static_session(token: String) -> CopilotSession {
+    CopilotSession {
+        token,
+        api_base: None,
+        // A static session credential is pre-exchanged and does not expire
+        // through the GitHub token renewal flow.
+        expires_at: Some(i64::MAX),
+    }
 }
 
 fn static_session_middleware(session: CopilotSession) -> CopilotTokenRefreshMiddleware {
