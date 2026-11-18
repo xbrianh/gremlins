@@ -1,12 +1,31 @@
 use std::collections::HashSet;
 
 use futures::future::BoxFuture;
-use rig_core::http_client::{DynHttpClient, HttpClientExt};
-use rig_core::operation::Listing;
-use rig_core::providers::copilot::{model_listing::Models, DIALECT};
+use http::{header::AUTHORIZATION, Request};
+use rig_core::http_client::{DynHttpClient, HttpClientExt, NoBody};
+use rig_core::providers::copilot::DIALECT;
 use rig_core::providers::openai::OpenAIConfig;
+use serde::Deserialize;
 
 use super::{resolve_catalog_session, CopilotSession, CopilotTokenRefreshMiddleware};
+
+#[derive(Deserialize)]
+struct Catalog {
+    data: Vec<Entry>,
+}
+
+#[derive(Deserialize)]
+struct Entry {
+    id: String,
+    #[serde(default)]
+    capabilities: Capabilities,
+}
+
+#[derive(Default, Deserialize)]
+struct Capabilities {
+    #[serde(rename = "type")]
+    kind: Option<String>,
+}
 
 pub(in crate::clients::backends) fn list_models() -> BoxFuture<'static, Result<Vec<String>, String>> {
     Box::pin(async move { list_models_with(rig_reqwest::shared()).await })
@@ -27,14 +46,31 @@ async fn list_models_for_session(
     middleware: CopilotTokenRefreshMiddleware,
 ) -> Result<Vec<String>, String> {
     let client = catalog_client(http, session.clone(), middleware);
-    let response = Models::new(catalog_config(&session)).send(&client).await.map_err(|_| {
-        "Copilot catalog request failed; check your Copilot session credential and GitHub account Copilot access"
-            .to_string()
-    })?;
+    let base_url = catalog_config(&session).base_url;
+    let request = Request::builder()
+        .method(http::Method::GET)
+        .uri(format!("{}/models", base_url.trim_end_matches('/')))
+        .header(AUTHORIZATION, format!("Bearer {}", session.token))
+        .body(NoBody)
+        .map_err(|_| "could not build the Copilot catalog request".to_string())?;
+    let response = client
+        .send::<_, Vec<u8>>(request)
+        .await
+        .map_err(|_| "Copilot catalog request failed; check your Copilot session credential and GitHub account Copilot access".to_string())?;
+    if !response.status().is_success() {
+        return Err(format!("Copilot catalog request failed with status {}", response.status()));
+    }
+    let body = response
+        .into_body()
+        .await
+        .map_err(|_| "could not read the Copilot catalog response".to_string())?;
+    let catalog: Catalog = serde_json::from_slice(&body)
+        .map_err(|_| "Copilot returned a catalog that could not be decoded".to_string())?;
     let mut seen = HashSet::new();
-    Ok(response
+    Ok(catalog
+        .data
         .into_iter()
-        .filter(|model| model.capabilities.r#type.as_deref() == Some("chat"))
+        .filter(|model| model.capabilities.kind.as_deref() == Some("chat"))
         .map(|model| model.id)
         .filter(|id| !id.trim().is_empty() && seen.insert(id.clone()))
         .collect())
@@ -62,8 +98,8 @@ mod tests {
 
     #[test]
     fn catalog_client_uses_shared_transport_constructor() {
-        // Transport construction is shared with completions; operation-level
-        // request behavior and decoding are provided by Rig's Models type.
+        // Transport construction is shared with completions; the model
+        // catalog request uses the Copilot OpenAI-compatible endpoint.
         let config = catalog_config(&CopilotSession {
             token: "test".into(),
             api_base: Some("https://assigned.example".into()),

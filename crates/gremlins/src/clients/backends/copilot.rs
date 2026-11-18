@@ -482,10 +482,10 @@ pub(super) fn resolve_catalog_session() -> Result<(CopilotSession, CopilotTokenR
             .map(str::to_string)
             .or_else(github_access_token)
             .ok_or_else(|| {
-                format!("no Copilot credentials: set GITHUB_COPILOT_API_KEY or \\
+                "no Copilot credentials: set GITHUB_COPILOT_API_KEY or \\
                     COPILOT_API_KEY, configure copilot.api-key, copilot.client-id plus \\
                     copilot.refresh-token, or copilot.github-token in providers.yaml, \\
-                    or set GITHUB_TOKEN or GH_TOKEN")
+                    or set GITHUB_TOKEN or GH_TOKEN".to_string()
             })?;
         (
             Arc::new(StaticTokenProvider { token: token.clone() }) as Arc<dyn TokenProvider>,
