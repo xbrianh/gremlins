@@ -66,14 +66,22 @@ impl DebugTerminal {
 enum PauseState {
     #[default]
     Idle,
-    Requested(CommandInbox),
-    Accepted,
+    /// A debugger has placed a pause request. The u64 is the execution
+    /// nonce under which the request was made; it lets [`next_session`]
+    /// distinguish a between-turn request from a stale leftover.
+    Requested(CommandInbox, u64),
+    /// The agent loop has accepted the pause. The u64 records the
+    /// execution nonce at the time of acceptance.
+    Accepted(u64),
 }
 
 impl PauseState {
     fn accept(&mut self) -> Option<CommandInbox> {
-        match std::mem::replace(self, Self::Accepted) {
-            Self::Requested(inbox) => Some(inbox),
+        match std::mem::replace(self, Self::Idle) {
+            Self::Requested(inbox, nonce) => {
+                *self = Self::Accepted(nonce);
+                Some(inbox)
+            }
             previous => {
                 *self = previous;
                 None
@@ -143,11 +151,14 @@ impl DebugTarget {
         let (commands, rx) = mpsc::channel(8);
         let (tx, ready) = oneshot::channel();
         let (terminal, ended) = oneshot::channel();
-        *state = PauseState::Requested(CommandInbox {
-            commands: rx,
-            ready: Some(tx),
-            ended: Some(terminal),
-        });
+        *state = PauseState::Requested(
+            CommandInbox {
+                commands: rx,
+                ready: Some(tx),
+                ended: Some(terminal),
+            },
+            self.nonce,
+        );
         slot.requested.notify_one();
         Ok(DebugAttachment {
             slot: self.slot.clone(),
@@ -171,7 +182,7 @@ pub(crate) struct DebugAttachment {
 impl Drop for DebugAttachment {
     fn drop(&mut self) {
         if let Some(slot) = self.slot.upgrade() {
-            *slot.state.lock().unwrap() = PauseState::Idle;
+            *slot.state.lock().unwrap_or_else(|e| e.into_inner()) = PauseState::Idle;
         }
     }
 }
@@ -232,10 +243,36 @@ impl InteractiveSessionFactory {
 
     pub(crate) fn next_session(&mut self) -> InteractiveSession {
         let slot = self.chat_slot.clone().unwrap_or_default();
-        // Mint a fresh execution identity, then republish so the handle's
-        // target reports the nonce of the execution it now points at.
+        // Mint a fresh execution identity *before* sweeping stale state
+        // so that the sweep is atomic with respect to the new nonce — a
+        // between-turn debugger that has not yet attached sees the new
+        // nonce and validates against it, while a request that was
+        // already placed under the old nonce is recognised as a
+        // between-turn holdover and updated.
         let nonce = slot.nonce.fetch_add(1, Ordering::Relaxed) + 1;
         self.handle.publish(&slot);
+        if self.chat_slot.is_some() {
+            let mut state = slot.state.lock().unwrap_or_else(|e| e.into_inner());
+            match &*state {
+                // Stale acceptance left over from the previous execution —
+                // that execution's agent loop is gone, so no one will
+                // consume the pause.  Reset it so a new debugger can attach.
+                PauseState::Accepted(old_nonce) if *old_nonce != nonce => {
+                    *state = PauseState::Idle;
+                }
+                // Request placed between turns under the previous nonce.
+                // Carry it forward to the new execution so the between-turn
+                // debugger's pause-on-entry is honoured.
+                PauseState::Requested(_, old_nonce) if *old_nonce != nonce => {
+                    if let PauseState::Requested(inbox, _) =
+                        std::mem::replace(&mut *state, PauseState::Idle)
+                    {
+                        *state = PauseState::Requested(inbox, nonce);
+                    }
+                }
+                _ => {}
+            }
+        }
         InteractiveSession {
             slot,
             nonce,
