@@ -9,6 +9,7 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
+use futures::future::BoxFuture;
 use indexmap::IndexMap;
 
 use crate::clients::backend::Backend;
@@ -19,6 +20,17 @@ pub type BuildFn = fn(
     native_block: &HashMap<String, Vec<String>>,
     extra_params: &IndexMap<String, String>,
 ) -> Result<Arc<dyn Backend>, String>;
+
+/// Asynchronously list the model slugs a backend offers to the current account.
+pub type ListModelsFn = fn() -> BoxFuture<'static, Result<Vec<String>, String>>;
+
+/// One registered backend: its name, constructor, and optional model catalog.
+#[derive(Clone, Copy)]
+pub(crate) struct BackendEntry {
+    pub(crate) name: &'static str,
+    pub(crate) build: BuildFn,
+    pub(crate) list_models: Option<ListModelsFn>,
+}
 
 /// Declare an OpenAI-protocol backend.
 ///
@@ -156,15 +168,20 @@ pub(crate) use declare_openai_backend;
 ///
 /// Each entry is `module: "provider_name" => path::to::Struct::build`.
 /// The macro expands to `pub mod module;` for each entry and a single
-/// `registry()` function returning `Vec<(&'static str, BuildFn)>`.
+/// `registry()` function returning `Vec<BackendEntry>`. An entry may append
+/// `; list = path::to::fn` to offer model discovery.
 macro_rules! backends {
-    ($($module:ident : $name:literal => $build:path),* $(,)?) => {
+    ($($module:ident : $name:literal => $build:path $(; list = $list:path)?),* $(,)?) => {
         $(pub mod $module;)*
 
         /// Return every registered backend, in declaration order.
-        pub fn registry() -> Vec<(&'static str, BuildFn)> {
+        pub(crate) fn registry() -> Vec<BackendEntry> {
             vec![$(
-                ($name, $build as BuildFn),
+                BackendEntry {
+                    name: $name,
+                    build: $build as BuildFn,
+                    list_models: None $(.or(Some($list as ListModelsFn)))?,
+                },
             )*]
         }
     };
@@ -173,7 +190,7 @@ macro_rules! backends {
 backends! {
     cmd: "cmd" => cmd::CmdBackend::build,
     copilot: "copilot" => copilot::CopilotBackend::build,
-    chatgpt: "chatgpt" => chatgpt::ChatGptBackend::build,
+    chatgpt: "chatgpt" => chatgpt::ChatGptBackend::build; list = chatgpt::list_models,
     openai: "openai" => openai::OpenAiBackend::build,
     xai: "xai" => xai::XaiBackend::build,
     openrouter: "openrouter" => openrouter::OpenRouterBackend::build,
