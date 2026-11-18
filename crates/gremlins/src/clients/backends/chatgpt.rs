@@ -1,21 +1,23 @@
 //! ChatGPT subscription backend using rig's Responses SSE dialect.
 
+mod oauth;
+
 use std::collections::HashMap;
 use std::sync::Arc;
 
 use async_trait::async_trait;
 use indexmap::IndexMap;
 use rig_core::driver::DynModel;
+use rig_core::http_client::DynHttpClient;
 use rig_core::operation::Completion;
 use rig_core::providers::chatgpt;
-use rig_core::providers::chatgpt::auth::FileTokenStore;
 use rig_core::providers::openai::{OpenAI, OpenAIConfig};
 
 use crate::clients::backend::{Backend, ClientError, RunParams};
 use crate::clients::cancel::CancelToken;
 #[cfg(test)]
 use crate::clients::chatgpt_auth::ACCESS_TOKEN_ENV;
-use crate::clients::chatgpt_auth::{resolve_stored, static_source, stored_oauth};
+use crate::clients::chatgpt_auth::{static_source, stored_oauth};
 use crate::clients::config::tool_filter;
 use crate::clients::interactive::InteractiveSession;
 use crate::clients::native::{NativeRunState, PreserveReasoning};
@@ -29,8 +31,8 @@ const PROVIDER_NAME: &str = "chatgpt";
 enum Credentials {
     /// A prebuilt client over a static token.
     Static(Box<OpenAI>),
-    /// The stored OAuth sign-in, resolved afresh for every model.
-    OAuth(FileTokenStore),
+    /// A store for model selection and a transport that resolves it on each request.
+    OAuth(oauth::StoredOAuth),
 }
 
 struct ChatGptRunState {
@@ -48,21 +50,23 @@ impl ChatGptBackend {
         native_block: &HashMap<String, Vec<String>>,
         extra_params: &IndexMap<String, String>,
     ) -> Result<Arc<dyn Backend>, String> {
-        Self::build_with(model, native_block, extra_params, |config| config.client())
+        Self::build_with(model, native_block, extra_params, rig_reqwest::shared())
     }
 
     fn build_with(
         model: &str,
         native_block: &HashMap<String, Vec<String>>,
         extra_params: &IndexMap<String, String>,
-        connect: impl FnOnce(OpenAIConfig) -> OpenAI,
+        http: DynHttpClient,
     ) -> Result<Arc<dyn Backend>, String> {
         let credentials = match static_source() {
-            Some(found) => Credentials::Static(Box::new(connect(OpenAIConfig::with_key(
-                &chatgpt::DIALECT,
-                found.secret,
-            )))),
-            None => Credentials::OAuth(stored_oauth().map_err(|error| error.to_string())?),
+            Some(found) => Credentials::Static(Box::new(
+                OpenAIConfig::with_key(&chatgpt::DIALECT, found.secret).connect(http),
+            )),
+            None => {
+                let store = stored_oauth().map_err(|error| error.to_string())?;
+                Credentials::OAuth(oauth::StoredOAuth { store, http })
+            }
         };
         let model = if model.is_empty() {
             chatgpt::DEFAULT_MODEL
@@ -85,25 +89,24 @@ impl ChatGptBackend {
 }
 
 impl ChatGptBackend {
-    /// A completion model for `name`, resolving the stored sign-in when in OAuth mode.
+    /// Check the sign-in during selection so a broken Task override fails early.
+    /// Only the API base is needed here; the transport supplies request credentials.
     async fn model_for(&self, name: &str) -> Result<DynModel<Completion>, ClientError> {
-        let store = match &self.state.credentials {
+        let oauth = match &self.state.credentials {
             Credentials::Static(client) => return Ok(client.completion(name).erase()),
-            Credentials::OAuth(store) => store,
+            Credentials::OAuth(oauth) => oauth,
         };
-        let context = resolve_stored(store)
+        let context = oauth.resolve()
             .await
             .map_err(|error| ClientError::Runtime {
                 message: error.to_string(),
             })?;
-        let mut config = OpenAIConfig::with_key(&chatgpt::DIALECT, context.api_key);
-        if let Some(account_id) = context.account_id {
-            config = config.with_account_id(account_id);
-        }
+        let mut config = OpenAIConfig::with_key(&chatgpt::DIALECT, "");
         if let Some(api_base) = context.api_base {
             config = config.with_base_url(api_base);
         }
-        Ok(config.client().completion(name).erase())
+        let http = oauth.http.clone().with_middleware(oauth.clone());
+        Ok(config.connect(http).completion(name).erase())
     }
 }
 

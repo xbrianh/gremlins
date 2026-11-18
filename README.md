@@ -56,8 +56,8 @@ For `cmd/<command>`, the command must be on `PATH`.
 
 **ChatGPT subscription:** Set `model: chatgpt/gpt-5.4` and supply a ChatGPT access
 token via `CHATGPT_ACCESS_TOKEN` or the `chatgpt.token` field in `providers.yaml`.
-The environment variable takes precedence. The backend does not refresh expired
-tokens or accept OpenAI API keys.
+The environment variable takes precedence. These static tokens are not refreshed.
+OpenAI API keys are not accepted.
 
 **ChatGPT sign-in and sign-out:**
 
@@ -66,16 +66,16 @@ tokens or accept OpenAI API keys.
   stored per user under `<user config root>/credentials/chatgpt.json`.
 - Static credentials win: `CHATGPT_ACCESS_TOKEN`, then `chatgpt.token` in
   `providers.yaml`, then the stored sign-in. Login refuses while a static one is set.
-- Runs are noninteractive: they refresh a stored sign-in but never prompt. With
-  no usable credential they report how to sign in again.
+- Runs and delegated Tasks check the stored sign-in before each model request
+  and refresh it when needed. They never prompt for login.
 - `gremlins auth chatgpt status` shows the selected source and local record
   (account, access-token expiry) without contacting the provider. An expired token
   may still refresh; an unexpired one does not prove a live subscription.
   Unreadable records exit nonzero.
 - `gremlins auth chatgpt logout` revokes and removes the stored sign-in only. It
   exits nonzero if revocation is unconfirmed (the record is still removed) or the
-  store fails. It never unsets env values, edits `providers.yaml`, or changes the
-  bearer of an already running model.
+  store fails. It leaves static credentials and in-flight requests alone. After
+  removal, the next request using stored OAuth needs a new sign-in.
 
 Manual smoke check (consenting operator, isolated config root): log in with the
 browser, complete a ChatGPT run, run `status`, then `logout`; repeat with

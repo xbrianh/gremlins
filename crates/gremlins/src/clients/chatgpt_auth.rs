@@ -5,19 +5,19 @@ use std::io::ErrorKind;
 use std::path::PathBuf;
 use std::sync::Arc;
 
+use rig_core::error::BoxError;
 use rig_core::http_client::DynHttpClient;
 use rig_core::providers::chatgpt::auth::{AuthContext, AuthError};
 use rig_core::providers::chatgpt::auth::{
     AuthSource, Authenticator, DeviceCodeHandler, FileTokenStore, SignInMethod, SignInPrompt,
-    SignedOut,
+    SignedOut, StoreLock, TokenStore,
 };
+use rig_core::wasm_compat::WasmBoxedFuture;
 
 use crate::clients::config::{static_token, StaticSecret};
 
 pub(crate) const ACCESS_TOKEN_ENV: &str = "CHATGPT_ACCESS_TOKEN";
 const PROVIDER_NAME: &str = "chatgpt";
-/// Whether rig may refresh stored tokens automatically.
-const AUTO_REFRESH: bool = true;
 
 /// Directory holding stored OAuth credentials (`chatgpt.json` lives here).
 pub(crate) fn store_dir() -> PathBuf {
@@ -86,7 +86,7 @@ fn authenticator(events: Arc<dyn Fn(LoginEvent) + Send + Sync>) -> Authenticator
         AuthSource::OAuth,
         FileTokenStore::new(store_dir()),
         handler,
-        AUTO_REFRESH,
+        true,
     )
 }
 
@@ -143,8 +143,14 @@ pub struct ChatGptStatus {
 
 #[derive(serde::Deserialize)]
 struct RecordView {
-    account_id: Option<String>,
+    #[serde(rename = "access_token")]
+    _access_token: Option<String>,
+    #[serde(rename = "refresh_token")]
+    _refresh_token: Option<String>,
+    #[serde(rename = "id_token")]
+    _id_token: Option<String>,
     expires_at: Option<i64>,
+    account_id: Option<String>,
 }
 
 /// Read-only inspection: no auth context, network, refresh, prompt, or store write.
@@ -264,7 +270,7 @@ impl fmt::Display for SignInError {
             Self::Transient => write!(
                 f,
                 "ChatGPT token refresh failed; retry shortly \
-                 (if it persists, check network and TLS configuration)"
+                 (if it persists, check provider status and network configuration)"
             ),
         }
     }
@@ -289,27 +295,60 @@ pub(crate) fn stored_oauth() -> Result<FileTokenStore, SignInError> {
     }
 }
 
+/// Rig uses the same JSON error for store reads and refresh responses. Validate the
+/// exact bytes rig will read, under its store lock, so local errors retain their origin.
+struct CheckedStore(FileTokenStore);
+
+impl TokenStore for CheckedStore {
+    fn load<'a>(&'a self, key: &'a str) -> WasmBoxedFuture<'a, Result<Option<String>, BoxError>> {
+        Box::pin(async move {
+            let record = self.0.load(key).await?;
+            if let Some(text) = &record {
+                serde_json::from_str::<RecordView>(text).map_err(|_| "malformed record")?;
+            }
+            Ok(record)
+        })
+    }
+
+    fn save<'a>(
+        &'a self,
+        key: &'a str,
+        record: &'a str,
+    ) -> WasmBoxedFuture<'a, Result<(), BoxError>> {
+        self.0.save(key, record)
+    }
+
+    fn delete<'a>(&'a self, key: &'a str) -> WasmBoxedFuture<'a, Result<(), BoxError>> {
+        self.0.delete(key)
+    }
+
+    fn lock<'a>(&'a self, key: &'a str) -> WasmBoxedFuture<'a, Result<StoreLock, BoxError>> {
+        self.0.lock(key)
+    }
+}
+
 /// Resolve the stored sign-in through a fresh authenticator that never prompts.
-pub(crate) async fn resolve_stored(store: &FileTokenStore) -> Result<AuthContext, SignInError> {
+pub(crate) async fn resolve_stored(
+    store: &FileTokenStore,
+    http: &DynHttpClient,
+) -> Result<AuthContext, SignInError> {
     let authenticator = Authenticator::new(
         AuthSource::OAuth,
-        store.clone(),
+        CheckedStore(store.clone()),
         DeviceCodeHandler::default(),
         false,
     );
-    let http = DynHttpClient::new(rig_reqwest::shared());
     let store_error = |detail: String| SignInError::Store {
         path: store.path(PROVIDER_NAME),
         detail,
     };
     authenticator
-        .auth_context(&http)
+        .auth_context(http)
         .await
         .map_err(|error| match error {
             AuthError::Io(error) => store_error(error.kind().to_string()),
-            AuthError::Json(_) => store_error("malformed record".into()),
             AuthError::Store(error) => store_error(error.to_string()),
-            AuthError::Http(_) => SignInError::Transient,
+            AuthError::Json(_) | AuthError::Http(_) => SignInError::Transient,
             AuthError::Message(message) => classify_message(&message),
         })
 }
@@ -340,6 +379,46 @@ mod classify_tests {
             SignInError::Required => "required",
             SignInError::Transient => "transient",
             _ => "other",
+        }
+    }
+
+    #[tokio::test]
+    async fn malformed_local_record_is_a_store_error_before_refresh() {
+        use rig_core::test_utils::SequencedHttpClient;
+
+        let dir = tempfile::tempdir().unwrap();
+        let store = FileTokenStore::new(dir.path());
+        let path = store.path(PROVIDER_NAME);
+        let http = SequencedHttpClient::new([]);
+        for record in ["{", r#"{"access_token":{"bad":"secret-marker"}}"#] {
+            std::fs::write(&path, record).unwrap();
+            let err = resolve_stored(&store, &DynHttpClient::new(http.clone()))
+                .await
+                .unwrap_err();
+            assert!(
+                matches!(err, SignInError::Store { path: ref p, ref detail } if p == &path && detail == "malformed record")
+            );
+        }
+        assert!(http.requests().is_empty());
+    }
+
+    #[tokio::test]
+    async fn malformed_refresh_response_is_not_a_store_error() {
+        use rig_core::test_utils::{MockHttpResponse, SequencedHttpClient};
+
+        let dir = tempfile::tempdir().unwrap();
+        let store = FileTokenStore::new(dir.path());
+        let path = store.path(PROVIDER_NAME);
+        let record = r#"{"refresh_token":"refresh","expires_at":0}"#;
+        std::fs::write(&path, record).unwrap();
+        for response in ["invalid JSON", r#"{"refresh_token":"secret-marker"}"#] {
+            let http = SequencedHttpClient::new([MockHttpResponse::success(response)]);
+            let err = resolve_stored(&store, &DynHttpClient::new(http.clone()))
+                .await
+                .unwrap_err();
+            assert!(matches!(err, SignInError::Transient));
+            assert_eq!(http.requests().len(), 1);
+            assert_eq!(std::fs::read_to_string(&path).unwrap(), record);
         }
     }
 
