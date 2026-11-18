@@ -493,7 +493,8 @@ pub(super) fn resolve_catalog_session() -> Result<(CopilotSession, CopilotTokenR
         )
     };
 
-    let session = exchange_github_token_sync(exchanger.clone(), &github_token)?;
+    let session = exchange_github_token_sync(exchanger.clone(), &github_token)
+        .map_err(|_| "Copilot token exchange failed; check your GitHub credential and Copilot access".to_string())?;
     let sessions = Arc::new(CopilotSessionProvider::with_session(
         provider,
         exchanger,

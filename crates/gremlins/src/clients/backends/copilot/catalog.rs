@@ -7,7 +7,10 @@ use rig_core::providers::copilot::DIALECT;
 use rig_core::providers::openai::OpenAIConfig;
 use serde::Deserialize;
 
-use super::{resolve_catalog_session, CopilotSession, CopilotTokenRefreshMiddleware};
+use super::{
+    resolve_catalog_session, CopilotSession, CopilotTokenRefreshMiddleware,
+    COPILOT_EDITOR_PLUGIN_VERSION, COPILOT_EDITOR_VERSION, COPILOT_USER_AGENT,
+};
 
 #[derive(Deserialize)]
 struct Catalog {
@@ -51,6 +54,9 @@ async fn list_models_for_session(
         .method(http::Method::GET)
         .uri(format!("{}/models", base_url.trim_end_matches('/')))
         .header(AUTHORIZATION, format!("Bearer {}", session.token))
+        .header("editor-version", COPILOT_EDITOR_VERSION)
+        .header("editor-plugin-version", COPILOT_EDITOR_PLUGIN_VERSION)
+        .header("user-agent", COPILOT_USER_AGENT)
         .body(NoBody)
         .map_err(|_| "could not build the Copilot catalog request".to_string())?;
     let response = client
