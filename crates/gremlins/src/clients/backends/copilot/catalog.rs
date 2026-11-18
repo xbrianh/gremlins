@@ -3,6 +3,9 @@
 use std::collections::HashSet;
 
 #[cfg(test)]
+use super::CopilotTokenExchanger;
+
+#[cfg(test)]
 use std::sync::Arc;
 
 use futures::future::BoxFuture;
@@ -27,7 +30,11 @@ const CHAT_TYPE: &str = "chat";
 /// The catalog request never reached Copilot.
 const CATALOG_TRANSPORT_ERROR: &str =
     "Copilot catalog request failed; check your network connection";
-/// Copilot answered, refusing the credential.
+/// Copilot answered, refusing the credential. The status code is rendered
+/// inline by [`catalog_status_message`]; this text supplies the remedy hint.
+const CATALOG_REJECTED_REMEDY: &str =
+    "check your Copilot API key or OAuth credentials";
+/// Copilot answered, refusing the credential (status unknown).
 const CATALOG_REJECTED_ERROR: &str =
     "Copilot catalog rejected your credential; check your Copilot API key or OAuth credentials";
 /// Copilot answered with a body this client cannot read.
@@ -50,6 +57,17 @@ pub(in crate::clients::backends) fn list_models() -> BoxFuture<'static, Result<V
     Box::pin(async move { list_models_with(rig_reqwest::shared()).await })
 }
 
+/// Test-only entry point that accepts an HTTP client — so hermetic tests can
+/// mock the catalog response while exercising the same credential resolution,
+/// session exchange, and transport middleware as the production path.
+#[cfg(test)]
+#[allow(dead_code)]
+pub(crate) fn list_models_with_http(
+    http: impl HttpClientExt + 'static,
+) -> BoxFuture<'static, Result<Vec<String>, String>> {
+    Box::pin(async move { list_models_with(http).await })
+}
+
 async fn list_models_with(http: impl HttpClientExt + 'static) -> Result<Vec<String>, String> {
     let (session, middleware) = tokio::task::spawn_blocking(resolve_catalog_session)
         .await
@@ -58,16 +76,60 @@ async fn list_models_with(http: impl HttpClientExt + 'static) -> Result<Vec<Stri
     list_models_for_session(http, session, middleware).await
 }
 
+/// End-to-end listing through the resolver — testable because both the
+/// HTTP client and the exchanger are injected.
+#[cfg(test)]
+pub(crate) async fn list_models_with_exchanger(
+    http: impl HttpClientExt + 'static,
+    make_exchanger: impl FnOnce() -> Result<
+        std::sync::Arc<dyn CopilotTokenExchanger>,
+        String,
+    > + Send + 'static,
+) -> Result<Vec<String>, String> {
+    use super::resolve_session_for_test;
+    let (session, middleware) =
+        tokio::task::spawn_blocking(move || resolve_session_for_test(make_exchanger))
+            .await
+            .map_err(|_| CATALOG_CREDENTIAL_ERROR.to_string())?
+            .map_err(catalog_credential_message)?;
+    list_models_for_session(http, session, middleware).await
+}
+
 /// Translate a credential-resolution failure into a locally-authored
-/// diagnostic: absent credentials and a refused credential are different
-/// remedies, and neither echoes the resolver's own text or any secret.
+/// diagnostic: absent credentials, a failed app refresh, and a rejected
+/// token exchange are different remedies, and the HTTP status from the
+/// exchange is preserved so the operator can distinguish 401/403 from
+/// transient server errors.  No provider description or body is ever echoed.
 fn catalog_credential_message(error: String) -> String {
     if error.starts_with(NO_COPILOT_CREDENTIALS) {
-        CREDENTIALS_MISSING_ERROR.to_string()
-    } else if error.starts_with(COPILOT_APP_REFRESH_ERROR) {
-        APP_REFRESH_ERROR.to_string()
+        return CREDENTIALS_MISSING_ERROR.to_string();
+    }
+    if error.starts_with(COPILOT_APP_REFRESH_ERROR) {
+        return APP_REFRESH_ERROR.to_string();
+    }
+    // Token-exchange failures carry an HTTP status from the blocking
+    // exchanger; parse it out so the diagnostic names the code.
+    if let Some(status) = exchange_error_status(&error) {
+        return format!(
+            "Copilot token exchange failed with HTTP {status}; \
+             check your GitHub credential and Copilot access"
+        );
+    }
+    TOKEN_EXCHANGE_ERROR.to_string()
+}
+
+/// Extract the HTTP status code embedded in an exchange error string.
+///
+/// The production exchanger renders errors as
+/// `"GitHub Copilot token exchange failed with HTTP {status}…"`.
+fn exchange_error_status(error: &str) -> Option<u16> {
+    let prefix = "GitHub Copilot token exchange failed with HTTP ";
+    let rest = error.strip_prefix(prefix)?;
+    let digits: String = rest.chars().take_while(|c| c.is_ascii_digit()).collect();
+    if digits.is_empty() {
+        None
     } else {
-        TOKEN_EXCHANGE_ERROR.to_string()
+        digits.parse().ok()
     }
 }
 
@@ -124,7 +186,10 @@ fn catalog_error_message(error: ProviderError) -> String {
 fn catalog_status_message(status: http::StatusCode) -> String {
     match status {
         http::StatusCode::UNAUTHORIZED | http::StatusCode::FORBIDDEN => {
-            CATALOG_REJECTED_ERROR.to_string()
+            format!(
+                "Copilot catalog rejected your credential (HTTP {}); {CATALOG_REJECTED_REMEDY}",
+                status.as_u16()
+            )
         }
         other => format!("Copilot catalog request failed with status {}", other.as_u16()),
     }
@@ -278,12 +343,12 @@ mod tests {
             ),
             APP_REFRESH_ERROR
         );
-        assert_eq!(
-            catalog_credential_message(
-                "GitHub Copilot token exchange failed with HTTP 401".into()
-            ),
-            TOKEN_EXCHANGE_ERROR
+        // Token-exchange failures preserve the HTTP status.
+        let exchange_err = catalog_credential_message(
+            "GitHub Copilot token exchange failed with HTTP 401".into(),
         );
+        assert!(exchange_err.contains("HTTP 401"), "{exchange_err}");
+        assert!(exchange_err.contains("check your GitHub credential"));
         assert!(CREDENTIALS_MISSING_ERROR.contains("GITHUB_COPILOT_API_KEY"));
         assert!(CREDENTIALS_MISSING_ERROR.contains("GITHUB_TOKEN"));
         assert!(CREDENTIALS_MISSING_ERROR.contains("GH_TOKEN"));
@@ -293,13 +358,13 @@ mod tests {
     }
 
     #[test]
-    fn exchange_failure_drops_raw_message() {
+    fn exchange_failure_drops_secret_but_keeps_status() {
         let error = catalog_credential_message(
             "GitHub Copilot token exchange failed with HTTP 403: secret-oauth-error".into(),
         );
-        assert_eq!(error, TOKEN_EXCHANGE_ERROR);
+        assert!(error.contains("HTTP 403"), "{error}");
+        assert!(error.contains("check your GitHub credential"));
         assert!(!error.contains("secret-oauth-error"));
-        assert!(!error.contains("403"));
     }
 
     // ── async listing tests ───────────────────────────────────────────
@@ -521,7 +586,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn rejected_exchange_drops_secrets() {
+    async fn rejected_exchange_drops_secret_keeps_status() {
         let (mut env, _tmp) = isolated_env();
         env.set("GITHUB_TOKEN", "github-token-secret");
 
@@ -539,9 +604,9 @@ mod tests {
             Ok(_) => panic!("expected error"),
         };
         let sanitized = catalog_credential_message(error);
-        assert_eq!(sanitized, TOKEN_EXCHANGE_ERROR);
+        assert!(sanitized.contains("HTTP 403"), "{sanitized}");
+        assert!(sanitized.contains("check your GitHub credential"));
         assert!(!sanitized.contains("secret-denied"));
-        assert!(!sanitized.contains("403"));
         assert!(!sanitized.contains("github-token-secret"));
     }
 
@@ -559,7 +624,8 @@ mod tests {
                 .await
                 .unwrap_err();
 
-        assert_eq!(error, CATALOG_REJECTED_ERROR);
+        assert!(error.contains("rejected your credential (HTTP 401)"), "{error}");
+        assert!(error.contains(CATALOG_REJECTED_REMEDY));
         assert!(!error.contains("secret-body"));
         assert!(!error.contains("tid="));
     }
@@ -578,7 +644,8 @@ mod tests {
                 .await
                 .unwrap_err();
 
-        assert_eq!(error, CATALOG_REJECTED_ERROR);
+        assert!(error.contains("rejected your credential (HTTP 403)"), "{error}");
+        assert!(error.contains(CATALOG_REJECTED_REMEDY));
         assert!(!error.contains("secret-body"));
         assert!(!error.contains("FORBIDDEN"));
     }
@@ -699,5 +766,180 @@ mod tests {
         fn exchange(&self, _access_token: &str) -> Result<CopilotSession, String> {
             Err(self.message.clone())
         }
+    }
+
+    // ── end-to-end credentialed listing tests ────────────────────────
+
+    /// Full path: credential selection → session exchange → catalog → model
+    /// slugs.  The exchanger is never called because the static API key beats
+    /// GITHUB_TOKEN.
+    #[tokio::test]
+    async fn full_listing_credential_precedence_api_key_beats_github_token() {
+        let (mut env, _tmp) = isolated_env();
+        env.set("GITHUB_COPILOT_API_KEY", FAKE_SESSION_TOKEN);
+        env.set("GITHUB_TOKEN", "should-not-be-used");
+
+        let mock = SequencedHttpClient::new([MockHttpResponse::success(
+            r#"{"data":[{"id":"gpt-4o","capabilities":{"type":"chat"}}]}"#,
+        )]);
+
+        let calls = Arc::new(AtomicUsize::new(0));
+        let exchanger: Arc<dyn CopilotTokenExchanger> = Arc::new(RecordExchange {
+            calls: calls.clone(),
+        });
+
+        let slugs = list_models_with_exchanger(
+            DynHttpClient::new(mock.clone()),
+            move || Ok(exchanger.clone()),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(slugs, ["gpt-4o"]);
+        assert_eq!(calls.load(AtomicOrdering::SeqCst), 0);
+        assert_eq!(
+            auth_header(&mock.requests()[0]),
+            format!("Bearer {FAKE_SESSION_TOKEN}")
+        );
+    }
+
+    /// Full path with GitHub token exchange → session → catalog → slugs.
+    #[tokio::test]
+    async fn full_listing_via_github_token_exchange() {
+        let (mut env, _tmp) = isolated_env();
+        env.set("GITHUB_TOKEN", "github-token-secret");
+
+        let mock = SequencedHttpClient::new([MockHttpResponse::success(
+            r#"{"data":[
+                {"id":"gpt-4o","capabilities":{"type":"chat"}},
+                {"id":"claude-sonnet","capabilities":{"type":"chat"}}
+            ]}"#,
+        )]);
+
+        let exchanger: Arc<dyn CopilotTokenExchanger> = Arc::new(FakeExchange {
+            session_token: "ex-session".into(),
+            api_base: Some("https://assigned.example".into()),
+        });
+
+        let slugs = list_models_with_exchanger(
+            DynHttpClient::new(mock.clone()),
+            move || Ok(exchanger.clone()),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(slugs, ["gpt-4o", "claude-sonnet"]);
+        assert_eq!(
+            auth_header(&mock.requests()[0]),
+            "Bearer ex-session"
+        );
+        assert_eq!(
+            request_uri(&mock.requests()[0]),
+            "https://assigned.example/models"
+        );
+        assert!(!auth_header(&mock.requests()[0]).contains("github-token-secret"));
+    }
+
+    /// Empty catalog is success (zero models), not an error.
+    #[tokio::test]
+    async fn full_listing_empty_catalog_succeeds() {
+        let (mut env, _tmp) = isolated_env();
+        env.set("GITHUB_COPILOT_API_KEY", FAKE_SESSION_TOKEN);
+
+        let mock = SequencedHttpClient::new([MockHttpResponse::success(
+            r#"{"data":[]}"#,
+        )]);
+
+        let exchanger: Arc<dyn CopilotTokenExchanger> = Arc::new(RecordExchange {
+            calls: Arc::new(AtomicUsize::new(0)),
+        });
+
+        let slugs = list_models_with_exchanger(
+            DynHttpClient::new(mock),
+            move || Ok(exchanger.clone()),
+        )
+        .await
+        .unwrap();
+
+        assert!(slugs.is_empty());
+    }
+
+    /// Exchange failures propagate the status code without the provider body.
+    #[tokio::test]
+    async fn full_listing_exchange_rejected_preserves_status() {
+        let (mut env, _tmp) = isolated_env();
+        env.set("GITHUB_TOKEN", "github-token-secret");
+
+        let mock = SequencedHttpClient::new([MockHttpResponse::success(
+            r#"{"data":[]}"#,
+        )]);
+
+        let exchanger: Arc<dyn CopilotTokenExchanger> = Arc::new(FailingExchange {
+            message: "GitHub Copilot token exchange failed with HTTP 401: bad-credential".into(),
+        });
+
+        let error = list_models_with_exchanger(
+            DynHttpClient::new(mock),
+            move || Ok(exchanger.clone()),
+        )
+        .await
+        .unwrap_err();
+
+        assert!(error.contains("HTTP 401"), "{error}");
+        assert!(error.contains("check your GitHub credential"));
+        assert!(!error.contains("bad-credential"));
+        assert!(!error.contains("github-token-secret"));
+    }
+
+    /// Catalog unauthorized/non-success 503 flows through with status.
+    #[tokio::test]
+    async fn full_listing_catalog_server_error_reports_status() {
+        let (mut env, _tmp) = isolated_env();
+        env.set("GITHUB_COPILOT_API_KEY", FAKE_SESSION_TOKEN);
+
+        let mock = SequencedHttpClient::new([MockHttpResponse::ErrorResponse(
+            http::StatusCode::SERVICE_UNAVAILABLE,
+            "boom".into(),
+        )]);
+
+        let exchanger: Arc<dyn CopilotTokenExchanger> = Arc::new(RecordExchange {
+            calls: Arc::new(AtomicUsize::new(0)),
+        });
+
+        let error = list_models_with_exchanger(
+            DynHttpClient::new(mock),
+            move || Ok(exchanger.clone()),
+        )
+        .await
+        .unwrap_err();
+
+        assert!(error.contains("status 503"), "{error}");
+        assert!(!error.contains("boom"));
+    }
+
+    /// Credential resolution panics do not propagate.
+    #[tokio::test]
+    async fn full_listing_missing_credentials_reports_remedy() {
+        let (_env, _tmp) = isolated_env();
+
+        let mock = SequencedHttpClient::new([MockHttpResponse::success(
+            r#"{"data":[]}"#,
+        )]);
+
+        let exchanger: Arc<dyn CopilotTokenExchanger> = Arc::new(FakeExchange {
+            session_token: "unused".into(),
+            api_base: None,
+        });
+
+        let error = list_models_with_exchanger(
+            DynHttpClient::new(mock),
+            move || Ok(exchanger.clone()),
+        )
+        .await
+        .unwrap_err();
+
+        assert!(error.contains("no Copilot credentials"), "{error}");
+        assert!(error.contains("GITHUB_COPILOT_API_KEY"), "{error}");
+        assert!(error.contains("GITHUB_TOKEN"), "{error}");
     }
 }
