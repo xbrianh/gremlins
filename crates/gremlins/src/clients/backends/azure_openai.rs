@@ -1,6 +1,5 @@
 use std::collections::HashMap;
-use std::sync::atomic::AtomicU64;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 
 use async_trait::async_trait;
 use rig_core::http_client::DynHttpClient;
@@ -10,7 +9,6 @@ use rig_core::providers::openai::wire::AZURE;
 use crate::clients::cancel::CancelToken;
 use crate::clients::azure_openai_responses_http::AzureResponsesHttpClient;
 use crate::clients::backend::{Backend, ClientError, RunParams};
-use crate::clients::cancels::CancelsMap;
 use crate::clients::interactive::InteractiveSession;
 use crate::clients::lazy_auth_http::{ApiKeyStrategy, LazyAuthHttpClient};
 
@@ -106,7 +104,7 @@ impl AzureOpenAiBackend {
             model.to_string()
         };
 
-        let tool_filter = openai_protocol::tool_filter(native_block);
+        let tool_filter = crate::clients::config::tool_filter(native_block);
         let resolved = Self::resolve_params(extra_params)?;
 
         let http_client = DynHttpClient::new(ReqwestClient::default());
@@ -175,16 +173,13 @@ impl AzureOpenAiBackend {
         };
 
         Ok(Arc::new(Self {
-            state: NativeRunState {
+            state: NativeRunState::new(
                 client_state,
                 model,
                 tool_filter,
                 resolved,
-                last_ctx: Mutex::new(None),
-                cancels: CancelsMap::default(),
-                next_id: AtomicU64::new(1),
-                log_label: "AzureOpenAiBackend".to_string(),
-            },
+                "AzureOpenAiBackend",
+            ),
         }))
     }
 }
@@ -257,8 +252,8 @@ impl Backend for AzureOpenAiBackend {
         "azure-openai"
     }
 
-    fn make_model(&self, spec: &str) -> Option<DynModel<Completion>> {
-        let (provider, model) = openai_protocol::provider_and_model(spec)?;
+    fn build_model(&self, spec: &str) -> Option<DynModel<Completion>> {
+        let (provider, model) = crate::model_uri::provider_and_model(spec)?;
         if provider == "azure-openai" {
             match &self.state.client_state {
                 AzureOpenAiClientState::Static(client) => {
@@ -537,22 +532,19 @@ mod tests {
         extra.insert("temperature".into(), "0.7".into());
 
         let resolved = AzureOpenAiBackend::resolve_params(&extra).unwrap();
-        let state = NativeRunState {
-            client_state: AzureOpenAiClientState::Static(Box::new(
+        let state = NativeRunState::new(
+            AzureOpenAiClientState::Static(Box::new(
                 OpenAIConfig::with_key(&AZURE, "fake-key")
-            .with_route(Route::Responses)
-            .with_api_version(DEFAULT_API_VERSION)
-            .with_base_url("https://example.openai.azure.com")
-            .client(),
+                    .with_route(Route::Responses)
+                    .with_api_version(DEFAULT_API_VERSION)
+                    .with_base_url("https://example.openai.azure.com")
+                    .client(),
             )),
-            model: "gpt-4o".into(),
-            tool_filter: None,
+            "gpt-4o".into(),
+            None,
             resolved,
-            last_ctx: Mutex::new(None),
-            cancels: CancelsMap::default(),
-            next_id: AtomicU64::new(1),
-            log_label: "test".into(),
-        };
+            "test",
+        );
 
         assert_eq!(state.resolved.max_tokens, Some(1024));
         assert_eq!(state.resolved.temperature, Some(0.7));
@@ -575,26 +567,22 @@ mod tests {
             .with_base_url("https://example.openai.azure.com")
             .client();
 
-        let backlog = CancelsMap::default();
+        let backend = AzureOpenAiBackend {
+            state: NativeRunState::new(
+                AzureOpenAiClientState::Static(Box::new(client)),
+                "gpt-4o".into(),
+                None,
+                ResolvedParams::default(),
+                "test",
+            ),
+        };
         let a = CancelToken::new();
         let b = CancelToken::new();
         let sibling = CancelToken::new();
-        backlog.insert("gr-test", 1, a.clone()).unwrap();
-        backlog.insert("gr-test", 2, b.clone()).unwrap();
-        backlog.insert("gr-sibling", 3, sibling.clone()).unwrap();
-
-        let backend = AzureOpenAiBackend {
-            state: NativeRunState {
-                client_state: AzureOpenAiClientState::Static(Box::new(client)),
-                model: "gpt-4o".into(),
-                tool_filter: None,
-                resolved: ResolvedParams::default(),
-                last_ctx: Mutex::new(None),
-                cancels: backlog,
-                next_id: AtomicU64::new(1),
-                log_label: "test".into(),
-            },
-        };
+        let cancels = &backend.state.cancels;
+        cancels.insert("gr-test", 1, a.clone()).unwrap();
+        cancels.insert("gr-test", 2, b.clone()).unwrap();
+        cancels.insert("gr-sibling", 3, sibling.clone()).unwrap();
         backend.reap_all("gr-test");
         assert!(a.is_cancelled());
         assert!(b.is_cancelled());
@@ -757,7 +745,7 @@ mod tests {
             &indexmap::IndexMap::new(),
         )
         .unwrap();
-        let model = backend.make_model("azure-openai/gpt-4o");
+        let model = backend.build_model("azure-openai/gpt-4o");
         assert!(model.is_some(), "Static client must produce a model");
     }
 
@@ -774,7 +762,7 @@ mod tests {
             &indexmap::IndexMap::new(),
         )
         .unwrap();
-        let model = backend.make_model("azure-openai/gpt-4o");
+        let model = backend.build_model("azure-openai/gpt-4o");
         assert!(
             model.is_some(),
             "Dynamic client must produce a model (lazy token acquisition)"
@@ -793,7 +781,7 @@ mod tests {
             &indexmap::IndexMap::new(),
         )
         .unwrap();
-        assert!(backend.make_model("openai/gpt-4o").is_none());
-        assert!(backend.make_model("anthropic/claude-sonnet-4-6").is_none());
+        assert!(backend.build_model("openai/gpt-4o").is_none());
+        assert!(backend.build_model("anthropic/claude-sonnet-4-6").is_none());
     }
 }

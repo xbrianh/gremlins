@@ -4179,16 +4179,17 @@ mod tests {
         ]]);
 
         let child_handle = child.clone();
-        let factory: super::super::task::TaskModelFactory = Arc::new(move |spec: &str| {
-            assert_eq!(spec, "openai/mini", "factory receives the matched spec");
-            Ok(super::super::task::TaskModel {
-                model: child_handle.clone().erase(),
-                temperature: None,
-                max_tokens: None,
-                extra: None,
-                preserve_reasoning: None,
-            })
-        });
+        let factory: super::super::task::TaskModelFactory =
+            crate::clients::agent::task_models::sync_factory(move |spec: &str| {
+                assert_eq!(spec, "openai/mini", "factory receives the matched spec");
+                Ok(super::super::task::TaskModel {
+                    model: child_handle.clone().erase(),
+                    temperature: None,
+                    max_tokens: None,
+                    extra: None,
+                    preserve_reasoning: None,
+                })
+            });
 
         let selector = super::super::task::TaskModelSelector::new(
             HashMap::from([(crate::task_kind::TaskKind::Scout, "openai/mini".to_string())]),
@@ -4393,15 +4394,16 @@ mod tests {
         ]]);
 
         let child_handle = child.clone();
-        let factory: super::super::task::TaskModelFactory = Arc::new(move |_spec: &str| {
-            Ok(super::super::task::TaskModel {
-                model: child_handle.clone().erase(),
-                temperature: None,
-                max_tokens: Some(8192),
-                extra: None,
-                preserve_reasoning: None,
-            })
-        });
+        let factory: super::super::task::TaskModelFactory =
+            crate::clients::agent::task_models::sync_factory(move |_spec: &str| {
+                Ok(super::super::task::TaskModel {
+                    model: child_handle.clone().erase(),
+                    temperature: None,
+                    max_tokens: Some(8192),
+                    extra: None,
+                    preserve_reasoning: None,
+                })
+            });
 
         let selector = super::super::task::TaskModelSelector::new(
             HashMap::from([(crate::task_kind::TaskKind::Scout, "openai/mini".to_string())]),
@@ -4619,15 +4621,16 @@ mod tests {
         ]]);
 
         let child_handle = child.clone();
-        let factory: super::super::task::TaskModelFactory = Arc::new(move |_spec: &str| {
-            Ok(super::super::task::TaskModel {
-                model: child_handle.clone().erase(),
-                temperature: None,
-                max_tokens: None,
-                extra: None,
-                preserve_reasoning: None,
-            })
-        });
+        let factory: super::super::task::TaskModelFactory =
+            crate::clients::agent::task_models::sync_factory(move |_spec: &str| {
+                Ok(super::super::task::TaskModel {
+                    model: child_handle.clone().erase(),
+                    temperature: None,
+                    max_tokens: None,
+                    extra: None,
+                    preserve_reasoning: None,
+                })
+            });
 
         let selector = super::super::task::TaskModelSelector::new(
             HashMap::from([(crate::task_kind::TaskKind::Scout, "openai/mini".to_string())]),

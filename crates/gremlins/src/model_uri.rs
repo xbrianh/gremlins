@@ -313,6 +313,12 @@ impl ModelURI {
     }
 }
 
+/// Parse a model specifier, discarding its optional client parameters.
+pub(crate) fn provider_and_model(spec: &str) -> Option<(String, String)> {
+    let uri = ModelURI::parse(spec).ok()?;
+    Some((uri.provider, uri.model))
+}
+
 impl fmt::Display for ModelURI {
     /// Renders the canonical form: `model://provider/model[?params]`, or
     /// `cmd/<command>` for the command backend.
@@ -340,6 +346,50 @@ fn render_params(params: &IndexMap<String, String>) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn provider_and_model_agrees_with_model_uri_on_plain_and_param_specs() {
+        for (spec, expected) in [
+            ("openai/gpt-4o", ("openai", "gpt-4o")),
+            ("openai/gpt-4o?foo=bar", ("openai", "gpt-4o")),
+            ("openai/gpt-4o?top_p=0.7,n=3", ("openai", "gpt-4o")),
+            (
+                "openrouter/anthropic/claude-sonnet-4:free",
+                ("openrouter", "anthropic/claude-sonnet-4:free"),
+            ),
+            (
+                "openrouter/google/gemini-2.5-flash:online",
+                ("openrouter", "google/gemini-2.5-flash:online"),
+            ),
+            (
+                "openrouter/some/model:free",
+                ("openrouter", "some/model:free"),
+            ),
+            ("model://openai/gpt-4o?foo=bar", ("openai", "gpt-4o")),
+            ("cmd/echo hello:world=foo", ("cmd", "echo hello:world=foo")),
+        ] {
+            assert_eq!(
+                provider_and_model(spec),
+                Some((expected.0.to_string(), expected.1.to_string())),
+                "{spec:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn provider_and_model_agrees_with_model_uri_on_malformed_specs() {
+        for spec in [
+            "",
+            "only",
+            LEGACY_COLON_SPEC,
+            "/model",
+            "openai/",
+            "openai/gpt-4o?reasoning=high,bad",
+            "model://cmd/true",
+        ] {
+            assert_eq!(provider_and_model(spec), None, "{spec:?}");
+        }
+    }
 
     #[test]
     fn model_uri_parse_stub_basic() {

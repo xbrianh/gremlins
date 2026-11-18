@@ -40,6 +40,13 @@ struct Cli {
     command: Option<Cmds>,
 }
 
+fn model_help() -> String {
+    let providers = gremlins::clients::provider_names()
+        .collect::<Vec<_>>()
+        .join(", ");
+    format!("Model spec supplying `default_model` only when the definition YAML has none. Providers: {providers}.")
+}
+
 #[derive(Subcommand)]
 enum Cmds {
     /// Start a definition as a detached background gremlin.
@@ -52,8 +59,7 @@ enum Cmds {
         /// Run with temp-backed storage — no footprint on disk after completion.
         #[arg(long)]
         ephemeral: bool,
-        /// Model spec supplying `default_model` only when the definition YAML has none.
-        #[arg(long)]
+        #[arg(long, help = model_help())]
         model: Option<String>,
     },
     /// Validate a definition — parse, resolve, and check bootstrap inputs
@@ -64,8 +70,7 @@ enum Cmds {
         /// Free-form --key value pairs passed to bootstrap sources.
         #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
         args: Vec<String>,
-        /// Model spec supplying `default_model` only when the definition YAML has none.
-        #[arg(long)]
+        #[arg(long, help = model_help())]
         model: Option<String>,
     },
     /// List gremlins from the state root as a plain-column table.
@@ -178,6 +183,26 @@ enum AuthCmds {
         #[command(subcommand)]
         command: CopilotAuthCmds,
     },
+    /// ChatGPT OAuth sign-in.
+    #[command(name = "chatgpt")]
+    ChatGpt {
+        #[command(subcommand)]
+        command: ChatGptAuthCmds,
+    },
+}
+
+#[derive(Subcommand)]
+enum ChatGptAuthCmds {
+    /// Show local credential state (no provider check).
+    Status,
+    /// Remove the stored OAuth sign-in (static credentials are untouched).
+    Logout,
+    /// Sign in with a browser, or a device code when forced or headless.
+    Login {
+        /// Use the device-code flow instead of the browser.
+        #[arg(long)]
+        device_code: bool,
+    },
 }
 
 #[derive(Subcommand)]
@@ -268,6 +293,15 @@ async fn main() {
         Some(Cmds::Serve { lock_fd }) => serve_daemon(lock_fd).await,
         Some(Cmds::Version) => version_cmd().await,
         Some(Cmds::Auth { command }) => match command {
+            AuthCmds::ChatGpt {
+                command: ChatGptAuthCmds::Login { device_code },
+            } => auth_chatgpt_login(device_code).await,
+            AuthCmds::ChatGpt {
+                command: ChatGptAuthCmds::Status,
+            } => auth_chatgpt_status(),
+            AuthCmds::ChatGpt {
+                command: ChatGptAuthCmds::Logout,
+            } => auth_chatgpt_logout().await,
             AuthCmds::Copilot { command } => match command {
                 CopilotAuthCmds::Login { client_id } => {
                     auth_copilot_login(copilot_login_client_id(client_id.as_deref())).await
@@ -2284,6 +2318,125 @@ async fn tail_log_lines(path: &Path, n: usize) -> Result<Vec<String>, String> {
 /// first-party Copilot OAuth app when none was given.
 fn copilot_login_client_id(client_id: Option<&str>) -> &str {
     client_id.unwrap_or(github_auth::DEFAULT_COPILOT_OAUTH_CLIENT_ID)
+}
+
+fn auth_chatgpt_status() -> Result<(), String> {
+    use gremlins::clients::chatgpt_auth::{self, RecordState, SelectedSource};
+
+    gremlins::config::init_global().map_err(|e| e.to_string())?;
+    let status = chatgpt_auth::status();
+    println!(
+        "Source: {}",
+        match status.source {
+            SelectedSource::Environment => "environment (CHATGPT_ACCESS_TOKEN)",
+            SelectedSource::Config => "config (chatgpt.token in providers.yaml)",
+            SelectedSource::OAuth => "stored OAuth sign-in",
+            SelectedSource::None => "none",
+        }
+    );
+    match status.record {
+        RecordState::Absent => {
+            println!("OAuth record: absent");
+            Ok(())
+        }
+        RecordState::Stored(info) => {
+            println!("OAuth record: stored (local state; not validated with the provider)");
+            println!(
+                "  account: {}",
+                info.account_id.as_deref().unwrap_or("unknown")
+            );
+            let now = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .ok()
+                .and_then(|d| i64::try_from(d.as_secs()).ok());
+            match info.expires_at.zip(now) {
+                None => println!("  access token expiry: unknown"),
+                Some((at, now)) if at <= now => {
+                    println!("  access token expired (unix {at}); it may still be refreshable")
+                }
+                Some((at, _)) => println!(
+                    "  access token expires at unix {at}; not proof of a live subscription"
+                ),
+            }
+            Ok(())
+        }
+        RecordState::Unreadable { path, reason } => {
+            println!("OAuth record: unreadable");
+            Err(format!(
+                "credential record at {} is unusable: {reason}",
+                path.display()
+            ))
+        }
+    }
+}
+
+async fn auth_chatgpt_logout() -> Result<(), String> {
+    use gremlins::clients::chatgpt_auth::{self, LogoutOutcome};
+
+    gremlins::config::init_global().map_err(|e| e.to_string())?;
+    let outcome = chatgpt_auth::logout().await;
+    let result = match outcome {
+        LogoutOutcome::NotSignedIn => {
+            println!("No stored ChatGPT sign-in.");
+            Ok(())
+        }
+        LogoutOutcome::Revoked => {
+            println!(
+                "✓ Signed out: the provider confirmed revocation and the local record was removed."
+            );
+            Ok(())
+        }
+        LogoutOutcome::RemovedUnconfirmed => {
+            println!("Local sign-in record removed.");
+            eprintln!("warning: the provider did not confirm revocation of the tokens.");
+            Err("revocation unconfirmed".to_string())
+        }
+        LogoutOutcome::StoreFailure { path } => Err(format!(
+            "could not sign out: credential store failed at {}",
+            path.display()
+        )),
+    };
+    if let Some(source) = chatgpt_auth::static_source_label() {
+        println!("Static credential {source} remains set and was not changed.");
+    }
+    result
+}
+
+async fn auth_chatgpt_login(device_code: bool) -> Result<(), String> {
+    use gremlins::clients::chatgpt_auth::{self, LoginEvent};
+
+    gremlins::config::init_global().map_err(|e| e.to_string())?;
+    if let Some(source) = chatgpt_auth::static_source_label() {
+        return Err(format!(
+            "{} is set — OAuth login would be ignored. Remove it first \
+             (unset the environment variable, or delete the entry from providers.yaml).",
+            source
+        ));
+    }
+    let events: std::sync::Arc<dyn Fn(LoginEvent) + Send + Sync> =
+        std::sync::Arc::new(|event| match event {
+            LoginEvent::Browser { launched: true, .. } => {
+                eprintln!("Complete sign-in in your browser.")
+            }
+            LoginEvent::Browser {
+                url,
+                launched: false,
+            } => {
+                eprintln!("Could not open a browser. Open this URL to sign in:\n  {url}")
+            }
+            LoginEvent::BrowserUnavailable(reason) => {
+                eprintln!("Browser sign-in unavailable ({reason}); falling back to a device code.")
+            }
+            LoginEvent::DeviceCode { url, code } => {
+                eprintln!("Open {url} and enter the code: {code}")
+            }
+        });
+    let account = chatgpt_auth::login(device_code, events).await?;
+    match account {
+        Some(id) => println!("✓ Signed in to ChatGPT (account {id})."),
+        None => println!("✓ Signed in to ChatGPT."),
+    }
+    Ok(())
 }
 
 async fn auth_copilot_login(client_id: &str) -> Result<(), String> {

@@ -79,7 +79,7 @@ macro_rules! declare_openai_backend {
                     state: $crate::clients::openai_protocol::OpenAiRunState::new(
                         client,
                         model,
-                        $crate::clients::openai_protocol::tool_filter(native_block),
+                        $crate::clients::config::tool_filter(native_block),
                         <Self as $crate::clients::backend::Backend>::resolve_params(extra_params)?,
                         stringify!($backend).to_string(),
                     ),
@@ -127,7 +127,7 @@ macro_rules! declare_openai_backend {
                 Some(self.state.resolved.clone())
             }
 
-            fn make_model(
+            fn build_model(
                 &self,
                 spec: &str,
             ) -> Option<rig_core::driver::DynModel<rig_core::operation::Completion>> {
@@ -173,6 +173,7 @@ macro_rules! backends {
 backends! {
     cmd: "cmd" => cmd::CmdBackend::build,
     copilot: "copilot" => copilot::CopilotBackend::build,
+    chatgpt: "chatgpt" => chatgpt::ChatGptBackend::build,
     openai: "openai" => openai::OpenAiBackend::build,
     xai: "xai" => xai::XaiBackend::build,
     openrouter: "openrouter" => openrouter::OpenRouterBackend::build,

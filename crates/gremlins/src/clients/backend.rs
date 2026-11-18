@@ -174,9 +174,20 @@ pub trait Backend: Send + Sync {
     /// Reap all child processes for a given gremlin ID.
     fn reap_all(&self, _gremlin_id: &str) {}
 
-    /// Build a model from a provider-raw spec string.
-    fn make_model(&self, _spec: &str) -> Option<DynModel<Completion>> {
+    /// Synchronous construction hook for backends whose credentials are
+    /// already resolved. Callers should use [`Backend::make_model`]; the
+    /// default `make_model` delegates here, so a backend must override at
+    /// least one of the two or every spec is reported unsupported (`None`).
+    /// Backends that must await credentials override `make_model` instead.
+    fn build_model(&self, _spec: &str) -> Option<DynModel<Completion>> {
         None
+    }
+
+    /// Build a model from a provider-raw spec string, possibly awaiting
+    /// credentials. `Ok(None)` means the spec is unsupported; failure to build
+    /// a supported model is an error.
+    async fn make_model(&self, spec: &str) -> Result<Option<DynModel<Completion>>, ClientError> {
+        Ok(self.build_model(spec))
     }
 
     /// Total cost in USD for this session, if tracked.

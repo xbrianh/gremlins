@@ -76,11 +76,15 @@ pub(crate) async fn score_comprehensibility(
             eprintln!("║ model spec:      {model_spec}");
             eprintln!("║ client:          {client}");
             if let Ok(backend) = client.get_or_build_backend() {
-                if let Some(model) = backend.make_model(model_spec) {
-                    eprintln!("║ model name:      {}", model.name());
-                    if let Some(id) = model.id() {
-                        eprintln!("║ model id:        {id}");
+                match backend.make_model(model_spec).await {
+                    Ok(Some(model)) => {
+                        eprintln!("║ model name:      {}", model.name());
+                        if let Some(id) = model.id() {
+                            eprintln!("║ model id:        {id}");
+                        }
                     }
+                    Ok(None) => eprintln!("║ model:           unsupported spec"),
+                    Err(e) => eprintln!("║ model error:     {e}"),
                 }
                 if let Some(ref rp) = backend.resolved_params() {
                     eprintln!("║ backend temp:    {:?}", rp.temperature);

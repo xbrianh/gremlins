@@ -50,9 +50,37 @@ can have running gremlins simultaneously without interference.
 - `gh` — [GitHub CLI](https://github.com/cli/cli#installation)
 - `git` — [Git](https://git-scm.com/downloads) (pre-installed on most systems)
 
-A provider also requires either its API key (`OPENAI_API_KEY`, `XAI_API_KEY`,
-`OPENROUTER_API_KEY`, `GREMLINS_AZURE_OPENAI_API_KEY` or `GREMLINS_AZURE_OPENAI_TOKEN`) or a `cmd/<command>`
-command on `PATH`.
+Hosted providers require credentials. For example, `openai`, `xai`, and `openrouter`
+read `OPENAI_API_KEY`, `XAI_API_KEY`, and `OPENROUTER_API_KEY`, respectively.
+For `cmd/<command>`, the command must be on `PATH`.
+
+**ChatGPT subscription:** Set `model: chatgpt/gpt-5.4` and supply a ChatGPT access
+token via `CHATGPT_ACCESS_TOKEN` or the `chatgpt.token` field in `providers.yaml`.
+The environment variable takes precedence. These static tokens are not refreshed.
+OpenAI API keys are not accepted.
+
+**ChatGPT sign-in and sign-out:**
+
+- `gremlins auth chatgpt login` signs in through the browser; add `--device-code`
+  to force device login (also used when no browser is available). The record is
+  stored per user under `<user config root>/credentials/chatgpt.json`.
+- Static credentials win: `CHATGPT_ACCESS_TOKEN`, then `chatgpt.token` in
+  `providers.yaml`, then the stored sign-in. Login refuses while a static one is set.
+- Runs and delegated Tasks check the stored sign-in before each model request
+  and refresh it when needed. They never prompt for login.
+- `gremlins auth chatgpt status` shows the selected source and local record
+  (account, access-token expiry) without contacting the provider. An expired token
+  may still refresh; an unexpired one does not prove a live subscription.
+  Unreadable records exit nonzero.
+- `gremlins auth chatgpt logout` revokes and removes the stored sign-in only. It
+  exits nonzero if revocation is unconfirmed (the record is still removed) or the
+  store fails. It leaves static credentials and in-flight requests alone. After
+  removal, the next request using stored OAuth needs a new sign-in.
+
+Manual smoke check (consenting operator, isolated config root): log in with the
+browser, complete a ChatGPT run, run `status`, then `logout`; repeat with
+`login --device-code`. With no static credentials, a fresh run after logout should
+say to run `gremlins auth chatgpt login`. This is not an automated test.
 
 **Azure OpenAI / Azure AI Foundry** uses `azure-openai/<deployment>` as the model
 specifier. Set `GREMLINS_AZURE_OPENAI_ENDPOINT` (required) and one of
@@ -281,7 +309,7 @@ stages:
     model: openai/gpt-4o      # this stage uses openai instead
 ```
 
-Providers: `openai`, `xai`, `openrouter`, `anthropic`, `azure-openai`, `copilot`, `cmd`. The CLI `--model provider/model` flag supplies the definition default only when the YAML does not declare `default_model:`; per-stage `model:` and `default-model-by-stage` still take precedence.
+Providers: `openai`, `chatgpt`, `xai`, `openrouter`, `anthropic`, `azure-openai`, `copilot`, `cmd`. The CLI `--model provider/model` flag supplies the definition default only when the YAML does not declare `default_model:`; per-stage `model:` and `default-model-by-stage` still take precedence.
 
 ### `prompt:` field
 

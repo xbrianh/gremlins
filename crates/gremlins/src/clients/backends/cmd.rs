@@ -646,7 +646,7 @@ impl Backend for CmdBackend {
         "cmd"
     }
 
-    fn make_model(&self, _spec: &str) -> Option<DynModel<Completion>> {
+    fn build_model(&self, _spec: &str) -> Option<DynModel<Completion>> {
         None
     }
 

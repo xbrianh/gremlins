@@ -6,6 +6,7 @@ pub mod backend;
 pub mod backends;
 pub(crate) mod cancel;
 pub(crate) mod cancels;
+pub mod chatgpt_auth;
 pub mod client;
 pub(crate) mod path_context;
 pub(crate) use client::run_naked;
@@ -27,3 +28,8 @@ pub(crate) mod shell_parse;
 pub(crate) mod stream_json;
 pub(crate) mod token_provider;
 pub(crate) mod tools;
+
+/// Names accepted in model specs, in backend registration order.
+pub fn provider_names() -> impl Iterator<Item = &'static str> {
+    backends::registry().into_iter().map(|(name, _)| name)
+}

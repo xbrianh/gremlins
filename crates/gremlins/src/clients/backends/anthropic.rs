@@ -1,6 +1,5 @@
 use std::collections::HashMap;
-use std::sync::atomic::AtomicU64;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 
 use async_trait::async_trait;
 use rig_core::http_client::DynHttpClient;
@@ -8,13 +7,11 @@ use rig_core::providers::anthropic::{Anthropic, AnthropicConfig};
 
 use crate::clients::cancel::CancelToken;
 use crate::clients::backend::{Backend, ClientError, RunParams};
-use crate::clients::cancels::CancelsMap;
 use crate::clients::config::ProviderAuth;
 use crate::clients::interactive::InteractiveSession;
 use crate::clients::lazy_auth_http::{BearerStrategy, LazyAuthHttpClient};
 
 use crate::clients::native::NativeRunState;
-use crate::clients::openai_protocol;
 use crate::clients::params::{self, ResolvedParams};
 use crate::clients::protocol::{CompactionBlock, CompactionResult, CompletedRun};
 use crate::clients::token_provider::{self, TokenProvider};
@@ -100,7 +97,7 @@ impl AnthropicBackend {
             model.to_string()
         };
 
-        let tool_filter = openai_protocol::tool_filter(native_block);
+        let tool_filter = crate::clients::config::tool_filter(native_block);
         let resolved = Self::resolve_params(extra_params)?;
 
         let http_client = DynHttpClient::new(ReqwestClient::default());
@@ -167,16 +164,13 @@ impl AnthropicBackend {
         };
 
         Ok(Self {
-            state: NativeRunState {
+            state: NativeRunState::new(
                 client_state,
                 model,
                 tool_filter,
                 resolved,
-                last_ctx: Mutex::new(None),
-                cancels: CancelsMap::default(),
-                next_id: AtomicU64::new(1),
-                log_label: "AnthropicBackend".to_string(),
-            },
+                "AnthropicBackend",
+            ),
             api_key,
             token_provider,
             auth_scope,
@@ -188,8 +182,8 @@ impl AnthropicBackend {
 
 #[async_trait]
 impl Backend for AnthropicBackend {
-    fn make_model(&self, spec: &str) -> Option<DynModel<Completion>> {
-        let (provider, model) = openai_protocol::provider_and_model(spec)?;
+    fn build_model(&self, spec: &str) -> Option<DynModel<Completion>> {
+        let (provider, model) = crate::model_uri::provider_and_model(spec)?;
         if provider == "anthropic" {
             match &self.state.client_state {
                 AnthropicClientState::Static(client) => {
@@ -720,31 +714,27 @@ mod tests {
 
         let client = Anthropic::new("sk-ant-test");
 
-        let backlog = CancelsMap::default();
-        let a = CancelToken::new();
-        let b = CancelToken::new();
-        let sibling = CancelToken::new();
-        backlog.insert("gr-test", 1, a.clone()).unwrap();
-        backlog.insert("gr-test", 2, b.clone()).unwrap();
-        backlog.insert("gr-sibling", 3, sibling.clone()).unwrap();
-
         let backend = AnthropicBackend {
             api_key: Some("sk-ant-test".into()),
             token_provider: None,
             auth_scope: "https://cognitiveservices.azure.com/.default".into(),
             raw_http: DynHttpClient::new(ReqwestClient::default()),
             base_url: "https://api.anthropic.com".into(),
-            state: NativeRunState {
-                client_state: AnthropicClientState::Static(client),
-                model: "claude-sonnet-4-6".into(),
-                tool_filter: None,
-                resolved: ResolvedParams::default(),
-                last_ctx: Mutex::new(None),
-                cancels: backlog,
-                next_id: AtomicU64::new(1),
-                log_label: "test".into(),
-            },
+            state: NativeRunState::new(
+                AnthropicClientState::Static(client),
+                "claude-sonnet-4-6".into(),
+                None,
+                ResolvedParams::default(),
+                "test",
+            ),
         };
+        let a = CancelToken::new();
+        let b = CancelToken::new();
+        let sibling = CancelToken::new();
+        let cancels = &backend.state.cancels;
+        cancels.insert("gr-test", 1, a.clone()).unwrap();
+        cancels.insert("gr-test", 2, b.clone()).unwrap();
+        cancels.insert("gr-sibling", 3, sibling.clone()).unwrap();
         backend.reap_all("gr-test");
         assert!(a.is_cancelled());
         assert!(b.is_cancelled());
@@ -920,7 +910,7 @@ mod tests {
             &indexmap::IndexMap::new(),
         )
         .unwrap();
-        let model = backend.make_model("anthropic/claude-sonnet-4-6");
+        let model = backend.build_model("anthropic/claude-sonnet-4-6");
         assert!(model.is_some(), "Static client must produce a model");
     }
 
@@ -936,7 +926,7 @@ mod tests {
             &indexmap::IndexMap::new(),
         )
         .unwrap();
-        let model = backend.make_model("anthropic/claude-sonnet-4-6");
+        let model = backend.build_model("anthropic/claude-sonnet-4-6");
         assert!(
             model.is_some(),
             "Dynamic client must produce a model (lazy token acquisition)"
@@ -954,8 +944,8 @@ mod tests {
             &indexmap::IndexMap::new(),
         )
         .unwrap();
-        assert!(backend.make_model("openai/gpt-4o").is_none());
-        assert!(backend.make_model("azure-openai/gpt-4o").is_none());
+        assert!(backend.build_model("openai/gpt-4o").is_none());
+        assert!(backend.build_model("azure-openai/gpt-4o").is_none());
     }
 
     /// Explicit `cache_control` with a custom TTL wins over the default.

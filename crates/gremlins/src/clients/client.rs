@@ -49,9 +49,7 @@ pub fn default_native_block() -> HashMap<String, Vec<String>> {
 ///
 /// Callers use this to reject a bad spec early, before any work is queued.
 pub fn is_known_provider(provider: &str) -> bool {
-    backends::registry()
-        .iter()
-        .any(|(name, _)| *name == provider)
+    super::provider_names().any(|name| name == provider)
 }
 
 fn backend_pool() -> &'static Mutex<HashMap<String, Arc<dyn Backend>>> {
@@ -294,16 +292,25 @@ pub(crate) fn validate_task_model_spec(spec: &str) -> Result<ModelURI, String> {
 /// the parent model's `temperature`/`max_tokens`/`extra`. Every failure —
 /// malformed spec, unknown provider, `cmd`, and backend-build failure — is
 /// returned as an `Err` with a reason instead of a silent fallback.
-pub(crate) fn resolve_model(spec: &str) -> Result<super::agent::task::TaskModel, String> {
+pub(crate) async fn resolve_model(spec: &str) -> Result<super::agent::task::TaskModel, String> {
     let uri = validate_task_model_spec(spec)?;
     let client = Client::from_uri(uri)?;
     let backend = client.get_or_build_backend()?;
-    let model = backend.make_model(spec).ok_or_else(|| {
-        format!(
-            "backend for provider '{}' could not build a model for {spec:?}",
-            client.provider()
-        )
-    })?;
+    let model = backend
+        .make_model(spec)
+        .await
+        .map_err(|e| {
+            format!(
+                "backend for provider '{}' failed to build {spec:?}: {e}",
+                client.provider()
+            )
+        })?
+        .ok_or_else(|| {
+            format!(
+                "backend for provider '{}' could not build a model for {spec:?}",
+                client.provider()
+            )
+        })?;
     let resolved = backend.resolved_params().ok_or_else(|| {
         format!(
             "backend for provider '{}' could not resolve request options for {spec:?}",
@@ -339,7 +346,9 @@ pub(crate) async fn run_naked(
     preamble: String,
     max_tokens: Option<u64>,
 ) -> Result<String, ClientError> {
-    let task_model = resolve_model(spec).map_err(|e| ClientError::Runtime { message: e })?;
+    let task_model = resolve_model(spec)
+        .await
+        .map_err(|e| ClientError::Runtime { message: e })?;
 
     let cancel = CancelToken::new(); // inert — single turn, no interactive
 
@@ -407,24 +416,24 @@ mod tests {
         assert!(Client::from_uri(ModelURI::parse("fake/m").unwrap()).is_err());
     }
 
-    #[test]
-    fn resolve_model_returns_err_for_malformed_specs() {
+    #[tokio::test]
+    async fn resolve_model_returns_err_for_malformed_specs() {
         for spec in ["no-slash", "/model", "openai/", "model://openai"] {
             assert!(
-                resolve_model(spec).is_err(),
+                resolve_model(spec).await.is_err(),
                 "malformed spec {spec:?} must not resolve"
             );
         }
     }
 
-    #[test]
-    fn resolve_model_returns_err_for_unknown_provider() {
-        assert!(resolve_model("fake/model").is_err());
+    #[tokio::test]
+    async fn resolve_model_returns_err_for_unknown_provider() {
+        assert!(resolve_model("fake/model").await.is_err());
     }
 
-    #[test]
-    fn resolve_model_returns_err_for_cmd() {
-        assert!(resolve_model("cmd/true").is_err());
+    #[tokio::test]
+    async fn resolve_model_returns_err_for_cmd() {
+        assert!(resolve_model("cmd/true").await.is_err());
     }
 
     #[test]
