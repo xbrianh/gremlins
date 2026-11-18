@@ -115,11 +115,7 @@ fn resolve_auth(
     }
     Err(format!(
         "no credentials for provider '{PROVIDER_NAME}': set GITHUB_COPILOT_API_KEY, \
-         COPILOT_API_KEY, GITHUB_TOKEN, or GH_TOKEN; or add an entry with \
-         \"api-key\", \"client-id\" + \"refresh-token\", or \"github-token\" in {}",
-        crate::config::user_config_root()
-            .join("providers.yaml")
-            .display(),
+         COPILOT_API_KEY, GITHUB_TOKEN, or GH_TOKEN; or configure Copilot credentials in providers.yaml",
     ))
 }
 
@@ -275,19 +271,15 @@ impl CopilotTokenExchanger for BlockingCopilotTokenExchanger {
                 format!("token {access_token}"),
             )
             .send()
-            .map_err(|err| format!("GitHub Copilot token exchange failed: {err}"))?;
+            .map_err(|_| "GitHub Copilot token exchange transport failed".to_string())?;
 
         if !response.status().is_success() {
             let status = response.status();
-            let body = response.text().unwrap_or_default();
-            return Err(format!(
-                "GitHub Copilot token exchange failed with HTTP {status}{}",
-                token_exchange_error_detail(&body)
-            ));
+            return Err(format!("GitHub Copilot token exchange failed with HTTP {status}"));
         }
 
-        let record: CopilotTokenResponse = response.json().map_err(|err| {
-            format!("GitHub Copilot token exchange response was invalid: {err}")
+        let record: CopilotTokenResponse = response.json().map_err(|_| {
+            "GitHub Copilot token exchange response could not be decoded".to_string()
         })?;
         session_from_response(record)
     }
@@ -424,27 +416,6 @@ impl HttpMiddleware for CopilotTokenRefreshMiddleware {
     }
 }
 
-/// Render a small, non-empty response body snippet for exchange errors.
-fn token_exchange_error_detail(body: &str) -> String {
-    const MAX_BODY_BYTES: usize = 512;
-
-    let body = body.trim();
-    if body.is_empty() {
-        return String::new();
-    }
-
-    let mut end = body.len().min(MAX_BODY_BYTES);
-    while !body.is_char_boundary(end) {
-        end -= 1;
-    }
-    let snippet = &body[..end];
-    if end < body.len() {
-        format!(": {snippet}...")
-    } else {
-        format!(": {snippet}")
-    }
-}
-
 pub(super) fn copilot_transport(
     middleware: CopilotTokenRefreshMiddleware,
 ) -> rig_core::http_client::DynHttpClient {
@@ -494,7 +465,7 @@ pub(super) fn resolve_catalog_session() -> Result<(CopilotSession, CopilotTokenR
     };
 
     let session = exchange_github_token_sync(exchanger.clone(), &github_token)
-        .map_err(|_| "Copilot token exchange failed; check your GitHub credential and Copilot access".to_string())?;
+        .map_err(|_| "Copilot session exchange failed; check your GitHub credential and Copilot access".to_string())?;
     let sessions = Arc::new(CopilotSessionProvider::with_session(
         provider,
         exchanger,
