@@ -66,7 +66,7 @@ pub async fn list_models(
     slugs
         .into_iter()
         .map(|slug| {
-            crate::model_uri::ModelURI::parse(&format!("model://{}/{slug}", entry.name))
+            crate::model_uri::ModelURI::from_parts(entry.name.to_string(), slug, Default::default())
                 .map_err(ListModelsError::Failed)
         })
         .collect()

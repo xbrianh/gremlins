@@ -30,7 +30,8 @@ struct Entry {
 
 /// Credentials resolved for one catalog request.
 struct Access {
-    token: String,
+    /// Sensitive `Authorization` header; the raw token never leaves construction.
+    authorization: HeaderValue,
     account_id: Option<String>,
     api_base: Option<String>,
     /// Remedy shown when the provider rejects the credential.
@@ -49,7 +50,7 @@ pub(super) async fn list_models_with(http: DynHttpClient) -> Result<Vec<String>,
             "{}/models?client_version={CLIENT_VERSION}",
             effective_base(access.api_base)
         ))
-        .header(AUTHORIZATION, bearer(&access.token)?)
+        .header(AUTHORIZATION, access.authorization)
         .body(NoBody)
         .map_err(|_| "could not build the ChatGPT catalog request".to_string())?;
     let request = match access.account_id {
@@ -61,7 +62,7 @@ pub(super) async fn list_models_with(http: DynHttpClient) -> Result<Vec<String>,
         .await
         .map_err(|_| "ChatGPT catalog request failed; check your network connection".to_string())?;
     let status = response.status();
-    if matches!(status, StatusCode::UNAUTHORIZED | StatusCode::FORBIDDEN) {
+    if status == StatusCode::UNAUTHORIZED {
         return Err(access.rejected);
     }
     if !status.is_success() {
@@ -77,8 +78,8 @@ pub(super) async fn list_models_with(http: DynHttpClient) -> Result<Vec<String>,
 async fn resolve_access(http: &DynHttpClient) -> Result<Access, String> {
     if let Some(found) = static_source() {
         return Ok(Access {
-            token: found.secret,
-            account_id: env_value("CHATGPT_ACCOUNT_ID"),
+            authorization: bearer(&found.secret)?,
+            account_id: None,
             api_base: None,
             rejected: format!(
                 "ChatGPT rejected the credential from {}; replace or remove it",
@@ -91,25 +92,16 @@ async fn resolve_access(http: &DynHttpClient) -> Result<Access, String> {
         .await
         .map_err(|error| error.to_string())?;
     Ok(Access {
-        token: context.api_key.expose().to_string(),
+        authorization: bearer(context.api_key.expose())?,
         account_id: context.account_id,
         api_base: context.api_base,
         rejected: "ChatGPT rejected the sign-in: run `gremlins auth chatgpt login`".into(),
     })
 }
 
-fn env_value(name: &str) -> Option<String> {
-    std::env::var(name)
-        .ok()
-        .map(|value| value.trim().to_string())
-        .filter(|value| !value.is_empty())
-}
-
-/// The Codex API base: sign-in override, then environment, then the default.
+/// The Codex API base: the sign-in override, else the default (as the run path).
 fn effective_base(api_base: Option<String>) -> String {
     api_base
-        .or_else(|| env_value("CHATGPT_API_BASE"))
-        .or_else(|| env_value("OPENAI_CHATGPT_API_BASE"))
         .unwrap_or_else(|| chatgpt::DIALECT.base_url.to_string())
         .trim_end_matches('/')
         .to_string()
@@ -168,9 +160,6 @@ mod tests {
         let root = tempfile::tempdir().unwrap();
         env.set("GREMLINS_SANDBOX_ROOT", root.path());
         env.set(ACCESS_TOKEN_ENV, "tok");
-        env.remove("CHATGPT_API_BASE");
-        env.remove("OPENAI_CHATGPT_API_BASE");
-        env.remove("CHATGPT_ACCOUNT_ID");
         let mock = SequencedHttpClient::new([MockHttpResponse::success(
             r#"{"models":[{"slug":"m","visibility":"list"}]}"#,
         )]);

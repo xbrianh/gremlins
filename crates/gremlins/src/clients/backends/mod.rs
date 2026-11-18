@@ -26,10 +26,10 @@ pub type ListModelsFn = fn() -> BoxFuture<'static, Result<Vec<String>, String>>;
 
 /// One registered backend: its name, constructor, and optional model catalog.
 #[derive(Clone, Copy)]
-pub struct BackendEntry {
-    pub name: &'static str,
-    pub build: BuildFn,
-    pub list_models: Option<ListModelsFn>,
+pub(crate) struct BackendEntry {
+    pub(crate) name: &'static str,
+    pub(crate) build: BuildFn,
+    pub(crate) list_models: Option<ListModelsFn>,
 }
 
 /// Declare an OpenAI-protocol backend.
@@ -169,13 +169,13 @@ pub(crate) use declare_openai_backend;
 /// Each entry is `module: "provider_name" => path::to::Struct::build`.
 /// The macro expands to `pub mod module;` for each entry and a single
 /// `registry()` function returning `Vec<BackendEntry>`. An entry may append
-/// `, list = path::to::fn` to offer model discovery.
+/// `; list = path::to::fn` to offer model discovery.
 macro_rules! backends {
     ($($module:ident : $name:literal => $build:path $(; list = $list:path)?),* $(,)?) => {
         $(pub mod $module;)*
 
         /// Return every registered backend, in declaration order.
-        pub fn registry() -> Vec<BackendEntry> {
+        pub(crate) fn registry() -> Vec<BackendEntry> {
             vec![$(
                 BackendEntry {
                     name: $name,
