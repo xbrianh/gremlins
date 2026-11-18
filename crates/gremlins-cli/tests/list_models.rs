@@ -24,7 +24,9 @@ fn assert_rejected(backend: &str, diagnostic: &str) {
 
 #[test]
 fn registered_backends_without_discovery_are_unsupported() {
-    for backend in gremlins::clients::provider_names().filter(|name| *name != "chatgpt") {
+    for backend in gremlins::clients::provider_names()
+        .filter(|name| !gremlins::clients::model_catalog_names().any(|catalog| catalog == *name))
+    {
         assert_rejected(backend, "not supported");
     }
 }

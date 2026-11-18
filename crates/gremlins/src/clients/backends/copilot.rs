@@ -26,12 +26,15 @@ use serde::Deserialize;
 const PROVIDER_NAME: &str = "copilot";
 const DEFAULT_MODEL: &str = "gpt-4o";
 
+mod catalog;
+pub(super) use catalog::list_models;
+
 const GITHUB_COPILOT_TOKEN_URL: &str = "https://api.github.com/copilot_internal/v2/token";
 const GITHUB_COPILOT_TOKEN_TIMEOUT: Duration = Duration::from_secs(10);
-const COPILOT_EDITOR_VERSION: &str = "vscode/1.107.0";
-const COPILOT_EDITOR_PLUGIN_VERSION: &str = "copilot-chat/0.35.0";
-const COPILOT_USER_AGENT: &str = "GitHubCopilotChat/0.35.0";
-const COPILOT_TOKEN_EXPIRY_SKEW_SECONDS: i64 = 30;
+pub(super) const COPILOT_EDITOR_VERSION: &str = "vscode/1.107.0";
+pub(super) const COPILOT_EDITOR_PLUGIN_VERSION: &str = "copilot-chat/0.35.0";
+pub(super) const COPILOT_USER_AGENT: &str = "GitHubCopilotChat/0.35.0";
+pub(super) const COPILOT_TOKEN_EXPIRY_SKEW_SECONDS: i64 = 30;
 
 #[derive(Debug, Deserialize)]
 struct CopilotTokenResponse {
@@ -47,9 +50,9 @@ struct CopilotTokenEndpoints {
 
 /// A validated Copilot session credential.
 #[derive(Clone, Debug, PartialEq, Eq)]
-struct CopilotSession {
-    token: String,
-    api_base: Option<String>,
+pub(super) struct CopilotSession {
+    pub(super) token: String,
+    pub(super) api_base: Option<String>,
     expires_at: Option<i64>,
 }
 
@@ -226,7 +229,7 @@ async fn exchange_github_token_async(
 }
 
 /// A swappable token exchange, so tests can drive auth without a network.
-trait CopilotTokenExchanger: Send + Sync {
+pub(super) trait CopilotTokenExchanger: Send + Sync {
     fn exchange(&self, access_token: &str) -> Result<CopilotSession, String>;
 }
 
@@ -236,12 +239,12 @@ trait CopilotTokenExchanger: Send + Sync {
 /// its internal runtime is always constructed and dropped on the blocking
 /// thread, never on a tokio worker.
 #[derive(Clone)]
-struct BlockingCopilotTokenExchanger {
+pub(super) struct BlockingCopilotTokenExchanger {
     token_url: String,
 }
 
 impl BlockingCopilotTokenExchanger {
-    fn new() -> Self {
+    pub(super) fn new() -> Self {
         Self::with_url(GITHUB_COPILOT_TOKEN_URL)
     }
 
@@ -338,7 +341,7 @@ fn session_expired(session: &CopilotSession) -> bool {
 
 /// Resolves a Copilot session credential from a GitHub access-token provider,
 /// refreshing the exchanged Copilot session when it expires.
-struct CopilotSessionProvider {
+pub(super) struct CopilotSessionProvider {
     token_provider: Arc<dyn TokenProvider>,
     exchanger: Arc<dyn CopilotTokenExchanger>,
     session: tokio::sync::Mutex<Option<CopilotSession>>,
@@ -392,12 +395,12 @@ impl TokenProvider for StaticTokenProvider {
 /// Replaces the bearer credential before every Copilot request, refreshing the
 /// GitHub-token-backed session when it expires.
 #[derive(Clone)]
-struct CopilotTokenRefreshMiddleware {
+pub(super) struct CopilotTokenRefreshMiddleware {
     sessions: Arc<CopilotSessionProvider>,
 }
 
 impl CopilotTokenRefreshMiddleware {
-    fn new(sessions: Arc<CopilotSessionProvider>) -> Self {
+    pub(super) fn new(sessions: Arc<CopilotSessionProvider>) -> Self {
         Self { sessions }
     }
 }
@@ -442,12 +445,49 @@ fn token_exchange_error_detail(body: &str) -> String {
     }
 }
 
+pub(super) fn copilot_transport(middleware: CopilotTokenRefreshMiddleware) -> rig_core::http_client::DynHttpClient {
+    rig_core::http_client::DynHttpClient::new(rig_reqwest::shared()).with_middleware(middleware)
+}
+
+pub(super) fn resolve_catalog_session() -> Result<(CopilotSession, CopilotTokenRefreshMiddleware), String> {
+    if let Some(token) = crate::config::copilot_api_key() {
+        let session = CopilotSession { token, api_base: None, expires_at: None };
+        return Ok((session.clone(), static_session_middleware(session)));
+    }
+    let providers = crate::clients::config::Providers::load();
+    if let Some(token) = providers.get(PROVIDER_NAME) {
+        let session = CopilotSession { token: token.to_string(), api_base: None, expires_at: None };
+        return Ok((session.clone(), static_session_middleware(session)));
+    }
+    let exchanger: Arc<dyn CopilotTokenExchanger> = Arc::new(BlockingCopilotTokenExchanger::new());
+    let (provider, token) = if let (Some(id), Some(refresh)) = (providers.client_id(PROVIDER_NAME), providers.refresh_token(PROVIDER_NAME)) {
+        let provider = Arc::new(github_auth::GitHubAppTokenProvider::new(id, refresh));
+        let token = provider.access_token_sync()?;
+        (provider as Arc<dyn TokenProvider>, token)
+    } else {
+        let token = providers.github_token(PROVIDER_NAME).map(str::to_string).or_else(github_access_token)
+            .ok_or_else(|| format!("no credentials for provider '{PROVIDER_NAME}': set GITHUB_COPILOT_API_KEY, COPILOT_API_KEY, GITHUB_TOKEN, or GH_TOKEN; or configure copilot credentials in providers.yaml"))?;
+        (Arc::new(StaticTokenProvider { token: token.clone() }) as Arc<dyn TokenProvider>, token)
+    };
+    let session = exchange_github_token_sync(exchanger.clone(), &token)?;
+    let sessions = Arc::new(CopilotSessionProvider::with_session(provider, exchanger, session.clone()));
+    Ok((session, CopilotTokenRefreshMiddleware::new(sessions)))
+}
+
+fn static_session_middleware(session: CopilotSession) -> CopilotTokenRefreshMiddleware {
+    let provider = Arc::new(CopilotSessionProvider::with_session(
+        Arc::new(StaticTokenProvider { token: String::new() }),
+        Arc::new(BlockingCopilotTokenExchanger::new()),
+        session,
+    ));
+    CopilotTokenRefreshMiddleware::new(provider)
+}
+
 fn copilot_client_with_session(
     session: CopilotSession,
     middleware: CopilotTokenRefreshMiddleware,
 ) -> OpenAI {
-    let transport = rig_core::http_client::DynHttpClient::new(rig_reqwest::shared())
-        .with_middleware(middleware);
+    let transport = copilot_transport(middleware);
     let config = OpenAIConfig::with_key(&COPILOT_DIALECT, session.token);
     let config = match session.api_base {
         Some(api_base) => config.with_base_url(api_base),

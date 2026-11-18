@@ -73,10 +73,14 @@ OpenAI API keys are not accepted.
   may still refresh; an unexpired one does not prove a live subscription.
   Unreadable records exit nonzero.
 - `gremlins list-models chatgpt` prints the models your subscription offers, one
-  `model://chatgpt/<slug>` per line, ready to paste into a definition or `/model`:
+  `model://chatgpt/<slug>` per line. `gremlins list-models copilot` prints the
+  Copilot chat catalog IDs as `model://copilot/<id>` URIs. These are catalog
+  entries, not a guarantee that your account can use every model. Both commands
+  print copyable URIs without headings:
 
   ```
   gremlins list-models chatgpt
+  gremlins list-models copilot
   ```
 
 - `gremlins auth chatgpt logout` revokes and removes the stored sign-in only. It
