@@ -535,6 +535,18 @@ impl<B: Backend> LiveArea<B> {
 
     // ── Widget accessors ─────────────────────────────────────────
 
+    /// Update the `active_request` flag in the stored state for `target`.
+    ///
+    /// When `target` is the active target the live `App` field is authoritative;
+    /// this only writes into the per-target map so the value is restored correctly
+    /// on the next target switch.
+    pub fn set_target_active_request(&mut self, target: &crate::tui::app::Target, active: bool) {
+        self.target_states
+            .entry(target.clone())
+            .or_default()
+            .active_request = active;
+    }
+
     /// Sync App-level per-target state into the current target's stored state.
     ///
     /// Called before switching away from a target so the next time it's selected

@@ -1407,7 +1407,8 @@ async fn debug_gremlin(id: &str) -> Result<(), String> {
         let is_terminal = trimmed == "/quit"
             || trimmed.starts_with("/quit ")
             || trimmed == "/continue"
-            || trimmed == "/exit";
+            || trimmed == "/exit"
+            || cmd.get("op").and_then(|v| v.as_str()) == Some("message");
         socket::write_json_line(&mut write_half, &cmd).await?;
         if is_terminal {
             break;

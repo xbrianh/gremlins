@@ -242,16 +242,22 @@ async fn handle_connection(
         }
 
         if op == "attach" {
-            // Events are enabled inside handle_attach once the
-            // handler subscribes to the per-run bus; the global
-            // event-forwarding task is gated behind
-            // events_enabled_tx so one-shot clients always see
-            // their response before any broadcast.  Attach
-            // clients hold the socket indefinitely, so unblocking
-            // here would race broadcast events against the
-            // attach ack — leave the gate closed.
+            // Stop the global event-forwarding task before handing
+            // off to the scoped attachment handler.  If a prior
+            // request already opened the event gate, unrelated
+            // runs' broadcasts can interleave with the per-run
+            // attachment protocol.  Unsubscribe, drop the gate,
+            // and await the forwarder's completion — same
+            // teardown as the log handoff below.
+            drop(events_enabled_tx);
+            event_handle.abort();
+            init_bus().unsubscribe(&event_sub);
+            let _ = event_handle.await;
             attachment::handle_attach(&request, &registry, reader, &writer).await;
-            break None;
+            // The loop-scope teardown was already performed above;
+            // return directly so we don't try to abort the already-
+            // consumed event handle again.
+            return;
         }
 
         dispatch_op(&op, &request, &registry, &writer, &sessions).await;

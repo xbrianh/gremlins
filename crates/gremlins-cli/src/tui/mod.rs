@@ -2845,6 +2845,7 @@ async fn run_app(live_area: &mut LiveArea) -> io::Result<()> {
                         });
 
                         app.active_request = false;
+                        live_area.set_target_active_request(&home, false);
                         active_turn = None;
 
                         // Repaint immediately so the finished response text
@@ -2857,6 +2858,7 @@ async fn run_app(live_area: &mut LiveArea) -> io::Result<()> {
                             continue;
                         }
                         app.active_request = false;
+                        live_area.set_target_active_request(&home, false);
                         let msg = format!("chat ended: {reason}");
                         live_area.with_target_transcript(&home, |transcript, reasoning| {
                             let had_turn = transcript.has_current_turn();
@@ -2892,6 +2894,7 @@ async fn run_app(live_area: &mut LiveArea) -> io::Result<()> {
                             continue;
                         }
                         app.active_request = false;
+                        live_area.set_target_active_request(&home, false);
                         active_turn = None;
                         let full = format!("chat error: {msg}");
                         live_area.with_target_transcript(&home, |transcript, reasoning| {
