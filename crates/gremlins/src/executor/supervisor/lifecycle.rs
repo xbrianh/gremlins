@@ -35,6 +35,7 @@ pub(crate) fn setup_gremlin_channels(
     } else {
         InteractiveSessionFactory::for_pipeline()
     };
+    sessions.set_run_id(gremlin.id.to_string());
     gremlin.interactive_sessions = Some(sessions);
 
     let store = gremlin.state.store_handle();

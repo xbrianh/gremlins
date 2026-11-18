@@ -1466,6 +1466,14 @@ async fn debug_connection_injects_into_the_next_chat_loop_without_reconnecting()
     )
     .await
     .unwrap();
+    // New protocol: attach acks and observes without pausing. Send `talk`
+    // to acquire the debugger lease, which emits `waiting_for_ready` and
+    // waits for the next loop to accept the pause.
+    let attached = read_until_type(&mut read, "attached").await;
+    assert_eq!(attached["id"], id);
+    socket::write_json_line(&mut write, &json!({"op":"talk", "text":"use the new plan"}))
+        .await
+        .unwrap();
     loop {
         let status = read_until_type(&mut read, "status").await;
         if status["stage"] == "waiting_for_ready" {
@@ -1479,9 +1487,8 @@ async fn debug_connection_injects_into_the_next_chat_loop_without_reconnecting()
     let second = tokio::spawn(run_turn(gremlin.next_interactive_session()));
     let ready = read_until_type(&mut read, "ready").await;
     assert_eq!(ready["id"], id);
-    socket::write_json_line(&mut write, &json!({"op":"talk", "text":"use the new plan"}))
-        .await
-        .unwrap();
+    // `talk` was already sent; the Inject command is delivered automatically
+    // once Ready is observed.
     let result = tokio::time::timeout(Duration::from_secs(5), second)
         .await
         .expect("command never reached second loop")

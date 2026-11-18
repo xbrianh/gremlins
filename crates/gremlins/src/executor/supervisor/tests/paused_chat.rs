@@ -97,7 +97,18 @@ async fn cancel_paused_chat(mode: &str) {
     )
     .await
     .unwrap();
+    // New protocol: attach acks without pausing. Send `continue` to acquire
+    // the debugger lease and pause the agent.
+    let attached = read_until_type(&mut debug, "attached").await;
+    assert_eq!(attached["id"], id);
+    write_json_line(&mut debug_write, &json!({"op": "continue"}))
+        .await
+        .unwrap();
     assert_eq!(read_until_type(&mut debug, "ready").await["id"], id);
+    // The lease's `continue` runs one turn, which re-issues the interrupted
+    // request. Hold it so the follow-up assertion below sees the next
+    // request (the actual follow-up prompt) rather than this re-run.
+    let (_rerun, _rerun_held) = pending_request(&provider).await;
 
     let (sub, mut events) = subscribe_run(id);
     let _guard = BusSubGuard::new(sub);

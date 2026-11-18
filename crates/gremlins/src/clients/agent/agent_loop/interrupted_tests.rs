@@ -464,7 +464,11 @@ async fn message_correction_injects_text_and_releases_slot_so_agent_resumes() {
 
     // Send Message correction — should inject, release slot, and agent resumes.
     commands
-        .send(InteractiveCommand::Message("fix this up".into()))
+        .send(InteractiveCommand::Message(
+            "fix this up".into(),
+            None,
+            None,
+        ))
         .await
         .unwrap();
 
@@ -534,7 +538,11 @@ async fn message_does_not_amend_system_prompt() {
     .expect("expected Ready");
 
     commands
-        .send(InteractiveCommand::Message("no debug prompt".into()))
+        .send(InteractiveCommand::Message(
+            "no debug prompt".into(),
+            None,
+            None,
+        ))
         .await
         .unwrap();
 
@@ -630,7 +638,11 @@ async fn message_releases_slot_so_second_debugger_can_attach() {
     .expect("expected first Ready");
 
     first
-        .send(InteractiveCommand::Message("correction one".into()))
+        .send(InteractiveCommand::Message(
+            "correction one".into(),
+            None,
+            None,
+        ))
         .await
         .unwrap();
     // Dropping the first attachment releases the pause slot to Idle.
@@ -703,7 +715,7 @@ async fn message_correction_with_nonterminal_tool_requires_second_iteration() {
     .expect("expected Ready");
 
     commands
-        .send(InteractiveCommand::Message("fix it".into()))
+        .send(InteractiveCommand::Message("fix it".into(), None, None))
         .await
         .unwrap();
 

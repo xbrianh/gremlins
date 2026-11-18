@@ -21,7 +21,7 @@
 //! | `continue`  | conversation  | Run one turn, re-enter interactive. |
 //! | `bail`      | conversation  | Terminate with error. |
 //! | `quit`      | conversation  | Release pause, resume autonomous. |
-//! | `detach`    | run           | Close this attachment, keep observing. |
+//! | `detach`    | run           | Release the lease, close this attachment. |
 //!
 //! Multiple passive readers, at most one controller per execution.
 //! Passive display streams are bounded, lag-tolerant; a gap report lets
@@ -33,15 +33,19 @@ use std::sync::Arc;
 use serde_json::Value;
 use tokio::io::BufReader;
 
-use crate::clients::interactive::{DebugOutcome, InteractiveCommand};
+use crate::clients::interactive::{
+    AttachError, DebugAttachment, InteractiveCommand, InteractiveHandle,
+};
 use crate::executor::gremlin::validate_gremlin_id;
 use crate::executor::socket;
 use gremlins_magic_bus::connection::{BusSubGuard, SharedWriter};
 use gremlins_magic_bus::{subscribe_run_lag_tolerant, EventKind, Recv};
+use tokio::net::unix::OwnedReadHalf;
+use tokio::sync::watch;
 
 use super::debug::{check_agent_stage, send_debug_status};
 use super::error_response;
-use super::run_registry::RunRegistry;
+use super::run_registry::{RunRegistry, RunState, StoreHandle};
 
 // ── Wire types ──────────────────────────────────────────────────────────
 
@@ -285,6 +289,7 @@ pub(crate) async fn handle_conversation_attach(
     // 2. Snapshot target and nonce before any async work.
     let target = handle.target();
     let execution_nonce = target.nonce();
+    let execution_id = target.execution_id().map(|s| s.to_string());
 
     // 3. Check if the caller wants passive observation only. Conversation
     //    scope is interactive by default: a client that names no mode expects
@@ -301,32 +306,36 @@ pub(crate) async fn handle_conversation_attach(
         .and_then(|v| v.as_str())
         .unwrap_or("control");
 
-    // 4. Validate active leaf — only control-mode needs agent stage.
-    if mode != "passive" {
-        let stage_check = tokio::task::spawn_blocking(move || check_agent_stage(&store))
-            .await
-            .map_err(|e| e.to_string())
-            .and_then(|result| result);
-        if let Err(e) = stage_check {
-            let resp = error_response(&format!("gremlin {id}: {e}"));
-            let _ = writer.write_json_line(&resp).await;
-            return;
-        }
-    }
+    // 4. Defer stage validation: passive mode skips entirely; control mode
+    //    checks only when the client actually sends a command (message/talk/
+    //    continue/bail/quit). This keeps observation zero-cost and lets
+    //    the attached ack go out immediately without blocking.
 
     // 5. Subscribe to run events before acknowledging.
     let (stream_sub, mut evt_rx) = subscribe_run_lag_tolerant(id, 256);
     let _stream_guard = BusSubGuard::new(stream_sub);
 
-    // 6. Emit attachment acknowledgment with execution identity.
+    // 6. Emit attachment acknowledgment with execution identity and a
+    //    stable execution nonce. Capabilities are computed from the actual
+    //    target: agent leaves advertise control, everything else observation
+    //    only.
     let mut caps = vec!["observe"];
     if mode != "passive" {
-        caps.extend(["message", "talk", "continue", "bail", "quit", "detach"]);
+        let can_control = tokio::task::spawn_blocking({
+            let store = store.clone();
+            move || check_agent_stage(&store).is_ok()
+        })
+        .await
+        .unwrap_or(false);
+        if can_control {
+            caps.extend(["message", "talk", "continue", "bail", "quit", "detach"]);
+        }
     }
     let ack = serde_json::json!({
         "type": "attached",
         "scope": "conversation",
         "id": id,
+        "execution_id": execution_id,
         "nonce": execution_nonce,
         "capabilities": caps,
     });
@@ -339,108 +348,51 @@ pub(crate) async fn handle_conversation_attach(
         return;
     }
 
-    // 7. Active mode: request the pause and wait for ready.
-    //    run_state is used only in the select to detect run-stop;
-    //    the select uses bare `return` in the run-stop branch so the
-    //    watch::Ref never enters the output type (keeps it Send).
-    let mut attachment = match target.attach() {
-        Ok(a) => a,
-        Err(message) => {
-            let _ = writer.write_json_line(&error_response(message)).await;
-            return;
-        }
-    };
-    // The pause is now pending. Report progress so a client can tell the
-    // request was registered before it waits for `ready`.
-    send_debug_status(writer, "waiting_for_ready").await;
+    // 7. Control mode: stream display events and accept commands on the
+    //    same socket. No pause is requested at attach time — the agent
+    //    keeps running. Only `message` / `talk` / `continue` / `bail` /
+    //    `quit` acquire a temporary lease on the captured execution.
 
-    let ready = tokio::select! {
-        biased;
-        _ = socket::read_json_line(&mut reader) => return,
-        _ = run_state.wait_for(|state| state.status != "running") => return,
-        ready = &mut attachment.ready => ready,
-    };
-    // run_state is consumed by the select — no lock held across await.
+    // The active lease, if any. Dropping releases the pause slot. A debugger
+    // command acquires a lease that crosses turn boundaries and is reused for
+    // every subsequent command; a `message` acquires a one-shot lease (unless a
+    // debugger lease is already held) and releases it after delivery.
+    let mut active_lease: Option<crate::clients::interactive::DebugAttachment> = None;
 
-    if ready.is_err() {
-        let _ = writer
-            .write_json_line(&error_response("agent exited before accepting pause"))
-            .await;
-        return;
-    }
-
-    // 8. Ready — start bidirectional command loop.
-    let ready_payload = serde_json::json!({
-        "type": "ready",
-        "scope": "conversation",
-        "id": id,
-        "nonce": execution_nonce,
-    });
-    if writer.write_json_line(&ready_payload).await.is_err() {
-        return;
-    }
-
-    // 9. Command loop.
     loop {
         tokio::select! {
             biased;
             result = socket::read_json_line(&mut reader) => {
-                let Ok(Some(cmd)) = result else {
-                    // EOF / disconnect: send Quit to release the pause
-                    // deterministically, then wait for the outcome.
-                    let _ = attachment.try_send(InteractiveCommand::Quit);
-                    break;
-                };
-                let op = cmd.get("op").and_then(Value::as_str).unwrap_or("");
-                // Client-supplied request id for command correlation.
-                let req_id = cmd.get("req_id").and_then(Value::as_str).map(|s| s.to_string());
-                let command = match op {
-                    "message" => {
-                        let text = cmd["text"].as_str().unwrap_or("").to_string();
-                        InteractiveCommand::Message(text)
-                    }
-                    "talk" => {
-                        let text = cmd["text"].as_str().unwrap_or("").to_string();
-                        InteractiveCommand::Inject(text)
-                    }
-                    "continue" => InteractiveCommand::RunTurn,
-                    "bail" => {
-                        InteractiveCommand::Bail(cmd["reason"].as_str().unwrap_or("operator bailed").into())
-                    }
-                    "quit" => InteractiveCommand::Quit,
-                    "detach" => {
-                        // Detach: release pause, resume autonomous, close attachment.
-                        let _ = attachment.try_send(InteractiveCommand::Quit);
-                        let detach_frame = serde_json::json!({
-                            "type": "detached",
-                            "scope": "conversation",
-                            "id": id,
-                        });
-                        let _ = writer.write_json_line(&detach_frame).await;
-                        break;
+                match result {
+                    Ok(Some(cmd)) => {
+                        let op = cmd.get("op").and_then(Value::as_str).unwrap_or("");
+                        let req_id = cmd.get("req_id").and_then(Value::as_str).map(|s| s.to_string());
+                        let should_break = dispatch_attach_command(
+                            &cmd,
+                            op,
+                            req_id,
+                            id,
+                            execution_nonce,
+                            execution_id.as_deref(),
+                            &handle,
+                            &store,
+                            &mut run_state,
+                            &mut reader,
+                            &mut evt_rx,
+                            writer,
+                            &mut active_lease,
+                        )
+                        .await;
+                        if should_break {
+                            break;
+                        }
                     }
                     _ => {
-                        let resp = error_response(&format!("unknown attach op: {op:?}"));
-                        if writer.write_json_line(&resp).await.is_err() { break; }
-                        continue;
+                        // EOF, disconnect, or a malformed frame: release any
+                        // pending lease and close the attachment.
+                        drop(active_lease.take());
+                        break;
                     }
-                };
-                // Never wait for the agent: EOF must still release the slot.
-                if let Err(err) = attachment.try_send(command) {
-                    use tokio::sync::mpsc::error::TrySendError;
-                    let reason = match err {
-                        TrySendError::Full(_) => "command queue is full; command not accepted",
-                        TrySendError::Closed(_) => "attachment is ending; command not accepted",
-                    };
-                    if writer.write_json_line(&error_response(reason)).await.is_err() { break; }
-                } else if let Some(ref rid) = req_id {
-                    // Report delivery after the loop has accepted the text.
-                    let ack = serde_json::json!({
-                        "type": "command_ack",
-                        "scope": "conversation",
-                        "req_id": rid,
-                    });
-                    if writer.write_json_line(&ack).await.is_err() { break; }
                 }
             }
             result = evt_rx.recv() => {
@@ -448,14 +400,11 @@ pub(crate) async fn handle_conversation_attach(
                     Recv::Event(dispatch) => {
                         let kind = dispatch.kind();
                         let mut payload = conversation_display_event(kind);
-                        // Tag every display frame with scope/nonce so clients
-                        // can distinguish display events from control replies.
+                        // Tag every display frame with scope so clients can
+                        // distinguish display events from control replies.
                         if let Some(ref mut p) = payload {
                             if let Some(obj) = p.as_object_mut() {
                                 obj.insert("scope".into(), "conversation".into());
-                                if obj.get("type").and_then(Value::as_str) == Some("ready") {
-                                    // display Ready carries turn, control Ready has id+nonce.
-                                }
                             }
                         }
                         if let Some(p) = payload {
@@ -473,19 +422,382 @@ pub(crate) async fn handle_conversation_attach(
                     Recv::Closed => break,
                 }
             }
-            ended = &mut attachment.ended => {
-                let outcome = ended.unwrap_or_else(|_| DebugOutcome::Ended {
-                    reason: "agent exited".into(),
-                });
-                let mut frame = serde_json::to_value(&outcome).unwrap_or(serde_json::Value::Null);
+            // Report the classified terminal outcome when the execution ends
+            // while a lease is held, so the debugger sees the same outcome as
+            // the chat rather than a bare socket EOF. Pending when no lease is
+            // held (a passive observer only follows the display stream).
+            outcome = async {
+                match active_lease.as_mut() {
+                    Some(lease) => (&mut lease.ended).await.ok(),
+                    None => std::future::pending().await,
+                }
+            } => {
+                let mut frame = match outcome {
+                    Some(outcome) => {
+                        serde_json::to_value(&outcome).unwrap_or(serde_json::Value::Null)
+                    }
+                    None => serde_json::json!({
+                        "type": "ended",
+                        "reason": "agent exited",
+                    }),
+                };
                 if let Some(obj) = frame.as_object_mut() {
                     obj.insert("scope".into(), "conversation".into());
+                    obj.entry("id").or_insert_with(|| serde_json::Value::String(id.into()));
                 }
                 let _ = writer.write_json_line(&frame).await;
                 break;
             }
         }
     }
+}
+
+// ── Control-mode command dispatch ──────────────────────────────────────
+
+#[allow(clippy::too_many_arguments)]
+async fn dispatch_attach_command(
+    cmd: &Value,
+    op: &str,
+    req_id: Option<String>,
+    id: &str,
+    execution_nonce: u64,
+    execution_id: Option<&str>,
+    handle: &InteractiveHandle,
+    store: &StoreHandle,
+    run_state: &mut watch::Receiver<RunState>,
+    reader: &mut BufReader<OwnedReadHalf>,
+    evt_rx: &mut gremlins_magic_bus::ReceiverHalf<EventKind>,
+    writer: &SharedWriter,
+    active_lease: &mut Option<DebugAttachment>,
+) -> bool {
+    match op {
+        "message" => {
+            let text = cmd["text"].as_str().unwrap_or("").to_string();
+
+            // Validate the leaf is an agent stage (deferred from attach time).
+            if let Err(e) = run_stage_check(store).await {
+                let resp = error_response(&format!("gremlin {id}: {e}"));
+                let _ = writer.write_json_line(&resp).await;
+                return false;
+            }
+
+            // Reuse a held debugger lease; otherwise acquire a one-shot
+            // message lease that we release after delivery so the agent
+            // resumes autonomously.
+            let acquired_for_message = if active_lease.is_none() {
+                let lease = match acquire_lease(
+                    handle,
+                    execution_nonce,
+                    run_state,
+                    reader,
+                    writer,
+                    false,
+                    id,
+                    execution_nonce,
+                )
+                .await
+                {
+                    Some(lease) => lease,
+                    None => return false,
+                };
+                *active_lease = Some(lease);
+                true
+            } else {
+                false
+            };
+
+            // Deliver the correction with a delivery one-shot.
+            let (delivery_tx, delivery_rx) = tokio::sync::oneshot::channel();
+            let send_req_id = req_id.clone();
+            let send_result = active_lease
+                .as_mut()
+                .unwrap()
+                .try_send(InteractiveCommand::Message(
+                    text,
+                    send_req_id,
+                    Some(delivery_tx),
+                ));
+            if let Err(err) = send_result {
+                use tokio::sync::mpsc::error::TrySendError;
+                let reason = match err {
+                    TrySendError::Full(_) => "command queue is full; message not delivered",
+                    TrySendError::Closed(_) => "attachment is ending; message not delivered",
+                };
+                let _ = writer.write_json_line(&error_response(reason)).await;
+                if acquired_for_message {
+                    drop(active_lease.take());
+                }
+                return false;
+            }
+
+            // Wait for incorporation while staying responsive to the socket
+            // and display stream.
+            let mut delivery_task = tokio::spawn(delivery_rx);
+            let delivered = loop {
+                tokio::select! {
+                    biased;
+                    result = socket::read_json_line(reader) => {
+                        match result {
+                            Ok(Some(frame)) => {
+                                // A command arriving mid-delivery is not what
+                                // the plan wants: the correction must resolve
+                                // exactly. Queueing another control op while
+                                // incorporation is outstanding would leave an
+                                // ambiguous owner.
+                                let _ = writer.write_json_line(&error_response(
+                                    "busy delivering correction",
+                                )).await;
+                                let _ = frame;
+                            }
+                            _ => {
+                                // EOF before incorporation: withdraw and
+                                // report non-delivery.
+                                drop(active_lease.take());
+                                let _ = writer.write_json_line(&serde_json::json!({
+                                    "type": "correction_dropped",
+                                    "id": id,
+                                    "reason": "disconnected before incorporation",
+                                })).await;
+                                return false;
+                            }
+                        }
+                    }
+                    result = evt_rx.recv() => {
+                        // Forward display events while waiting for
+                        // incorporation so a slow viewer never blocks the
+                        // agent and the owner keeps seeing the stream.
+                        match result {
+                            Recv::Event(dispatch) => {
+                                let kind = dispatch.kind();
+                                if let Some(p) = conversation_display_event(kind) {
+                                    if writer.write_json_line(&p).await.is_err() {
+                                        drop(active_lease.take());
+                                        return false;
+                                    }
+                                }
+                            }
+                            Recv::Lagged(skipped) => {
+                                let payload = serde_json::json!({
+                                    "type": "lagged",
+                                    "scope": "conversation",
+                                    "skipped": skipped,
+                                });
+                                if writer.write_json_line(&payload).await.is_err() {
+                                    drop(active_lease.take());
+                                    return false;
+                                }
+                            }
+                            Recv::Closed => {
+                                drop(active_lease.take());
+                                return false;
+                            }
+                        }
+                    }
+                    delivered = &mut delivery_task => {
+                        break matches!(delivered, Ok(Ok(())));
+                    }
+                }
+            };
+
+            if delivered {
+                let mut payload = serde_json::json!({
+                    "type": "delivered",
+                    "scope": "conversation",
+                    "id": id,
+                    "nonce": execution_nonce,
+                });
+                if let Some(ref rid) = req_id {
+                    payload["req_id"] = serde_json::Value::String(rid.clone());
+                }
+                if let Some(eid) = execution_id {
+                    payload["execution_id"] = serde_json::Value::String(eid.to_string());
+                }
+                let _ = writer.write_json_line(&payload).await;
+            } else {
+                let mut payload = serde_json::json!({
+                    "type": "correction_dropped",
+                    "id": id,
+                    "reason": "agent exited before incorporation",
+                });
+                if let Some(eid) = execution_id {
+                    payload["execution_id"] = serde_json::Value::String(eid.to_string());
+                }
+                let _ = writer.write_json_line(&payload).await;
+            }
+
+            if acquired_for_message {
+                drop(active_lease.take());
+            }
+        }
+        "detach" => {
+            // Release any lease and close the attachment.
+            drop(active_lease.take());
+            let detach_frame = serde_json::json!({
+                "type": "detached",
+                "scope": "conversation",
+                "id": id,
+            });
+            let _ = writer.write_json_line(&detach_frame).await;
+            return true;
+        }
+        "talk" | "continue" | "bail" | "quit" => {
+            // Validate the leaf is an agent stage (deferred from attach time).
+            if let Err(e) = run_stage_check(store).await {
+                let resp = error_response(&format!("gremlin {id}: {e}"));
+                let _ = writer.write_json_line(&resp).await;
+                return false;
+            }
+
+            if active_lease.is_none() {
+                let lease = match acquire_lease(
+                    handle,
+                    execution_nonce,
+                    run_state,
+                    reader,
+                    writer,
+                    true,
+                    id,
+                    execution_nonce,
+                )
+                .await
+                {
+                    Some(lease) => lease,
+                    None => return false,
+                };
+                *active_lease = Some(lease);
+            }
+
+            let command = match op {
+                "talk" => {
+                    let text = cmd["text"].as_str().unwrap_or("").to_string();
+                    InteractiveCommand::Inject(text)
+                }
+                "bail" => InteractiveCommand::Bail(
+                    cmd["reason"].as_str().unwrap_or("operator bailed").into(),
+                ),
+                "quit" => InteractiveCommand::Quit,
+                _ => InteractiveCommand::RunTurn,
+            };
+            if let Err(err) = active_lease.as_mut().unwrap().try_send(command) {
+                use tokio::sync::mpsc::error::TrySendError;
+                let reason = match err {
+                    TrySendError::Full(_) => "command queue is full; command not accepted",
+                    TrySendError::Closed(_) => "attachment is ending; command not accepted",
+                };
+                let _ = writer.write_json_line(&error_response(reason)).await;
+            }
+
+            // Keep the lease so the debugger can send more commands. The
+            // agent loop re-enters the interactive loop after one turn.
+        }
+        _ => {
+            let resp = error_response(&format!("unknown attach op: {op:?}"));
+            let _ = writer.write_json_line(&resp).await;
+        }
+    }
+    false
+}
+
+async fn run_stage_check(store: &StoreHandle) -> Result<(), String> {
+    let store = store.clone();
+    tokio::task::spawn_blocking(move || check_agent_stage(&store))
+        .await
+        .map_err(|e| e.to_string())
+        .and_then(|result| result)
+}
+
+/// Acquire a lease on the target captured at attach time and wait for the
+/// agent to accept the pause. Returns `None` when the caller has already
+/// reported a terminal error frame.
+#[allow(clippy::too_many_arguments)]
+async fn acquire_lease(
+    handle: &InteractiveHandle,
+    captured_nonce: u64,
+    run_state: &mut watch::Receiver<RunState>,
+    reader: &mut BufReader<OwnedReadHalf>,
+    writer: &SharedWriter,
+    debugger: bool,
+    id: &str,
+    ready_nonce: u64,
+) -> Option<DebugAttachment> {
+    let current_target = handle.target();
+    if current_target.nonce() != captured_nonce {
+        let _ = writer
+            .write_json_line(&error_response(
+                "execution has been replaced since attach; retry",
+            ))
+            .await;
+        return None;
+    }
+
+    let mut lease = match if debugger {
+        current_target.attach_debugger()
+    } else {
+        current_target.attach()
+    } {
+        Ok(a) => a,
+        Err(err) => {
+            let msg = match err {
+                AttachError::NoLongerActive => "agent stage is no longer active",
+                AttachError::Stale => "execution has been replaced; target is stale",
+                AttachError::Busy => "busy",
+            };
+            let _ = writer.write_json_line(&error_response(msg)).await;
+            return None;
+        }
+    };
+
+    if debugger {
+        send_debug_status(writer, "waiting_for_ready").await;
+    }
+
+    // Spawn the run-stop wait into a oneshot so the watch::Ref never crosses
+    // an await point (watch::Ref is !Send).
+    let (run_stop_tx, run_stop_rx) = tokio::sync::oneshot::channel::<()>();
+    {
+        let mut rs = run_state.clone();
+        tokio::spawn(async move {
+            let _ = rs.wait_for(|s| s.status != "running").await;
+            let _ = run_stop_tx.send(());
+        });
+    }
+
+    let ready = tokio::select! {
+        biased;
+        _ = socket::read_json_line(reader) => {
+            // EOF while waiting for Ready: drop the pending lease before the
+            // agent can observe the pause.
+            drop(lease);
+            return None;
+        }
+        _ = run_stop_rx => {
+            let _ = writer.write_json_line(
+                &error_response("run stopped before agent accepted pause"),
+            ).await;
+            return None;
+        }
+        r = &mut lease.ready => r,
+    };
+
+    if ready.is_err() {
+        let _ = writer
+            .write_json_line(&error_response("agent exited before accepting pause"))
+            .await;
+        return None;
+    }
+
+    // Ready — report it, then retain the lease.
+    let ready_payload = serde_json::json!({
+        "type": "ready",
+        "scope": "conversation",
+        "id": id,
+        "nonce": ready_nonce,
+    });
+    if writer.write_json_line(&ready_payload).await.is_err() {
+        return None;
+    }
+
+    Some(lease)
 }
 
 /// Passive conversation: stream events until the execution ends.

@@ -203,10 +203,27 @@ pub(crate) async fn handle_chat(
         };
 
         let debug_target = interactive.target();
+        let execution_id = debug_target.execution_id().map(|s| s.to_string());
         if debug_target.nonce() != target_nonce {
             let resp = error_response("execution has been replaced; target is stale");
             let _ = writer.write_json_line(&resp).await;
             return;
+        }
+        // Validate the client-supplied execution ID when present.
+        let client_execution_id = target_obj.get("execution_id").and_then(|v| v.as_str());
+        if let Some(client_eid) = client_execution_id {
+            match debug_target.execution_id() {
+                Some(actual) if actual != client_eid => {
+                    let resp = error_response("execution_id mismatch: target has been replaced");
+                    let _ = writer.write_json_line(&resp).await;
+                    return;
+                }
+                None => {
+                    // No execution ID published yet; the nonce check above
+                    // already guards against stale targets.
+                }
+                _ => {}
+            }
         }
 
         // `attach()` checks the nonce under the slot lock, closing the
@@ -214,7 +231,16 @@ pub(crate) async fn handle_chat(
         // attachment.
         let attachment = match debug_target.attach() {
             Ok(a) => a,
-            Err(msg) => {
+            Err(err) => {
+                let msg = match err {
+                    crate::clients::interactive::AttachError::NoLongerActive => {
+                        "agent stage is no longer active"
+                    }
+                    crate::clients::interactive::AttachError::Stale => {
+                        "execution has been replaced; target is stale"
+                    }
+                    crate::clients::interactive::AttachError::Busy => "debugger already attached",
+                };
                 let resp = error_response(msg);
                 let _ = writer.write_json_line(&resp).await;
                 return;
@@ -226,7 +252,12 @@ pub(crate) async fn handle_chat(
         // and does not wait for the agent to process the command.
         let correction_text = text.to_string();
         let target_id_for_log = target_id.to_string();
+        let req_id = request
+            .get("req_id")
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string());
         let writer_for_error = writer.clone();
+        let execution_id_for_task = execution_id.clone();
         tokio::spawn(async move {
             // Wait for the agent to accept the pause.
             let mut attachment = attachment;
@@ -235,33 +266,68 @@ pub(crate) async fn handle_chat(
                     "correction for {}: agent exited before accepting pause",
                     target_id_for_log
                 );
+                let mut payload = serde_json::json!({
+                    "type": "correction_dropped",
+                    "id": target_id_for_log,
+                    "reason": "agent exited before accepting pause",
+                });
+                if let Some(ref eid) = execution_id_for_task {
+                    payload["execution_id"] = serde_json::Value::String(eid.clone());
+                }
+                let _ = writer_for_error.write_json_line(&payload).await;
                 return; // Attachment drop resets the pause slot.
             }
             // Deliver the correction without amending the system prompt.
-            if let Err(e) = attachment.try_send(InteractiveCommand::Message(correction_text)) {
+            let (delivery_tx, delivery_rx) = tokio::sync::oneshot::channel();
+            if let Err(e) = attachment.try_send(InteractiveCommand::Message(
+                correction_text.clone(),
+                req_id.clone(),
+                Some(delivery_tx),
+            )) {
                 log::warn!("correction for {}: send failed ({})", target_id_for_log, e);
                 // Notify the owner that the correction was dropped.
-                let payload = serde_json::json!({
+                let mut payload = serde_json::json!({
                     "type": "correction_dropped",
                     "id": target_id_for_log,
                     "reason": format!("command channel closed: {}", e),
                 });
+                if let Some(ref eid) = execution_id_for_task {
+                    payload["execution_id"] = serde_json::Value::String(eid.clone());
+                }
                 let _ = writer_for_error.write_json_line(&payload).await;
+                return;
+            }
+            // Await delivery confirmation from the agent loop.
+            match delivery_rx.await {
+                Ok(()) => {
+                    let mut payload = serde_json::json!({
+                        "type": "delivered",
+                        "id": target_id_for_log,
+                        "nonce": target_nonce,
+                        "req_id": req_id,
+                    });
+                    if let Some(ref eid) = execution_id_for_task {
+                        payload["execution_id"] = serde_json::Value::String(eid.clone());
+                    }
+                    let _ = writer_for_error.write_json_line(&payload).await;
+                }
+                Err(_) => {
+                    let mut payload = serde_json::json!({
+                        "type": "correction_dropped",
+                        "id": target_id_for_log,
+                        "reason": "agent exited before incorporation",
+                    });
+                    if let Some(ref eid) = execution_id_for_task {
+                        payload["execution_id"] = serde_json::Value::String(eid.clone());
+                    }
+                    let _ = writer_for_error.write_json_line(&payload).await;
+                }
             }
             // Let the attachment drop naturally — it resets the pause slot
             // for the next debugger. The agent has already consumed the
             // command from its inbox.
         });
 
-        // Acknowledge immediately: the correction is queued for the agent,
-        // not parked behind the chat-gremlin prompt channel. The spawned
-        // task reports delivery success/failure asynchronously.
-        let resp = ok_response(serde_json::json!({
-            "id": target_id,
-            "status": "queued",
-            "nonce": target_nonce,
-        }));
-        let _ = writer.write_json_line(&resp).await;
         return;
     }
 
@@ -399,7 +465,27 @@ pub(crate) async fn handle_chat(
     //    the client must not conflate a missing lookup with a legitimate
     //    nonce of 0.
     let ack = match registry.get_run_nonce(&handle.id).await {
-        Some(nonce) => serde_json::json!({"id": handle.id, "status": "streaming", "nonce": nonce}),
+        Some(nonce) => {
+            let execution_id = match registry.get_run_interactive(&handle.id).await {
+                Some((interactive, _, _)) => {
+                    interactive.target().execution_id().map(|s| s.to_string())
+                }
+                None => None,
+            };
+            match execution_id {
+                Some(execution_id) => serde_json::json!({
+                    "id": handle.id,
+                    "status": "streaming",
+                    "nonce": nonce,
+                    "execution_id": execution_id,
+                }),
+                None => serde_json::json!({
+                    "id": handle.id,
+                    "status": "streaming",
+                    "nonce": nonce,
+                }),
+            }
+        }
         None => serde_json::json!({"id": handle.id, "status": "streaming"}),
     };
     let _ = writer.write_json_line(&ok_response(ack)).await;

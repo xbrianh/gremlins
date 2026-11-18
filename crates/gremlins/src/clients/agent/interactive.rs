@@ -1,9 +1,7 @@
 use crate::clients::cancel::CancelToken;
 use crate::clients::conversation::Conversation;
 use crate::clients::error::ClientError;
-use crate::clients::interactive::{
-    DebugOutcome, InteractiveCommand, InteractiveSession, MESSAGE_DELIVERED_REASON,
-};
+use crate::clients::interactive::{DebugOutcome, InteractiveCommand, InteractiveSession};
 use gremlins_magic_bus::{emit_run_event_async, EventKind};
 
 // ── interactive loop ─────────────────────────────────────────────────────
@@ -50,9 +48,9 @@ pub(super) async fn interactive_loop(
             conv.inject_operator(&text);
             Ok(InteractiveLoopResult::RunOneTurn)
         }
-        Some(InteractiveCommand::Message(text)) => {
+        Some(InteractiveCommand::Message(text, req_id, delivery)) => {
             log::debug!(
-                "interactive_loop: Message command (len={}, turn={turn})",
+                "interactive_loop: Message command (len={}, req_id={req_id:?}, turn={turn})",
                 text.len()
             );
             conv.inject_operator(&text);
@@ -64,9 +62,17 @@ pub(super) async fn interactive_loop(
                 },
             )
             .await;
-            session.finish_attachment(DebugOutcome::Ended {
-                reason: MESSAGE_DELIVERED_REASON.into(),
-            });
+            // Fire the delivery confirmation *after* conv.inject_operator
+            // succeeded so the owner learns about incorporation — not just
+            // enqueue or display echo.
+            if let Some(tx) = delivery {
+                let _ = tx.send(());
+            }
+            // Drop the accepted inbox without firing `ended`: the socket
+            // handler releases the lease itself (message path) or keeps the
+            // debugger lease live for the next command. Either way the
+            // observer must stay connected.
+            session.finish_attachment_without_outcome();
             Ok(InteractiveLoopResult::MessageDelivered)
         }
         Some(InteractiveCommand::RunTurn) => {

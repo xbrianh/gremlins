@@ -27,13 +27,29 @@ pub(crate) enum InteractiveCommand {
     Inject(String),
     /// Deliver a correction, release the pause slot, and resume the agent loop.
     /// Does NOT amend the system prompt — keeps the original model/prompt.
-    Message(String),
+    ///
+    /// The second field is the client-supplied correlation id (`req_id`). The
+    /// third is a one-shot sender the agent loop fires after
+    /// `conv.inject_operator` succeeds, letting the owner await delivery.
+    Message(String, Option<String>, Option<oneshot::Sender<()>>),
     /// Run a single turn without injecting text (operator 'continue').
     RunTurn,
     /// Terminate the agent with an error.
     Bail(String),
     /// Resume autonomous execution (detach the debugger).
     Quit,
+}
+
+/// Structured failure returned by [`DebugTarget::attach`] and
+/// [`DebugTarget::attach_debugger`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum AttachError {
+    /// The pause slot's owning execution is gone.
+    NoLongerActive,
+    /// The execution nonce has changed — target is stale.
+    Stale,
+    /// Another debugger already holds the lease.
+    Busy,
 }
 
 #[derive(Debug)]
@@ -66,9 +82,14 @@ impl DebugTerminal {
 enum PauseState {
     #[default]
     Idle,
-    /// A debugger has placed a pause request. The u64 is the execution
-    /// nonce under which the request was made; it lets [`next_session`]
-    /// distinguish a between-turn request from a stale leftover.
+    /// A debugger placed a pause request. Crosses turn boundaries. The u64 is
+    /// the execution nonce under which the request was made; it lets
+    /// [`InteractiveSessionFactory::next_session`] distinguish a between-turn
+    /// request from a stale leftover.
+    DebuggerRequested(CommandInbox, u64),
+    /// A message/correction placed a pause request. Does NOT cross turn
+    /// boundaries. The u64 is the execution nonce under which the request was
+    /// made.
     Requested(CommandInbox, u64),
     /// The agent loop has accepted the pause. The u64 records the
     /// execution nonce at the time of acceptance.
@@ -76,9 +97,13 @@ enum PauseState {
 }
 
 impl PauseState {
+    fn is_pending(&self) -> bool {
+        matches!(self, Self::Requested(..) | Self::DebuggerRequested(..))
+    }
+
     fn accept(&mut self) -> Option<CommandInbox> {
         match std::mem::replace(self, Self::Idle) {
-            Self::Requested(inbox, nonce) => {
+            Self::Requested(inbox, nonce) | Self::DebuggerRequested(inbox, nonce) => {
                 *self = Self::Accepted(nonce);
                 Some(inbox)
             }
@@ -90,13 +115,62 @@ impl PauseState {
     }
 }
 
-#[derive(Debug, Default)]
-struct PauseSlot {
+#[derive(Default)]
+pub(crate) struct PauseSlot {
     state: Mutex<PauseState>,
     requested: Notify,
     /// Identifies one execution (one agent loop invocation). Incremented when
     /// a new session is minted from this slot.
     nonce: AtomicU64,
+    /// The run's own id (the gremlin id), used to build execution IDs.
+    run_id: Mutex<Option<String>>,
+    /// Opaque execution ID published alongside the nonce.
+    execution_id: Mutex<Option<String>>,
+    /// Increments on every successful attachment so a delayed drop of an old
+    /// lease cannot clear a newer lease on the same execution.
+    acquisition: AtomicU64,
+}
+
+// `AtomicU64` is not `Debug`, so compose the fields we can print by hand.
+impl std::fmt::Debug for PauseSlot {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("PauseSlot")
+            .field("state", &self.state)
+            .field("nonce", &self.nonce)
+            .field("execution_id", &self.execution_id)
+            .finish_non_exhaustive()
+    }
+}
+
+impl PauseSlot {
+    /// Publish the run id used to build execution IDs.
+    pub(crate) fn set_run_id(&self, id: String) {
+        *self.run_id.lock().unwrap_or_else(|e| e.into_inner()) = Some(id);
+    }
+
+    /// Read the run id, if one has been published.
+    pub(crate) fn run_id(&self) -> Option<String> {
+        self.run_id
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone()
+    }
+
+    /// Publish the opaque execution ID alongside the nonce.
+    ///
+    /// Callers publish the handle afterwards so nonce and execution ID are
+    /// observed as one consistent snapshot.
+    pub(crate) fn set_execution_id(&self, id: String) {
+        *self.execution_id.lock().unwrap_or_else(|e| e.into_inner()) = Some(id);
+    }
+
+    /// Read the opaque execution ID, if one has been published.
+    pub(crate) fn execution_id(&self) -> Option<String> {
+        self.execution_id
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone()
+    }
 }
 
 /// The published run handle points to one execution at a time. A debugger
@@ -113,12 +187,13 @@ impl InteractiveHandle {
         *self.0.lock().unwrap() = DebugTarget {
             slot: Arc::downgrade(slot),
             nonce: slot.nonce.load(Ordering::Relaxed),
+            execution_id: slot.execution_id(),
         };
     }
 
     #[cfg(test)]
     pub(crate) fn attach(&self) -> Option<DebugAttachment> {
-        self.target().attach().ok()
+        self.target().attach_debugger().ok()
     }
 }
 
@@ -128,6 +203,8 @@ impl InteractiveHandle {
 pub(crate) struct DebugTarget {
     slot: Weak<PauseSlot>,
     nonce: u64,
+    /// The opaque execution ID captured when the target was published.
+    execution_id: Option<String>,
 }
 
 impl DebugTarget {
@@ -136,32 +213,53 @@ impl DebugTarget {
         self.nonce
     }
 
-    pub(crate) fn attach(&self) -> Result<DebugAttachment, &'static str> {
-        let slot = self
-            .slot
-            .upgrade()
-            .ok_or("agent stage is no longer active")?;
+    /// The opaque execution ID captured when the target was published.
+    pub(crate) fn execution_id(&self) -> Option<&str> {
+        self.execution_id.as_deref()
+    }
+
+    /// Place a message/correction pause request. The reservation does NOT cross
+    /// turn boundaries.
+    pub(crate) fn attach(&self) -> Result<DebugAttachment, AttachError> {
+        self.attach_impl(false)
+    }
+
+    /// Place a debugger pause request. The reservation crosses turn boundaries
+    /// so a between-turn debugger's pause-on-entry is honoured.
+    pub(crate) fn attach_debugger(&self) -> Result<DebugAttachment, AttachError> {
+        self.attach_impl(true)
+    }
+
+    /// Shared validation for [`Self::attach`] and [`Self::attach_debugger`].
+    /// The two differ only in the `PauseState` variant they reserve.
+    fn attach_impl(&self, debugger: bool) -> Result<DebugAttachment, AttachError> {
+        let slot = self.slot.upgrade().ok_or(AttachError::NoLongerActive)?;
         if slot.nonce.load(Ordering::Relaxed) != self.nonce {
-            return Err("execution has been replaced; target is stale");
+            return Err(AttachError::Stale);
         }
         let mut state = slot.state.lock().unwrap();
         if !matches!(*state, PauseState::Idle) {
-            return Err("debugger already attached");
+            return Err(AttachError::Busy);
         }
+        let acquisition = slot.acquisition.fetch_add(1, Ordering::Relaxed) + 1;
         let (commands, rx) = mpsc::channel(8);
         let (tx, ready) = oneshot::channel();
         let (terminal, ended) = oneshot::channel();
-        *state = PauseState::Requested(
-            CommandInbox {
-                commands: rx,
-                ready: Some(tx),
-                ended: Some(terminal),
-            },
-            self.nonce,
-        );
+        let inbox = CommandInbox {
+            commands: rx,
+            ready: Some(tx),
+            ended: Some(terminal),
+        };
+        *state = if debugger {
+            PauseState::DebuggerRequested(inbox, self.nonce)
+        } else {
+            PauseState::Requested(inbox, self.nonce)
+        };
         slot.requested.notify_one();
         Ok(DebugAttachment {
             slot: self.slot.clone(),
+            nonce: self.nonce,
+            acquisition,
             commands,
             ready,
             ended,
@@ -174,15 +272,40 @@ impl DebugTarget {
 #[derive(Debug)]
 pub(crate) struct DebugAttachment {
     slot: Weak<PauseSlot>,
+    /// The execution nonce this attachment was created under. Used to avoid
+    /// clearing a *newer* execution's pause state on drop.
+    nonce: u64,
+    /// The lease generation this attachment acquired. Drop only clears slot
+    /// state when both nonce and acquisition still match.
+    acquisition: u64,
     commands: mpsc::Sender<InteractiveCommand>,
     pub(crate) ready: oneshot::Receiver<()>,
+    #[allow(dead_code)]
     pub(crate) ended: oneshot::Receiver<DebugOutcome>,
 }
 
 impl Drop for DebugAttachment {
     fn drop(&mut self) {
         if let Some(slot) = self.slot.upgrade() {
-            *slot.state.lock().unwrap_or_else(|e| e.into_inner()) = PauseState::Idle;
+            // If the nonce has changed, a new execution has started and its
+            // pause state is not ours to clear. Likewise a newer lease on the
+            // same execution carries a higher acquisition token; an old
+            // lease's delayed cleanup must not clear it.
+            if slot.nonce.load(Ordering::Relaxed) != self.nonce
+                || slot.acquisition.load(Ordering::Relaxed) != self.acquisition
+            {
+                return;
+            }
+            let mut state = slot.state.lock().unwrap_or_else(|e| e.into_inner());
+            let was_pending = state.is_pending();
+            *state = PauseState::Idle;
+            drop(state);
+            // If a request was withdrawn before the agent accepted it,
+            // re-notify so any blocked `paused()` waiter can discover the
+            // reset and continue without the pause.
+            if was_pending {
+                slot.requested.notify_one();
+            }
         }
     }
 }
@@ -207,29 +330,34 @@ impl DebugAttachment {
 #[derive(Debug)]
 pub(crate) struct InteractiveSessionFactory {
     handle: InteractiveHandle,
-    /// Only chats allow a pending request to cross the gap between turns.
-    chat_slot: Option<Arc<PauseSlot>>,
+    /// Every factory keeps a shared pause slot — even pipelines.
+    /// This ensures that nonces are globally unique per run and that stale
+    /// state (a `Requested` left on the slot by a stage that ignored the
+    /// interactive session) is detected and cleared by `next_session`.
+    /// Chats additionally allow a debugger request to cross turn boundaries.
+    slot: Arc<PauseSlot>,
+    chat: bool,
     next_terminal: Option<DebugTerminal>,
 }
 
 impl InteractiveSessionFactory {
     pub(crate) fn for_pipeline() -> (Self, InteractiveHandle) {
-        Self::with_chat_slot(None)
+        Self::with_chat(false)
     }
 
     pub(crate) fn for_chat() -> (Self, InteractiveHandle) {
-        Self::with_chat_slot(Some(Arc::default()))
+        Self::with_chat(true)
     }
 
-    fn with_chat_slot(chat_slot: Option<Arc<PauseSlot>>) -> (Self, InteractiveHandle) {
+    fn with_chat(chat: bool) -> (Self, InteractiveHandle) {
         let handle = InteractiveHandle::default();
-        if let Some(slot) = &chat_slot {
-            handle.publish(slot);
-        }
+        let slot: Arc<PauseSlot> = Arc::default();
+        handle.publish(&slot);
         (
             Self {
                 handle: handle.clone(),
-                chat_slot,
+                slot,
+                chat,
                 next_terminal: None,
             },
             handle,
@@ -241,8 +369,13 @@ impl InteractiveSessionFactory {
         self.next_terminal.insert(DebugTerminal::default()).clone()
     }
 
+    /// Publish the run id used to build execution IDs.
+    pub(crate) fn set_run_id(&self, id: String) {
+        self.slot.set_run_id(id);
+    }
+
     pub(crate) fn next_session(&mut self) -> InteractiveSession {
-        let slot = self.chat_slot.clone().unwrap_or_default();
+        let slot = self.slot.clone();
         // Mint a fresh execution identity *before* sweeping stale state
         // so that the sweep is atomic with respect to the new nonce — a
         // between-turn debugger that has not yet attached sees the new
@@ -250,29 +383,38 @@ impl InteractiveSessionFactory {
         // already placed under the old nonce is recognised as a
         // between-turn holdover and updated.
         let nonce = slot.nonce.fetch_add(1, Ordering::Relaxed) + 1;
+        // Publish the execution ID *before* the single handle publish so the
+        // nonce and execution ID are always observed together.
+        if let Some(run_id) = slot.run_id() {
+            slot.set_execution_id(format!("{run_id}:{nonce}"));
+        }
         self.handle.publish(&slot);
-        if self.chat_slot.is_some() {
-            let mut state = slot.state.lock().unwrap_or_else(|e| e.into_inner());
-            match &*state {
-                // Stale acceptance left over from the previous execution —
-                // that execution's agent loop is gone, so no one will
-                // consume the pause.  Reset it so a new debugger can attach.
-                PauseState::Accepted(old_nonce) if *old_nonce != nonce => {
-                    *state = PauseState::Idle;
-                }
-                // Request placed between turns under the previous nonce.
-                // Carry it forward to the new execution so the between-turn
-                // debugger's pause-on-entry is honoured.
-                PauseState::Requested(_, old_nonce) if *old_nonce != nonce => {
-                    if let PauseState::Requested(inbox, _) =
+        let mut state = slot.state.lock().unwrap_or_else(|e| e.into_inner());
+        match &*state {
+            // Stale acceptance (left over from a previous execution whose
+            // agent loop is gone) or a message request: reset to Idle so a
+            // new debugger can attach.
+            PauseState::Accepted(old_nonce) | PauseState::Requested(_, old_nonce)
+                if *old_nonce != nonce =>
+            {
+                *state = PauseState::Idle;
+            }
+            // Debugger request placed between turns under the previous
+            // nonce. Carry it forward to the new execution (chat only).
+            PauseState::DebuggerRequested(_, old_nonce) if *old_nonce != nonce => {
+                if self.chat {
+                    if let PauseState::DebuggerRequested(inbox, _) =
                         std::mem::replace(&mut *state, PauseState::Idle)
                     {
-                        *state = PauseState::Requested(inbox, nonce);
+                        *state = PauseState::DebuggerRequested(inbox, nonce);
                     }
+                } else {
+                    *state = PauseState::Idle;
                 }
-                _ => {}
             }
+            _ => {}
         }
+        drop(state);
         InteractiveSession {
             slot,
             nonce,
@@ -335,6 +477,15 @@ impl InteractiveSession {
         } else if let Some(tx) = self.active.as_mut().and_then(|inbox| inbox.ended.take()) {
             let _ = tx.send(outcome);
         }
+        self.active = None;
+    }
+
+    /// Drop the accepted inbox without firing the `ended` oneshot.
+    ///
+    /// Used when a correction is delivered through a retained debugger lease:
+    /// the socket must stay connected and the lease must remain live for the
+    /// next operator command, so we must not emit a terminal outcome.
+    pub(crate) fn finish_attachment_without_outcome(&mut self) {
         self.active = None;
     }
 
