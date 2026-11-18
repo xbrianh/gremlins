@@ -24,7 +24,7 @@
 //! byte-size gate.
 
 use async_trait::async_trait;
-use rig_core::completion::message::{Reasoning, Sealed, ToolCall};
+use rig_core::completion::message::{Reasoning, ToolCall};
 use rig_core::completion::Message;
 use std::sync::Arc;
 
@@ -156,7 +156,7 @@ impl StandardConversation {
                 Ok(Some(r)) if r.block.is_some() => {
                     let signed = r.block.unwrap();
                     let mut new_history = Vec::with_capacity(1 + kept.len());
-                    new_history.push(compaction_block_as_message(&signed));
+                    new_history.push(compaction_block_as_message(&signed, backend.model()));
                     new_history.extend_from_slice(&kept);
                     self.history = new_history;
                     return Some(CompactionReport {
@@ -226,7 +226,7 @@ impl Conversation for StandardConversation {
     fn record_turn(
         &mut self,
         text: &str,
-        reasoning_items: &[Sealed<Reasoning>],
+        reasoning_items: &[Reasoning],
         tool_calls: &[ToolCall],
         input_tokens: Option<u64>,
     ) {
@@ -250,7 +250,7 @@ impl Conversation for StandardConversation {
 
     fn pop_last_assistant_turn(&mut self) {
         // Pop the assistant message.
-        if matches!(self.history.last(), Some(Message::Assistant { .. })) {
+        if matches!(self.history.last(), Some(Message::Assistant(_))) {
             self.history.pop();
         }
         // Pop the preceding user prompt (the one committed by record_turn)
@@ -314,7 +314,7 @@ impl Conversation for StandardConversation {
         &mut self,
         turn: usize,
         text: &str,
-        reasoning_items: &[Sealed<Reasoning>],
+        reasoning_items: &[Reasoning],
         done: Option<&ToolCall>,
     ) -> RunArtifact {
         let mut messages = self.history.clone();
@@ -370,7 +370,7 @@ impl Conversation for StandardConversation {
         // tool results would leave an unmatched assistant tool-use, so drop only
         // the assistant message — the preceding user prompt (the original task)
         // must stay so the child receives the promised parent context.
-        if matches!(history.last(), Some(Message::Assistant { .. })) {
+        if matches!(history.last(), Some(Message::Assistant(_))) {
             history.pop();
         }
         Box::new(Self {
@@ -417,19 +417,15 @@ impl Conversation for StandardConversation {
             if has_tool_result {
                 // Append to the pending tool-result user message.
                 let mut merged = existing;
-                merged.push(UserContent::Text(Text {
-                    text: format!("[operator]: {text}"),
-                    additional_params: None,
-                }));
+                merged.push(UserContent::Text(Text::new(format!("[operator]: {text}"))));
                 self.next_prompt = Message::User { content: merged };
             } else {
                 // Append the operator note to the pending user prompt so
                 // the original task is not discarded.
                 let mut merged = existing;
-                merged.push(UserContent::Text(Text {
-                    text: format!("\n\n[operator]: {text}"),
-                    additional_params: None,
-                }));
+                merged.push(UserContent::Text(Text::new(format!(
+                    "\n\n[operator]: {text}"
+                ))));
                 self.history
                     .push(Message::user(format!("[operator]: {text}")));
                 self.next_prompt = Message::User { content: merged };
@@ -444,7 +440,7 @@ impl Conversation for StandardConversation {
     fn done_rejected(
         &mut self,
         text: &str,
-        reasoning_items: &[Sealed<Reasoning>],
+        reasoning_items: &[Reasoning],
         tool_calls: &[ToolCall],
         results: Vec<Message>,
         next_prompt: Message,
@@ -607,7 +603,7 @@ mod tests {
         assert!(
             history
                 .iter()
-                .any(|m| matches!(m, Message::Assistant { .. })),
+                .any(|m| matches!(m, Message::Assistant(_))),
             "history must contain an assistant message"
         );
         assert!(
@@ -798,9 +794,9 @@ mod tests {
         let assistant = second
             .chat_history
             .iter()
-            .find(|m| matches!(m, Message::Assistant { .. }))
+            .find(|m| matches!(m, Message::Assistant(_)))
             .expect("second request carries the prior assistant turn");
-        let Message::Assistant { content, .. } = assistant else {
+        let Message::Assistant(ref msg) = assistant else {
             unreachable!()
         };
         let reasoning = content.iter().find_map(|c| match c {

@@ -9,7 +9,7 @@
 
 use std::time::{Duration, Instant};
 
-use rig_core::completion::message::{Reasoning, Sealed};
+use rig_core::completion::message::Reasoning;
 use rig_core::completion::Usage;
 use rig_core::driver::DynModel;
 use rig_core::operation::Completion;
@@ -53,7 +53,7 @@ pub(super) async fn consume_stream_events(
 
     let mut text = String::new();
     let mut reasoning = String::new();
-    let mut reasoning_items: Vec<Sealed<Reasoning>> = Vec::new();
+    let mut reasoning_items: Vec<Reasoning> = Vec::new();
     let mut tool_calls = Vec::new();
     let mut ended = false;
     let mut turn_usage: Option<Usage> = None;

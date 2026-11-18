@@ -60,9 +60,7 @@ impl Conversation for NakedConversation {
     fn record_turn(
         &mut self,
         _text: &str,
-        _reasoning_items: &[rig_core::completion::message::Sealed<
-            rig_core::completion::message::Reasoning,
-        >],
+        _reasoning_items: &[rig_core::completion::message::Reasoning],
         _tool_calls: &[rig_core::completion::message::ToolCall],
         _input_tokens: Option<u64>,
     ) {
@@ -105,9 +103,7 @@ impl Conversation for NakedConversation {
         &mut self,
         turn: usize,
         text: &str,
-        reasoning_items: &[rig_core::completion::message::Sealed<
-            rig_core::completion::message::Reasoning,
-        >],
+        reasoning_items: &[rig_core::completion::message::Reasoning],
         done: Option<&rig_core::completion::message::ToolCall>,
     ) -> RunArtifact {
         let mut messages = self.history.clone();
@@ -176,9 +172,7 @@ impl Conversation for NakedConversation {
     fn done_rejected(
         &mut self,
         _text: &str,
-        _reasoning_items: &[rig_core::completion::message::Sealed<
-            rig_core::completion::message::Reasoning,
-        >],
+        _reasoning_items: &[rig_core::completion::message::Reasoning],
         _tool_calls: &[rig_core::completion::message::ToolCall],
         _results: Vec<rig_core::completion::Message>,
         _next_prompt: rig_core::completion::Message,

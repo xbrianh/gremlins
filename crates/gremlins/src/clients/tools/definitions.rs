@@ -1,3 +1,4 @@
+use rig_core::completion::message::ToolName;
 use rig_core::completion::ToolDefinition;
 
 use super::tool_specs::{
@@ -88,27 +89,28 @@ pub(crate) fn tool_definitions(
             .replace("{TASK_MAX_PER_TURN}", &TASK_MAX_PER_TURN.to_string())
             .replace("{MAX_CONCURRENT_TOOLS}", &MAX_CONCURRENT_TOOLS.to_string());
         all.push(ToolDefinition {
-            name: spec.name.into(),
+            name: ToolName::new(spec.name.to_string()).expect("tool name must not be empty"),
             description,
             parameters: tool_parameters(spec),
+            annotations: Default::default(),
         });
     }
     match filter {
         Some(names) => all
             .into_iter()
             .filter(|t| {
-                always_available(&t.name)
+                always_available(t.name.as_str())
                     || (is_chat && {
                         // Chat-only tools bypass the filter in chat mode.
                         // We look up the original spec to check `chat_only`
                         // so the flag stays the single source of truth.
                         TOOL_SPECS
                             .iter()
-                            .find(|s| s.name == t.name)
+                            .find(|s| s.name == t.name.as_str())
                             .map(|s| s.chat_only)
                             .unwrap_or(false)
                     })
-                    || names.iter().any(|n| n == &t.name)
+                    || names.iter().any(|n| n.as_str() == t.name.as_str())
             })
             .collect(),
         None => all,

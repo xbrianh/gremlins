@@ -13,7 +13,7 @@
 use std::path::PathBuf;
 use std::time::Instant;
 
-use rig_core::completion::message::{Reasoning, Sealed, ToolCall};
+use rig_core::completion::message::{Reasoning, ToolCall};
 use rig_core::completion::Usage;
 
 use super::done_helpers::done_user_message;
@@ -91,7 +91,7 @@ pub(super) async fn handle_done_decision(
     cancel: &CancelToken,
     nested: bool,
     text: &str,
-    reasoning_items: &[Sealed<Reasoning>],
+    reasoning_items: &[Reasoning],
     tool_calls: &[ToolCall],
     expected_artifact_paths: &[PathBuf],
     captured: &mut Option<Vec<serde_json::Value>>,
@@ -241,7 +241,7 @@ pub(super) fn handle_empty_turn(
     nested: bool,
     text: &str,
     reasoning: &str,
-    reasoning_items: &[Sealed<Reasoning>],
+    reasoning_items: &[Reasoning],
     expected_artifact_paths: &[PathBuf],
     input_tokens: Option<u64>,
     loop_start: Instant,
@@ -362,7 +362,7 @@ pub(super) fn handle_empty_turn(
 pub(super) fn commit_turn_to_history(
     state: &mut LoopState,
     text: &str,
-    reasoning_items: &[Sealed<Reasoning>],
+    reasoning_items: &[Reasoning],
     tool_calls: &[ToolCall],
     input_tokens: Option<u64>,
 ) {

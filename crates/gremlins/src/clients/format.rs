@@ -1,4 +1,4 @@
-use rig_core::completion::message::{AssistantContent, Reasoning, Sealed, ToolCall};
+use rig_core::completion::message::{AssistantContent, AssistantMessage, Reasoning, ToolCall};
 use rig_core::completion::Message;
 use rig_core::streaming::{Item, StreamEvent};
 
@@ -18,14 +18,14 @@ pub(crate) fn apply_chunk(
     chunk: Item<StreamEvent>,
     text: &mut String,
     reasoning: &mut String,
-    reasoning_items: &mut Vec<Sealed<Reasoning>>,
+    reasoning_items: &mut Vec<Reasoning>,
     tool_calls: &mut Vec<ToolCall>,
 ) {
     match chunk {
         Item::Event(StreamEvent::End { content, .. }) => match content {
             AssistantContent::Text(t) => text.push_str(&t.text),
             AssistantContent::ToolCall(tc) => tool_calls.push(tc),
-            AssistantContent::Reasoning(sealed) => reasoning_items.push(sealed),
+            AssistantContent::Reasoning(r) => reasoning_items.push(r),
             _ => {}
         },
         Item::Event(StreamEvent::Reasoning { text: r, .. }) => reasoning.push_str(&r),
@@ -35,7 +35,7 @@ pub(crate) fn apply_chunk(
 
 /// Format a tool call for human display — name plus the key argument.
 pub(crate) fn format_tool_call(tc: &ToolCall) -> String {
-    format_tool_call_parts(&tc.function.name, &tc.function.arguments)
+    format_tool_call_parts(&tc.function.name, &tc.function.arguments_value())
 }
 
 /// Format a tool call from its already-parsed name and arguments.
@@ -68,7 +68,7 @@ pub(crate) fn format_tool_call_parts(name: &str, args: &serde_json::Value) -> St
 
 pub(crate) fn assistant_tool_message(
     text: &str,
-    reasoning_items: &[Sealed<Reasoning>],
+    reasoning_items: &[Reasoning],
     tool_calls: &[ToolCall],
     include_reasoning_items: bool,
 ) -> Message {
@@ -96,10 +96,7 @@ pub(crate) fn assistant_tool_message(
     if contents.is_empty() {
         contents.push(AssistantContent::text(String::new()));
     }
-    Message::Assistant {
-        id: None,
-        content: contents,
-    }
+    Message::Assistant(AssistantMessage::new(contents))
 }
 
 pub(crate) fn key_arg(args: &serde_json::Value) -> String {

@@ -9,7 +9,7 @@
 //! actual completion to [`crate::clients::run_naked`]. No I/O driver types
 //! cross into this module.
 
-use rig_core::completion::message::{AssistantContent, UserContent};
+use rig_core::completion::message::{AssistantContent, AssistantMessage, UserContent};
 use rig_core::completion::Message;
 use serde::Serialize;
 
@@ -135,8 +135,8 @@ fn extract_file_ops(messages: &[Message]) -> (Vec<String>, Vec<String>) {
     let mut modified: Vec<String> = Vec::new();
 
     for msg in messages {
-        if let Message::Assistant { content, .. } = msg {
-            for block in content {
+        if let Message::Assistant(ref msg) = msg {
+            for block in &msg.content {
                 if let AssistantContent::ToolCall(tc) = block {
                     let path = tc
                         .function
@@ -234,10 +234,9 @@ fn truncate_tool_result_content(
                     let cutoff = t.text.floor_char_boundary(TOOL_RESULT_MAX_CHARS);
                     let truncated = &t.text[..cutoff];
                     let remaining = t.text.len() - cutoff;
-                    ToolResultContent::Text(Text {
-                        text: format!("{truncated}…\n[{remaining} more chars truncated]"),
-                        ..t.clone()
-                    })
+                    ToolResultContent::Text(Text::new(format!(
+                        "{truncated}…\n[{remaining} more chars truncated]"
+                    )))
                 } else {
                     c.clone()
                 }
@@ -328,15 +327,9 @@ pub(crate) async fn run_local_compaction(
     let file_annotations = format_file_ops(&read_files, &modified_files);
     let enriched = format!("{summary_text}{file_annotations}");
 
-    let msg = Message::Assistant {
-        id: None,
-        content: vec![AssistantContent::Text(
-            rig_core::completion::message::Text {
-                text: enriched,
-                additional_params: None,
-            },
-        )],
-    };
+    let msg = Message::Assistant(AssistantMessage::new(vec![AssistantContent::Text(
+        rig_core::completion::message::Text::new(enriched),
+    )]));
 
     Some((msg, None, None))
 }
@@ -376,27 +369,20 @@ fn summary_looks_truncated(text: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use rig_core::completion::message::{AssistantContent, Text, UserContent};
+    use rig_core::completion::message::{AssistantContent, AssistantMessage, Text, UserContent};
 
     /// Build a simple user message with one text block.
     fn user_msg<S: Into<String>>(s: S) -> Message {
         Message::User {
-            content: vec![UserContent::Text(Text {
-                text: s.into(),
-                additional_params: None,
-            })],
+            content: vec![UserContent::Text(Text::new(s.into()))],
         }
     }
 
     /// Build a simple assistant message with one text block.
     fn asst_msg<S: Into<String>>(s: S) -> Message {
-        Message::Assistant {
-            id: None,
-            content: vec![AssistantContent::Text(Text {
-                text: s.into(),
-                additional_params: None,
-            })],
-        }
+        Message::Assistant(AssistantMessage::new(vec![AssistantContent::Text(
+            Text::new(s.into()),
+        )]))
     }
 
     #[test]

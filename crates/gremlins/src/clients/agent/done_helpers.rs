@@ -13,15 +13,10 @@ pub(crate) fn done_user_message(
             UserContent::ToolResult(ToolResult {
                 call: call_id,
                 name: tool_name,
-                content: vec![ToolResultContent::Text(Text {
-                    text: result_text.to_string(),
-                    additional_params: None,
-                })],
+                content: vec![ToolResultContent::Text(Text::new(result_text))],
+                is_error: false,
             }),
-            UserContent::Text(Text {
-                text: ledger.to_string(),
-                additional_params: None,
-            }),
+            UserContent::Text(Text::new(ledger)),
         ],
     }
 }

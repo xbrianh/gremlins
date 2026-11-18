@@ -4,7 +4,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use futures::future::join_all;
-use rig_core::completion::message::{CallId, Reasoning, Sealed, ToolCall, ToolName};
+use rig_core::completion::message::{CallId, Reasoning, ToolCall, ToolName};
 use rig_core::completion::{CompletionRequest, Message, ToolDefinition, Usage};
 use rig_core::driver::DynModel;
 use rig_core::error::ProviderError;
@@ -113,7 +113,7 @@ pub(super) struct LoopState {
 pub(super) struct StreamAccumulator {
     pub(super) text: String,
     pub(super) reasoning: String,
-    pub(super) reasoning_items: Vec<Sealed<Reasoning>>,
+    pub(super) reasoning_items: Vec<Reasoning>,
     pub(super) tool_calls: Vec<ToolCall>,
     pub(super) ended: bool,
     pub(super) turn_usage: Option<Usage>,
@@ -129,7 +129,7 @@ pub(super) struct StreamAccumulator {
 pub(super) struct StreamTurnOutput {
     pub(super) text: String,
     pub(super) reasoning: String,
-    pub(super) reasoning_items: Vec<Sealed<Reasoning>>,
+    pub(super) reasoning_items: Vec<Reasoning>,
     pub(super) tool_calls: Vec<ToolCall>,
     pub(super) turn_usage: Option<Usage>,
     pub(super) first_token: Option<Instant>,
@@ -503,14 +503,14 @@ impl LoopState {
                 "tool: {} {}",
                 tc.function.name,
                 trunc(
-                    &enrich_log_line(&tc.function.name, &tc.function.arguments),
+                    &enrich_log_line(&tc.function.name, &tc.function.arguments_value()),
                     200
                 )
             );
             self.hook_log(&format!("{prefix}{tool_msg}"));
             let id_str = tc.id.to_string();
             let tool_evt =
-                tool_use_event(&id_str, tc.function.name.as_str(), &tc.function.arguments);
+                tool_use_event(&id_str, tc.function.name.as_str(), &tc.function.arguments_value());
             write_raw(raw, &tool_evt);
             if !nested {
                 if let Some(evts) = captured.as_mut() {
@@ -521,7 +521,7 @@ impl LoopState {
                 id: tc.id.to_string(),
                 name: tc.function.name.to_string(),
                 args: args_json,
-                call: format_tool_call_parts(&tc.function.name, &tc.function.arguments),
+                call: format_tool_call_parts(&tc.function.name, &tc.function.arguments_value()),
                 over_cap: tools::max_per_message(tc.function.name.as_str()).and_then(|cap| {
                     task_count += 1;
                     (task_count > cap).then(|| {
@@ -815,7 +815,7 @@ impl LoopState {
         cancel: &CancelToken,
         nested: bool,
         text: &str,
-        reasoning_items: &[Sealed<Reasoning>],
+        reasoning_items: &[Reasoning],
         tool_calls: &[ToolCall],
         expected_artifact_paths: &[PathBuf],
         captured: &mut Option<Vec<serde_json::Value>>,
@@ -846,7 +846,7 @@ impl LoopState {
         nested: bool,
         text: &str,
         reasoning: &str,
-        reasoning_items: &[Sealed<Reasoning>],
+        reasoning_items: &[Reasoning],
         expected_artifact_paths: &[PathBuf],
         input_tokens: Option<u64>,
         loop_start: Instant,
@@ -873,7 +873,7 @@ impl LoopState {
     fn commit_turn_to_history(
         &mut self,
         text: &str,
-        reasoning_items: &[Sealed<Reasoning>],
+        reasoning_items: &[Reasoning],
         tool_calls: &[ToolCall],
         input_tokens: Option<u64>,
     ) {
@@ -2595,11 +2595,11 @@ mod tests {
             true,
         );
 
-        let Message::Assistant { content, .. } = message else {
+        let Message::Assistant(ref msg) = message else {
             panic!("expected an assistant message");
         };
-        assert_eq!(content.len(), 2);
-        match &content[0] {
+        assert_eq!(msg.content.len(), 2);
+        match &msg.content[0] {
             AssistantContent::Reasoning(sealed) => {
                 let opened = sealed
                     .open(&Issuer::from("openai"))
@@ -2611,7 +2611,7 @@ mod tests {
         // The referencing `function_call` must stay beside its reasoning item,
         // with its provider `item_id` naming that reasoning id so the replayed
         // `input` array does not orphan it.
-        match &content[1] {
+        match &msg.content[1] {
             AssistantContent::ToolCall(tc) => {
                 let provider = tc
                     .id
@@ -2649,15 +2649,15 @@ mod tests {
             false,
         );
 
-        let Message::Assistant { content, .. } = message else {
+        let Message::Assistant(ref msg) = message else {
             panic!("expected an assistant message");
         };
-        assert_eq!(content.len(), 2, "text and tool call, no reasoning");
-        match &content[0] {
+        assert_eq!(msg.content.len(), 2, "text and tool call, no reasoning");
+        match &msg.content[0] {
             AssistantContent::Text(t) => assert_eq!(&t.text, "some text"),
             other => panic!("first item must be text, got {other:?}"),
         }
-        match &content[1] {
+        match &msg.content[1] {
             AssistantContent::ToolCall(_) => {}
             other => panic!("second item must be tool call, got {other:?}"),
         }
@@ -2724,12 +2724,12 @@ mod tests {
         let assistant = second
             .chat_history
             .iter()
-            .find(|m| matches!(m, Message::Assistant { .. }))
+            .find(|m| matches!(m, Message::Assistant(_)))
             .expect("second request carries the prior assistant turn");
-        let Message::Assistant { content, .. } = assistant else {
+        let Message::Assistant(ref msg) = assistant else {
             unreachable!()
         };
-        let reasoning = content.iter().find_map(|c| match c {
+        let reasoning = msg.content.iter().find_map(|c| match c {
             AssistantContent::Reasoning(sealed) => {
                 sealed.open(&Issuer::from("mock")).map(|r| r.id.clone())
             }
@@ -2742,10 +2742,10 @@ mod tests {
         );
         // The reasoning item must precede the referencing function_call in the
         // replayed content so the call is not orphaned.
-        let reasoning_at = content
+        let reasoning_at = msg.content
             .iter()
             .position(|c| matches!(c, AssistantContent::Reasoning(_)));
-        let call_at = content
+        let call_at = msg.content
             .iter()
             .position(|c| matches!(c, AssistantContent::ToolCall(_)));
         assert!(
@@ -2819,21 +2819,21 @@ mod tests {
         let assistant = second
             .chat_history
             .iter()
-            .find(|m| matches!(m, Message::Assistant { .. }))
+            .find(|m| matches!(m, Message::Assistant(_)))
             .expect("second request carries the prior assistant turn");
-        let Message::Assistant { content, .. } = assistant else {
+        let Message::Assistant(ref msg) = assistant else {
             unreachable!()
         };
 
         // The reasoning item must NOT appear in the replayed history.
         assert!(
-            !content
+            !msg.content
                 .iter()
                 .any(|c| matches!(c, AssistantContent::Reasoning(_))),
             "flag=false must omit reasoning items from replayed history"
         );
         // The tool call must still be present.
-        let call = content
+        let call = msg.content
             .iter()
             .find(|c| matches!(c, AssistantContent::ToolCall(_)));
         assert!(call.is_some(), "tool call must survive into the replay");
@@ -5461,8 +5461,8 @@ mod tests {
         // message containing a matching ToolResult.
         let mut done_tool_use_seen = false;
         for (i, m) in messages.iter().enumerate() {
-            if let Message::Assistant { content, .. } = m {
-                let has_done = content.iter().any(
+            if let Message::Assistant(ref msg) = m {
+                let has_done = msg.content.iter().any(
                     |c| matches!(c, AssistantContent::ToolCall(tc) if tc.function.name == "Done"),
                 );
                 if has_done {
@@ -5602,8 +5602,8 @@ mod tests {
         // assistant message pair in the persisted history.
         // Count how many times the Done tool_use appears.
         let done_count = messages.iter().filter(|m| {
-            matches!(m, Message::Assistant { content, .. }
-                if content.iter().any(|c| matches!(c, AssistantContent::ToolCall(tc) if tc.function.name == "Done")))
+            matches!(m, Message::Assistant(ref msg)
+                if msg.content.iter().any(|c| matches!(c, AssistantContent::ToolCall(tc) if tc.function.name == "Done")))
         }).count();
         assert_eq!(
             done_count, 1,
