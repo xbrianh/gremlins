@@ -27,3 +27,8 @@ pub(crate) mod shell_parse;
 pub(crate) mod stream_json;
 pub(crate) mod token_provider;
 pub(crate) mod tools;
+
+/// Names accepted in model specs, in backend registration order.
+pub fn provider_names() -> impl Iterator<Item = &'static str> {
+    backends::registry().into_iter().map(|(name, _)| name)
+}

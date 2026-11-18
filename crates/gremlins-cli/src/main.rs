@@ -40,6 +40,13 @@ struct Cli {
     command: Option<Cmds>,
 }
 
+fn model_help() -> String {
+    let providers = gremlins::clients::provider_names()
+        .collect::<Vec<_>>()
+        .join(", ");
+    format!("Model spec supplying `default_model` only when the definition YAML has none. Providers: {providers}.")
+}
+
 #[derive(Subcommand)]
 enum Cmds {
     /// Start a definition as a detached background gremlin.
@@ -52,8 +59,7 @@ enum Cmds {
         /// Run with temp-backed storage — no footprint on disk after completion.
         #[arg(long)]
         ephemeral: bool,
-        /// Model spec supplying `default_model` only when the definition YAML has none.
-        #[arg(long)]
+        #[arg(long, help = model_help())]
         model: Option<String>,
     },
     /// Validate a definition — parse, resolve, and check bootstrap inputs
@@ -64,8 +70,7 @@ enum Cmds {
         /// Free-form --key value pairs passed to bootstrap sources.
         #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
         args: Vec<String>,
-        /// Model spec supplying `default_model` only when the definition YAML has none.
-        #[arg(long)]
+        #[arg(long, help = model_help())]
         model: Option<String>,
     },
     /// List gremlins from the state root as a plain-column table.

@@ -8,6 +8,11 @@ use std::os::unix::fs::PermissionsExt;
 
 use crate::config::StrictString;
 
+/// The `allowed_tools` entry of `native_block`, if any.
+pub(crate) fn tool_filter(native_block: &HashMap<String, Vec<String>>) -> Option<Vec<String>> {
+    native_block.get("allowed_tools").cloned()
+}
+
 // ---------------------------------------------------------------------------
 // ProviderAuth
 // ---------------------------------------------------------------------------
@@ -764,6 +769,14 @@ fn write_atomic_str(path: &Path, content: &str) -> Result<(), String> {
 mod tests {
     use super::*;
     use crate::test_support::{EnvGuard, Sandbox};
+
+    #[test]
+    fn tool_filter_preserves_an_explicit_empty_allowlist() {
+        let mut block = HashMap::new();
+        assert_eq!(tool_filter(&block), None);
+        block.insert("allowed_tools".into(), vec![]);
+        assert_eq!(tool_filter(&block), Some(vec![]));
+    }
 
     // -----------------------------------------------------------------------
     // Providers tests

@@ -1,0 +1,12 @@
+event: response.output_item.added
+data: {"type":"response.output_item.added","sequence_number":1,"output_index":0,"item":{"type":"function_call","id":"fc_1","call_id":"call_1","name":"Done","arguments":"","status":"in_progress"}}
+
+event: response.function_call_arguments.delta
+data: {"type":"response.function_call_arguments.delta","sequence_number":2,"output_index":0,"item_id":"fc_1","delta":"{\"summary\":\"Hello from ChatGPT\"}"}
+
+event: response.output_item.done
+data: {"type":"response.output_item.done","sequence_number":3,"output_index":0,"item":{"type":"function_call","id":"fc_1","call_id":"call_1","name":"Done","arguments":"{\"summary\":\"Hello from ChatGPT\"}","status":"completed"}}
+
+event: response.completed
+data: {"type":"response.completed","sequence_number":4,"response":{"id":"resp_1","object":"response","model":"gpt-5.4","status":"completed","output":[{"type":"function_call","id":"fc_1","call_id":"call_1","name":"Done","arguments":"{\"summary\":\"Hello from ChatGPT\"}","status":"completed"}],"usage":{"input_tokens":4,"output_tokens":5,"total_tokens":9}}}
+

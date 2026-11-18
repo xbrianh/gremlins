@@ -16,6 +16,7 @@ use super::cancels::CancelsMap;
 use super::interactive::InteractiveSession;
 use super::params::{self, ResolvedParams};
 use super::protocol::CompletedRun;
+use crate::model_uri::provider_and_model;
 
 /// Shared state for OpenAI-protocol backends.
 ///
@@ -186,11 +187,6 @@ pub(crate) fn build_openai_client(
         .connect(http_client))
 }
 
-/// The `allowed_tools` entry of `native_block`, if any.
-pub(crate) fn tool_filter(native_block: &HashMap<String, Vec<String>>) -> Option<Vec<String>> {
-    native_block.get("allowed_tools").cloned()
-}
-
 // ── shared helpers ───────────────────────────────────────────────────────
 
 /// Resolve raw client params for an OpenAI-protocol backend.
@@ -308,21 +304,6 @@ pub(crate) async fn run_with_agent_loop(
         interactive,
     )
     .await
-}
-
-/// Split a model specifier into `(provider, model)`, or `None` when the
-/// provider or model part is empty or the spec is otherwise malformed.
-///
-/// This is a thin adapter over [`crate::clients::client::ModelURI`], so it
-/// derives the provider and model from the exact same grammar as
-/// [`crate::clients::client::Client`] and discards any parsed parameter
-/// suffix. Both URI spellings are accepted: `openai/gpt-4o?foo=bar` yields
-/// `("openai", "gpt-4o")`, as does `model://openai/gpt-4o?foo=bar`. An
-/// OpenRouter model ID with a colon suffix such as
-/// `openrouter/some/model:free` yields `("openrouter", "some/model:free")`.
-pub(crate) fn provider_and_model(spec: &str) -> Option<(String, String)> {
-    let uri = crate::clients::client::ModelURI::parse(spec).ok()?;
-    Some((uri.provider().to_string(), uri.model().to_string()))
 }
 
 /// Build a [`DynModel<Completion>`] for `spec` when it names this provider.
@@ -536,74 +517,6 @@ mod tests {
         let r = resolve_openai_protocol("openai", &map).unwrap();
         let additional = r.additional_value().unwrap();
         assert_eq!(additional["reasoning"]["effort"], "low");
-    }
-
-    fn assert_provider_and_model_agrees_with_model_uri(spec: &str) {
-        match crate::clients::client::ModelURI::parse(spec) {
-            Ok(uri) => {
-                assert_eq!(
-                    provider_and_model(spec),
-                    Some((uri.provider().to_string(), uri.model().to_string())),
-                    "{spec:?}"
-                );
-            }
-            Err(_) => {
-                assert_eq!(provider_and_model(spec), None, "{spec:?}");
-            }
-        }
-    }
-
-    #[test]
-    fn provider_and_model_agrees_with_model_uri_on_plain_and_param_specs() {
-        for (spec, expected) in [
-            ("openai/gpt-4o", ("openai", "gpt-4o")),
-            ("openai/gpt-4o?foo=bar", ("openai", "gpt-4o")),
-            ("openai/gpt-4o?top_p=0.7,n=3", ("openai", "gpt-4o")),
-            (
-                "openrouter/anthropic/claude-sonnet-4:free",
-                ("openrouter", "anthropic/claude-sonnet-4:free"),
-            ),
-            (
-                "openrouter/google/gemini-2.5-flash:online",
-                ("openrouter", "google/gemini-2.5-flash:online"),
-            ),
-            (
-                "openrouter/some/model:free",
-                ("openrouter", "some/model:free"),
-            ),
-            ("model://openai/gpt-4o?foo=bar", ("openai", "gpt-4o")),
-            ("cmd/echo hello:world=foo", ("cmd", "echo hello:world=foo")),
-        ] {
-            assert_provider_and_model_agrees_with_model_uri(spec);
-            assert_eq!(
-                provider_and_model(spec),
-                Some((expected.0.to_string(), expected.1.to_string())),
-                "{spec:?}"
-            );
-        }
-    }
-
-    #[test]
-    fn provider_and_model_agrees_with_model_uri_on_malformed_specs() {
-        const LEGACY_COLON_SPEC: &str = concat!("openai", ":", "gpt-4o");
-
-        for spec in [
-            "",
-            "only",
-            LEGACY_COLON_SPEC,
-            "/model",
-            "openai/",
-            "openai/gpt-4o?reasoning=high,bad",
-            "model://cmd/true",
-        ] {
-            assert_provider_and_model_agrees_with_model_uri(spec);
-        }
-
-        // Belt-and-braces: the malformed/empty-parts contract remains None.
-        assert_eq!(provider_and_model(""), None);
-        assert_eq!(provider_and_model("only"), None);
-        assert_eq!(provider_and_model(LEGACY_COLON_SPEC), None);
-        assert_eq!(provider_and_model("openai/"), None);
     }
 
     #[test]

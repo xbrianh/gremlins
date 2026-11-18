@@ -49,9 +49,7 @@ pub fn default_native_block() -> HashMap<String, Vec<String>> {
 ///
 /// Callers use this to reject a bad spec early, before any work is queued.
 pub fn is_known_provider(provider: &str) -> bool {
-    backends::registry()
-        .iter()
-        .any(|(name, _)| *name == provider)
+    super::provider_names().any(|name| name == provider)
 }
 
 fn backend_pool() -> &'static Mutex<HashMap<String, Arc<dyn Backend>>> {

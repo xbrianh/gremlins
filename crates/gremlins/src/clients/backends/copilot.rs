@@ -1,6 +1,5 @@
 use std::collections::HashMap;
-use std::sync::atomic::AtomicU64;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use async_trait::async_trait;
@@ -13,11 +12,9 @@ use rig_core::providers::openai::{OpenAI, OpenAIConfig};
 
 use crate::clients::backend::{Backend, ClientError, RunParams};
 use crate::clients::cancel::CancelToken;
-use crate::clients::cancels::CancelsMap;
 use crate::clients::github_auth;
 use crate::clients::interactive::InteractiveSession;
 use crate::clients::native::NativeRunState;
-use crate::clients::openai_protocol;
 use crate::clients::params::{self, ResolvedParams};
 use crate::clients::protocol::CompletedRun;
 use crate::clients::token_provider::{TokenProvider, TokenProviderError};
@@ -539,7 +536,7 @@ impl CopilotBackend {
             model.to_string()
         };
 
-        let tool_filter = openai_protocol::tool_filter(native_block);
+        let tool_filter = crate::clients::config::tool_filter(native_block);
 
         let resolved = Self::resolve_params(extra_params)?;
         let (strict_tools, tool_result_array_content) = parse_extra_params(extra_params)?;
@@ -549,16 +546,13 @@ impl CopilotBackend {
                 client,
                 strict_tools,
                 tool_result_array_content,
-                native: NativeRunState {
-                    client_state: (),
+                native: NativeRunState::new(
+                    (),
                     model,
                     tool_filter,
                     resolved,
-                    last_ctx: Mutex::new(None),
-                    cancels: CancelsMap::default(),
-                    next_id: AtomicU64::new(1),
-                    log_label: "CopilotBackend".to_string(),
-                },
+                    "CopilotBackend",
+                ),
             },
         }))
     }
@@ -567,7 +561,7 @@ impl CopilotBackend {
 #[async_trait]
 impl Backend for CopilotBackend {
     fn make_model(&self, spec: &str) -> Option<DynModel<Completion>> {
-        let (provider, model) = openai_protocol::provider_and_model(spec)?;
+        let (provider, model) = crate::model_uri::provider_and_model(spec)?;
         if provider == PROVIDER_NAME {
             let mut mdl = self.state.client.completion(&model);
             if self.state.strict_tools {
@@ -784,31 +778,27 @@ mod tests {
     #[test]
     fn reap_all_cancels_only_own_tokens() {
         let client = OpenAIConfig::with_key(&COPILOT_DIALECT, "tid=1;exp=9999999999").client();
-        let backlog = CancelsMap::default();
-        let a = CancelToken::new();
-        let b = CancelToken::new();
-        let sibling = CancelToken::new();
-        backlog.insert("gr-test", 1, a.clone()).unwrap();
-        backlog.insert("gr-test", 2, b.clone()).unwrap();
-        backlog.insert("gr-sibling", 3, sibling.clone()).unwrap();
-
         let backend = CopilotBackend {
             state: CopilotRunState {
                 client,
                 strict_tools: false,
                 tool_result_array_content: false,
-                native: NativeRunState {
-                    client_state: (),
-                    model: "gpt-4o".into(),
-                    tool_filter: None,
-                    resolved: ResolvedParams::default(),
-                    last_ctx: Mutex::new(None),
-                    cancels: backlog,
-                    next_id: AtomicU64::new(1),
-                    log_label: "test".into(),
-                },
+                native: NativeRunState::new(
+                    (),
+                    "gpt-4o".into(),
+                    None,
+                    ResolvedParams::default(),
+                    "test",
+                ),
             },
         };
+        let a = CancelToken::new();
+        let b = CancelToken::new();
+        let sibling = CancelToken::new();
+        let cancels = &backend.state.native.cancels;
+        cancels.insert("gr-test", 1, a.clone()).unwrap();
+        cancels.insert("gr-test", 2, b.clone()).unwrap();
+        cancels.insert("gr-sibling", 3, sibling.clone()).unwrap();
         backend.reap_all("gr-test");
         assert!(a.is_cancelled());
         assert!(b.is_cancelled());

@@ -23,10 +23,8 @@ use crate::clients::protocol::CompletedRun;
 /// persistent turn history.
 ///
 /// The Azure OpenAI Responses backend validates `function_call` → `reasoning`
-/// id references and therefore needs the id-bearing items kept in history. All
-/// other backends use the Chat Completions wire format, which has no such
-/// cross-item reference, so their reasoning text can be dropped from replay to
-/// avoid re-billing output-rate tokens as input tokens.
+/// id references and therefore needs the id-bearing items kept in history.
+/// Other backends omit reasoning from replay to avoid re-billing it as input.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum PreserveReasoning {
     /// Omit structured reasoning items from persistent turn history.
@@ -49,15 +47,34 @@ impl PreserveReasoning {
 pub(crate) struct NativeRunState<C> {
     pub(crate) client_state: C,
     pub(crate) model: String,
-    pub(crate) tool_filter: Option<Vec<String>>,
+    tool_filter: Option<Vec<String>>,
     pub(crate) resolved: ResolvedParams,
-    pub(crate) last_ctx: Mutex<Option<RunContext>>,
+    last_ctx: Mutex<Option<RunContext>>,
     pub(crate) cancels: CancelsMap,
-    pub(crate) next_id: AtomicU64,
-    pub(crate) log_label: String,
+    next_id: AtomicU64,
+    log_label: &'static str,
 }
 
 impl<C> NativeRunState<C> {
+    pub(crate) fn new(
+        client_state: C,
+        model: String,
+        tool_filter: Option<Vec<String>>,
+        resolved: ResolvedParams,
+        log_label: &'static str,
+    ) -> Self {
+        Self {
+            client_state,
+            model,
+            tool_filter,
+            resolved,
+            last_ctx: Mutex::new(None),
+            cancels: CancelsMap::default(),
+            next_id: AtomicU64::new(1),
+            log_label,
+        }
+    }
+
     /// The backend's `additional_params` object, or `None` when empty.
     pub(crate) fn extra_params(&self) -> Option<serde_json::Value> {
         self.resolved.additional_value()
@@ -93,7 +110,7 @@ impl<C> NativeRunState<C> {
     /// Cancel every in-flight token for `gremlin_id`.
     pub(crate) fn reap(&self, gremlin_id: &str) {
         self.cancels
-            .reap_all(gremlin_id, &self.log_label, &self.model);
+            .reap_all(gremlin_id, self.log_label, &self.model);
     }
 
     /// Execute a single agent-loop attempt, registering and cleaning up a
