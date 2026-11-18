@@ -58,7 +58,9 @@ pub async fn list_models(
         });
     };
     let Some(list) = entry.list_models else {
-        return Err(ListModelsError::Unsupported { backend: entry.name });
+        return Err(ListModelsError::Unsupported {
+            backend: entry.name,
+        });
     };
     let slugs = list().await.map_err(ListModelsError::Failed)?;
     slugs
