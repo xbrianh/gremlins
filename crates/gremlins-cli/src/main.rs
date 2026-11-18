@@ -158,6 +158,13 @@ enum Cmds {
         /// Gremlin definition: a bare name (resolved under .gremlins/) or a path.
         definition: String,
     },
+    /// List the models a backend offers to your account, one model URI per line.
+    ///
+    /// Example: gremlins list-models chatgpt
+    ListModels {
+        /// Backend name (currently only `chatgpt` supports listing).
+        backend: String,
+    },
     /// Manage provider authentication credentials.
     Auth {
         #[command(subcommand)]
@@ -292,6 +299,7 @@ async fn main() {
         Some(Cmds::Bundle { definition }) => bundle(&definition).await,
         Some(Cmds::Serve { lock_fd }) => serve_daemon(lock_fd).await,
         Some(Cmds::Version) => version_cmd().await,
+        Some(Cmds::ListModels { backend }) => list_models_cmd(&backend).await,
         Some(Cmds::Auth { command }) => match command {
             AuthCmds::ChatGpt {
                 command: ChatGptAuthCmds::Login { device_code },
@@ -2367,6 +2375,27 @@ fn auth_chatgpt_status() -> Result<(), String> {
                 path.display()
             ))
         }
+    }
+}
+
+async fn list_models_cmd(backend: &str) -> Result<(), String> {
+    use gremlins::clients::{list_models, ListModelsError};
+
+    match list_models(backend).await {
+        Ok(uris) => {
+            for uri in uris {
+                println!("{uri}");
+            }
+            Ok(())
+        }
+        Err(ListModelsError::Unknown { registered }) => Err(format!(
+            "unknown backend '{backend}'; registered backends: {}",
+            registered.join(", ")
+        )),
+        Err(ListModelsError::Unsupported { backend }) => Err(format!(
+            "listing models is not supported for '{backend}'; it is currently available only for 'chatgpt'"
+        )),
+        Err(ListModelsError::Failed(message)) => Err(message),
     }
 }
 

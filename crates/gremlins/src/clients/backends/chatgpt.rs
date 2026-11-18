@@ -2,6 +2,9 @@
 
 mod oauth;
 
+mod catalog;
+pub(super) use catalog::list_models;
+
 use std::collections::HashMap;
 use std::sync::Arc;
 

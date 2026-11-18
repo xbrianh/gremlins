@@ -165,9 +165,9 @@ impl Client {
     /// [`Client::from_uri`] long before this runs, so the fallthrough arm is a
     /// guard against a future constructor that forgets to validate.
     fn build_backend(&self) -> Result<Arc<dyn Backend>, String> {
-        for (name, build) in backends::registry() {
-            if name == self.uri.provider() {
-                return build(
+        for entry in backends::registry() {
+            if entry.name == self.uri.provider() {
+                return (entry.build)(
                     self.uri.model(),
                     &self.native_block,
                     self.uri.extra_params(),

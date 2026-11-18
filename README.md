@@ -72,6 +72,13 @@ OpenAI API keys are not accepted.
   (account, access-token expiry) without contacting the provider. An expired token
   may still refresh; an unexpired one does not prove a live subscription.
   Unreadable records exit nonzero.
+- `gremlins list-models chatgpt` prints the models your subscription offers, one
+  `model://chatgpt/<slug>` per line, ready to paste into a definition or `/model`:
+
+  ```
+  gremlins list-models chatgpt
+  ```
+
 - `gremlins auth chatgpt logout` revokes and removes the stored sign-in only. It
   exits nonzero if revocation is unconfirmed (the record is still removed) or the
   store fails. It leaves static credentials and in-flight requests alone. After
