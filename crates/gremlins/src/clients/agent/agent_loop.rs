@@ -1848,7 +1848,7 @@ mod tests {
     use gremlins_magic_bus::{self, Recv};
     use http::StatusCode;
     use rig_core::completion::message::AssistantContent;
-    use rig_core::message::{Issuer, Reasoning, ReasoningContent, ToolFunction, UserContent};
+    use rig_core::completion::message::{Reasoning, ToolFunction, UserContent};
     use rig_core::operation::Completion;
     use std::collections::HashMap;
     use std::sync::atomic::{AtomicBool, Ordering};
@@ -1880,15 +1880,10 @@ mod tests {
 
     #[test]
     fn turn_stats_passes_through_partial_usage_without_zero_filling() {
-        let usage = Usage {
-            input_tokens: Some(10),
-            output_tokens: None,
-            cached_input_tokens: Some(4),
-            cache_creation_input_tokens: None,
-            reasoning_tokens: Some(3),
-            tool_use_prompt_tokens: None,
-            total_tokens: None,
-        };
+        let usage = Usage::default()
+            .input_tokens(10)
+            .cached_input_tokens(4)
+            .reasoning_tokens(3);
 
         let stats = turn_stats(1, Some(&usage)).unwrap();
 
@@ -1902,15 +1897,7 @@ mod tests {
 
     #[test]
     fn turn_stats_none_when_usage_block_is_entirely_absent() {
-        let usage = Usage {
-            input_tokens: None,
-            output_tokens: None,
-            cached_input_tokens: None,
-            cache_creation_input_tokens: None,
-            reasoning_tokens: None,
-            tool_use_prompt_tokens: None,
-            total_tokens: None,
-        };
+        let usage = Usage::default();
 
         assert!(turn_stats(0, Some(&usage)).is_none());
         assert!(turn_stats(3, None).is_none());
@@ -2575,16 +2562,12 @@ mod tests {
     #[test]
     fn assistant_tool_message_retains_reasoning_items() {
         let reasoning = Reasoning {
-            id: Some("rs_reasoning_item".to_string()),
-            content: vec![ReasoningContent::Text {
-                text: "thinking hard".to_string(),
-                signature: None,
-            }],
-        }
-        .sealed("openai");
-        let call = ToolCall::from_dual_wire(
+            text: "thinking hard".to_string(),
+            redacted: false,
+            native: None,
+        };
+        let call = ToolCall::from_wire(
             "fc_item",
-            "call_1",
             ToolFunction::new(
                 ToolName::new("Read").unwrap(),
                 serde_json::json!({ "file_path": "/tmp/x" }),
@@ -2603,11 +2586,8 @@ mod tests {
         };
         assert_eq!(msg.content.len(), 2);
         match &msg.content[0] {
-            AssistantContent::Reasoning(sealed) => {
-                let opened = sealed
-                    .open(&Issuer::from("openai"))
-                    .expect("issuer preserved");
-                assert_eq!(opened.id.as_deref(), Some("rs_reasoning_item"));
+            AssistantContent::Reasoning(r) => {
+                assert_eq!(r.text, "thinking hard");
             }
             other => panic!("first item must be reasoning, got {other:?}"),
         }
@@ -2620,7 +2600,7 @@ mod tests {
                     .id
                     .provider()
                     .expect("dual-wire call keeps a provider id");
-                assert_eq!(provider.item_id.as_deref(), Some("fc_item"));
+                assert_eq!(provider.as_str(), "fc_item");
             }
             other => panic!("second item must be the tool call, got {other:?}"),
         }
@@ -2629,16 +2609,12 @@ mod tests {
     #[test]
     fn assistant_tool_message_omits_reasoning_items_when_false() {
         let reasoning = Reasoning {
-            id: Some("rs_skip".to_string()),
-            content: vec![ReasoningContent::Text {
-                text: "should be excluded".to_string(),
-                signature: None,
-            }],
-        }
-        .sealed("openai");
-        let call = ToolCall::from_dual_wire(
+            text: "should be excluded".to_string(),
+            redacted: false,
+            native: None,
+        };
+        let call = ToolCall::from_wire(
             "fc_item",
-            "call_1",
             ToolFunction::new(
                 ToolName::new("Read").unwrap(),
                 serde_json::json!({ "file_path": "/tmp/x" }),
@@ -2727,28 +2703,32 @@ mod tests {
         let assistant = second
             .chat_history
             .iter()
-            .find(|m| matches!(m, Message::Assistant(_)))
+            .find(|m| matches!(m.as_ref(), Message::Assistant(_)))
             .expect("second request carries the prior assistant turn");
-        let Message::Assistant(ref msg) = assistant else {
+        let Message::Assistant(ref msg) = assistant.as_ref() else {
             unreachable!()
         };
-        let reasoning = msg.content.iter().find_map(|c| match c {
-            AssistantContent::Reasoning(sealed) => {
-                sealed.open(&Issuer::from("mock")).map(|r| r.id.clone())
-            }
+        // rig 0.46 replays another provider's reasoning block as plain text
+        // unless the wire accepts foreign reasoning; either way the reasoning
+        // text must lead the replayed turn.
+        let reasoning = msg.content.first().and_then(|c| match c {
+            AssistantContent::Reasoning(r) => Some(r.text.clone()),
+            AssistantContent::Text(t) => Some(t.text.clone()),
             _ => None,
         });
         assert_eq!(
-            reasoning.flatten().as_deref(),
-            Some("rs_1"),
-            "reasoning item id must survive into the replay"
+            reasoning.as_deref(),
+            Some("thinking"),
+            "reasoning text must survive into the replay: {msg:#?}"
         );
         // The reasoning item must precede the referencing function_call in the
         // replayed content so the call is not orphaned.
-        let reasoning_at = msg
-            .content
-            .iter()
-            .position(|c| matches!(c, AssistantContent::Reasoning(_)));
+        let reasoning_at = msg.content.iter().position(|c| {
+            matches!(
+                c,
+                AssistantContent::Reasoning(_) | AssistantContent::Text(_)
+            )
+        });
         let call_at = msg
             .content
             .iter()
@@ -2824,9 +2804,9 @@ mod tests {
         let assistant = second
             .chat_history
             .iter()
-            .find(|m| matches!(m, Message::Assistant(_)))
+            .find(|m| matches!(m.as_ref(), Message::Assistant(_)))
             .expect("second request carries the prior assistant turn");
-        let Message::Assistant(ref msg) = assistant else {
+        let Message::Assistant(ref msg) = assistant.as_ref() else {
             unreachable!()
         };
 
@@ -2953,6 +2933,8 @@ mod tests {
         type Op = Completion;
         type Payload = CompletionRequest;
         type Frame = rig_core::test_utils::MockFrame;
+        type Event = rig_core::test_utils::MockFrame;
+        type Reassembler = rig_core::test_utils::MockDocument;
         type Decoder<'id> = rig_core::test_utils::MockDecoder<'id>;
 
         fn describe(&self) -> rig_core::wire::Descriptor<'_> {
@@ -3496,7 +3478,7 @@ mod tests {
             .unwrap();
         assert!(content.contains("unknown tool"));
         let reqs = model.requests();
-        let history: Vec<&Message> = reqs[1].chat_history.iter().collect();
+        let history: Vec<&Message> = reqs[1].chat_history.iter().map(|m| m.as_ref()).collect();
         // Denied calls appear in history as tool results.
         let history_debug = format!("{:?}", history);
         assert!(
@@ -3786,7 +3768,7 @@ mod tests {
         let requests = model.requests();
         assert!(!requests.is_empty());
         for req in requests {
-            match req.chat_history.first() {
+            match req.chat_history.first().map(|m| m.as_ref()) {
                 Some(Message::System { content }) => assert_eq!(content, "you are a harness"),
                 other => panic!("system prompt must lead the history, got: {other:?}"),
             }
@@ -3837,7 +3819,7 @@ mod tests {
                 "harness must not inject preamble"
             );
             for msg in req.chat_history.iter() {
-                if let Message::System { content } = msg {
+                if let Message::System { content } = msg.as_ref() {
                     panic!("harness injected system message: {content}");
                 }
             }
@@ -4226,7 +4208,7 @@ mod tests {
             .unwrap()
             .chat_history
             .iter()
-            .flat_map(|m| match m {
+            .flat_map(|m| match m.as_ref() {
                 Message::User { content } => content
                     .iter()
                     .filter_map(|c| match c {
@@ -4331,7 +4313,7 @@ mod tests {
         let parent_history = &reqs.last().unwrap().chat_history;
         let task_result = parent_history
             .iter()
-            .flat_map(|m| match m {
+            .flat_map(|m| match m.as_ref() {
                 Message::User { content } => content
                     .iter()
                     .filter_map(|c| match c {

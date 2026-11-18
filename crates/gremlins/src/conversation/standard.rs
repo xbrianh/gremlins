@@ -477,8 +477,8 @@ impl Conversation for StandardConversation {
 
 #[cfg(test)]
 mod tests {
+    use rig_core::completion::message::{AssistantContent, UserContent};
     use rig_core::completion::Message;
-    use rig_core::message::{AssistantContent, Issuer, UserContent};
 
     use crate::clients::agent::agent_loop::*;
     use crate::clients::cancel::CancelToken;
@@ -578,7 +578,7 @@ mod tests {
             .iter()
             .find(|req| {
                 matches!(
-                    req.chat_history.first(),
+                    req.chat_history.first().map(|m| m.as_ref()),
                     Some(Message::System { content })
                         if content.contains("This is a forked child agent")
                 )
@@ -587,25 +587,28 @@ mod tests {
 
         let history = &fork_req.chat_history;
         // The child inherits the parent's conversation as static history:
-        // [system prompt] + [User(stage_prompt), Assistant(tool_call), User(tool_result),
-        // User(Continue.)] followed by the fork prompt.
-        // That's 6 messages: system + 5 (4 inherited + 1 fork).
-        assert_eq!(history.len(), 6, "unexpected fork history: {history:#?}");
+        // [system prompt] + [User(stage_prompt), Assistant(tool_call),
+        // User(tool_result + Continue. + fork prompt)] followed by the fork
+        // prompt. rig 0.46 shapes the wire history, folding consecutive user
+        // turns into one message: system + 3 (2 inherited + 1 fork).
+        assert_eq!(history.len(), 4, "unexpected fork history: {history:#?}");
 
         // Fork system prompt leads the child history.
         assert!(matches!(
-            &history[0],
+            history[0].as_ref(),
             Message::System { content }
                 if content.contains("<tools>") && content.contains("Do not call")
         ));
 
         // Inherited parent conversation — the fork prompt is the last message.
         assert!(
-            history.iter().any(|m| matches!(m, Message::Assistant(_))),
+            history
+                .iter()
+                .any(|m| matches!(m.as_ref(), Message::Assistant(_))),
             "history must contain an assistant message"
         );
         assert!(
-            history.iter().any(|m| matches!(m, Message::User { content } if content.iter().any(|c| matches!(c, UserContent::ToolResult(_))))),
+            history.iter().any(|m| matches!(m.as_ref(), Message::User { content } if content.iter().any(|c| matches!(c, UserContent::ToolResult(_))))),
             "history must contain a tool result"
         );
         // The Fork prompt is the last message in chat_history.
@@ -705,7 +708,7 @@ mod tests {
         let parent_history = &requests.last().unwrap().chat_history;
         let task_result = parent_history
             .iter()
-            .flat_map(|m| match m {
+            .flat_map(|m| match m.as_ref() {
                 Message::User { content } => content
                     .iter()
                     .filter_map(|c| match c {
@@ -752,8 +755,8 @@ mod tests {
 
         // Turn 0: reasoning only (rs_0), no text, no tool call — the loop
         // records the reasoning item and continues with "Continue.".
-        // Turn 1: Done. The second request must carry rs_0 as an assistant
-        // message, not as two consecutive user messages.
+        // Turn 1: Done. The second request must carry the reasoning text as an
+        // assistant message, not as two consecutive user messages.
         let model = rig_core::test_utils::MockCompletionModel::from_stream_turns([
             vec![
                 rig_core::test_utils::MockStreamEvent::reasoning_delta_with_id("rs_0", "thinking"),
@@ -792,28 +795,30 @@ mod tests {
         let assistant = second
             .chat_history
             .iter()
-            .find(|m| matches!(m, Message::Assistant(_)))
+            .find(|m| matches!(m.as_ref(), Message::Assistant(_)))
             .expect("second request carries the prior assistant turn");
-        let Message::Assistant(ref msg) = assistant else {
+        let Message::Assistant(ref msg) = assistant.as_ref() else {
             unreachable!()
         };
-        let reasoning = content.iter().find_map(|c| match c {
-            AssistantContent::Reasoning(sealed) => {
-                sealed.open(&Issuer::from("mock")).map(|r| r.id.clone())
-            }
+        // rig 0.46 replays another provider's reasoning block as plain text
+        // unless the wire accepts foreign reasoning; either way the reasoning
+        // text must lead the replayed turn.
+        let reasoning = msg.content.iter().find_map(|c| match c {
+            AssistantContent::Reasoning(r) => Some(r.text.clone()),
+            AssistantContent::Text(t) => Some(t.text.clone()),
             _ => None,
         });
         assert_eq!(
-            reasoning.flatten().as_deref(),
-            Some("rs_0"),
-            "reasoning-only turn's structured item must survive into the replay"
+            reasoning.as_deref(),
+            Some("thinking"),
+            "reasoning-only turn's reasoning text must survive into the replay"
         );
 
         // No two consecutive user messages: the assistant turn (with its
         // reasoning item) must sit between the original prompt and "Continue.".
         let mut prev_user = false;
         for m in &second.chat_history {
-            match m {
+            match m.as_ref() {
                 Message::User { .. } => {
                     assert!(
                         !prev_user,
