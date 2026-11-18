@@ -1488,8 +1488,11 @@ async fn debug_connection_injects_into_the_next_chat_loop_without_reconnecting()
     assert_eq!(done["usage"]["turns"], 1);
     let requests = model.requests();
     assert_eq!(requests.len(), 2);
-    let Some(Message::User { content }) = requests[1].chat_history.last() else {
+    let Some(user_msg) = requests[1].chat_history.last() else {
         panic!("expected the corrected user prompt");
+    };
+    let Message::User { content } = user_msg.as_ref() else {
+        panic!("expected user message");
     };
     assert!(content.iter().any(
         |block| matches!(block, UserContent::Text(t) if t.text.trim() == "[operator]: use the new plan")

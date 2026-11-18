@@ -74,11 +74,7 @@ impl Conversation for NakedConversation {
         unreachable!("NakedConversation: finish_turn called in multi-turn path")
     }
 
-    fn record_interrupted_response(
-        &mut self,
-        text: String,
-        reasoning: &[Reasoning],
-    ) {
+    fn record_interrupted_response(&mut self, text: String, reasoning: &[Reasoning]) {
         self.next_prompt.commit_interrupted(
             &mut self.history,
             &text,

@@ -416,7 +416,13 @@ impl Conversation for StandardConversation {
         results: Vec<Message>,
         next_prompt: Message,
     ) {
-        self.record_turn(text, reasoning_items, tool_calls, self.last_prompt_tokens, None);
+        self.record_turn(
+            text,
+            reasoning_items,
+            tool_calls,
+            self.last_prompt_tokens,
+            None,
+        );
         self.history.extend(results);
         self.next_prompt = PendingPrompt::new(next_prompt);
     }
@@ -437,7 +443,7 @@ impl Conversation for StandardConversation {
 
 #[cfg(test)]
 mod tests {
-    use rig_core::completion::message::{AssistantContent, UserContent};
+    use rig_core::completion::message::{AssistantContent, AssistantMessage, UserContent};
     use rig_core::completion::Message;
 
     use crate::clients::agent::agent_loop::*;
@@ -461,14 +467,13 @@ mod tests {
 
     #[test]
     fn interrupted_reasoning_only_respects_backend_replay_setting() {
-        let reasoning = rig_core::message::Reasoning::encrypted("sealed payload").sealed("mock");
+        let reasoning = rig_core::message::Reasoning::new("sealed payload");
         for preserve in [false, true] {
             let mut expected = vec![Message::user("original")];
             if preserve {
-                expected.push(Message::Assistant {
-                    id: None,
-                    content: vec![AssistantContent::Reasoning(reasoning.clone())],
-                });
+                expected.push(Message::Assistant(AssistantMessage::new(vec![
+                    AssistantContent::Reasoning(reasoning.clone()),
+                ])));
             }
             for blank in ["", " \n"] {
                 let mut conv = new_blank_conversation("original", preserve, None);
@@ -497,10 +502,9 @@ mod tests {
             script.messages,
             [
                 Message::user("original"),
-                Message::Assistant {
-                    id: None,
-                    content: vec![AssistantContent::ToolCall(call)],
-                },
+                Message::Assistant(AssistantMessage::new(vec![AssistantContent::ToolCall(
+                    call
+                ),])),
             ]
         );
         let Message::User { mut content } = result else {

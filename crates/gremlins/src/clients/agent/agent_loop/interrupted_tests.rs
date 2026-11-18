@@ -6,10 +6,10 @@ use crate::clients::interactive::{
 use crate::conversation::new_blank_conversation;
 use futures::{stream, StreamExt};
 use gremlins_magic_bus::{connection::BusSubGuard, subscribe_run, EventKind, Recv};
-use rig_core::completion::message::{AssistantContent, ReasoningContent, ToolCall, ToolFunction};
+use rig_core::completion::message::{AssistantContent, AssistantMessage, ToolCall, ToolFunction};
 use rig_core::completion::{CompletionRequest, Message};
 use rig_core::driver::{Exchange, Model, Opened, Opening, Transport};
-use rig_core::message::{Issuer, ToolName};
+use rig_core::message::ToolName;
 use rig_core::test_utils::{MockCompletionModel, MockFrame, MockScript, MockStreamEvent as Event};
 use serde_json::json;
 use std::path::Path;
@@ -47,10 +47,9 @@ fn earlier_messages() -> Vec<Message> {
     );
     vec![
         Message::user("Read the old file."),
-        Message::Assistant {
-            id: None,
-            content: vec![AssistantContent::ToolCall(read.clone())],
-        },
+        Message::Assistant(AssistantMessage::new(vec![AssistantContent::ToolCall(
+            read.clone(),
+        )])),
         Message::tool_result(read.id, read.function.name, "old contents"),
     ]
 }
@@ -180,8 +179,14 @@ async fn pause_and_replay(
 
     let mut requests = transport.requests.lock().unwrap();
     assert_eq!(requests.len(), 2);
-    let mut replay = requests.pop().unwrap().chat_history;
-    replay.retain(|m| !matches!(m, Message::System { .. }));
+    let mut replay: Vec<Message> = requests
+        .pop()
+        .unwrap()
+        .chat_history
+        .into_iter()
+        .filter(|m| !matches!(m.as_ref(), Message::System { .. }))
+        .map(Arc::unwrap_or_clone)
+        .collect();
     let earlier = earlier_messages();
     assert!(
         replay.starts_with(&earlier),
@@ -234,22 +239,16 @@ async fn resume_retains_partial_prose_and_only_sealed_reasoning() {
         InteractiveCommand::Quit,
     )
     .await;
-    let [original, Message::Assistant { content, .. }, continuation] = replay.as_slice() else {
+    let [original, Message::Assistant(msg), continuation] = replay.as_slice() else {
         panic!("unexpected resumed request: {replay:?}");
     };
     assert_eq!(original, &Message::user(PROMPT));
     assert_eq!(continuation, &Message::user("Continue."));
-    let [AssistantContent::Reasoning(item), AssistantContent::Text(prose)] = content.as_slice()
+    let [AssistantContent::Reasoning(item), AssistantContent::Text(prose)] = msg.content.as_slice()
     else {
-        panic!("expected exactly one completed reasoning item and prose: {content:?}");
+        panic!("expected exactly one completed reasoning item and prose: {msg:?}");
     };
-    let item = item
-        .open(&Issuer::from("mock"))
-        .expect("original provider seal");
-    assert_eq!(item.id.as_deref(), Some("completed-item"));
-    assert!(
-        matches!(&item.content[..], [ReasoningContent::Text { text, .. }] if text == "verified")
-    );
+    assert_eq!(item.text, "verified");
     assert_eq!(prose.text, "partial prose");
 }
 
@@ -389,15 +388,14 @@ async fn uninterrupted_text_blocks_are_finalized_once_without_ready() {
         assert!(!matches!(event.kind(), EventKind::Ready { .. }));
     }
     let messages = run.messages().unwrap();
-    let [prompt, Message::Assistant { content, .. }, _done_result] =
-        &messages[earlier_messages().len()..]
+    let [prompt, Message::Assistant(msg), _done_result] = &messages[earlier_messages().len()..]
     else {
         panic!("unexpected finalized transcript: {messages:?}");
     };
     assert_eq!(prompt, &Message::user(PROMPT));
-    let [AssistantContent::Text(text), AssistantContent::ToolCall(_done)] = content.as_slice()
+    let [AssistantContent::Text(text), AssistantContent::ToolCall(_done)] = msg.content.as_slice()
     else {
-        panic!("unexpected completed response: {content:?}");
+        panic!("unexpected completed response: {msg:?}");
     };
     assert_eq!(text.text, format!("{FIRST}{SECOND}"));
 }
@@ -464,7 +462,7 @@ async fn message_correction_injects_text_and_releases_slot_so_agent_resumes() {
     let corrected = &model.requests()[1];
     let mut correction_count = 0usize;
     for m in &corrected.chat_history {
-        if let Message::User { content } = m {
+        if let Message::User { content } = m.as_ref() {
             let text: String = content
                 .iter()
                 .filter_map(|c| match c {
@@ -532,7 +530,7 @@ async fn message_does_not_amend_system_prompt() {
     let first = &model.requests()[0];
     let second = &model.requests()[1];
     let has_debug_note = second.chat_history.iter().any(|m| {
-        if let Message::System { content } = m {
+        if let Message::System { content } = m.as_ref() {
             content.contains("operator has connected in debug mode")
                 || content.contains("Treat them as")
         } else {
@@ -548,7 +546,7 @@ async fn message_does_not_amend_system_prompt() {
         .chat_history
         .iter()
         .filter_map(|m| {
-            if let Message::System { content } = m {
+            if let Message::System { content } = m.as_ref() {
                 Some(content.as_str())
             } else {
                 None
@@ -559,7 +557,7 @@ async fn message_does_not_amend_system_prompt() {
         .chat_history
         .iter()
         .filter_map(|m| {
-            if let Message::System { content } = m {
+            if let Message::System { content } = m.as_ref() {
                 Some(content.as_str())
             } else {
                 None
@@ -747,7 +745,7 @@ async fn explicit_continue_still_amends_system_prompt() {
     assert_eq!(model.requests().len(), 2);
     let second = &model.requests()[1];
     let has_debug_note = second.chat_history.iter().any(|m| {
-        if let Message::System { content } = m {
+        if let Message::System { content } = m.as_ref() {
             content.contains("operator has connected in debug mode")
         } else {
             false

@@ -173,11 +173,7 @@ pub(crate) trait Conversation: Send + Sync {
 
     /// Commit the pending prompt and replayable output when an operator pauses
     /// the stream. With no text or replayable reasoning the prompt stays pending.
-    fn record_interrupted_response(
-        &mut self,
-        text: String,
-        reasoning: &[Reasoning],
-    );
+    fn record_interrupted_response(&mut self, text: String, reasoning: &[Reasoning]);
 
     /// Drop the most recent assistant turn from history so the turn can be
     /// re-executed cleanly.
@@ -444,11 +440,7 @@ impl Conversation for ConversationStub {
         self.set_next_prompt("Continue.");
     }
 
-    fn record_interrupted_response(
-        &mut self,
-        text: String,
-        reasoning: &[Reasoning],
-    ) {
+    fn record_interrupted_response(&mut self, text: String, reasoning: &[Reasoning]) {
         self.next_prompt.commit_interrupted(
             &mut self.history,
             &text,
