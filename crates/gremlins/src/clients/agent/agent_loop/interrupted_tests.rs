@@ -6,7 +6,9 @@ use crate::clients::interactive::{
 use crate::conversation::new_blank_conversation;
 use futures::{stream, StreamExt};
 use gremlins_magic_bus::{connection::BusSubGuard, subscribe_run, EventKind, Recv};
-use rig_core::completion::message::{AssistantContent, AssistantMessage, ToolCall, ToolFunction};
+use rig_core::completion::message::{
+    AssistantContent, AssistantMessage, ToolCall, ToolFunction, UserContent,
+};
 use rig_core::completion::{CompletionRequest, Message};
 use rig_core::driver::{Exchange, Model, Opened, Opening, Transport};
 use rig_core::message::ToolName;
@@ -36,6 +38,16 @@ fn finish() -> Vec<Event> {
         Event::tool_call("finish", "Done", json!({"summary": "finished"})),
         Event::final_response_with_default_usage(),
     ]
+}
+
+/// rig-core merges the pending prompt into the preceding user (tool-result) message.
+fn expected_merged_earlier() -> Vec<Message> {
+    let mut msgs = earlier_messages();
+    let Some(Message::User { content }) = msgs.last_mut() else {
+        panic!("expected the fixture to end with a tool result");
+    };
+    content.push(UserContent::text(PROMPT));
+    msgs
 }
 
 /// Preserve a previous, answered tool call in every test: committing or rolling
@@ -187,12 +199,12 @@ async fn pause_and_replay(
         .filter(|m| !matches!(m.as_ref(), Message::System { .. }))
         .map(Arc::unwrap_or_clone)
         .collect();
-    let earlier = earlier_messages();
+    let expected = expected_merged_earlier();
     assert!(
-        replay.starts_with(&earlier),
+        replay.starts_with(&expected),
         "lost earlier tool results: {replay:?}"
     );
-    replay.split_off(earlier.len())
+    replay.split_off(expected.len())
 }
 
 #[tokio::test]
@@ -218,7 +230,6 @@ async fn injected_correction_follows_completed_block_and_visible_delta_once() {
     assert_eq!(
         replay,
         [
-            Message::user(PROMPT),
             Message::assistant(partial),
             Message::user("[operator]: Actually, describe the new one."),
         ]
@@ -239,16 +250,20 @@ async fn resume_retains_partial_prose_and_only_sealed_reasoning() {
         InteractiveCommand::Quit,
     )
     .await;
-    let [original, Message::Assistant(msg), continuation] = replay.as_slice() else {
+    let [Message::Assistant(msg), continuation] = replay.as_slice() else {
         panic!("unexpected resumed request: {replay:?}");
     };
-    assert_eq!(original, &Message::user(PROMPT));
     assert_eq!(continuation, &Message::user("Continue."));
-    let [AssistantContent::Reasoning(item), AssistantContent::Text(prose)] = msg.content.as_slice()
-    else {
+    let [sealed, AssistantContent::Text(prose)] = msg.content.as_slice() else {
         panic!("expected exactly one completed reasoning item and prose: {msg:?}");
     };
-    assert_eq!(item.text, "verified");
+    // rig-core can project foreign reasoning to plain text on the provider request.
+    let sealed_text = match sealed {
+        AssistantContent::Reasoning(r) => &r.text,
+        AssistantContent::Text(t) => &t.text,
+        other => panic!("unexpected replay of sealed reasoning: {other:?}"),
+    };
+    assert_eq!(sealed_text, "verified");
     assert_eq!(prose.text, "partial prose");
 }
 
@@ -256,7 +271,7 @@ async fn resume_retains_partial_prose_and_only_sealed_reasoning() {
 async fn pause_before_output_preserves_pending_prompt() {
     let replay =
         pause_and_replay("history-empty", vec![], "", false, InteractiveCommand::Quit).await;
-    assert_eq!(replay, [Message::user(PROMPT)]);
+    assert!(replay.is_empty(), "expected empty suffix: {replay:?}");
 }
 
 #[tokio::test]
@@ -269,7 +284,7 @@ async fn whitespace_only_pause_preserves_pending_prompt() {
         InteractiveCommand::Quit,
     )
     .await;
-    assert_eq!(replay, [Message::user(PROMPT)]);
+    assert!(replay.is_empty(), "expected empty suffix: {replay:?}");
 }
 
 #[tokio::test]
@@ -290,7 +305,7 @@ async fn undispatched_call_and_display_only_reasoning_have_no_history() {
         InteractiveCommand::Quit,
     )
     .await;
-    assert_eq!(replay, [Message::user(PROMPT)]);
+    assert!(replay.is_empty(), "expected empty suffix: {replay:?}");
 }
 
 async fn cancel_after_step(id: &str, queue_command: bool) {
