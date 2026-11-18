@@ -115,7 +115,7 @@ fn resolve_auth(
     }
     Err(format!(
         "no credentials for provider '{PROVIDER_NAME}': set GITHUB_COPILOT_API_KEY, \
-         COPILOT_API_KEY, GITHUB_TOKEN, or GH_TOKEN; or configure Copilot credentials in providers.yaml",
+         COPILOT_API_KEY, GITHUB_TOKEN, or GH_TOKEN; or configure Copilot credentials (api-key, client-id + refresh-token, or github-token) in providers.yaml",
     ))
 }
 
@@ -275,11 +275,16 @@ impl CopilotTokenExchanger for BlockingCopilotTokenExchanger {
 
         if !response.status().is_success() {
             let status = response.status();
-            return Err(format!("GitHub Copilot token exchange failed with HTTP {status}"));
+            let body = response
+                .text()
+                .unwrap_or_else(|_| "<response body unavailable>".to_string());
+            return Err(format!(
+                "GitHub Copilot token exchange failed with HTTP {status}: {body}"
+            ));
         }
 
         let record: CopilotTokenResponse = response.json().map_err(|_| {
-            "GitHub Copilot token exchange response could not be decoded".to_string()
+            "GitHub Copilot token exchange response was invalid".to_string()
         })?;
         session_from_response(record)
     }
