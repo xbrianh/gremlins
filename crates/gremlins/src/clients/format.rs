@@ -1,4 +1,6 @@
-use rig_core::completion::message::{AssistantContent, AssistantMessage, Reasoning, ToolCall};
+use rig_core::completion::message::{
+    AssistantContent, AssistantMessage, Origin, Reasoning, ToolCall,
+};
 use rig_core::completion::Message;
 use rig_core::streaming::{Item, StreamEvent};
 
@@ -71,6 +73,7 @@ pub(crate) fn assistant_tool_message(
     reasoning_items: &[Reasoning],
     tool_calls: &[ToolCall],
     include_reasoning_items: bool,
+    origin: Option<Origin>,
 ) -> Message {
     let mut contents = Vec::new();
     // Omit structured reasoning items from persistent history unless the
@@ -96,7 +99,11 @@ pub(crate) fn assistant_tool_message(
     if contents.is_empty() {
         contents.push(AssistantContent::text(String::new()));
     }
-    Message::Assistant(AssistantMessage::new(contents))
+    let mut msg = AssistantMessage::new(contents);
+    // Preserve the producing provider/model so rig's `adapt` keeps native
+    // provider metadata when the turn is replayed to the same model.
+    msg.origin = origin;
+    Message::Assistant(msg)
 }
 
 pub(crate) fn key_arg(args: &serde_json::Value) -> String {

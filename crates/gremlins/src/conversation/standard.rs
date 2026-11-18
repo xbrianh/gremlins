@@ -24,7 +24,7 @@
 //! byte-size gate.
 
 use async_trait::async_trait;
-use rig_core::completion::message::{Reasoning, ToolCall};
+use rig_core::completion::message::{Origin, Reasoning, ToolCall};
 use rig_core::completion::Message;
 use std::sync::Arc;
 
@@ -229,6 +229,7 @@ impl Conversation for StandardConversation {
         reasoning_items: &[Reasoning],
         tool_calls: &[ToolCall],
         input_tokens: Option<u64>,
+        origin: Option<Origin>,
     ) {
         // Commit the pending user prompt before the assistant message.
         let prompt = self.next_prompt.clone();
@@ -239,6 +240,7 @@ impl Conversation for StandardConversation {
             reasoning_items,
             tool_calls,
             self.preserve_reasoning_in_history,
+            origin,
         ));
         self.last_prompt_tokens = input_tokens;
     }
@@ -337,6 +339,7 @@ impl Conversation for StandardConversation {
             reasoning_items,
             tool_slice,
             self.preserve_reasoning_in_history,
+            None,
         ));
         if let Some(done_tc) = done {
             let done_ledger = format!(
@@ -455,6 +458,7 @@ impl Conversation for StandardConversation {
             reasoning_items,
             tool_calls,
             self.preserve_reasoning_in_history,
+            None,
         ));
         self.history.extend(results);
     }

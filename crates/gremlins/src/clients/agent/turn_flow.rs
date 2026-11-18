@@ -13,7 +13,7 @@
 use std::path::PathBuf;
 use std::time::Instant;
 
-use rig_core::completion::message::{Reasoning, ToolCall};
+use rig_core::completion::message::{Origin, Reasoning, ToolCall};
 use rig_core::completion::Usage;
 
 use super::done_helpers::done_user_message;
@@ -257,7 +257,7 @@ pub(super) fn handle_empty_turn(
         log::debug!("reasoning-only turn: turn={} — continuing", state.turn_num);
         state
             .conv
-            .record_turn("", reasoning_items, &[], input_tokens);
+            .record_turn("", reasoning_items, &[], input_tokens, None);
         state.conv.set_next_prompt("Continue.");
         return EmptyTurnAction::ContinueLoop;
     }
@@ -281,7 +281,7 @@ pub(super) fn handle_empty_turn(
             ));
             state
                 .conv
-                .record_turn(text, reasoning_items, &[], input_tokens);
+                .record_turn(text, reasoning_items, &[], input_tokens, None);
             let reminder = artifact_reminder(&missing);
             write_raw(
                 raw,
@@ -313,7 +313,7 @@ pub(super) fn handle_empty_turn(
         }
         state
             .conv
-            .record_turn(text, reasoning_items, &[], input_tokens);
+            .record_turn(text, reasoning_items, &[], input_tokens, None);
         state.conv.set_next_prompt(nudge_msg);
         return EmptyTurnAction::ContinueLoop;
     }
@@ -365,10 +365,11 @@ pub(super) fn commit_turn_to_history(
     reasoning_items: &[Reasoning],
     tool_calls: &[ToolCall],
     input_tokens: Option<u64>,
+    origin: Option<Origin>,
 ) {
     state
         .conv
-        .record_turn(text, reasoning_items, tool_calls, input_tokens);
+        .record_turn(text, reasoning_items, tool_calls, input_tokens, origin);
 }
 
 /// Fold this turn's provider usage into the running totals and return the

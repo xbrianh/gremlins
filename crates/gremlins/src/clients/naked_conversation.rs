@@ -6,6 +6,7 @@
 //! fork/spawn.
 
 use async_trait::async_trait;
+use rig_core::completion::message::Origin;
 
 use super::conversation::message_text_byte_len;
 use super::conversation::{Conversation, RunArtifact, TurnScript, TurnScriptError};
@@ -63,6 +64,7 @@ impl Conversation for NakedConversation {
         _reasoning_items: &[rig_core::completion::message::Reasoning],
         _tool_calls: &[rig_core::completion::message::ToolCall],
         _input_tokens: Option<u64>,
+        _origin: Option<Origin>,
     ) {
         unreachable!("NakedConversation: record_turn called in multi-turn path")
     }
@@ -127,6 +129,7 @@ impl Conversation for NakedConversation {
             reasoning_items,
             tool_slice,
             self.preserve_reasoning,
+            None,
         ));
         if let Some(done_tc) = done {
             let done_ledger = format!(

@@ -2,6 +2,8 @@
 
 use async_trait::async_trait;
 
+use rig_core::completion::message::Origin;
+
 /// The transcript produced for one model turn.
 #[derive(Clone, Debug)]
 pub(crate) struct TurnScript {
@@ -102,6 +104,7 @@ pub(crate) trait Conversation: Send + Sync {
         reasoning_items: &[rig_core::completion::message::Reasoning],
         tool_calls: &[rig_core::completion::message::ToolCall],
         input_tokens: Option<u64>,
+        origin: Option<Origin>,
     );
 
     /// Record tool-result messages into history.
@@ -364,6 +367,7 @@ impl Conversation for ConversationStub {
         reasoning_items: &[rig_core::completion::message::Reasoning],
         tool_calls: &[rig_core::completion::message::ToolCall],
         _input_tokens: Option<u64>,
+        origin: Option<Origin>,
     ) {
         // Commit the pending user prompt before the assistant message.
         let prompt = self.next_prompt.clone();
@@ -374,6 +378,7 @@ impl Conversation for ConversationStub {
             reasoning_items,
             tool_calls,
             self.preserve_reasoning,
+            origin,
         ));
     }
 
@@ -450,6 +455,7 @@ impl Conversation for ConversationStub {
             reasoning_items,
             tool_slice,
             self.preserve_reasoning,
+            None,
         ));
         if let Some(done_tc) = done {
             let done_ledger = format!(
@@ -527,6 +533,7 @@ impl Conversation for ConversationStub {
             reasoning_items,
             tool_calls,
             self.preserve_reasoning,
+            None,
         ));
         self.history.extend(results);
     }

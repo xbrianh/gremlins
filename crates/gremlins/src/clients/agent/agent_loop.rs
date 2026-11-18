@@ -4,7 +4,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use futures::future::join_all;
-use rig_core::completion::message::{CallId, Reasoning, ToolCall, ToolName};
+use rig_core::completion::message::{CallId, Origin, Reasoning, ToolCall, ToolName};
 use rig_core::completion::{CompletionRequest, Message, ToolDefinition, Usage};
 use rig_core::driver::DynModel;
 use rig_core::error::ProviderError;
@@ -122,6 +122,9 @@ pub(super) struct StreamAccumulator {
     pub(super) retry_timeout_turn: bool,
     pub(super) first_token: Option<Instant>,
     pub(super) last_token: Option<Instant>,
+    /// Origin reported by the provider for this stream, used to preserve
+    /// native metadata for same-model replay.
+    pub(super) origin: Option<Origin>,
 }
 
 /// Result of streaming one turn's request: the accumulated assistant content
@@ -135,6 +138,9 @@ pub(super) struct StreamTurnOutput {
     pub(super) first_token: Option<Instant>,
     pub(super) last_token: Option<Instant>,
     pub(super) ended: bool,
+    /// Origin of the response that produced this turn, threaded into history
+    /// so same-model replay keeps provider-native items.
+    pub(super) origin: Option<Origin>,
 }
 
 /// Control-flow signal returned by [`LoopState::stream_turn`].
@@ -879,6 +885,7 @@ impl LoopState {
         reasoning_items: &[Reasoning],
         tool_calls: &[ToolCall],
         input_tokens: Option<u64>,
+        origin: Option<Origin>,
     ) {
         super::turn_flow::commit_turn_to_history(
             self,
@@ -886,6 +893,7 @@ impl LoopState {
             reasoning_items,
             tool_calls,
             input_tokens,
+            origin,
         )
     }
 
@@ -1467,6 +1475,7 @@ pub(crate) async fn run_agent_loop_core(
             first_token,
             last_token,
             ended,
+            origin,
         } = out;
 
         if state.timed_out || state.stream_error.is_some() {
@@ -1592,6 +1601,7 @@ pub(crate) async fn run_agent_loop_core(
             &reasoning_items,
             &tool_calls,
             turn_usage.as_ref().and_then(|u| u.input_tokens),
+            origin,
         );
 
         state
@@ -2579,6 +2589,7 @@ mod tests {
             std::slice::from_ref(&reasoning),
             std::slice::from_ref(&call),
             true,
+            None,
         );
 
         let Message::Assistant(ref msg) = message else {
@@ -2625,6 +2636,7 @@ mod tests {
             std::slice::from_ref(&reasoning),
             std::slice::from_ref(&call),
             false,
+            None,
         );
 
         let Message::Assistant(ref msg) = message else {
