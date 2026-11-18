@@ -560,7 +560,7 @@ impl CopilotBackend {
 
 #[async_trait]
 impl Backend for CopilotBackend {
-    fn make_model(&self, spec: &str) -> Option<DynModel<Completion>> {
+    fn build_model(&self, spec: &str) -> Option<DynModel<Completion>> {
         let (provider, model) = crate::model_uri::provider_and_model(spec)?;
         if provider == PROVIDER_NAME {
             let mut mdl = self.state.client.completion(&model);

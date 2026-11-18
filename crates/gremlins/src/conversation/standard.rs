@@ -642,7 +642,6 @@ mod tests {
         use rig_core::test_utils::{MockCompletionModel, MockStreamEvent};
 
         use std::collections::HashMap;
-        use std::sync::Arc;
 
         let dir = tempfile::tempdir().unwrap();
         let note = dir.path().join("note.txt");
@@ -685,7 +684,7 @@ mod tests {
 
         let child_handle = child.clone();
         let factory: crate::clients::agent::task::TaskModelFactory =
-            Arc::new(move |_spec: &str| {
+            crate::clients::agent::task_models::sync_factory(move |_spec: &str| {
                 Ok(crate::clients::agent::task::TaskModel {
                     model: child_handle.clone().erase(),
                     temperature: None,

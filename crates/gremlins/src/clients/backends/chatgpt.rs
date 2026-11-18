@@ -97,7 +97,7 @@ impl Backend for ChatGptBackend {
 
     super::delegate_native_run_state!(state.native);
 
-    fn make_model(&self, spec: &str) -> Option<DynModel<Completion>> {
+    fn build_model(&self, spec: &str) -> Option<DynModel<Completion>> {
         let (provider, model) = provider_and_model(spec)?;
         (provider == PROVIDER_NAME).then(|| self.state.client.completion(&model).erase())
     }
@@ -149,8 +149,8 @@ mod tests {
         assert!(is_known_provider("chatgpt"));
         assert_eq!(backend.name(), "chatgpt");
         assert_eq!(backend.model(), chatgpt::DEFAULT_MODEL);
-        assert!(backend.make_model("chatgpt/gpt-5.3-codex").is_some());
-        assert!(backend.make_model("openai/gpt-4o").is_none());
+        assert!(backend.build_model("chatgpt/gpt-5.3-codex").is_some());
+        assert!(backend.build_model("openai/gpt-4o").is_none());
     }
 
     #[test]

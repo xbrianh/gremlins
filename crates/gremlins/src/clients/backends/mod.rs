@@ -127,7 +127,7 @@ macro_rules! declare_openai_backend {
                 Some(self.state.resolved.clone())
             }
 
-            fn make_model(
+            fn build_model(
                 &self,
                 spec: &str,
             ) -> Option<rig_core::driver::DynModel<rig_core::operation::Completion>> {

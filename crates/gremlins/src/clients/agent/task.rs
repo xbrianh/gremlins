@@ -159,7 +159,7 @@ fn make_task_runner_at_depth(
                     Ok((parent_selection.clone(), None))
                 } else {
                     match &task_model_selector {
-                        Some(selector) => selector.model_for(kind, &parent_selection).map(
+                        Some(selector) => selector.model_for(kind, &parent_selection).await.map(
                             |(mut selected, spec)| {
                                 if selected.preserve_reasoning.is_none() {
                                     selected.preserve_reasoning =
@@ -353,8 +353,8 @@ mod tests {
         assert_eq!(overrides.spec_for(TaskKind::Implement), None);
     }
 
-    #[test]
-    fn task_model_selector_builds_matched_model_or_defaults() {
+    #[tokio::test]
+    async fn task_model_selector_builds_matched_model_or_defaults() {
         let target = TaskModel {
             model: rig_core::test_utils::MockCompletionModel::from_turns([]).erase(),
             temperature: Some(0.2),
@@ -362,10 +362,11 @@ mod tests {
             extra: Some(serde_json::json!({ "parallel_tool_calls": true })),
             preserve_reasoning: None,
         };
-        let factory: TaskModelFactory = Arc::new(move |spec: &str| {
-            assert_eq!(spec, "openai/mini");
-            Ok(target.clone())
-        });
+        let factory: TaskModelFactory =
+            crate::clients::agent::task_models::sync_factory(move |spec: &str| {
+                assert_eq!(spec, "openai/mini");
+                Ok(target.clone())
+            });
         let selector = TaskModelSelector::new(
             HashMap::from([(TaskKind::Scout, "openai/mini".into())]),
             factory,
@@ -374,6 +375,7 @@ mod tests {
 
         let (selected, spec) = selector
             .model_for(TaskKind::Scout, &gm_mock_task())
+            .await
             .unwrap();
         assert_eq!(spec.as_deref(), Some("openai/mini"));
         assert_eq!(selected.temperature, Some(0.2));
@@ -386,6 +388,7 @@ mod tests {
         // No match — the default model and its options stand.
         let (selected, spec) = selector
             .model_for(TaskKind::Implement, &gm_mock_task())
+            .await
             .unwrap();
         assert_eq!(spec, None);
         assert_eq!(selected.temperature, None);
@@ -393,10 +396,12 @@ mod tests {
         assert_eq!(selected.extra, None);
     }
 
-    #[test]
-    fn task_model_selector_surfaces_factory_errors() {
+    #[tokio::test]
+    async fn task_model_selector_surfaces_factory_errors() {
         let factory: TaskModelFactory =
-            Arc::new(|_spec: &str| Err("backend build failed: missing credential".to_string()));
+            crate::clients::agent::task_models::sync_factory(|_spec: &str| {
+                Err("backend build failed: missing credential".to_string())
+            });
         let selector = TaskModelSelector::new(
             HashMap::from([(TaskKind::Scout, "openai/mini".into())]),
             factory,
@@ -406,6 +411,7 @@ mod tests {
         // Spec matches but the factory fails — the error must surface.
         let err = selector
             .model_for(TaskKind::Scout, &gm_mock_task())
+            .await
             .unwrap_err();
         assert!(
             err.contains("missing credential"),
@@ -415,6 +421,7 @@ mod tests {
         // No match still returns the default.
         let (selected, spec) = selector
             .model_for(TaskKind::Implement, &gm_mock_task())
+            .await
             .unwrap();
         assert_eq!(spec, None);
         assert_eq!(selected.temperature, None);
@@ -422,20 +429,59 @@ mod tests {
         assert_eq!(selected.extra, None);
     }
 
-    #[test]
-    fn task_model_selector_is_none_when_unconfigured() {
-        let factory: TaskModelFactory = Arc::new(|_spec: &str| Err("unused".to_string()));
-        assert!(TaskModelSelector::new(HashMap::new(), factory).is_none());
-    }
-
-    #[test]
-    fn build_task_selector_does_not_eagerly_resolve_entries() {
+    #[tokio::test]
+    async fn yielding_factory_runs_only_on_match_and_surfaces_late_failure() {
         let calls = Arc::new(AtomicU64::new(0));
         let calls_flag = calls.clone();
         let factory: TaskModelFactory = Arc::new(move |_spec: &str| {
             calls_flag.fetch_add(1, Ordering::SeqCst);
-            Err("unused".to_string())
+            Box::pin(async {
+                tokio::task::yield_now().await;
+                Err("late credential failure".to_string())
+            })
         });
+        let selector = TaskModelSelector::new(
+            HashMap::from([(TaskKind::Scout, "openai/mini".into())]),
+            factory,
+        )
+        .unwrap();
+
+        selector
+            .model_for(TaskKind::Implement, &gm_mock_task())
+            .await
+            .unwrap();
+        assert_eq!(
+            calls.load(Ordering::SeqCst),
+            0,
+            "unmatched kind skips factory"
+        );
+
+        let err = selector
+            .model_for(TaskKind::Scout, &gm_mock_task())
+            .await
+            .unwrap_err();
+        assert!(err.contains("late credential failure"));
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn task_model_selector_is_none_when_unconfigured() {
+        let factory: TaskModelFactory =
+            crate::clients::agent::task_models::sync_factory(|_spec: &str| {
+                Err("unused".to_string())
+            });
+        assert!(TaskModelSelector::new(HashMap::new(), factory).is_none());
+    }
+
+    #[tokio::test]
+    async fn build_task_selector_does_not_eagerly_resolve_entries() {
+        let calls = Arc::new(AtomicU64::new(0));
+        let calls_flag = calls.clone();
+        let factory: TaskModelFactory =
+            crate::clients::agent::task_models::sync_factory(move |_spec: &str| {
+                calls_flag.fetch_add(1, Ordering::SeqCst);
+                Err("unused".to_string())
+            });
         let selector = build_task_selector(
             factory,
             &HashMap::from([(TaskKind::Scout, "openai/mini".into())]),
@@ -450,7 +496,7 @@ mod tests {
             "selector construction must not resolve entries"
         );
 
-        let result = selector.model_for(TaskKind::Scout, &gm_mock_task());
+        let result = selector.model_for(TaskKind::Scout, &gm_mock_task()).await;
         assert_eq!(
             calls.load(Ordering::SeqCst),
             1,
@@ -461,6 +507,7 @@ mod tests {
         // A non-matching kind must not trigger another resolution.
         let (_selected, spec) = selector
             .model_for(TaskKind::Implement, &gm_mock_task())
+            .await
             .unwrap();
         assert_eq!(spec, None);
         assert_eq!(
@@ -615,10 +662,11 @@ mod tests {
 
         let factory_called = Arc::new(std::sync::atomic::AtomicBool::new(false));
         let factory_flag = factory_called.clone();
-        let factory: TaskModelFactory = Arc::new(move |_spec: &str| {
-            factory_flag.store(true, Ordering::SeqCst);
-            Err("factory must not run for Fork".to_string())
-        });
+        let factory: TaskModelFactory =
+            crate::clients::agent::task_models::sync_factory(move |_spec: &str| {
+                factory_flag.store(true, Ordering::SeqCst);
+                Err("factory must not run for Fork".to_string())
+            });
         let selector = TaskModelSelector::new(
             HashMap::from([
                 (TaskKind::Scout, "openai/mini".into()),
@@ -724,15 +772,16 @@ mod tests {
         let target_extra = serde_json::json!({ "parallel_tool_calls": true });
         let target_extra_for_factory = target_extra.clone();
         let child_handle = child.clone();
-        let factory: TaskModelFactory = Arc::new(move |_spec: &str| {
-            Ok(TaskModel {
-                model: child_handle.clone().erase(),
-                temperature: Some(0.7),
-                max_tokens: Some(8192),
-                extra: Some(target_extra_for_factory.clone()),
-                preserve_reasoning: None,
-            })
-        });
+        let factory: TaskModelFactory =
+            crate::clients::agent::task_models::sync_factory(move |_spec: &str| {
+                Ok(TaskModel {
+                    model: child_handle.clone().erase(),
+                    temperature: Some(0.7),
+                    max_tokens: Some(8192),
+                    extra: Some(target_extra_for_factory.clone()),
+                    preserve_reasoning: None,
+                })
+            });
         let selector = TaskModelSelector::new(
             HashMap::from([(TaskKind::Scout, "openai/mini".to_string())]),
             factory,
@@ -804,7 +853,9 @@ mod tests {
         ]]);
 
         let factory: TaskModelFactory =
-            Arc::new(|_spec: &str| Err("backend build failed: missing credential".to_string()));
+            crate::clients::agent::task_models::sync_factory(|_spec: &str| {
+                Err("backend build failed: missing credential".to_string())
+            });
         let selector = TaskModelSelector::new(
             HashMap::from([(TaskKind::Scout, "openai/mini".to_string())]),
             factory,
@@ -1867,15 +1918,16 @@ mod tests {
 
             // Wire child into a TaskModelSelector so the Task tool dispatches
             // to it.  Without a selector, the parent model handles the task.
-            let factory: TaskModelFactory = Arc::new(move |_spec: &str| {
-                Ok(TaskModel {
-                    model: child_handle.clone().erase(),
-                    temperature: None,
-                    max_tokens: None,
-                    extra: None,
-                    preserve_reasoning: None,
-                })
-            });
+            let factory: TaskModelFactory =
+                crate::clients::agent::task_models::sync_factory(move |_spec: &str| {
+                    Ok(TaskModel {
+                        model: child_handle.clone().erase(),
+                        temperature: None,
+                        max_tokens: None,
+                        extra: None,
+                        preserve_reasoning: None,
+                    })
+                });
             let selector = TaskModelSelector::new(
                 HashMap::from([(TaskKind::Scout, "openai/mini".to_string())]),
                 factory,

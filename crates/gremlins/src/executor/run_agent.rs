@@ -141,7 +141,10 @@ pub(crate) async fn run_agent(
     let stage_env = gremlin.env.clone();
 
     let task_models = crate::clients::agent::task::build_task_selector(
-        std::sync::Arc::new(crate::clients::client::resolve_model),
+        std::sync::Arc::new(|spec: &str| {
+            let spec = spec.to_string();
+            Box::pin(async move { crate::clients::client::resolve_model(&spec).await })
+        }),
         &task_models_by_kind,
     );
 

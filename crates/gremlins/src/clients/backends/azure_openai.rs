@@ -252,7 +252,7 @@ impl Backend for AzureOpenAiBackend {
         "azure-openai"
     }
 
-    fn make_model(&self, spec: &str) -> Option<DynModel<Completion>> {
+    fn build_model(&self, spec: &str) -> Option<DynModel<Completion>> {
         let (provider, model) = crate::model_uri::provider_and_model(spec)?;
         if provider == "azure-openai" {
             match &self.state.client_state {
@@ -745,7 +745,7 @@ mod tests {
             &indexmap::IndexMap::new(),
         )
         .unwrap();
-        let model = backend.make_model("azure-openai/gpt-4o");
+        let model = backend.build_model("azure-openai/gpt-4o");
         assert!(model.is_some(), "Static client must produce a model");
     }
 
@@ -762,7 +762,7 @@ mod tests {
             &indexmap::IndexMap::new(),
         )
         .unwrap();
-        let model = backend.make_model("azure-openai/gpt-4o");
+        let model = backend.build_model("azure-openai/gpt-4o");
         assert!(
             model.is_some(),
             "Dynamic client must produce a model (lazy token acquisition)"
@@ -781,7 +781,7 @@ mod tests {
             &indexmap::IndexMap::new(),
         )
         .unwrap();
-        assert!(backend.make_model("openai/gpt-4o").is_none());
-        assert!(backend.make_model("anthropic/claude-sonnet-4-6").is_none());
+        assert!(backend.build_model("openai/gpt-4o").is_none());
+        assert!(backend.build_model("anthropic/claude-sonnet-4-6").is_none());
     }
 }

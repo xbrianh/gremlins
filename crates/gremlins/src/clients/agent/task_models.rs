@@ -1,4 +1,6 @@
 use std::collections::HashMap;
+use std::future::Future;
+use std::pin::Pin;
 use std::sync::Arc;
 
 use crate::task_kind::TaskKind;
@@ -41,7 +43,9 @@ pub(crate) struct TaskModel {
 /// Task invocation. Returns `Err` with a reason when the entry cannot be
 /// resolved (for example, its backend cannot be built because a credential is
 /// missing).
-pub(crate) type TaskModelFactory = Arc<dyn Fn(&str) -> Result<TaskModel, String> + Send + Sync>;
+pub(crate) type TaskModelFactory = Arc<
+    dyn Fn(&str) -> Pin<Box<dyn Future<Output = Result<TaskModel, String>> + Send>> + Send + Sync,
+>;
 
 /// Lookup map for `task-models`, keyed by the exact [`TaskKind`] spelling.
 /// Shared behind an `Arc` so a Task fan-out clones one pointer per invocation
@@ -101,17 +105,29 @@ impl TaskModelSelector {
     /// `task-models` entry (for logging), or `None` when no entry matched. A
     /// matched entry that fails to build is an `Err` — it must surface as a
     /// task result, not silently fall back to `default`.
-    pub(crate) fn model_for(
+    pub(crate) async fn model_for(
         &self,
         kind: TaskKind,
         default: &TaskModel,
     ) -> Result<(TaskModel, Option<String>), String> {
         match self.overrides.spec_for(kind) {
-            Some(spec) => match (self.factory)(spec) {
+            Some(spec) => match (self.factory)(spec).await {
                 Ok(m) => Ok((m, Some(spec.to_string()))),
                 Err(reason) => Err(reason),
             },
             None => Ok((default.clone(), None)),
         }
     }
+}
+
+/// Wrap a synchronous builder as a [`TaskModelFactory`] whose future is
+/// immediately ready.
+#[cfg(test)]
+pub(crate) fn sync_factory(
+    f: impl Fn(&str) -> Result<TaskModel, String> + Send + Sync + 'static,
+) -> TaskModelFactory {
+    Arc::new(move |spec| {
+        let result = f(spec);
+        Box::pin(async move { result })
+    })
 }
