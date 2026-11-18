@@ -8,11 +8,14 @@ use indexmap::IndexMap;
 use rig_core::driver::DynModel;
 use rig_core::operation::Completion;
 use rig_core::providers::chatgpt;
+use rig_core::providers::chatgpt::auth::FileTokenStore;
 use rig_core::providers::openai::{OpenAI, OpenAIConfig};
 
 use crate::clients::backend::{Backend, ClientError, RunParams};
 use crate::clients::cancel::CancelToken;
-use crate::clients::chatgpt_auth::{static_source, ACCESS_TOKEN_ENV};
+#[cfg(test)]
+use crate::clients::chatgpt_auth::ACCESS_TOKEN_ENV;
+use crate::clients::chatgpt_auth::{resolve_stored, static_source, stored_oauth};
 use crate::clients::config::tool_filter;
 use crate::clients::interactive::InteractiveSession;
 use crate::clients::native::{NativeRunState, PreserveReasoning};
@@ -22,8 +25,16 @@ use crate::model_uri::provider_and_model;
 
 const PROVIDER_NAME: &str = "chatgpt";
 
+/// Where model credentials come from.
+enum Credentials {
+    /// A prebuilt client over a static token.
+    Static(Box<OpenAI>),
+    /// The stored OAuth sign-in, resolved afresh for every model.
+    OAuth(FileTokenStore),
+}
+
 struct ChatGptRunState {
-    client: OpenAI,
+    credentials: Credentials,
     native: NativeRunState<()>,
 }
 
@@ -46,12 +57,13 @@ impl ChatGptBackend {
         extra_params: &IndexMap<String, String>,
         connect: impl FnOnce(OpenAIConfig) -> OpenAI,
     ) -> Result<Arc<dyn Backend>, String> {
-        let token = static_source().map(|found| found.secret).ok_or_else(|| {
-            format!(
-                "no credentials for provider '{PROVIDER_NAME}': set {ACCESS_TOKEN_ENV} \
-                 or add {PROVIDER_NAME}.token in providers.yaml"
-            )
-        })?;
+        let credentials = match static_source() {
+            Some(found) => Credentials::Static(Box::new(connect(OpenAIConfig::with_key(
+                &chatgpt::DIALECT,
+                found.secret,
+            )))),
+            None => Credentials::OAuth(stored_oauth().map_err(|error| error.to_string())?),
+        };
         let model = if model.is_empty() {
             chatgpt::DEFAULT_MODEL
         } else {
@@ -59,7 +71,7 @@ impl ChatGptBackend {
         };
         Ok(Arc::new(Self {
             state: ChatGptRunState {
-                client: connect(OpenAIConfig::with_key(&chatgpt::DIALECT, token)),
+                credentials,
                 native: NativeRunState::new(
                     (),
                     model.to_owned(),
@@ -69,6 +81,29 @@ impl ChatGptBackend {
                 ),
             },
         }))
+    }
+}
+
+impl ChatGptBackend {
+    /// A completion model for `name`, resolving the stored sign-in when in OAuth mode.
+    async fn model_for(&self, name: &str) -> Result<DynModel<Completion>, ClientError> {
+        let store = match &self.state.credentials {
+            Credentials::Static(client) => return Ok(client.completion(name).erase()),
+            Credentials::OAuth(store) => store,
+        };
+        let context = resolve_stored(store)
+            .await
+            .map_err(|error| ClientError::Runtime {
+                message: error.to_string(),
+            })?;
+        let mut config = OpenAIConfig::with_key(&chatgpt::DIALECT, context.api_key);
+        if let Some(account_id) = context.account_id {
+            config = config.with_account_id(account_id);
+        }
+        if let Some(api_base) = context.api_base {
+            config = config.with_base_url(api_base);
+        }
+        Ok(config.client().completion(name).erase())
     }
 }
 
@@ -90,16 +125,32 @@ impl Backend for ChatGptBackend {
                 cancel,
                 interactive,
                 PreserveReasoning::No,
-                async { Ok(self.state.client.completion(&model_name).erase()) },
+                self.model_for(&model_name),
             )
             .await
     }
 
     super::delegate_native_run_state!(state.native);
 
+    /// Synchronous construction only serves static credentials; OAuth mode must
+    /// resolve asynchronously, so callers go through [`Backend::make_model`].
     fn build_model(&self, spec: &str) -> Option<DynModel<Completion>> {
         let (provider, model) = provider_and_model(spec)?;
-        (provider == PROVIDER_NAME).then(|| self.state.client.completion(&model).erase())
+        match &self.state.credentials {
+            Credentials::Static(client) if provider == PROVIDER_NAME => {
+                Some(client.completion(&model).erase())
+            }
+            _ => None,
+        }
+    }
+
+    async fn make_model(&self, spec: &str) -> Result<Option<DynModel<Completion>>, ClientError> {
+        match provider_and_model(spec) {
+            Some((provider, model)) if provider == PROVIDER_NAME => {
+                self.model_for(&model).await.map(Some)
+            }
+            _ => Ok(None),
+        }
     }
 
     fn model(&self) -> &str {
@@ -170,8 +221,8 @@ mod tests {
         };
         assert_eq!(
             error,
-            "no credentials for provider 'chatgpt': set CHATGPT_ACCESS_TOKEN \
-             or add chatgpt.token in providers.yaml"
+            "no credentials for provider 'chatgpt': set CHATGPT_ACCESS_TOKEN, \
+             add chatgpt.token in providers.yaml, or run `gremlins auth chatgpt login`"
         );
         std::fs::write(path, "chatgpt:\n  token: test-access-token\n").unwrap();
         assert_eq!(build().unwrap().model(), "gpt-5.4");

@@ -1,9 +1,12 @@
 //! ChatGPT OAuth sign-in: shared store location, static-source lookup, and login.
 
+use std::fmt;
+use std::io::ErrorKind;
 use std::path::PathBuf;
 use std::sync::Arc;
 
 use rig_core::http_client::DynHttpClient;
+use rig_core::providers::chatgpt::auth::{AuthContext, AuthError};
 use rig_core::providers::chatgpt::auth::{
     AuthSource, Authenticator, DeviceCodeHandler, FileTokenStore, SignInMethod, SignInPrompt,
 };
@@ -95,4 +98,131 @@ pub async fn login(
 ) -> Result<Option<String>, String> {
     let auth = authenticator(Arc::clone(&events));
     sign_in(&auth, detect_method(device_code), events).await
+}
+
+/// Why a stored sign-in could not yield a credential, each with its own remedy.
+#[derive(Debug)]
+pub(crate) enum SignInError {
+    /// No credential source of any kind is configured.
+    Missing,
+    /// No usable sign-in: removed or rejected by the provider.
+    Required,
+    /// The record could not be read, decoded, or written.
+    Store { path: PathBuf, detail: String },
+    /// A refresh failed for a reason that may pass.
+    Transient,
+}
+
+impl fmt::Display for SignInError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Missing => write!(
+                f,
+                "no credentials for provider '{PROVIDER_NAME}': set {ACCESS_TOKEN_ENV}, \
+                 add {PROVIDER_NAME}.token in providers.yaml, or run `gremlins auth chatgpt login`"
+            ),
+            Self::Required => write!(
+                f,
+                "ChatGPT sign-in required: run `gremlins auth chatgpt login`"
+            ),
+            Self::Store { path, detail } => write!(
+                f,
+                "ChatGPT credential store failed at {}: {detail}",
+                path.display()
+            ),
+            Self::Transient => write!(
+                f,
+                "ChatGPT token refresh failed; retry shortly \
+                 (if it persists, check network and TLS configuration)"
+            ),
+        }
+    }
+}
+
+impl std::error::Error for SignInError {}
+
+/// The store holding the OAuth record, provided that a record file exists.
+/// Only a missing entry counts as "no credentials"; anything else is a store error.
+pub(crate) fn stored_oauth() -> Result<FileTokenStore, SignInError> {
+    let store = FileTokenStore::new(store_dir());
+    let path = store.path(PROVIDER_NAME);
+    let store_error = |detail: String| SignInError::Store {
+        path: path.clone(),
+        detail,
+    };
+    match std::fs::metadata(&path) {
+        Ok(meta) if meta.is_file() => Ok(store),
+        Ok(_) => Err(store_error("not a regular file".into())),
+        Err(error) if error.kind() == ErrorKind::NotFound => Err(SignInError::Missing),
+        Err(error) => Err(store_error(error.kind().to_string())),
+    }
+}
+
+/// Resolve the stored sign-in through a fresh authenticator that never prompts.
+pub(crate) async fn resolve_stored(store: &FileTokenStore) -> Result<AuthContext, SignInError> {
+    let authenticator = Authenticator::new(
+        AuthSource::OAuth,
+        store.clone(),
+        DeviceCodeHandler::default(),
+        false,
+    );
+    let http = DynHttpClient::new(rig_reqwest::shared());
+    let store_error = |detail: String| SignInError::Store {
+        path: store.path(PROVIDER_NAME),
+        detail,
+    };
+    authenticator
+        .auth_context(&http)
+        .await
+        .map_err(|error| match error {
+            AuthError::Io(error) => store_error(error.kind().to_string()),
+            AuthError::Json(_) => store_error("malformed record".into()),
+            AuthError::Store(error) => store_error(error.to_string()),
+            AuthError::Http(_) => SignInError::Transient,
+            AuthError::Message(message) => classify_message(&message),
+        })
+}
+
+/// Sort rig's textual refresh failures (`ChatGPT token refresh failed: <status> ...`).
+/// This is the single place coupled to that wording. Rejected authorization
+/// (4xx other than 408/429) needs a sign-in; anything else that is a refresh
+/// failure may pass. Messages in any other form mean no usable sign-in.
+fn classify_message(message: &str) -> SignInError {
+    const REFRESH: &str = "ChatGPT token refresh failed: ";
+    let Some(rest) = message.strip_prefix(REFRESH) else {
+        return SignInError::Required;
+    };
+    let digits: String = rest.chars().take_while(char::is_ascii_digit).collect();
+    match digits.parse::<u16>() {
+        Ok(408 | 429) => SignInError::Transient,
+        Ok(400..=499) => SignInError::Required,
+        _ => SignInError::Transient,
+    }
+}
+
+#[cfg(test)]
+mod classify_tests {
+    use super::*;
+
+    fn kind(message: &str) -> &'static str {
+        match classify_message(message) {
+            SignInError::Required => "required",
+            SignInError::Transient => "transient",
+            _ => "other",
+        }
+    }
+
+    #[test]
+    fn classifies_refresh_failures_by_status() {
+        assert_eq!(
+            kind("ChatGPT token refresh failed: 401 Unauthorized"),
+            "required"
+        );
+        assert_eq!(kind("ChatGPT token refresh failed: 400"), "required");
+        assert_eq!(kind("ChatGPT token refresh failed: 429"), "transient");
+        assert_eq!(kind("ChatGPT token refresh failed: 408"), "transient");
+        assert_eq!(kind("ChatGPT token refresh failed: 503"), "transient");
+        assert_eq!(kind("ChatGPT token refresh failed: oops"), "transient");
+        assert_eq!(kind("no refresh token"), "required");
+    }
 }
