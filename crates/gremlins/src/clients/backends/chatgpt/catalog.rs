@@ -175,4 +175,102 @@ mod tests {
         );
         assert_eq!(request.headers["authorization"].to_str().unwrap(), "Bearer tok");
     }
+
+    const BODY: &str = r#"{"models":[{"slug":"m","visibility":"list"}]}"#;
+
+    fn isolated(root: &std::path::Path) -> EnvGuard {
+        let mut env = EnvGuard::lock();
+        env.set("GREMLINS_SANDBOX_ROOT", root);
+        env.remove(ACCESS_TOKEN_ENV);
+        env
+    }
+
+    fn seed(record: serde_json::Value) {
+        let dir = crate::clients::chatgpt_auth::store_dir();
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("chatgpt.json"), record.to_string()).unwrap();
+    }
+
+    fn header<'a>(request: &'a rig_core::test_utils::CapturedHttpRequest, name: &str) -> &'a str {
+        request.headers[name].to_str().unwrap()
+    }
+
+    #[tokio::test]
+    async fn live_oauth_sends_bearer_and_account() {
+        let root = tempfile::tempdir().unwrap();
+        let _env = isolated(root.path());
+        seed(serde_json::json!({"access_token":"live","account_id":"acct","expires_at":i64::MAX}));
+        let mock = SequencedHttpClient::new([MockHttpResponse::success(BODY)]);
+        let slugs = list_models_with(DynHttpClient::new(mock.clone())).await.unwrap();
+        assert_eq!(slugs, ["m"]);
+        let request = &mock.requests()[0];
+        assert_eq!(
+            request.uri,
+            format!("{}/models?client_version={CLIENT_VERSION}", chatgpt::DIALECT.base_url)
+        );
+        assert_eq!(header(request, "authorization"), "Bearer live");
+        assert_eq!(header(request, "chatgpt-account-id"), "acct");
+    }
+
+    #[tokio::test]
+    async fn expired_oauth_refreshes_before_request() {
+        let root = tempfile::tempdir().unwrap();
+        let _env = isolated(root.path());
+        seed(serde_json::json!({
+            "access_token":"old","refresh_token":"r","account_id":"acct","expires_at":0
+        }));
+        let mock = SequencedHttpClient::new([
+            MockHttpResponse::success(r#"{"access_token":"fresh","refresh_token":"r2"}"#),
+            MockHttpResponse::success(BODY),
+        ]);
+        list_models_with(DynHttpClient::new(mock.clone())).await.unwrap();
+        let requests = mock.requests();
+        assert_eq!(requests[0].uri, "https://auth.openai.com/oauth/token");
+        assert_eq!(header(&requests[1], "authorization"), "Bearer fresh");
+    }
+
+    #[tokio::test]
+    async fn env_token_beats_stored_oauth() {
+        let root = tempfile::tempdir().unwrap();
+        let mut env = isolated(root.path());
+        seed(serde_json::json!({"access_token":"live","account_id":"acct","expires_at":i64::MAX}));
+        env.set(ACCESS_TOKEN_ENV, "env-tok");
+        let mock = SequencedHttpClient::new([MockHttpResponse::success(BODY)]);
+        list_models_with(DynHttpClient::new(mock.clone())).await.unwrap();
+        let request = &mock.requests()[0];
+        assert_eq!(header(request, "authorization"), "Bearer env-tok");
+        assert!(!request.headers.contains_key("chatgpt-account-id"));
+    }
+
+    #[tokio::test]
+    async fn configured_token_beats_stored_oauth() {
+        let root = tempfile::tempdir().unwrap();
+        let _env = isolated(root.path());
+        seed(serde_json::json!({"access_token":"live","expires_at":i64::MAX}));
+        std::fs::write(
+            root.path().join("config/providers.yaml"),
+            "chatgpt:\n  token: cfg-tok\n",
+        )
+        .unwrap();
+        let mock = SequencedHttpClient::new([MockHttpResponse::success(BODY)]);
+        list_models_with(DynHttpClient::new(mock.clone())).await.unwrap();
+        assert_eq!(header(&mock.requests()[0], "authorization"), "Bearer cfg-tok");
+    }
+
+    #[tokio::test]
+    async fn rejected_credentials_name_their_own_remedy() {
+        let root = tempfile::tempdir().unwrap();
+        let mut env = isolated(root.path());
+        seed(serde_json::json!({"access_token":"stored-secret","expires_at":i64::MAX}));
+        let rejected = || SequencedHttpClient::new([MockHttpResponse::ErrorResponse(StatusCode::UNAUTHORIZED, "raw-body".into())]);
+
+        let error = list_models_with(DynHttpClient::new(rejected())).await.unwrap_err();
+        assert!(error.contains("gremlins auth chatgpt login"), "{error}");
+        assert!(!error.contains("stored-secret") && !error.contains("raw-body"));
+
+        env.set(ACCESS_TOKEN_ENV, "env-secret");
+        let error = list_models_with(DynHttpClient::new(rejected())).await.unwrap_err();
+        assert!(error.contains(ACCESS_TOKEN_ENV) && !error.contains("login"), "{error}");
+        assert!(!error.contains("env-secret") && !error.contains("raw-body"));
+    }
 }
