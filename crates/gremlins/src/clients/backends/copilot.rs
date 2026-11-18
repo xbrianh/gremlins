@@ -275,12 +275,14 @@ impl CopilotTokenExchanger for BlockingCopilotTokenExchanger {
 
         if !response.status().is_success() {
             let status = response.status();
-            let body = response
-                .text()
-                .unwrap_or_else(|_| "<response body unavailable>".to_string());
-            return Err(format!(
-                "GitHub Copilot token exchange failed with HTTP {status}: {body}"
-            ));
+            let hint = if status == reqwest::StatusCode::UNAUTHORIZED
+                || status == reqwest::StatusCode::FORBIDDEN
+            {
+                "; check your GitHub credential and Copilot access"
+            } else {
+                ""
+            };
+            return Err(format!("GitHub Copilot token exchange failed with HTTP {status}{hint}"));
         }
 
         let record: CopilotTokenResponse = response.json().map_err(|_| {
@@ -1021,16 +1023,17 @@ mod tests {
     }
 
     #[test]
-    fn exchange_http_error_includes_status_and_body() {
+    fn exchange_http_error_includes_status_without_response_secrets() {
+        let sentinel = "exchange-secret-sentinel";
         let (url, server) = serve_once(
             "HTTP/1.1 500 Internal Server Error",
-            r#"{"message":"bad token"}"#,
+            r#"{"message":"exchange-secret-sentinel"}"#,
         );
         let exchanger = BlockingCopilotTokenExchanger::with_url(&url);
         let err = exchanger.exchange("gh-token").unwrap_err();
 
         assert!(err.contains("HTTP 500"), "{err}");
-        assert!(err.contains("bad token"), "{err}");
+        assert!(!err.contains(sentinel), "{err}");
         server.join().unwrap();
     }
 
