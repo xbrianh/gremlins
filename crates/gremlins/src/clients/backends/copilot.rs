@@ -40,6 +40,11 @@ pub(super) const COPILOT_TOKEN_EXPIRY_SKEW_SECONDS: i64 = 30;
 /// [`resolve_auth`] rewrites into completion-path guidance.
 pub(super) const NO_COPILOT_CREDENTIALS: &str = "no Copilot credentials";
 
+/// Sentinel prefix for a stored-app (`client-id` + `refresh-token`) credential
+/// refresh failure, so the catalog layer can distinguish it from a session
+/// exchange failure.
+pub(super) const COPILOT_APP_REFRESH_ERROR: &str = "Copilot app credential refresh failed";
+
 #[derive(Debug, Deserialize)]
 struct CopilotTokenResponse {
     token: Option<String>,
@@ -437,7 +442,9 @@ fn resolve_session(
         // access_token_sync refreshes stored credentials only; unlike the
         // device-flow methods, it never starts interactive login.
         let provider = Arc::new(github_auth::GitHubAppTokenProvider::new(id, refresh));
-        let token = provider.access_token_sync()?;
+        let token = provider
+            .access_token_sync()
+            .map_err(|e| format!("{COPILOT_APP_REFRESH_ERROR}: {e}"))?;
         (provider as Arc<dyn TokenProvider>, token)
     } else {
         let token = providers
@@ -478,12 +485,9 @@ pub(super) fn resolve_catalog_session(
 
 /// Resolve a session credential through the shared resolver, exposing
 /// [`resolve_session`] to the catalog's integration tests.
-///
-/// This is `#[doc(hidden)]` and only `pub` so the crate's own tests can
-/// inject fake exchangers without reaching into private internals.
-#[doc(hidden)]
+#[cfg(test)]
 #[allow(private_bounds, private_interfaces)]
-pub fn resolve_session_for_test(
+pub(crate) fn resolve_session_for_test(
     make_exchanger: impl FnOnce() -> Result<Arc<dyn CopilotTokenExchanger>, String>,
 ) -> Result<(CopilotSession, CopilotTokenRefreshMiddleware), String> {
     resolve_session(make_exchanger)

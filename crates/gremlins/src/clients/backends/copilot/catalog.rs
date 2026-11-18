@@ -14,7 +14,12 @@ use rig_core::providers::copilot::model_listing::Models;
 use rig_core::providers::copilot::DIALECT;
 use rig_core::providers::openai::OpenAIConfig;
 
-use super::{resolve_catalog_session, CopilotSession, CopilotTokenRefreshMiddleware};
+use super::{
+    resolve_catalog_session, CopilotSession, CopilotTokenRefreshMiddleware,
+    NO_COPILOT_CREDENTIALS, COPILOT_APP_REFRESH_ERROR,
+};
+#[cfg(test)]
+use super::{COPILOT_EDITOR_PLUGIN_VERSION, COPILOT_EDITOR_VERSION, COPILOT_USER_AGENT};
 
 /// Copilot advertises chat, embedding and completion models together.
 const CHAT_TYPE: &str = "chat";
@@ -32,13 +37,14 @@ const CATALOG_DECODE_ERROR: &str =
 const CATALOG_CREDENTIAL_ERROR: &str = "Copilot credential resolution task failed";
 /// No credential source matched, so nothing could be sent.
 const CREDENTIALS_MISSING_ERROR: &str =
-    "no Copilot credentials: check GITHUB_COPILOT_API_KEY, COPILOT_API_KEY, or providers.yaml";
+    "no Copilot credentials: check GITHUB_COPILOT_API_KEY, COPILOT_API_KEY, \
+     GITHUB_TOKEN, GH_TOKEN, or providers.yaml";
+/// A stored-app (`client-id` + `refresh-token`) credential refresh failed.
+const APP_REFRESH_ERROR: &str =
+    "Copilot app credential refresh failed; check your client-id and refresh-token";
 /// A GitHub credential was found, but the Copilot session exchange refused it.
 const TOKEN_EXCHANGE_ERROR: &str =
     "Copilot token exchange failed; check your GitHub credential and Copilot access";
-
-/// The resolver's missing-credential sentinel, rewritten into catalog guidance.
-const NO_COPILOT_CREDENTIALS: &str = "no Copilot credentials";
 
 pub(in crate::clients::backends) fn list_models() -> BoxFuture<'static, Result<Vec<String>, String>> {
     Box::pin(async move { list_models_with(rig_reqwest::shared()).await })
@@ -58,6 +64,8 @@ async fn list_models_with(http: impl HttpClientExt + 'static) -> Result<Vec<Stri
 fn catalog_credential_message(error: String) -> String {
     if error.starts_with(NO_COPILOT_CREDENTIALS) {
         CREDENTIALS_MISSING_ERROR.to_string()
+    } else if error.starts_with(COPILOT_APP_REFRESH_ERROR) {
+        APP_REFRESH_ERROR.to_string()
     } else {
         TOKEN_EXCHANGE_ERROR.to_string()
     }
@@ -145,6 +153,7 @@ mod tests {
 
     use super::super::{
         CopilotTokenExchanger, NO_COPILOT_CREDENTIALS as RESOLVER_NO_CREDENTIALS,
+        COPILOT_APP_REFRESH_ERROR as RESOLVER_APP_REFRESH_ERROR,
     };
     use super::*;
     use crate::test_support::EnvGuard;
@@ -171,6 +180,13 @@ mod tests {
         let mut model = ModelInfo::from_id(id);
         model.r#type = Some(kind.into());
         model
+    }
+
+    /// Build a refresh middleware for a static session — a test-only helper
+    /// so catalog tests never reach two levels up to
+    /// `super::super::static_session_middleware`.
+    fn test_static_middleware(session: CopilotSession) -> CopilotTokenRefreshMiddleware {
+        super::super::static_session_middleware(session)
     }
 
     fn scrub_copilot_env(guard: &mut EnvGuard) {
@@ -258,12 +274,22 @@ mod tests {
         );
         assert_eq!(
             catalog_credential_message(
+                format!("{RESOLVER_APP_REFRESH_ERROR}: GitHub App refresh failed")
+            ),
+            APP_REFRESH_ERROR
+        );
+        assert_eq!(
+            catalog_credential_message(
                 "GitHub Copilot token exchange failed with HTTP 401".into()
             ),
             TOKEN_EXCHANGE_ERROR
         );
         assert!(CREDENTIALS_MISSING_ERROR.contains("GITHUB_COPILOT_API_KEY"));
+        assert!(CREDENTIALS_MISSING_ERROR.contains("GITHUB_TOKEN"));
+        assert!(CREDENTIALS_MISSING_ERROR.contains("GH_TOKEN"));
         assert!(CREDENTIALS_MISSING_ERROR.contains("providers.yaml"));
+        assert!(APP_REFRESH_ERROR.contains("client-id"), "{}", APP_REFRESH_ERROR);
+        assert!(!APP_REFRESH_ERROR.contains("token exchange"));
     }
 
     #[test]
@@ -281,7 +307,7 @@ mod tests {
     #[tokio::test]
     async fn lists_chat_models_from_the_wire() {
         let s = session();
-        let middleware = super::super::static_session_middleware(s.clone());
+        let middleware = test_static_middleware(s.clone());
         let mock = SequencedHttpClient::new([MockHttpResponse::success(
             r#"{"data":[
                 {"id":"gpt-4o","capabilities":{"type":"chat"}},
@@ -298,9 +324,39 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn catalog_request_includes_copilot_editor_headers() {
+        let s = session();
+        let middleware = test_static_middleware(s.clone());
+        let mock =
+            SequencedHttpClient::new([MockHttpResponse::success(r#"{"data":[]}"#)]);
+
+        list_models_for_session(DynHttpClient::new(mock.clone()), s, middleware)
+            .await
+            .unwrap();
+
+        let request = &mock.requests()[0];
+        assert_eq!(
+            auth_header(request),
+            format!("Bearer {FAKE_SESSION_TOKEN}")
+        );
+        assert_eq!(
+            request.headers["editor-version"].to_str().unwrap(),
+            COPILOT_EDITOR_VERSION
+        );
+        assert_eq!(
+            request.headers["editor-plugin-version"].to_str().unwrap(),
+            COPILOT_EDITOR_PLUGIN_VERSION
+        );
+        assert_eq!(
+            request.headers["user-agent"].to_str().unwrap(),
+            COPILOT_USER_AGENT
+        );
+    }
+
+    #[tokio::test]
     async fn catalog_request_bears_only_the_session_token() {
         let s = session();
-        let middleware = super::super::static_session_middleware(s.clone());
+        let middleware = test_static_middleware(s.clone());
         let mock =
             SequencedHttpClient::new([MockHttpResponse::success(r#"{"data":[]}"#)]);
 
@@ -321,7 +377,7 @@ mod tests {
             api_base: None,
             expires_at: Some(i64::MAX),
         };
-        let middleware = super::super::static_session_middleware(s.clone());
+        let middleware = test_static_middleware(s.clone());
         let mock =
             SequencedHttpClient::new([MockHttpResponse::success(r#"{"data":[]}"#)]);
 
@@ -336,9 +392,9 @@ mod tests {
 
     #[tokio::test]
     async fn static_session_beats_github_token() {
-        let (_env, _tmp) = isolated_env();
-        std::env::set_var("GITHUB_COPILOT_API_KEY", FAKE_SESSION_TOKEN);
-        std::env::set_var("GITHUB_TOKEN", "github-token-secret");
+        let (mut env, _tmp) = isolated_env();
+        env.set("GITHUB_COPILOT_API_KEY", FAKE_SESSION_TOKEN);
+        env.set("GITHUB_TOKEN", "github-token-secret");
 
         let calls = Arc::new(AtomicUsize::new(0));
         let exchanger: Arc<dyn CopilotTokenExchanger> =
@@ -373,8 +429,8 @@ mod tests {
 
     #[tokio::test]
     async fn github_token_exchanges_for_session_bearer() {
-        let (_env, _tmp) = isolated_env();
-        std::env::set_var("GITHUB_TOKEN", "github-token-secret");
+        let (mut env, _tmp) = isolated_env();
+        env.set("GITHUB_TOKEN", "github-token-secret");
 
         let exchanger: Arc<dyn CopilotTokenExchanger> =
             Arc::new(FakeExchange {
@@ -412,8 +468,8 @@ mod tests {
 
     #[tokio::test]
     async fn default_base_when_exchange_has_no_api_base() {
-        let (_env, _tmp) = isolated_env();
-        std::env::set_var("GITHUB_TOKEN", "github-token-secret");
+        let (mut env, _tmp) = isolated_env();
+        env.set("GITHUB_TOKEN", "github-token-secret");
 
         let exchanger: Arc<dyn CopilotTokenExchanger> =
             Arc::new(FakeExchange {
@@ -466,8 +522,8 @@ mod tests {
 
     #[tokio::test]
     async fn rejected_exchange_drops_secrets() {
-        let (_env, _tmp) = isolated_env();
-        std::env::set_var("GITHUB_TOKEN", "github-token-secret");
+        let (mut env, _tmp) = isolated_env();
+        env.set("GITHUB_TOKEN", "github-token-secret");
 
         let exchanger: Arc<dyn CopilotTokenExchanger> =
             Arc::new(FailingExchange {
@@ -492,7 +548,7 @@ mod tests {
     #[tokio::test]
     async fn rejected_credential_names_no_secret_or_body() {
         let s = session();
-        let middleware = super::super::static_session_middleware(s.clone());
+        let middleware = test_static_middleware(s.clone());
         let mock = SequencedHttpClient::new([MockHttpResponse::ErrorResponse(
             http::StatusCode::UNAUTHORIZED,
             "secret-body".into(),
@@ -511,7 +567,7 @@ mod tests {
     #[tokio::test]
     async fn forbidden_reports_credential_remedy() {
         let s = session();
-        let middleware = super::super::static_session_middleware(s.clone());
+        let middleware = test_static_middleware(s.clone());
         let mock = SequencedHttpClient::new([MockHttpResponse::ErrorResponse(
             http::StatusCode::FORBIDDEN,
             "secret-body".into(),
@@ -530,7 +586,7 @@ mod tests {
     #[tokio::test]
     async fn other_status_reports_the_code_only() {
         let s = session();
-        let middleware = super::super::static_session_middleware(s.clone());
+        let middleware = test_static_middleware(s.clone());
         let mock = SequencedHttpClient::new([MockHttpResponse::ErrorResponse(
             http::StatusCode::INTERNAL_SERVER_ERROR,
             "secret-body".into(),
@@ -548,7 +604,7 @@ mod tests {
     #[tokio::test]
     async fn undecodable_catalog_reports_a_local_message() {
         let s = session();
-        let middleware = super::super::static_session_middleware(s.clone());
+        let middleware = test_static_middleware(s.clone());
         let mock =
             SequencedHttpClient::new([MockHttpResponse::success("not-json")]);
 
@@ -565,7 +621,7 @@ mod tests {
     #[tokio::test]
     async fn mixed_catalog_yields_only_chat_ids_in_order() {
         let s = session();
-        let middleware = super::super::static_session_middleware(s.clone());
+        let middleware = test_static_middleware(s.clone());
         let catalog = serde_json::json!({
             "data": [
                 {"id": "claude-3.5-sonnet",    "name": "Claude 3.5 Sonnet",  "vendor": "anthropic",  "capabilities": {"type": "chat"}},
@@ -593,7 +649,7 @@ mod tests {
     #[tokio::test]
     async fn valid_catalog_with_no_chat_models_succeeds_empty() {
         let s = session();
-        let middleware = super::super::static_session_middleware(s.clone());
+        let middleware = test_static_middleware(s.clone());
         let mock = SequencedHttpClient::new([MockHttpResponse::success(
             r#"{"data":[{"id":"embed","capabilities":{"type":"embedding"}}]}"#,
         )]);
