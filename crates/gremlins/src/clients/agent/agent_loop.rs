@@ -509,8 +509,11 @@ impl LoopState {
             );
             self.hook_log(&format!("{prefix}{tool_msg}"));
             let id_str = tc.id.to_string();
-            let tool_evt =
-                tool_use_event(&id_str, tc.function.name.as_str(), &tc.function.arguments_value());
+            let tool_evt = tool_use_event(
+                &id_str,
+                tc.function.name.as_str(),
+                &tc.function.arguments_value(),
+            );
             write_raw(raw, &tool_evt);
             if !nested {
                 if let Some(evts) = captured.as_mut() {
@@ -2742,10 +2745,12 @@ mod tests {
         );
         // The reasoning item must precede the referencing function_call in the
         // replayed content so the call is not orphaned.
-        let reasoning_at = msg.content
+        let reasoning_at = msg
+            .content
             .iter()
             .position(|c| matches!(c, AssistantContent::Reasoning(_)));
-        let call_at = msg.content
+        let call_at = msg
+            .content
             .iter()
             .position(|c| matches!(c, AssistantContent::ToolCall(_)));
         assert!(
@@ -2833,7 +2838,8 @@ mod tests {
             "flag=false must omit reasoning items from replayed history"
         );
         // The tool call must still be present.
-        let call = msg.content
+        let call = msg
+            .content
             .iter()
             .find(|c| matches!(c, AssistantContent::ToolCall(_)));
         assert!(call.is_some(), "tool call must survive into the replay");

@@ -601,9 +601,7 @@ mod tests {
 
         // Inherited parent conversation — the fork prompt is the last message.
         assert!(
-            history
-                .iter()
-                .any(|m| matches!(m, Message::Assistant(_))),
+            history.iter().any(|m| matches!(m, Message::Assistant(_))),
             "history must contain an assistant message"
         );
         assert!(
