@@ -59,6 +59,29 @@ token via `CHATGPT_ACCESS_TOKEN` or the `chatgpt.token` field in `providers.yaml
 The environment variable takes precedence. The backend does not refresh expired
 tokens or accept OpenAI API keys.
 
+**ChatGPT sign-in and sign-out:**
+
+- `gremlins auth chatgpt login` signs in through the browser; add `--device-code`
+  to force device login (also used when no browser is available). The record is
+  stored per user under `<user config root>/credentials/chatgpt.json`.
+- Static credentials win: `CHATGPT_ACCESS_TOKEN`, then `chatgpt.token` in
+  `providers.yaml`, then the stored sign-in. Login refuses while a static one is set.
+- Runs are noninteractive: they refresh a stored sign-in but never prompt. With
+  no usable credential they report how to sign in again.
+- `gremlins auth chatgpt status` shows the selected source and local record
+  (account, access-token expiry) without contacting the provider. An expired token
+  may still refresh; an unexpired one does not prove a live subscription.
+  Unreadable records exit nonzero.
+- `gremlins auth chatgpt logout` revokes and removes the stored sign-in only. It
+  exits nonzero if revocation is unconfirmed (the record is still removed) or the
+  store fails. It never unsets env values, edits `providers.yaml`, or changes the
+  bearer of an already running model.
+
+Manual smoke check (consenting operator, isolated config root): log in with the
+browser, complete a ChatGPT run, run `status`, then `logout`; repeat with
+`login --device-code`. With no static credentials, a fresh run after logout should
+say to run `gremlins auth chatgpt login`. This is not an automated test.
+
 **Azure OpenAI / Azure AI Foundry** uses `azure-openai/<deployment>` as the model
 specifier. Set `GREMLINS_AZURE_OPENAI_ENDPOINT` (required) and one of
 `GREMLINS_AZURE_OPENAI_TOKEN` (Entra ID bearer token) or `GREMLINS_AZURE_OPENAI_API_KEY`

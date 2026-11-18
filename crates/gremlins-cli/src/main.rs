@@ -193,6 +193,10 @@ enum AuthCmds {
 
 #[derive(Subcommand)]
 enum ChatGptAuthCmds {
+    /// Show local credential state (no provider check).
+    Status,
+    /// Remove the stored OAuth sign-in (static credentials are untouched).
+    Logout,
     /// Sign in with a browser, or a device code when forced or headless.
     Login {
         /// Use the device-code flow instead of the browser.
@@ -292,6 +296,12 @@ async fn main() {
             AuthCmds::ChatGpt {
                 command: ChatGptAuthCmds::Login { device_code },
             } => auth_chatgpt_login(device_code).await,
+            AuthCmds::ChatGpt {
+                command: ChatGptAuthCmds::Status,
+            } => auth_chatgpt_status(),
+            AuthCmds::ChatGpt {
+                command: ChatGptAuthCmds::Logout,
+            } => auth_chatgpt_logout().await,
             AuthCmds::Copilot { command } => match command {
                 CopilotAuthCmds::Login { client_id } => {
                     auth_copilot_login(copilot_login_client_id(client_id.as_deref())).await
@@ -2308,6 +2318,88 @@ async fn tail_log_lines(path: &Path, n: usize) -> Result<Vec<String>, String> {
 /// first-party Copilot OAuth app when none was given.
 fn copilot_login_client_id(client_id: Option<&str>) -> &str {
     client_id.unwrap_or(github_auth::DEFAULT_COPILOT_OAUTH_CLIENT_ID)
+}
+
+fn auth_chatgpt_status() -> Result<(), String> {
+    use gremlins::clients::chatgpt_auth::{self, RecordState, SelectedSource};
+
+    gremlins::config::init_global().map_err(|e| e.to_string())?;
+    let status = chatgpt_auth::status();
+    println!(
+        "Source: {}",
+        match status.source {
+            SelectedSource::Environment => "environment (CHATGPT_ACCESS_TOKEN)",
+            SelectedSource::Config => "config (chatgpt.token in providers.yaml)",
+            SelectedSource::OAuth => "stored OAuth sign-in",
+            SelectedSource::None => "none",
+        }
+    );
+    match status.record {
+        RecordState::Absent => {
+            println!("OAuth record: absent");
+            Ok(())
+        }
+        RecordState::Stored(info) => {
+            println!("OAuth record: stored (local state; not validated with the provider)");
+            println!(
+                "  account: {}",
+                info.account_id.as_deref().unwrap_or("unknown")
+            );
+            let now = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .ok()
+                .and_then(|d| i64::try_from(d.as_secs()).ok());
+            match info.expires_at.zip(now) {
+                None => println!("  access token expiry: unknown"),
+                Some((at, now)) if at <= now => {
+                    println!("  access token expired (unix {at}); it may still be refreshable")
+                }
+                Some((at, _)) => println!(
+                    "  access token expires at unix {at}; not proof of a live subscription"
+                ),
+            }
+            Ok(())
+        }
+        RecordState::Unreadable { path, reason } => {
+            println!("OAuth record: unreadable");
+            Err(format!(
+                "credential record at {} is unusable: {reason}",
+                path.display()
+            ))
+        }
+    }
+}
+
+async fn auth_chatgpt_logout() -> Result<(), String> {
+    use gremlins::clients::chatgpt_auth::{self, LogoutOutcome};
+
+    gremlins::config::init_global().map_err(|e| e.to_string())?;
+    let outcome = chatgpt_auth::logout().await;
+    let result = match outcome {
+        LogoutOutcome::NotSignedIn => {
+            println!("No stored ChatGPT sign-in.");
+            Ok(())
+        }
+        LogoutOutcome::Revoked => {
+            println!(
+                "✓ Signed out: the provider confirmed revocation and the local record was removed."
+            );
+            Ok(())
+        }
+        LogoutOutcome::RemovedUnconfirmed => {
+            println!("Local sign-in record removed.");
+            eprintln!("warning: the provider did not confirm revocation of the tokens.");
+            Err("revocation unconfirmed".to_string())
+        }
+        LogoutOutcome::StoreFailure { path } => Err(format!(
+            "could not sign out: credential store failed at {}",
+            path.display()
+        )),
+    };
+    if let Some(source) = chatgpt_auth::static_source_label() {
+        println!("Static credential {source} remains set and was not changed.");
+    }
+    result
 }
 
 async fn auth_chatgpt_login(device_code: bool) -> Result<(), String> {

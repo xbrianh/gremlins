@@ -9,6 +9,7 @@ use rig_core::http_client::DynHttpClient;
 use rig_core::providers::chatgpt::auth::{AuthContext, AuthError};
 use rig_core::providers::chatgpt::auth::{
     AuthSource, Authenticator, DeviceCodeHandler, FileTokenStore, SignInMethod, SignInPrompt,
+    SignedOut,
 };
 
 use crate::clients::config::{static_token, StaticSecret};
@@ -98,6 +99,136 @@ pub async fn login(
 ) -> Result<Option<String>, String> {
     let auth = authenticator(Arc::clone(&events));
     sign_in(&auth, detect_method(device_code), events).await
+}
+
+/// Which credential a ChatGPT run would use, by the shared precedence rules.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SelectedSource {
+    /// `CHATGPT_ACCESS_TOKEN`.
+    Environment,
+    /// `chatgpt.token` in `providers.yaml`.
+    Config,
+    /// The stored OAuth sign-in.
+    OAuth,
+    /// Nothing is configured.
+    None,
+}
+
+/// Display-safe facts from a readable stored record.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct StoredSignIn {
+    pub account_id: Option<String>,
+    /// Access-token expiry (unix seconds); `None` when unknown.
+    pub expires_at: Option<i64>,
+}
+
+/// The local OAuth record, independent of which source is selected.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RecordState {
+    Absent,
+    Stored(StoredSignIn),
+    /// Unreadable or malformed; the path and a short reason, never contents.
+    Unreadable {
+        path: PathBuf,
+        reason: String,
+    },
+}
+
+/// Local credential state. This is not provider validation.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ChatGptStatus {
+    pub source: SelectedSource,
+    pub record: RecordState,
+}
+
+#[derive(serde::Deserialize)]
+struct RecordView {
+    account_id: Option<String>,
+    expires_at: Option<i64>,
+}
+
+/// Read-only inspection: no auth context, network, refresh, prompt, or store write.
+pub fn status() -> ChatGptStatus {
+    let record = match stored_oauth() {
+        Err(SignInError::Missing) => RecordState::Absent,
+        Err(SignInError::Store { path, detail }) => RecordState::Unreadable {
+            path,
+            reason: detail,
+        },
+        Err(_) => RecordState::Unreadable {
+            path: FileTokenStore::new(store_dir()).path(PROVIDER_NAME),
+            reason: "credential store unavailable".into(),
+        },
+        Ok(store) => {
+            let path = store.path(PROVIDER_NAME);
+            match std::fs::read(&path) {
+                Err(error) if error.kind() == ErrorKind::NotFound => RecordState::Absent,
+                Err(error) => RecordState::Unreadable {
+                    path,
+                    reason: error.kind().to_string(),
+                },
+                Ok(bytes) => match serde_json::from_slice::<RecordView>(&bytes) {
+                    Ok(view) => RecordState::Stored(StoredSignIn {
+                        account_id: view.account_id,
+                        expires_at: view.expires_at,
+                    }),
+                    Err(_) => RecordState::Unreadable {
+                        path,
+                        reason: "malformed record".into(),
+                    },
+                },
+            }
+        }
+    };
+    let source = match static_source() {
+        Some(found) if found.source == ACCESS_TOKEN_ENV => SelectedSource::Environment,
+        Some(_) => SelectedSource::Config,
+        None if matches!(record, RecordState::Stored(_)) => SelectedSource::OAuth,
+        None => SelectedSource::None,
+    };
+    ChatGptStatus { source, record }
+}
+
+/// What logging out of the stored sign-in did.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum LogoutOutcome {
+    NotSignedIn,
+    /// The provider confirmed revocation and the record was removed.
+    Revoked,
+    /// The record was removed but revocation is unconfirmed.
+    RemovedUnconfirmed,
+    /// The store failed; nothing is claimed removed.
+    StoreFailure {
+        path: PathBuf,
+    },
+}
+
+/// Sign out of the stored OAuth sign-in only, even when a static source wins.
+pub async fn logout() -> LogoutOutcome {
+    let store = match stored_oauth() {
+        Ok(store) => store,
+        Err(SignInError::Store { path, .. }) => return LogoutOutcome::StoreFailure { path },
+        Err(SignInError::Missing) => return LogoutOutcome::NotSignedIn,
+        Err(_) => {
+            return LogoutOutcome::StoreFailure {
+                path: FileTokenStore::new(store_dir()).path(PROVIDER_NAME),
+            }
+        }
+    };
+    let path = store.path(PROVIDER_NAME);
+    let authenticator = Authenticator::new(
+        AuthSource::OAuth,
+        store,
+        DeviceCodeHandler::default(),
+        false,
+    );
+    let http = DynHttpClient::new(rig_reqwest::shared());
+    match authenticator.sign_out(&http).await {
+        Ok(SignedOut::NotSignedIn) => LogoutOutcome::NotSignedIn,
+        Ok(SignedOut::Forgotten { revoked: Ok(()) }) => LogoutOutcome::Revoked,
+        Ok(SignedOut::Forgotten { revoked: Err(_) }) => LogoutOutcome::RemovedUnconfirmed,
+        Err(_) => LogoutOutcome::StoreFailure { path },
+    }
 }
 
 /// Why a stored sign-in could not yield a credential, each with its own remedy.
