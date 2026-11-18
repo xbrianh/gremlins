@@ -12,7 +12,8 @@ use rig_core::providers::openai::{OpenAI, OpenAIConfig};
 
 use crate::clients::backend::{Backend, ClientError, RunParams};
 use crate::clients::cancel::CancelToken;
-use crate::clients::config::{auth_token, tool_filter};
+use crate::clients::chatgpt_auth::{static_source, ACCESS_TOKEN_ENV};
+use crate::clients::config::tool_filter;
 use crate::clients::interactive::InteractiveSession;
 use crate::clients::native::{NativeRunState, PreserveReasoning};
 use crate::clients::params::{self, ResolvedParams};
@@ -20,7 +21,6 @@ use crate::clients::protocol::CompletedRun;
 use crate::model_uri::provider_and_model;
 
 const PROVIDER_NAME: &str = "chatgpt";
-const ACCESS_TOKEN_ENV: &str = "CHATGPT_ACCESS_TOKEN";
 
 struct ChatGptRunState {
     client: OpenAI,
@@ -46,7 +46,7 @@ impl ChatGptBackend {
         extra_params: &IndexMap<String, String>,
         connect: impl FnOnce(OpenAIConfig) -> OpenAI,
     ) -> Result<Arc<dyn Backend>, String> {
-        let token = auth_token(ACCESS_TOKEN_ENV, PROVIDER_NAME).ok_or_else(|| {
+        let token = static_source().map(|found| found.secret).ok_or_else(|| {
             format!(
                 "no credentials for provider '{PROVIDER_NAME}': set {ACCESS_TOKEN_ENV} \
                  or add {PROVIDER_NAME}.token in providers.yaml"

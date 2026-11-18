@@ -6,6 +6,7 @@ pub mod backend;
 pub mod backends;
 pub(crate) mod cancel;
 pub(crate) mod cancels;
+pub mod chatgpt_auth;
 pub mod client;
 pub(crate) mod path_context;
 pub(crate) use client::run_naked;

@@ -411,14 +411,32 @@ pub(crate) fn base_url(env_var_name: &str, provider_name: &str, default: &str) -
         .unwrap_or_else(|| default.to_string())
 }
 
-/// Resolve auth token for a provider. Checks env var first, then providers.yaml.
-pub(crate) fn auth_token(env_var_name: &str, provider_name: &str) -> Option<String> {
-    if let Some(val) = env_value(env_var_name) {
-        return Some(val);
+/// A statically configured secret together with the source that supplied it.
+pub(crate) struct StaticSecret {
+    /// Human-readable label of the winning source (never the secret itself).
+    pub(crate) source: String,
+    pub(crate) secret: String,
+}
+
+/// Look up a static auth token: a nonblank env var wins over providers.yaml's `token`.
+pub(crate) fn static_token(env_var_name: &str, provider_name: &str) -> Option<StaticSecret> {
+    if let Some(secret) = env_value(env_var_name) {
+        return Some(StaticSecret {
+            source: env_var_name.to_string(),
+            secret,
+        });
     }
     Providers::load()
         .token(provider_name)
-        .map(|s| s.trim().to_string())
+        .map(|s| StaticSecret {
+            source: format!("{provider_name}.token in providers.yaml"),
+            secret: s.trim().to_string(),
+        })
+}
+
+/// Resolve auth token for a provider. Checks env var first, then providers.yaml.
+pub(crate) fn auth_token(env_var_name: &str, provider_name: &str) -> Option<String> {
+    static_token(env_var_name, provider_name).map(|found| found.secret)
 }
 
 /// Resolve endpoint for a provider. Checks env var first, then providers.yaml.

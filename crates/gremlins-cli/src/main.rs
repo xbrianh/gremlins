@@ -183,6 +183,22 @@ enum AuthCmds {
         #[command(subcommand)]
         command: CopilotAuthCmds,
     },
+    /// ChatGPT OAuth sign-in.
+    #[command(name = "chatgpt")]
+    ChatGpt {
+        #[command(subcommand)]
+        command: ChatGptAuthCmds,
+    },
+}
+
+#[derive(Subcommand)]
+enum ChatGptAuthCmds {
+    /// Sign in with a browser, or a device code when forced or headless.
+    Login {
+        /// Use the device-code flow instead of the browser.
+        #[arg(long)]
+        device_code: bool,
+    },
 }
 
 #[derive(Subcommand)]
@@ -273,6 +289,9 @@ async fn main() {
         Some(Cmds::Serve { lock_fd }) => serve_daemon(lock_fd).await,
         Some(Cmds::Version) => version_cmd().await,
         Some(Cmds::Auth { command }) => match command {
+            AuthCmds::ChatGpt {
+                command: ChatGptAuthCmds::Login { device_code },
+            } => auth_chatgpt_login(device_code).await,
             AuthCmds::Copilot { command } => match command {
                 CopilotAuthCmds::Login { client_id } => {
                     auth_copilot_login(copilot_login_client_id(client_id.as_deref())).await
@@ -2289,6 +2308,43 @@ async fn tail_log_lines(path: &Path, n: usize) -> Result<Vec<String>, String> {
 /// first-party Copilot OAuth app when none was given.
 fn copilot_login_client_id(client_id: Option<&str>) -> &str {
     client_id.unwrap_or(github_auth::DEFAULT_COPILOT_OAUTH_CLIENT_ID)
+}
+
+async fn auth_chatgpt_login(device_code: bool) -> Result<(), String> {
+    use gremlins::clients::chatgpt_auth::{self, LoginEvent};
+
+    gremlins::config::init_global().map_err(|e| e.to_string())?;
+    if let Some(source) = chatgpt_auth::static_source_label() {
+        return Err(format!(
+            "{} is set — OAuth login would be ignored. Remove it first \
+             (unset the environment variable, or delete the entry from providers.yaml).",
+            source
+        ));
+    }
+    let events: std::sync::Arc<dyn Fn(LoginEvent) + Send + Sync> =
+        std::sync::Arc::new(|event| match event {
+            LoginEvent::Browser { launched: true, .. } => {
+                eprintln!("Complete sign-in in your browser.")
+            }
+            LoginEvent::Browser {
+                url,
+                launched: false,
+            } => {
+                eprintln!("Could not open a browser. Open this URL to sign in:\n  {url}")
+            }
+            LoginEvent::BrowserUnavailable(reason) => {
+                eprintln!("Browser sign-in unavailable ({reason}); falling back to a device code.")
+            }
+            LoginEvent::DeviceCode { url, code } => {
+                eprintln!("Open {url} and enter the code: {code}")
+            }
+        });
+    let account = chatgpt_auth::login(device_code, events).await?;
+    match account {
+        Some(id) => println!("✓ Signed in to ChatGPT (account {id})."),
+        None => println!("✓ Signed in to ChatGPT."),
+    }
+    Ok(())
 }
 
 async fn auth_copilot_login(client_id: &str) -> Result<(), String> {
