@@ -108,7 +108,7 @@ impl<C> NativeRunState<C> {
         prompt: &str,
         ctx: RunContext,
         cancel: Arc<CancelToken>,
-        interactive: Option<InteractiveSession>,
+        interactive: InteractiveSession,
         preserve_reasoning: PreserveReasoning,
         make_model: impl std::future::Future<Output = Result<DynModel<Completion>, ClientError>>,
     ) -> Result<CompletedRun, ClientError> {

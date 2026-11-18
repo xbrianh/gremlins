@@ -98,11 +98,13 @@ pub(crate) struct AgentLoopRuntime {
     /// Run-scoped id (gremlin_id) used for direct bus emission of log lines
     /// and stream events. Empty in tests / naked runs.
     pub(crate) message_prefix: String,
-    /// Whether skills are available (chat-only). Doubles as the canonical
-    /// chat predicate for tool gates (Mischief bypass, LoadSkill inclusion).
-    pub(crate) skills_available: bool,
     /// Discovered skills for this session. Session-bound so concurrent chat
     /// sessions resolve their own project's skills instead of a shared slot.
+    /// When `None`, skills-gated tools (Mischief, WebSearch) are rejected at
+    /// dispatch; LoadSkill is gated inside its own handler. When `Some`, they
+    /// bypass the tool filter.
+    /// `Some(empty_vec)` is a valid "skills configured but none discovered"
+    /// state — `LoadSkill` itself checks for individual names.
     pub(crate) discovered_skills: Option<Arc<Vec<crate::skills::LoadedSkill>>>,
     /// Pre-resolved file-path context for short-circuiting discovery tools.
     /// Populated by the chat supervisor from the operator prompt and project

@@ -1,57 +1,64 @@
 //! Single-instance executor supervisor.
 //!
-//! The supervisor owns an actor task that holds the run map, session map, and
-//! connection counter. The accept loop dispatches socket requests to the
-//! appropriate handlers, which communicate with the actor via
-//! [`ActorMsg`] messages.
+//! The supervisor owns a lock-protected run registry (run map, connection
+//! counter, id locks) and a per-session task registry. The accept loop
+//! dispatches socket requests to the appropriate handlers, which reach the
+//! registry directly instead of through an actor mailbox.
 
-pub(crate) mod actor;
-pub(crate) mod actor_client;
+pub(crate) mod attachment;
 pub(crate) mod chat;
+pub(crate) mod chat_handle;
+pub(crate) mod chat_system_prompt;
 pub(crate) mod debug;
 pub(crate) mod lifecycle;
 pub(crate) mod log_handler;
 pub(crate) mod ops;
+pub(crate) mod prompt_msg;
+pub(crate) mod run_registry;
 pub(crate) mod session;
+pub(crate) mod session_task;
 pub(crate) mod state_view;
 
 #[cfg(test)]
+mod test_provider;
+#[cfg(test)]
 mod tests;
 
+use std::collections::HashMap;
 use std::path::PathBuf;
-use std::sync::atomic::AtomicBool;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use serde_json::Value;
 use tokio::io::BufReader;
 use tokio::net::UnixListener;
-use tokio::sync::{mpsc, watch};
+use tokio::sync::watch;
 
 use crate::executor::socket::{self, GremlinsDaemonLock};
-use gremlins_magic_bus::connection::{ConnectionGuard, SharedWriter};
-use gremlins_magic_bus::EventKind;
+use gremlins_magic_bus::connection::SharedWriter;
 use gremlins_magic_bus::{init_bus, subscribe_all};
 
+use self::run_registry::RunRegistry;
 use crate::executor::gremlin::validate_gremlin_id;
-use crate::executor::state;
 
 // ── Re-exports needed by external executor modules ──────────────────────
-pub(crate) use crate::clients::cancel::CancelToken;
-pub(crate) use crate::clients::interactive::InteractiveHandle;
-
 #[allow(unused_imports)]
-pub(crate) use crate::clients::interactive::{InteractiveChannels, InteractiveCommand};
+pub(crate) use crate::clients::cancel::CancelToken;
+
+/// Registry mapping `session_id → session_task::SessionTaskHandle`.
+/// Shared between the supervisor accept loop and the control-socket dispatch
+/// so `stop_session_chat_gremlin` can locate owning sessions without the actor.
+pub(crate) type SessionRegistry = Arc<Mutex<HashMap<String, session_task::SessionTaskHandle>>>;
 
 // Items consumed by mod.rs itself.
 pub(crate) use self::chat::base_process_env;
-pub(crate) use self::debug::handle_debug;
-pub(crate) use self::lifecycle::{launch_child, stop_child, LaunchResult, LogRelay};
+pub(crate) use self::lifecycle::LogRelay;
 pub(crate) use self::log_handler::handle_log;
 pub(crate) use self::ops::{
     handle_artifact, handle_create_session, handle_info, handle_launch, handle_ls, handle_model,
     handle_resume, handle_rm, handle_snapshot, handle_status, handle_stop,
     stop_session_chat_gremlin,
 };
+pub(crate) use self::run_registry::LaunchResult;
 #[allow(unused_imports)]
 pub(crate) use self::session::handle_session_main;
 
@@ -65,81 +72,12 @@ pub(crate) use self::ops::resolve_filepath_source_values;
 #[allow(unused_imports)]
 pub(crate) use self::ops::{handle_chat_model, handle_compact, parallel_runtime_keys};
 
-/// RAII guard that restores pause and sends Quit on drop (even during abort).
-pub(crate) struct DebugDetachGuard {
-    interactive: Option<InteractiveHandle>,
-}
-
-impl DebugDetachGuard {
-    pub(crate) fn new(interactive: InteractiveHandle) -> Self {
-        Self {
-            interactive: Some(interactive),
-        }
-    }
-
-    pub(crate) fn disarm(&mut self) {
-        self.interactive = None;
-    }
-}
-
-impl Drop for DebugDetachGuard {
-    fn drop(&mut self) {
-        if let Some(interactive) = &self.interactive {
-            let _ = interactive.cmd_tx.try_send(InteractiveCommand::Quit);
-            interactive.pause.reset();
-        }
-    }
-}
-
 /// The in-flight chat turn for a connection, if any.
-pub(crate) struct CurrentTurn {
-    pub(crate) id: String,
-    /// Client-generated turn id, used to match a `cancel_chat` to the turn
-    /// it targets so a late cancel cannot hit a subsequent turn.
-    pub(crate) turn: Option<String>,
-    pub(crate) cancel: Arc<CancelToken>,
-    /// Set to `true` once the turn has re-inserted its gremlin (or dropped
-    /// it). A follow-up `chat` for the same id waits on this so it never
-    /// sees the gremlin as "unknown" mid-turn. Waiters clone the receiver;
-    /// the value is sticky so a waiter that subscribes after the turn
-    /// finished still proceeds immediately.
-    pub(crate) done: watch::Receiver<bool>,
-    pub(crate) hard: Arc<AtomicBool>,
-}
+#[allow(unused_imports)]
+pub(crate) use self::chat::CurrentTurn;
 
-// ---------------------------------------------------------------------------
-// RunHandle
-// ---------------------------------------------------------------------------
-
-pub(crate) struct RunHandle {
-    pub cancel: Arc<CancelToken>,
-    pub task: Option<tokio::task::JoinHandle<()>>,
-    pub aborted: Arc<AtomicBool>,
-    #[allow(dead_code)]
-    pub state_tx: watch::Sender<RunState>,
-    /// Interactive handle (supervisor → agent loop).
-    pub interactive: InteractiveHandle,
-    /// State store handle — stored so handle_status / handle_info / handle_ls
-    /// can read state directly for live gremlins whose state may be in a
-    /// TempDir (ephemeral runs) rather than under config::state_root().
-    pub store: Arc<dyn state::StateStore + Send + Sync>,
-    /// Flush barrier for the log writer: a follower that wants to read
-    /// persisted history can request a flush and wait for the ack before
-    /// opening the log blob, so that pre-subscription events are visible.
-    pub log_flush: Option<tokio::sync::mpsc::UnboundedSender<tokio::sync::oneshot::Sender<()>>>,
-    /// Bus subscriber for the run's lossless log-writer subscription.
-    /// Held so finish and stop paths can unregister it, preventing the run's
-    /// log task, blocking writer, and state store from living until daemon exit.
-    pub log_sub: Option<gremlins_magic_bus::Subscriber<EventKind>>,
-}
-
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
-pub struct RunState {
-    pub id: String,
-    pub status: String,
-    pub stage: String,
-    pub started_at: String,
-}
+// RunState lives in `run_registry`.
+pub(crate) use self::run_registry::RunState;
 
 /// Validate `"id"` field from a JSON-RPC-style request against [`validate_gremlin_id`].
 pub(crate) fn valid_id(request: &Value) -> Result<&str, Value> {
@@ -166,9 +104,10 @@ pub async fn run_supervisor(
     let _ = base_process_env();
     let (shutdown_tx, mut shutdown_rx) = watch::channel(false);
 
-    // Spawn the actor — it owns the run map, session map, connection counter,
-    // and idle-shutdown logic.
-    let actor_tx = actor::spawn_actor(state_root.clone(), shutdown_tx);
+    // Build the shared registry — it owns the run map, connection counter,
+    // id locks, chat-id sequence, and idle-shutdown logic.
+    let registry = Arc::new(RunRegistry::new(shutdown_tx));
+    let sessions: SessionRegistry = Arc::new(Mutex::new(HashMap::new()));
 
     loop {
         tokio::select! {
@@ -181,14 +120,20 @@ pub async fn run_supervisor(
                 match result {
                     Ok((stream, _addr)) => {
                         log::info!("supervisor: accepted connection");
-                        let actor_tx = actor_tx.clone();
+                        let registry = Arc::clone(&registry);
+                        let sessions = Arc::clone(&sessions);
                         tokio::spawn(async move {
-                            let _guard = ConnectionGuard::new(
-                                &actor_tx,
-                                actor::ActorMsg::ConnectionUp,
-                                actor::ActorMsg::ConnectionDown,
-                            );
-                            handle_connection(stream, actor_tx).await;
+                            let _guard = {
+                                let registry = Arc::clone(&registry);
+                                gremlins_magic_bus::connection::ConnectionGuard::new(
+                                    {
+                                        let registry = Arc::clone(&registry);
+                                        move || registry.connection_up()
+                                    },
+                                    move || registry.connection_down(),
+                                )
+                            };
+                            handle_connection(stream, registry, sessions).await;
                         });
                     }
                     Err(e) => {
@@ -202,20 +147,13 @@ pub async fn run_supervisor(
 
     log::info!("supervisor: shutting down");
 
-    // Tear down every session. The actor does the surgery; we just fire the
-    // requests and wait for completion.
-    let (respond, rx) = tokio::sync::oneshot::channel();
-    let _ = actor_tx.send(actor::ActorMsg::SessionGetAll { respond });
-    if let Ok(session_ids) = rx.await {
-        for session_id in session_ids {
-            let (done_tx, done_rx) = tokio::sync::oneshot::channel();
-            let _ = actor_tx.send(actor::ActorMsg::SessionTeardown {
-                session_id,
-                abort_listener: true,
-                respond: done_tx,
-            });
-            let _ = done_rx.await;
-        }
+    // Tear down every session before unlinking the supervisor socket so each
+    // session's chat gremlins are stopped, aux sockets/listener are aborted,
+    // and session socket files are unlinked.
+    let handles: Vec<session_task::SessionTaskHandle> =
+        sessions.lock().unwrap().values().cloned().collect();
+    for handle in handles {
+        handle.teardown(true).await;
     }
 
     socket::unlink_socket(&state_root);
@@ -223,7 +161,8 @@ pub async fn run_supervisor(
 
 async fn handle_connection(
     stream: tokio::net::UnixStream,
-    actor_tx: mpsc::UnboundedSender<actor::ActorMsg>,
+    registry: Arc<RunRegistry>,
+    sessions: SessionRegistry,
 ) {
     let (read_half, write_half) = stream.into_split();
     let writer = SharedWriter::new(write_half);
@@ -302,13 +241,26 @@ async fn handle_connection(
             break Some((request, reader));
         }
 
-        if op == "debug" {
-            let _ = events_enabled_tx.send(true);
-            handle_debug(&request, &actor_tx, reader, &writer).await;
-            break None;
+        if op == "attach" {
+            // Stop the global event-forwarding task before handing
+            // off to the scoped attachment handler.  If a prior
+            // request already opened the event gate, unrelated
+            // runs' broadcasts can interleave with the per-run
+            // attachment protocol.  Unsubscribe, drop the gate,
+            // and await the forwarder's completion — same
+            // teardown as the log handoff below.
+            drop(events_enabled_tx);
+            event_handle.abort();
+            init_bus().unsubscribe(&event_sub);
+            let _ = event_handle.await;
+            attachment::handle_attach(&request, &registry, reader, &writer).await;
+            // The loop-scope teardown was already performed above;
+            // return directly so we don't try to abort the already-
+            // consumed event handle again.
+            return;
         }
 
-        dispatch_op(&op, &request, &actor_tx, &writer).await;
+        dispatch_op(&op, &request, &registry, &writer, &sessions).await;
         // Unblock events *after* the response is written so one-shot
         // clients always read the response before any broadcast event.
         // Skip for "version" — the version handshake is a one-shot
@@ -329,11 +281,11 @@ async fn handle_connection(
     let _ = event_handle.await;
 
     if let Some((request, reader)) = log_request {
-        handle_log(&request, &actor_tx, reader, &writer).await;
+        handle_log(&request, &registry, reader, &writer).await;
     }
 
     // After this connection drops the `ConnectionGuard` will fire a
-    // `ConnectionDown` message, which triggers idle-shutdown inside the actor.
+    // `connection_down`, which triggers idle-shutdown inside the registry.
 }
 
 // ---------------------------------------------------------------------------
@@ -343,26 +295,27 @@ async fn handle_connection(
 pub(crate) async fn dispatch_op(
     op: &str,
     request: &Value,
-    actor_tx: &mpsc::UnboundedSender<actor::ActorMsg>,
+    registry: &Arc<RunRegistry>,
     writer: &SharedWriter,
+    sessions: &SessionRegistry,
 ) {
     let resp = match op {
         "version" => ok_response(serde_json::json!({"version": crate::VERSION})),
-        "launch" => handle_launch(request, actor_tx).await,
-        "create_session" => handle_create_session(request, actor_tx).await,
+        "launch" => handle_launch(request, registry).await,
+        "create_session" => handle_create_session(request, registry, sessions).await,
         "stop" => {
             if let Some(id) = request.get("id").and_then(|v| v.as_str()) {
-                stop_session_chat_gremlin(id, actor_tx).await;
+                stop_session_chat_gremlin(id, registry, sessions).await;
             }
-            handle_stop(request, actor_tx).await
+            handle_stop(request, registry).await
         }
-        "resume" => handle_resume(request, actor_tx).await,
-        "ls" => handle_ls(request, actor_tx).await,
-        "rm" => handle_rm(request, actor_tx).await,
-        "status" => handle_status(request, actor_tx).await,
-        "info" => handle_info(request, actor_tx).await,
-        "artifact" => handle_artifact(request, actor_tx).await,
-        "snapshot" => handle_snapshot(request, actor_tx).await,
+        "resume" => handle_resume(request, registry).await,
+        "ls" => handle_ls(request, registry).await,
+        "rm" => handle_rm(request, registry).await,
+        "status" => handle_status(request, registry).await,
+        "info" => handle_info(request, registry).await,
+        "artifact" => handle_artifact(request, registry).await,
+        "snapshot" => handle_snapshot(request, registry).await,
         "model" => handle_model(request).await,
         _ => error_response(&format!("unknown op: {op:?}")),
     };

@@ -1,12 +1,11 @@
 //! Model configuration op handlers: model, chat_model, compact.
 
 use serde_json::Value;
-use tokio::sync::mpsc;
 
 use crate::clients::client::Client as LlmClient;
 use crate::config;
 
-use super::super::actor_client::Client;
+use super::super::session_task::SessionTaskHandle;
 use super::super::{error_response, ok_response};
 
 /// Show, set, or clear the TUI chat model override.
@@ -62,45 +61,29 @@ pub(crate) async fn handle_model(request: &Value) -> Value {
 }
 
 /// Read the active chat gremlin's resolved model from `state.json`.
-pub(crate) async fn handle_chat_model(
-    _request: &Value,
-    actor_tx: &mpsc::UnboundedSender<super::super::actor::ActorMsg>,
-    session_id: &str,
-) -> Value {
-    match Client::new(actor_tx.clone())
-        .session_get_chat_model(session_id)
-        .await
-    {
+pub(crate) async fn handle_chat_model(_request: &Value, session_task: &SessionTaskHandle) -> Value {
+    match session_task.get_chat_model().await {
         Some(model) => ok_response(serde_json::json!({ "model": model })),
         None => ok_response(serde_json::json!({ "model": Value::Null })),
     }
 }
 
 /// Handle the `/compact` TUI command.
-pub(crate) async fn handle_compact(
-    _request: &Value,
-    actor_tx: &mpsc::UnboundedSender<super::super::actor::ActorMsg>,
-    session_id: &str,
-) -> Value {
-    let ids = Client::new(actor_tx.clone())
-        .session_get_chat_ids(session_id)
-        .await;
+pub(crate) async fn handle_compact(_request: &Value, session_task: &SessionTaskHandle) -> Value {
+    let ids = session_task.get_chat_ids().await;
     let Some(id) = ids.into_iter().next() else {
         return error_response("no active chat session to compact");
     };
 
-    let turn_active = Client::new(actor_tx.clone())
-        .session_get_current_turn(session_id)
+    let turn_active = session_task
+        .get_current_turn()
         .await
         .is_some_and(|cur| cur.id == id);
     if turn_active {
         return error_response("cannot compact while a chat turn is active");
     }
 
-    let Some(mut gremlin) = Client::new(actor_tx.clone())
-        .session_take_gremlin(session_id, &id)
-        .await
-    else {
+    let Some(mut gremlin) = session_task.take_gremlin(&id).await else {
         return error_response("active chat gremlin not found");
     };
 
@@ -111,9 +94,7 @@ pub(crate) async fn handle_compact(
         .expect("chat gremlin must carry a ChatDefinition")
         .interrupted();
     if interrupted {
-        Client::new(actor_tx.clone())
-            .session_reinsert_gremlin(session_id, &id, gremlin)
-            .await;
+        session_task.reinsert_gremlin(&id, gremlin).await;
         return error_response("cannot compact an interrupted chat turn");
     }
 
@@ -123,9 +104,7 @@ pub(crate) async fn handle_compact(
     let backend = match client.get_or_build_backend() {
         Ok(b) => b,
         Err(e) => {
-            Client::new(actor_tx.clone())
-                .session_reinsert_gremlin(session_id, &id, gremlin)
-                .await;
+            session_task.reinsert_gremlin(&id, gremlin).await;
             return error_response(&format!("failed to build backend for compaction: {e}"));
         }
     };
@@ -136,7 +115,7 @@ pub(crate) async fn handle_compact(
         Some(backend.clone()),
     );
 
-    let system_prompt = crate::clients::agent::system_prompts::chat_system_prompt();
+    let system_prompt = crate::executor::supervisor::chat_system_prompt::chat_system_prompt();
 
     match conv.compact(Some(system_prompt), None).await {
         Some(report) => {
@@ -152,18 +131,14 @@ pub(crate) async fn handle_compact(
                     Ok(()) => None,
                     Err(e) => Some(e.to_string()),
                 };
-            Client::new(actor_tx.clone())
-                .session_reinsert_gremlin(session_id, &id, gremlin)
-                .await;
+            session_task.reinsert_gremlin(&id, gremlin).await;
             match persist_err {
                 None => ok_response(serde_json::to_value(&report).unwrap_or_default()),
                 Some(msg) => error_response(&format!("failed to persist compacted history: {msg}")),
             }
         }
         None => {
-            Client::new(actor_tx.clone())
-                .session_reinsert_gremlin(session_id, &id, gremlin)
-                .await;
+            session_task.reinsert_gremlin(&id, gremlin).await;
             ok_response(serde_json::json!({"compacted": false, "reason": "nothing to compact"}))
         }
     }

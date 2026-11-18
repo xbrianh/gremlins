@@ -24,11 +24,11 @@ the defaults.
 | `glob.rs` | Glob | File globbing. Wraps the `glob` crate with sandbox-aware path resolution. |
 | `grep.rs` | Grep | Regex search. Walks directories, skips binaries, collects matches with configurable context lines, merges overlapping blocks, and separates non-contiguous results. |
 | `landscape.rs` | Landscape | File/directory structural outline. Delegates to `gremlins-landscape` for the tree-formatted output. |
-| `mischief.rs` | Mischief | Gremlins YAML DSL reference. Chat-only (`chat_only() == true`). Returns the full DSL reference document. |
+| `mischief.rs` | Mischief | Gremlins YAML DSL reference. Skills-gated (`skills_gated() == true`). Returns the full DSL reference document. |
 | `read.rs` | Read | File reading with 1-based line number prefixes. Supports offset/limit pagination. Has a larger `display_truncation` (500) because its body is a focal artifact. |
-| `skills.rs` | LoadSkill | Skill loading. Chat-only and bypasses the tool filter (`bypass_filter() == true`). Emits `EventKind::SkillLoaded { id, name }` on the bus; the supervisor applies the activation at the next turn boundary. |
+| `skills.rs` | LoadSkill | Skill loading. Skills-gated (`skills_gated() == true`). Emits `EventKind::SkillLoaded { id, name }` on the bus; the supervisor applies the activation at the next turn boundary. |
 | `task.rs` | Task | Fan-out worker delegation. Dispatches `Fork`/`Scout`/`Implement` tasks via the `task_fn` callback, which spawns nested agent loops. Implements `max_per_message()` to return `TASK_MAX_PER_TURN` (8). |
-| `websearch.rs` | WebSearch | Web page fetching via curl. Chat-only. Formats truncated page text. |
+| `websearch.rs` | WebSearch | Web page fetching via curl. Skills-gated. Formats truncated page text. |
 | `write.rs` | Write | File writing. Creates or overwrites files, creating parent directories as needed. Sandbox-checked via `sandbox_check()`. |
 
 ## Trait method defaults vs per-tool overrides
@@ -43,11 +43,11 @@ Most trait methods keep their defaults. Here's what each handler overrides:
 | `GlobTool` | `title_detail`, `secondary_args`, `sandbox_check`, `output_cap`, `output_marker`, `invoke` |
 | `GrepTool` | `title_detail`, `title_uses_secondaries`, `secondary_args`, `sandbox_check`, `output_cap`, `output_marker`, `invoke` |
 | `LandscapeTool` | `title_detail`, `sandbox_check`, `output_cap`, `invoke` |
-| `MischiefTool` | `chat_only`, `invoke` |
+| `MischiefTool` | `skills_gated`, `invoke` |
 | `ReadTool` | `title_detail`, `title_uses_secondaries`, `secondary_args`, `display_truncation`, `sandbox_check`, `output_cap`, `invoke` |
-| `LoadSkillTool` | `bypass_filter`, `invoke` |
+| `LoadSkillTool` | `skills_gated`, `invoke` |
 | `TaskTool` | `title_detail`, `max_per_message`, `invoke` |
-| `WebSearchTool` | `chat_only`, `title_detail`, `secondary_args`, `output_cap`, `invoke` |
+| `WebSearchTool` | `skills_gated`, `title_detail`, `secondary_args`, `output_cap`, `invoke` |
 | `WriteTool` | `title_detail`, `sandbox_check`, `invoke` |
 
 ## Key invariants

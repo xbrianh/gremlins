@@ -698,7 +698,7 @@ mod tests {
             loop_iter: "1".to_string(),
             runtime_config: crate::executor::gremlin::RuntimeConfig::snapshot(None),
             cancel_token: None,
-            interactive_session: None,
+            interactive_sessions: None,
             clean_cmds: Vec::new(),
             enclosing_task_models: None,
             enclosing_model: None,

@@ -1,13 +1,18 @@
-//! Leaf helpers shared by the chat request handler and the turn loop:
+//! Leaf module shared by the chat request handler and the turn loop:
 //! usage accounting and the chat JSON-line envelope.
 //!
-//! Keeping these in a leaf module lets [`super::turn`] and
-//! [`super::turn_finalizer`] import downward instead of reaching back into
-//! their parent, so `chat → turn` stays a one-way edge.
+//! Keeping these in a leaf module lets [`super::turn`] import downward instead
+//! of reaching back into its parent, so `chat → turn` stays a one-way edge.
+//!
+//! [`PromptMsg`] is re-exported from [`super::super::prompt_msg`] so the
+//! chat module and [`super::super::chat_handle`] share a neutral prompt type
+//! without creating a dependency cycle.
 
 use serde_json::{Map, Value};
 
 use crate::clients::protocol::{add_opt, UsageStats};
+
+pub(crate) use super::super::prompt_msg::PromptMsg;
 
 /// Read persisted `state.json.token_usage` as [`UsageStats`].
 pub(crate) fn usage_stats_from_state(value: Option<&Value>) -> UsageStats {

@@ -220,13 +220,8 @@ pub async fn commit_agent(
 // Workspace preamble assembly
 // ---------------------------------------------------------------------------
 
-pub(crate) fn build_workspace_preamble(cwd: &str, is_chat: bool) -> String {
-    let base = format!("Your working directory is: {cwd}");
-    if is_chat {
-        base
-    } else {
-        format!("{base}\nRelevant environment variable: $GREMLIN_WORKDIR")
-    }
+pub(crate) fn build_workspace_preamble(cwd: &str) -> String {
+    format!("Your working directory is: {cwd}")
 }
 
 impl AgentPrepared {
@@ -241,8 +236,8 @@ impl AgentPrepared {
     }
 
     /// Workspace preamble + stage prompt (no harness system content).
-    pub fn user_prompt(&self, is_chat: bool) -> String {
-        let preamble = build_workspace_preamble(&self.cwd, is_chat);
+    pub fn user_prompt(&self) -> String {
+        let preamble = build_workspace_preamble(&self.cwd);
         format!("{preamble}\n\n{}", self.prompt)
     }
 }
@@ -515,17 +510,11 @@ mod tests {
             .await
             .unwrap();
         prepared.cwd = String::new();
-        // Chat: no $GREMLIN_WORKDIR line even for empty cwd.
-        let chat_preamble = build_workspace_preamble(&prepared.cwd, true);
-        assert_eq!(chat_preamble, "Your working directory is: ");
-        assert!(!chat_preamble.contains("$GREMLIN_WORKDIR"));
-        // Pipeline: both lines present, with an empty cwd value.
-        let pipeline_preamble = build_workspace_preamble(&prepared.cwd, false);
-        assert_eq!(
-            pipeline_preamble,
-            "Your working directory is: \nRelevant environment variable: $GREMLIN_WORKDIR"
-        );
-        let full = format!("{pipeline_preamble}\n\n{}", prepared.prompt);
+        // No $GREMLIN_WORKDIR line even for empty cwd.
+        let preamble = build_workspace_preamble(&prepared.cwd);
+        assert_eq!(preamble, "Your working directory is: ");
+        assert!(!preamble.contains("$GREMLIN_WORKDIR"));
+        let full = format!("{preamble}\n\n{}", prepared.prompt);
         assert!(full.contains("Your working directory is: "));
     }
 
@@ -547,13 +536,11 @@ mod tests {
             .await
             .unwrap();
         prepared.cwd = "/work".to_string();
-        // Pipeline: both the working directory and the env var line.
-        let preamble = build_workspace_preamble(&prepared.cwd, false);
+        let preamble = build_workspace_preamble(&prepared.cwd);
         assert!(preamble.contains("Your working directory is: /work"));
-        assert!(preamble.contains("$GREMLIN_WORKDIR"));
+        assert!(!preamble.contains("$GREMLIN_WORKDIR"));
         let full = format!("{preamble}\n\n{}", prepared.prompt);
         assert!(full.contains("Your working directory is: /work"));
-        assert!(full.contains("$GREMLIN_WORKDIR"));
         assert!(!full.contains("Project worktree:"));
     }
 
@@ -704,23 +691,15 @@ mod tests {
 
     #[test]
     fn test_build_workspace_preamble_pipeline() {
-        let p = build_workspace_preamble("/work/dir", false);
-        assert!(p.contains("Your working directory is: /work/dir"));
-        assert!(p.contains("$GREMLIN_WORKDIR"));
-        assert!(!p.contains("Project worktree:"));
-
-        let p2 = build_workspace_preamble("/tmp/run", false);
-        assert!(p2.contains("Your working directory is: /tmp/run"));
-        assert!(p2.contains("$GREMLIN_WORKDIR"));
-        assert!(!p2.contains("Project worktree:"));
-    }
-
-    #[test]
-    fn test_build_workspace_preamble_chat_omits_env_var() {
-        let p = build_workspace_preamble("/work/dir", true);
-        assert!(p.contains("Your working directory is: /work/dir"));
+        let p = build_workspace_preamble("/work/dir");
+        assert_eq!(p, "Your working directory is: /work/dir");
         assert!(!p.contains("$GREMLIN_WORKDIR"));
         assert!(!p.contains("Project worktree:"));
+
+        let p2 = build_workspace_preamble("/tmp/run");
+        assert_eq!(p2, "Your working directory is: /tmp/run");
+        assert!(!p2.contains("$GREMLIN_WORKDIR"));
+        assert!(!p2.contains("Project worktree:"));
     }
 
     fn agent_with_bind(key: &str, uri: &str) -> Agent {

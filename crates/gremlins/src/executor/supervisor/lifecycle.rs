@@ -1,11 +1,9 @@
-//! Child gremlin lifecycle: launch, stop, channel setup, and task spawning.
+//! Child gremlin lifecycle: channel setup, task spawning, log writing, and terminal reap.
 
 use std::sync::Arc;
 
-use tokio::sync::{mpsc, watch};
-
 use crate::clients::client::Client;
-use crate::clients::interactive::{InteractiveChannels, InteractiveHandle};
+use crate::clients::interactive::{InteractiveHandle, InteractiveSessionFactory};
 use crate::executor::gremlin::Gremlin;
 use crate::executor::state;
 
@@ -13,7 +11,12 @@ use gremlins_magic_bus::EventKind;
 use gremlins_magic_bus::{emit_event, init_bus};
 use gremlins_magic_bus::{CorrId, ReceiverHalf, SubscriberRegistration};
 
-use super::RunState;
+/// Best-effort relay of a child's log into the parent's event bus.
+#[derive(Clone)]
+pub(crate) struct LogRelay {
+    pub parent_id: String,
+    pub prefix: String,
+}
 
 /// Set up log + interactive + stage-stream channels on a gremlin. Returns the
 /// interactive handle, log flush channel, and the log-writer bus subscriber
@@ -27,10 +30,12 @@ pub(crate) fn setup_gremlin_channels(
     tokio::sync::mpsc::UnboundedSender<tokio::sync::oneshot::Sender<()>>,
     gremlins_magic_bus::Subscriber<EventKind>,
 ) {
-    let channels = InteractiveChannels::new();
-    let (interactive_handle, interactive_session) = channels.split();
-    gremlin.runtime_config.interactive = Some(interactive_handle.clone());
-    gremlin.interactive_session = Some(interactive_session);
+    let (sessions, interactive_handle) = if gremlin.state.read_str("kind") == "chat" {
+        InteractiveSessionFactory::for_chat()
+    } else {
+        InteractiveSessionFactory::for_pipeline()
+    };
+    gremlin.interactive_sessions = Some(sessions);
 
     let store = gremlin.state.store_handle();
     let run_id = gremlin.id.to_string();
@@ -185,97 +190,7 @@ fn spawn_log_writer(
     barrier_tx
 }
 
-pub(crate) fn spawn_gremlin_runner(
-    actor_tx: &mpsc::UnboundedSender<super::actor::ActorMsg>,
-    gremlin: Gremlin,
-    stage_label: &str,
-    resume_from: Option<&str>,
-    definition_name: &str,
-    notify_shutdown: bool,
-) {
-    let (respond, _rx) = tokio::sync::oneshot::channel();
-    actor_tx
-        .send(super::actor::ActorMsg::LaunchRun {
-            gremlin,
-            stage_label: stage_label.to_string(),
-            resume_from: resume_from.map(String::from),
-            definition_name: definition_name.to_string(),
-            notify_shutdown,
-            respond,
-        })
-        .expect("actor alive");
-    // Fire-and-forget: the actor sends the id back but no caller awaits it.
-}
-
-// ---------------------------------------------------------------------------
-// launch_child / stop_child — public API for the parallel executor
-// ---------------------------------------------------------------------------
-
-/// Result of [`launch_child`]: a state watch receiver that fires when the
-/// child reaches a terminal state, and a oneshot receiver for the child
-/// [`Gremlin`] after its task completes.
-pub(crate) struct LaunchResult {
-    pub state_rx: watch::Receiver<RunState>,
-    pub gremlin_rx: tokio::sync::oneshot::Receiver<Gremlin>,
-}
-
-/// Best-effort relay of a child's log into the parent's event bus.
-#[derive(Clone)]
-pub(crate) struct LogRelay {
-    pub parent_id: String,
-    pub prefix: String,
-}
-
-/// Launch a pre-configured child gremlin into the run map.
-///
-/// The actor owns channel setup, the run-map insert, the spawned task and the
-/// `RunStarted` event; this just sends `LaunchChild` and awaits the reply.
-pub(crate) async fn launch_child(
-    actor_tx: &mpsc::UnboundedSender<super::actor::ActorMsg>,
-    gremlin: Gremlin,
-    relay: Option<LogRelay>,
-) -> LaunchResult {
-    let (respond, rx) = tokio::sync::oneshot::channel();
-    actor_tx
-        .send(super::actor::ActorMsg::LaunchChild {
-            gremlin,
-            relay,
-            respond,
-        })
-        .expect("actor alive");
-    rx.await.expect("actor died")
-}
-
-/// Stop a child gremlin by aborting its task and cleaning up.
-///
-/// A no-op when the child is not in the run map (already finished or never
-/// launched).
-pub(crate) async fn stop_child(actor_tx: &mpsc::UnboundedSender<super::actor::ActorMsg>, id: &str) {
-    let (respond, rx) = tokio::sync::oneshot::channel();
-    let _ = actor_tx.send(super::actor::ActorMsg::StopRun {
-        id: id.to_string(),
-        respond,
-    });
-    // The actor already removed the entry, published the terminal state, and
-    // released the log subscription; `Some(..)` means the id was live and the
-    // follow-up work is ours.
-    if let Ok(Some(state_tx)) = rx.await {
-        let _ = state_tx.send(RunState {
-            id: id.to_string(),
-            status: "stopped".to_string(),
-            stage: String::new(),
-            started_at: String::new(),
-        });
-        // Write terminal state to disk so the aborted child isn't reported as
-        // orphan and has a recorded exit_code.
-        if let Ok(sd) = state::StateData::open(id) {
-            sd.write_terminal_state(1);
-        }
-        // Reap backend resources that the aborted task would have reaped in
-        // Gremlin::finish.
-        reap_client_for(id);
-    }
-}
+// ── Terminal reap ──────────────────────────────────────────────────────
 
 pub(crate) fn reap_client_for(id: &str) {
     let spec = state::StateData::open(id)

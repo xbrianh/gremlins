@@ -55,26 +55,19 @@ pub(crate) async fn run_stage(
     stage: &ExecutorStage,
     gremlin: &mut Gremlin,
 ) -> Result<(), RunError> {
-    run_stage_scoped(stage, gremlin, "", "", "", None, None).await
+    run_stage_scoped(stage, gremlin, "", &[], None, None).await
 }
 
 /// Run one stage under `scope`.
 ///
-/// `display_stage` is the human-readable stage name for `ls`, `info`, and
-/// `/watch` — it is the immediate enclosing composite's name (or empty for
-/// top-level stages).  This is separate from `scope`, which is the
-/// execution key used for routing (may contain nested paths or iteration
-/// keys).
-///
-/// `stage_usage_path` is the stable structural path for per-stage token
-/// breakdown — it stays constant across repeated/resumed iterations while
-/// `scope` may vary.
+/// `sequences` is the structural path of enclosing sequences. Its first
+/// element is the display stage; the full path identifies the active leaf
+/// and scopes token accounting independently of attempts and iterations.
 async fn run_stage_scoped(
     stage: &ExecutorStage,
     gremlin: &mut Gremlin,
     scope: &str,
-    display_stage: &str,
-    stage_usage_path: &str,
+    sequences: &[&str],
     enclosing_model: Option<&ModelURI>,
     enclosing_task_models: Option<&IndexMap<String, String>>,
 ) -> Result<(), RunError> {
@@ -92,33 +85,28 @@ async fn run_stage_scoped(
         ),
     });
 
-    // Scoped (sequence/parallel child) stages are not announced by the
-    // top-level run loop. Publish their active leaf identity so a stage-stream
-    // follow can switch from the enclosing composite's operational log to the
-    // child's agent/exec output.
-    let scoped = !scope.is_empty();
-    if scoped {
-        send_stage_boundary(gremlin.id.as_str(), stage.name(), stage.stage_type());
-    }
+    let display_stage = sequences.first().copied();
+    let stage_usage_path = sequences.join("/");
 
     // Keep `state.stage` pointed at the enclosing composite so `ls`,
     // `info`, and `/watch` show the human-readable stage name (not an
     // internal execution key like `reviews/checks` or `1~reviews~1`).
     // The leaf name goes into `sub_stage` for Ctrl+O classification.
-    if matches!(
+    let is_leaf = matches!(
         stage,
         ExecutorStage::Agent { .. } | ExecutorStage::Exec { .. }
-    ) {
-        gremlin.state.set_stage(stage.name(), None, display_stage);
-        let (event_stage, sub_stage) = if display_stage.is_empty() {
-            (stage.name().to_string(), None)
-        } else {
-            (display_stage.to_string(), Some(stage.name().to_string()))
-        };
+    );
+    if is_leaf {
+        gremlin.state.set_stage_path(stage.name(), None, sequences);
+    }
+    if display_stage.is_some() {
+        send_stage_boundary(gremlin.id.as_str(), stage.name(), stage.stage_type());
+    }
+    if is_leaf {
         emit_event(EventKind::StageTransition {
             id: gremlin.id.to_string(),
-            stage: event_stage,
-            sub_stage,
+            stage: display_stage.unwrap_or(stage.name()).to_owned(),
+            sub_stage: display_stage.map(|_| stage.name().to_owned()),
         });
     }
 
@@ -128,7 +116,7 @@ async fn run_stage_scoped(
                 stage,
                 gremlin,
                 scope,
-                stage_usage_path,
+                &stage_usage_path,
                 enc_model,
                 enc_tm,
             )
@@ -138,24 +126,18 @@ async fn run_stage_scoped(
             crate::executor::run_exec::run_exec(stage, gremlin, enc_model, enc_tm).await
         }
         ExecutorStage::Sequence(_) => {
-            run_sequence(
-                stage,
-                gremlin,
-                scope,
-                display_stage,
-                stage_usage_path,
-                enc_model,
-                enc_tm,
-            )
-            .await
+            run_sequence(stage, gremlin, scope, sequences, enc_model, enc_tm).await
         }
         ExecutorStage::Parallel { .. } => {
-            run_parallel(stage, gremlin, scope, stage_usage_path, enc_model, enc_tm).await
+            run_parallel(stage, gremlin, scope, &stage_usage_path, enc_model, enc_tm).await
         }
         ExecutorStage::Done => Ok(()),
     };
 
-    if scoped {
+    if display_stage.is_some() {
+        if is_leaf {
+            gremlin.state.finish_scoped_leaf();
+        }
         send_stage_boundary(gremlin.id.as_str(), "", "other");
     }
     result
@@ -334,8 +316,7 @@ async fn run_sequence(
     node: &ExecutorStage,
     gremlin: &mut Gremlin,
     scope: &str,
-    display_stage: &str,
-    stage_usage_path: &str,
+    sequences: &[&str],
     enclosing_model: Option<&ModelURI>,
     enclosing_task_models: Option<&IndexMap<String, String>>,
 ) -> Result<(), RunError> {
@@ -349,18 +330,10 @@ async fn run_sequence(
     let enclosing_task_models = merged.as_ref();
 
     let key = stage_key(scope, &seq.name);
-    // Structural path for per-stage token accounting: skips iteration and
-    // attempt suffixes so repeated/resumed executions accumulate together.
-    let usage_path = stage_key(stage_usage_path, &seq.name);
+    let mut child_sequences = sequences.to_vec();
+    child_sequences.push(&seq.name);
     let max_iterations = seq.max_iterations.max(1);
     let skip_guard = &seq.skip_if_exists;
-
-    // Preserve the outermost display identity through nested sequences.
-    let effective_display = if !display_stage.is_empty() {
-        display_stage
-    } else {
-        &seq.name
-    };
 
     // Non-repeating: run children once.
     if max_iterations == 1 {
@@ -382,8 +355,7 @@ async fn run_sequence(
                 child,
                 gremlin,
                 &key,
-                effective_display,
-                &usage_path,
+                &child_sequences,
                 enclosing_model,
                 enclosing_task_models,
             ))
@@ -450,8 +422,7 @@ async fn run_sequence(
                 child,
                 gremlin,
                 &loop_iter,
-                effective_display,
-                &usage_path,
+                &child_sequences,
                 enclosing_model,
                 enclosing_task_models,
             ))
@@ -782,10 +753,11 @@ mod tests {
         // Spawn a test actor so the parallel executor has a mailbox for
         // launch_child / stop_child.
         let (shutdown_tx, _shutdown_rx) = tokio::sync::watch::channel(false);
-        let actor_tx =
-            crate::executor::supervisor::actor::spawn_actor(config::state_root(), shutdown_tx);
+        let registry = std::sync::Arc::new(
+            crate::executor::supervisor::run_registry::RunRegistry::new(shutdown_tx),
+        );
         let mut runtime_config = crate::executor::gremlin::RuntimeConfig::snapshot(None);
-        runtime_config.actor_tx = Some(actor_tx);
+        runtime_config.registry = Some(registry);
 
         let gremlin = Gremlin {
             id: validate_gremlin_id("gr-test").unwrap(),
@@ -811,7 +783,7 @@ mod tests {
             stage_inputs: HashMap::new(),
             runtime_config,
             cancel_token: None,
-            interactive_session: None,
+            interactive_sessions: None,
             clean_cmds: Vec::new(),
             enclosing_task_models: None,
             enclosing_model: None,

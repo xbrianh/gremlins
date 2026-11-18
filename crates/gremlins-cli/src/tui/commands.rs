@@ -21,6 +21,14 @@ pub enum CommandResult {
     ActivateSkill(String),
     /// List discovered skills grouped by source.
     ListSkills,
+    /// Switch the conversation target back to the home chat.
+    AttachHome,
+    /// Attach to a stage execution: switch the conversation target to the
+    /// given run's current or named stage.
+    AttachStage {
+        run_id: String,
+        stage: Option<String>,
+    },
 }
 
 /// Parse `input` (minus the leading `/`) and dispatch.
@@ -250,6 +258,16 @@ pub fn dispatch(input: &str) -> Option<CommandResult> {
             op: "compact".to_string(),
             payload: serde_json::json!({"op": "compact"}),
         }),
+        "attach" => match args.first().copied() {
+            None | Some("home") => Some(CommandResult::AttachHome),
+            Some(id) => {
+                let stage = args.get(1).copied().map(String::from);
+                Some(CommandResult::AttachStage {
+                    run_id: id.to_string(),
+                    stage,
+                })
+            }
+        },
         _ => Some(CommandResult::Lines(vec![format!(
             "unknown command: /{cmd} — type /help for available commands"
         )])),
@@ -304,6 +322,8 @@ fn help_text() -> Vec<String> {
         "  /skills          — list available operator skills".to_string(),
         "  /skill <name>    — activate a skill for the chat session".to_string(),
         "  /compact         — compact conversation history to reduce context usage".to_string(),
+        "  /attach [id] [stage] — attach to a stage execution; /attach home to return to chat"
+            .to_string(),
         "  /chat            — chat is always active (type directly)".to_string(),
         "  /clear, /new     — restart chat".to_string(),
         "  /help            — show this help".to_string(),
@@ -320,6 +340,10 @@ fn help_text() -> Vec<String> {
         "  Ctrl+O           — in /watch: open or close the selected gremlin's live log"
             .to_string(),
         "  j/k/Up/Down      — in /watch: move the gremlin selection".to_string(),
+        "  Enter             — in /watch: open the selected gremlin's chat"
+            .to_string(),
+        "  s                 — in /watch: stop the selected gremlin".to_string(),
+        "  r                 — in /watch: resume the selected gremlin".to_string(),
         "  Esc              — in /watch: close the live log first, then return to chat; otherwise clear/cancel"
             .to_string(),
         "  Ctrl+G           — open external editor".to_string(),
@@ -357,6 +381,7 @@ mod tests {
             "/skills",
             "/skill",
             "/compact",
+            "/attach",
             "/chat",
             "/clear",
             "/new",

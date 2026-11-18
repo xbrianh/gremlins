@@ -1,289 +1,383 @@
-//! Interactive operator prompt for agent stages.
-//!
-//! Channels created once per gremlin at launch time. The supervisor holds an
-//! [`InteractiveHandle`]; the agent loop receives an [`InteractiveSession`].
-//! Stream events flow through the event bus, not through these channels.
+//! The run handle publishes pause requests; only the loop that accepts a
+//! request receives that attachment's commands. Stream events stay on the bus.
 
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Mutex, Weak};
 
-use serde::{Deserialize, Serialize};
-use tokio::sync::{mpsc, Notify};
+use crate::clients::protocol::UsageStats;
+use tokio::sync::{mpsc, oneshot, Notify};
 
-/// A resettable signal that interrupts the agent loop at any async yield point.
-/// Modelled on [`CancelToken`] but with a public `reset()` so the agent can
-/// resume normal operation after a debug session ends.
+/// The terminal debug frames have different wire shapes. Never synthesize a
+/// successful model turn from a command-channel close or cancellation.
+#[derive(Debug, serde::Serialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub(crate) enum DebugOutcome {
+    Done { text: String, usage: UsageStats },
+    Ended { reason: String },
+}
+
+/// Reason string for [`DebugOutcome::Ended`] when a [`InteractiveCommand::Message`]
+/// correction is delivered.  Emitted by `interactive_loop`, consumed by
+/// `turn_runner`.
+pub(crate) const MESSAGE_DELIVERED_REASON: &str = "message delivered";
+
 #[derive(Debug)]
-pub struct PauseToken {
-    flag: AtomicBool,
-    notify: Notify,
-}
-
-impl PauseToken {
-    pub fn new() -> Arc<Self> {
-        Arc::new(Self {
-            flag: AtomicBool::new(false),
-            notify: Notify::new(),
-        })
-    }
-
-    /// Signal the agent loop to pause at the next yield point.
-    ///
-    /// Uses [`Notify::notify_one`] rather than `notify_waiters` so the
-    /// permit is stored when no waiter is registered yet — eliminating the
-    /// race between flag check and `notified().await` in [`paused`](Self::paused).
-    pub fn pause(&self) {
-        log::debug!("PauseToken::pause() called");
-        self.flag.store(true, Ordering::Release);
-        self.notify.notify_one();
-    }
-
-    /// Clear the pause signal so the agent can resume normal operation.
-    pub fn reset(&self) {
-        log::debug!("PauseToken::reset() called");
-        self.flag.store(false, Ordering::Release);
-    }
-
-    pub fn is_paused(&self) -> bool {
-        let paused = self.flag.load(Ordering::Acquire);
-        if paused {
-            log::debug!("PauseToken::is_paused() -> true");
-        }
-        paused
-    }
-
-    /// Future that resolves when `pause()` is called.
-    ///
-    /// Safe against the race where `pause()` fires between the flag check
-    /// and `notified().await`: `pause()` uses `notify_one`, which stores a
-    /// permit when no waiter is registered, so the next `notified().await`
-    /// completes immediately.
-    ///
-    /// After waking, re-checks the flag so that a `reset()` between
-    /// `pause()` and `paused()` does not cause a spurious resolution.
-    pub async fn paused(&self) {
-        log::debug!("PauseToken::paused() — entering wait loop");
-        loop {
-            let notified = self.notify.notified();
-            if self.flag.load(Ordering::Acquire) {
-                log::debug!("PauseToken::paused() — flag already set, returning immediately");
-                return;
-            }
-            log::debug!("PauseToken::paused() — waiting for notify");
-            notified.await;
-            // Woke up — re-check the flag before returning.
-            // If reset() was called, the flag is false and we loop.
-            log::debug!("PauseToken::paused() — notified, re-checking flag");
-        }
-    }
-}
-
-/// Commands the supervisor sends to the agent loop over an mpsc channel.
-///
-/// `Pause` is no longer carried on this channel — use [`PauseToken::pause`]
-/// instead for immediate interrupt at any yield point.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub enum InteractiveCommand {
-    /// Inject an operator message and run one turn.
+pub(crate) enum InteractiveCommand {
+    /// Inject text and run a single step with a debug-amended system prompt.
     Inject(String),
-    /// Run one turn with the current next_prompt, then re-pause.
+    /// Deliver a correction, release the pause slot, and resume the agent loop.
+    /// Does NOT amend the system prompt — keeps the original model/prompt.
+    Message(String),
+    /// Run a single turn without injecting text (operator 'continue').
     RunTurn,
-    /// Terminate the run with a bail reason.
+    /// Terminate the agent with an error.
     Bail(String),
-    /// Exit interactive mode and resume normal operation.
+    /// Resume autonomous execution (detach the debugger).
     Quit,
 }
 
-// ── Channel pair ──────────────────────────────────────────────────────────
-
-/// Created once per gremlin at launch. Call [`split`](InteractiveChannels::split)
-/// to produce the supervisor-side [`InteractiveHandle`] and the agent-side
-/// [`InteractiveSession`].
-pub(crate) struct InteractiveChannels {
-    pub cmd_tx: mpsc::Sender<InteractiveCommand>,
-    pub cmd_rx: mpsc::Receiver<InteractiveCommand>,
-    pub pause: Arc<PauseToken>,
+#[derive(Debug)]
+struct CommandInbox {
+    commands: mpsc::Receiver<InteractiveCommand>,
+    ready: Option<oneshot::Sender<()>>,
+    ended: Option<oneshot::Sender<DebugOutcome>>,
 }
 
-impl InteractiveChannels {
-    /// Create a new channel pair with a shared [`PauseToken`].
-    pub(crate) fn new() -> Self {
-        let (cmd_tx, cmd_rx) = mpsc::channel(8);
-        let pause = PauseToken::new();
-        Self {
-            cmd_tx,
-            cmd_rx,
-            pause,
+/// Outlives the command inbox so a supervisor can publish the actual turn
+/// outcome after the agent unwinds. Only an accepted attachment registers.
+#[derive(Clone, Debug, Default)]
+pub(crate) struct DebugTerminal(Arc<Mutex<Option<oneshot::Sender<DebugOutcome>>>>);
+
+impl DebugTerminal {
+    fn finish(&self, outcome: DebugOutcome) {
+        if let Some(tx) = self.0.lock().unwrap().take() {
+            let _ = tx.send(outcome);
         }
     }
 
-    /// Split into the supervisor-side handle and the agent-side session.
-    /// Both halves share the same pause token.
-    pub(crate) fn split(self) -> (InteractiveHandle, InteractiveSession) {
-        let handle = InteractiveHandle {
-            cmd_tx: self.cmd_tx,
-            pause: self.pause.clone(),
-        };
-        let session = InteractiveSession {
-            cmd_rx: self.cmd_rx,
-            pause: self.pause,
-        };
-        (handle, session)
+    pub(crate) fn end(&self, reason: &str) {
+        self.finish(DebugOutcome::Ended {
+            reason: reason.into(),
+        });
     }
 }
 
-impl Default for InteractiveChannels {
-    fn default() -> Self {
-        Self::new()
+#[derive(Debug, Default)]
+enum PauseState {
+    #[default]
+    Idle,
+    Requested(CommandInbox),
+    Accepted,
+}
+
+impl PauseState {
+    fn accept(&mut self) -> Option<CommandInbox> {
+        match std::mem::replace(self, Self::Accepted) {
+            Self::Requested(inbox) => Some(inbox),
+            previous => {
+                *self = previous;
+                None
+            }
+        }
     }
 }
 
-// ── Supervisor-side handle ────────────────────────────────────────────────
-
-/// Stored in [`RunHandle`] and [`RuntimeConfig`]. The supervisor uses this to
-/// send commands and trigger pause. Stream events are consumed via the event
-/// bus, not this handle.
-#[derive(Clone, Debug)]
-pub(crate) struct InteractiveHandle {
-    pub cmd_tx: mpsc::Sender<InteractiveCommand>,
-    pub pause: Arc<PauseToken>,
+#[derive(Debug, Default)]
+struct PauseSlot {
+    state: Mutex<PauseState>,
+    requested: Notify,
+    /// Identifies one execution (one agent loop invocation). Incremented when
+    /// a new session is minted from this slot.
+    nonce: AtomicU64,
 }
 
-// ── Agent-side session ────────────────────────────────────────────────────
+/// The published run handle points to one execution at a time. A debugger
+/// snapshots its target *before* validating the active leaf against the store.
+#[derive(Clone, Debug, Default)]
+pub(crate) struct InteractiveHandle(Arc<Mutex<DebugTarget>>);
 
-/// Threaded through [`RunParams`] into the agent loop. The agent loop reads
-/// commands from `cmd_rx` and watches `pause` for immediate interrupt
-/// signals. Stream events are emitted through the agent loop's token-usage
-/// and prompt-debug callbacks rather than this session.
+impl InteractiveHandle {
+    pub(crate) fn target(&self) -> DebugTarget {
+        self.0.lock().unwrap().clone()
+    }
+
+    fn publish(&self, slot: &Arc<PauseSlot>) {
+        *self.0.lock().unwrap() = DebugTarget {
+            slot: Arc::downgrade(slot),
+            nonce: slot.nonce.load(Ordering::Relaxed),
+        };
+    }
+
+    #[cfg(test)]
+    pub(crate) fn attach(&self) -> Option<DebugAttachment> {
+        self.target().attach().ok()
+    }
+}
+
+/// Weak by design: neither validation nor a silent debugger keeps a static
+/// execution's pending request alive after its agent session goes away.
+#[derive(Clone, Debug, Default)]
+pub(crate) struct DebugTarget {
+    slot: Weak<PauseSlot>,
+    nonce: u64,
+}
+
+impl DebugTarget {
+    /// The execution identity captured when the target was published.
+    pub(crate) fn nonce(&self) -> u64 {
+        self.nonce
+    }
+
+    pub(crate) fn attach(&self) -> Result<DebugAttachment, &'static str> {
+        let slot = self
+            .slot
+            .upgrade()
+            .ok_or("agent stage is no longer active")?;
+        if slot.nonce.load(Ordering::Relaxed) != self.nonce {
+            return Err("execution has been replaced; target is stale");
+        }
+        let mut state = slot.state.lock().unwrap();
+        if !matches!(*state, PauseState::Idle) {
+            return Err("debugger already attached");
+        }
+        let (commands, rx) = mpsc::channel(8);
+        let (tx, ready) = oneshot::channel();
+        let (terminal, ended) = oneshot::channel();
+        *state = PauseState::Requested(CommandInbox {
+            commands: rx,
+            ready: Some(tx),
+            ended: Some(terminal),
+        });
+        slot.requested.notify_one();
+        Ok(DebugAttachment {
+            slot: self.slot.clone(),
+            commands,
+            ready,
+            ended,
+        })
+    }
+}
+
+/// Withdrawing a pending pause and accepting it are mutually exclusive.
+/// If already accepted, dropping the sole sender wakes just that receiver.
 #[derive(Debug)]
-pub struct InteractiveSession {
-    pub cmd_rx: mpsc::Receiver<InteractiveCommand>,
-    pub pause: Arc<PauseToken>,
+pub(crate) struct DebugAttachment {
+    slot: Weak<PauseSlot>,
+    commands: mpsc::Sender<InteractiveCommand>,
+    pub(crate) ready: oneshot::Receiver<()>,
+    pub(crate) ended: oneshot::Receiver<DebugOutcome>,
 }
 
-// ── Tests ────────────────────────────────────────────────────────────────
+impl Drop for DebugAttachment {
+    fn drop(&mut self) {
+        if let Some(slot) = self.slot.upgrade() {
+            *slot.state.lock().unwrap() = PauseState::Idle;
+        }
+    }
+}
+
+impl DebugAttachment {
+    pub(crate) fn try_send(
+        &self,
+        command: InteractiveCommand,
+    ) -> Result<(), mpsc::error::TrySendError<InteractiveCommand>> {
+        self.commands.try_send(command)
+    }
+
+    #[cfg(test)]
+    pub(crate) async fn send(
+        &self,
+        command: InteractiveCommand,
+    ) -> Result<(), mpsc::error::SendError<InteractiveCommand>> {
+        self.commands.send(command).await
+    }
+}
+
+#[derive(Debug)]
+pub(crate) struct InteractiveSessionFactory {
+    handle: InteractiveHandle,
+    /// Only chats allow a pending request to cross the gap between turns.
+    chat_slot: Option<Arc<PauseSlot>>,
+    next_terminal: Option<DebugTerminal>,
+}
+
+impl InteractiveSessionFactory {
+    pub(crate) fn for_pipeline() -> (Self, InteractiveHandle) {
+        Self::with_chat_slot(None)
+    }
+
+    pub(crate) fn for_chat() -> (Self, InteractiveHandle) {
+        Self::with_chat_slot(Some(Arc::default()))
+    }
+
+    fn with_chat_slot(chat_slot: Option<Arc<PauseSlot>>) -> (Self, InteractiveHandle) {
+        let handle = InteractiveHandle::default();
+        if let Some(slot) = &chat_slot {
+            handle.publish(slot);
+        }
+        (
+            Self {
+                handle: handle.clone(),
+                chat_slot,
+                next_terminal: None,
+            },
+            handle,
+        )
+    }
+
+    /// Chat classifies soft vs. hard cancellation after joining the stage.
+    pub(crate) fn supervise_next_turn(&mut self) -> DebugTerminal {
+        self.next_terminal.insert(DebugTerminal::default()).clone()
+    }
+
+    pub(crate) fn next_session(&mut self) -> InteractiveSession {
+        let slot = self.chat_slot.clone().unwrap_or_default();
+        // Mint a fresh execution identity, then republish so the handle's
+        // target reports the nonce of the execution it now points at.
+        let nonce = slot.nonce.fetch_add(1, Ordering::Relaxed) + 1;
+        self.handle.publish(&slot);
+        InteractiveSession {
+            slot,
+            nonce,
+            active: None,
+            terminal: self.next_terminal.take(),
+        }
+    }
+}
+
+#[derive(Debug, Default)]
+pub struct InteractiveSession {
+    slot: Arc<PauseSlot>,
+    /// Identifies this execution so commands can be checked against the
+    /// correct agent loop invocation.
+    #[allow(dead_code)]
+    nonce: u64,
+    active: Option<CommandInbox>,
+    terminal: Option<DebugTerminal>,
+}
+
+impl InteractiveSession {
+    pub fn unattached() -> Self {
+        Self::default()
+    }
+
+    /// Without an outer chat supervisor the agent reports its own result.
+    pub(crate) fn supervise_if_needed(&mut self) -> Option<DebugTerminal> {
+        if self.terminal.is_some() {
+            None
+        } else {
+            Some(self.terminal.insert(DebugTerminal::default()).clone())
+        }
+    }
+
+    pub(crate) fn accept_pause(&mut self) -> bool {
+        let Some(mut inbox) = self.slot.state.lock().unwrap().accept() else {
+            return false;
+        };
+        if let Some(terminal) = &self.terminal {
+            *terminal.0.lock().unwrap() = inbox.ended.take();
+        }
+        self.active = Some(inbox);
+        true
+    }
+
+    pub(crate) async fn paused(&mut self) {
+        while !self.accept_pause() {
+            // notify_one stores a permit even if attach races this await.
+            self.slot.requested.notified().await;
+        }
+    }
+
+    pub(crate) fn is_attached(&self) -> bool {
+        self.active.is_some()
+    }
+
+    pub(crate) fn finish_attachment(&mut self, outcome: DebugOutcome) {
+        if let Some(terminal) = &self.terminal {
+            terminal.finish(outcome);
+        } else if let Some(tx) = self.active.as_mut().and_then(|inbox| inbox.ended.take()) {
+            let _ = tx.send(outcome);
+        }
+        self.active = None;
+    }
+
+    /// Called after Ready has been emitted, including when re-entering after
+    /// a single step. Only the first Ready completes the socket handshake.
+    pub(crate) async fn next_command(&mut self) -> Option<InteractiveCommand> {
+        let inbox = self.active.as_mut().expect("accepted pause");
+        if let Some(ready) = inbox.ready.take() {
+            let _ = ready.send(());
+        }
+        inbox.commands.recv().await
+    }
+}
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::time::Duration;
+    use futures::FutureExt;
 
-    /// pause() notifies a waiter in paused() — even when pause() fires
-    /// before paused() is awaited (the notify_one permit is stored).
     #[tokio::test]
-    async fn pause_token_wakes_waiter() {
-        let token = PauseToken::new();
-        assert!(!token.is_paused());
+    async fn static_pause_expires_with_the_leaf_that_was_validated() {
+        let (mut sessions, handle) = InteractiveSessionFactory::for_pipeline();
+        let first = sessions.next_session();
+        let validated = handle.target();
+        let mut pending = validated.attach().unwrap();
 
-        // Fire pause before the waiter starts — the permit must be stored.
-        token.pause();
-        assert!(token.is_paused());
+        // The leaf finishes without polling the request. Neither a pending
+        // handshake nor validation in progress can follow the published handle.
+        drop(first);
+        let mut second = sessions.next_session();
+        assert!((&mut pending.ready).now_or_never().unwrap().is_err());
+        assert!(validated.attach().is_err());
+        assert!(!second.accept_pause());
 
-        // The waiter should resolve immediately.
-        let result = tokio::time::timeout(Duration::from_secs(2), async {
-            token.paused().await;
-            true
-        })
-        .await;
-        assert!(result.is_ok(), "paused() timed out");
-        assert!(result.unwrap());
+        let current = handle.target().attach().unwrap();
+        drop(pending);
+        assert!(second.accept_pause());
+        current.try_send(InteractiveCommand::RunTurn).unwrap();
+        assert!(matches!(
+            second.next_command().await,
+            Some(InteractiveCommand::RunTurn)
+        ));
     }
 
-    /// reset() clears the flag so is_paused() returns false.
     #[tokio::test]
-    async fn pause_token_reset_clears_flag() {
-        let token = PauseToken::new();
-        token.pause();
-        assert!(token.is_paused());
-        token.reset();
-        assert!(!token.is_paused());
-    }
-
-    /// reset() between pause() and paused() — the notify permit was stored,
-    /// so paused() still resolves, but the flag check at the top of the
-    /// loop sees false and loops back.
-    #[tokio::test]
-    async fn pause_then_reset_before_await() {
-        let token = PauseToken::new();
-        token.pause();
-        token.reset();
-
-        // paused() should NOT resolve within a short timeout because the
-        // flag is false — it waits for another notify.
-        let result = tokio::time::timeout(Duration::from_millis(200), async {
-            token.paused().await;
-            true
-        })
-        .await;
-        assert!(
-            result.is_err(),
-            "paused() should have timed out after reset()"
-        );
-
-        // Now pause again — the waiting task should resolve.
-        token.pause();
-        let result = tokio::time::timeout(Duration::from_secs(2), async {
-            token.paused().await;
-            true
-        })
-        .await;
-        assert!(result.is_ok(), "paused() timed out after second pause()");
-        assert!(result.unwrap());
-    }
-
-    /// Split channels: send a command from handle side, receive on session side.
-    #[tokio::test]
-    async fn channels_deliver_commands() {
-        let channels = InteractiveChannels::new();
-        let (handle, mut session) = channels.split();
-
-        // Send Inject from handle side.
-        handle
-            .cmd_tx
-            .send(InteractiveCommand::Inject("hello".to_string()))
-            .await
-            .unwrap();
-
-        // Receive on session side.
-        let cmd = session.cmd_rx.recv().await.unwrap();
-        assert!(matches!(cmd, InteractiveCommand::Inject(ref text) if text == "hello"));
-    }
-
-    /// When cmd_rx is dropped, recv() on the session side returns None.
-    #[tokio::test]
-    async fn cmd_rx_closed_when_handle_dropped() {
-        let channels = InteractiveChannels::new();
-        let (handle, mut session) = channels.split();
-
-        // Drop the handle side — cmd_tx is dropped, so cmd_rx should close.
-        drop(handle);
-
-        let cmd = session.cmd_rx.recv().await;
-        assert!(
-            cmd.is_none(),
-            "cmd_rx should return None when sender is dropped"
-        );
-    }
-
-    /// When the agent-side session is dropped, the handle's cmd_tx.closed()
-    /// future resolves — letting the supervisor detect a dead agent.
-    #[tokio::test]
-    async fn cmd_tx_closed_when_session_dropped() {
-        let channels = InteractiveChannels::new();
-        let (handle, session) = channels.split();
-
-        let cmd_tx_closed = handle.cmd_tx.closed();
-        tokio::pin!(cmd_tx_closed);
-
-        // Before dropping the session, cmd_tx should not be closed.
-        // (We can't assert it's not ready without a race, but we assert
-        // that after drop it resolves promptly.)
+    async fn supervisor_outcome_outlives_the_accepted_command_inbox() {
+        let (mut sessions, handle) = InteractiveSessionFactory::for_chat();
+        let terminal = sessions.supervise_next_turn();
+        let mut session = sessions.next_session();
+        let mut debugger = handle.attach().unwrap();
+        session.paused().await;
+        assert!(session.next_command().now_or_never().is_none());
+        (&mut debugger.ready).await.unwrap();
         drop(session);
+        assert!((&mut debugger.ended).now_or_never().is_none());
+        terminal.end("interrupted");
+        assert!(matches!(
+            (&mut debugger.ended).await,
+            Ok(DebugOutcome::Ended { reason }) if reason == "interrupted"
+        ));
+    }
 
-        let result = tokio::time::timeout(Duration::from_secs(2), &mut cmd_tx_closed).await;
-        assert!(
-            result.is_ok(),
-            "cmd_tx.closed() should resolve after session is dropped"
-        );
+    #[tokio::test]
+    async fn dropping_an_attachment_only_releases_its_own_pause() {
+        let (mut sessions, handle) = InteractiveSessionFactory::for_chat();
+        let mut first = sessions.next_session();
+        let old = handle.attach().unwrap();
+        first.paused().await;
+        assert!(handle.attach().is_none());
+        drop(old);
+
+        let next = handle.attach().unwrap();
+        let mut second = sessions.next_session();
+        second.paused().await;
+        assert!(first.next_command().await.is_none());
+        assert!(second.next_command().now_or_never().is_none());
+        next.send(InteractiveCommand::RunTurn).await.unwrap();
+        assert!(matches!(
+            second.next_command().await,
+            Some(InteractiveCommand::RunTurn)
+        ));
     }
 }

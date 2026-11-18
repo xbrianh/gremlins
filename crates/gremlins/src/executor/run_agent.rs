@@ -78,6 +78,7 @@ pub(crate) async fn run_agent(
         unreachable!("run_agent is only called for agent stages")
     };
 
+    let interactive = gremlin.next_interactive_session();
     let stage_path = if !stage_usage_path.is_empty() {
         stage_key(stage_usage_path, &agent.name)
     } else {
@@ -271,7 +272,7 @@ pub(crate) async fn run_agent(
         Box::new(conv);
 
     let params = RunParams {
-        prompt: prepared.user_prompt(is_chat),
+        prompt: prepared.user_prompt(),
         label: prepared.name.clone(),
         model: prepared
             .model
@@ -300,7 +301,6 @@ pub(crate) async fn run_agent(
         task_models,
         cancel_token: gremlin.cancel_token.clone(),
         prepopulated_conversation,
-        skills_available: gremlin.discovered_skills.is_some(),
         discovered_skills: gremlin.discovered_skills.clone(),
         extra_sandbox_roots: gremlin.extra_sandbox_roots.clone(),
         path_context: {
@@ -329,29 +329,6 @@ pub(crate) async fn run_agent(
         id: gremlin.id.to_string(),
         line: msg,
     });
-
-    // Interactive session: take the pre-created handle or create a fresh one.
-    let interactive = match gremlin.interactive_session.take() {
-        Some(session) => Some(session),
-        None => match gremlin.runtime_config.interactive.as_ref() {
-            Some(handle) => {
-                let (tx, rx) = tokio::sync::mpsc::channel(8);
-                if let Some(actor_tx) = gremlin.runtime_config.actor_tx.clone() {
-                    let _ =
-                        actor_tx.send(super::supervisor::actor::ActorMsg::SetRunInteractiveCmd {
-                            id: gremlin.id.to_string(),
-                            cmd_tx: tx,
-                            respond: tokio::sync::oneshot::channel().0,
-                        });
-                }
-                Some(crate::clients::interactive::InteractiveSession {
-                    cmd_rx: rx,
-                    pause: handle.pause.clone(),
-                })
-            }
-            None => None,
-        },
-    };
 
     log::debug!(
         "agent stage '{}' (gremlin={}): invoking client.run (model={})",
@@ -397,7 +374,7 @@ pub(crate) async fn run_agent(
             if matches!(&error, ClientError::Cancelled) && is_chat {
                 if let Some(turn_num) = chat_turn {
                     let mut messages = canonical_prefix;
-                    messages.push(Message::user(prepared.user_prompt(is_chat)));
+                    messages.push(Message::user(prepared.user_prompt()));
                     if let Err(e) =
                         persist_chat_conversation_turn(gremlin, turn_num, &messages).await
                     {

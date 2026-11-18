@@ -2,7 +2,8 @@ use rig_core::completion::message::ToolName;
 use rig_core::completion::ToolDefinition;
 
 use super::tool_specs::{
-    always_available, ToolSpec, MAX_CONCURRENT_TOOLS, TASK_MAX_PER_TURN, TOOL_SPECS,
+    always_available, is_skills_gated, ToolSpec, MAX_CONCURRENT_TOOLS, TASK_MAX_PER_TURN,
+    TOOL_SPECS,
 };
 
 /// Build the JSON-schema `parameters` object for a tool from its [`ToolSpec`].
@@ -69,7 +70,7 @@ fn tool_parameters(spec: &ToolSpec) -> serde_json::Value {
 
 pub(crate) fn tool_definitions(
     filter: Option<&[String]>,
-    is_chat: bool,
+    skills_available: bool,
     mode: super::tool_specs::ToolMode,
 ) -> Vec<ToolDefinition> {
     if mode == super::tool_specs::ToolMode::NoTools {
@@ -77,11 +78,11 @@ pub(crate) fn tool_definitions(
     }
     let mut all: Vec<ToolDefinition> = Vec::new();
     for spec in TOOL_SPECS {
-        // Chat-only tools are omitted from tool definitions in headless
-        // mode. The `chat_only` flag on ToolSpec is the single source of
-        // truth for this — it matches the `chat_only()` trait hook on the
-        // corresponding handler.
-        if spec.chat_only && !is_chat {
+        // Skills-gated tools are omitted from tool definitions when skills
+        // are unavailable. The `skills_gated` flag on ToolSpec is the single
+        // source of truth for this — it matches the `skills_gated()` trait hook
+        // on the corresponding handler.
+        if spec.skills_gated && !skills_available {
             continue;
         }
         let description = spec
@@ -99,18 +100,9 @@ pub(crate) fn tool_definitions(
         Some(names) => all
             .into_iter()
             .filter(|t| {
-                always_available(t.name.as_str())
-                    || (is_chat && {
-                        // Chat-only tools bypass the filter in chat mode.
-                        // We look up the original spec to check `chat_only`
-                        // so the flag stays the single source of truth.
-                        TOOL_SPECS
-                            .iter()
-                            .find(|s| s.name == t.name.as_str())
-                            .map(|s| s.chat_only)
-                            .unwrap_or(false)
-                    })
-                    || names.iter().any(|n| n.as_str() == t.name.as_str())
+                always_available(&t.name)
+                    || (skills_available && is_skills_gated(&t.name))
+                    || names.iter().any(|n| n == &t.name)
             })
             .collect(),
         None => all,

@@ -6,10 +6,11 @@
 //! fork/spawn.
 
 use async_trait::async_trait;
-use rig_core::completion::message::Origin;
+use rig_core::completion::message::{Origin, Reasoning};
+use rig_core::completion::Message;
 
 use super::conversation::message_text_byte_len;
-use super::conversation::{Conversation, RunArtifact, TurnScript, TurnScriptError};
+use super::conversation::{Conversation, PendingPrompt, RunArtifact, TurnScript, TurnScriptError};
 
 /// A minimal [`Conversation`] implementation for shell-backed models.
 ///
@@ -20,7 +21,7 @@ use super::conversation::{Conversation, RunArtifact, TurnScript, TurnScriptError
 /// `crate::conversation`.
 pub(crate) struct NakedConversation {
     history: Vec<rig_core::completion::Message>,
-    next_prompt: rig_core::completion::Message,
+    next_prompt: PendingPrompt,
     preserve_reasoning: bool,
     last_text: String,
     finalized_messages: Option<Vec<rig_core::completion::Message>>,
@@ -30,7 +31,7 @@ impl NakedConversation {
     pub(crate) fn with_history(prompt: &str, history: Vec<rig_core::completion::Message>) -> Self {
         Self {
             history,
-            next_prompt: rig_core::completion::Message::user(prompt.to_string()),
+            next_prompt: PendingPrompt::new(Message::user(prompt)),
             preserve_reasoning: false,
             last_text: String::new(),
             finalized_messages: None,
@@ -73,6 +74,15 @@ impl Conversation for NakedConversation {
         unreachable!("NakedConversation: finish_turn called in multi-turn path")
     }
 
+    fn record_interrupted_response(&mut self, text: String, reasoning: &[Reasoning]) {
+        self.next_prompt.commit_interrupted(
+            &mut self.history,
+            &text,
+            reasoning,
+            self.preserve_reasoning,
+        );
+    }
+
     fn pop_last_assistant_turn(&mut self) {
         unreachable!("NakedConversation: pop_last_assistant_turn called in retry path")
     }
@@ -82,13 +92,14 @@ impl Conversation for NakedConversation {
         _nested: bool,
         system_prompt: Option<String>,
     ) -> Result<TurnScript, TurnScriptError> {
+        let next_user_prompt = self.next_prompt.for_request();
         let limit = crate::config::max_prompt_bytes();
         let sys_bytes = system_prompt.as_ref().map(|s| s.len() as u64).unwrap_or(0);
         let actual: u64 = sys_bytes
             + self
                 .history
                 .iter()
-                .chain(std::iter::once(&self.next_prompt))
+                .chain(std::iter::once(&next_user_prompt))
                 .map(message_text_byte_len)
                 .sum::<u64>();
         if actual > limit {
@@ -97,7 +108,7 @@ impl Conversation for NakedConversation {
         Ok(TurnScript {
             messages: self.history.clone(),
             system_prompt,
-            next_user_prompt: self.next_prompt.clone(),
+            next_user_prompt,
         })
     }
 
@@ -109,7 +120,7 @@ impl Conversation for NakedConversation {
         done: Option<&rig_core::completion::message::ToolCall>,
     ) -> RunArtifact {
         let mut messages = self.history.clone();
-        messages.push(self.next_prompt.clone());
+        messages.push(self.next_prompt.for_request());
         let final_text = if text.trim().is_empty() {
             done.and_then(|tc| {
                 tc.function
@@ -165,11 +176,11 @@ impl Conversation for NakedConversation {
     }
 
     fn set_next_prompt(&mut self, prompt: &str) {
-        self.next_prompt = rig_core::completion::Message::user(prompt.to_string());
+        self.next_prompt = PendingPrompt::new(Message::user(prompt));
     }
 
-    fn inject_operator(&mut self, _text: &str) {
-        unreachable!("NakedConversation: inject_operator called in interactive path")
+    fn inject_operator(&mut self, text: &str) {
+        self.next_prompt.inject_operator(text);
     }
 
     fn done_rejected(
@@ -188,7 +199,7 @@ impl Conversation for NakedConversation {
             return msgs.clone();
         }
         let mut msgs = self.history.clone();
-        msgs.push(self.next_prompt.clone());
+        self.next_prompt.append_pending_to(&mut msgs);
         msgs
     }
 

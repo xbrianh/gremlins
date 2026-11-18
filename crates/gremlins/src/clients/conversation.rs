@@ -1,6 +1,67 @@
 // ── conversation machinery ──────────────────────────────────────────────────
 
 use async_trait::async_trait;
+use rig_core::completion::message::{Reasoning, UserContent};
+use rig_core::completion::Message;
+
+/// A prompt moves into history with its assistant response. Once consumed,
+/// the next request gets an ordinary continuation unless the operator injects
+/// a new prompt first.
+#[derive(Clone, Default)]
+pub(crate) struct PendingPrompt(Option<Message>);
+
+impl PendingPrompt {
+    pub(crate) fn new(prompt: Message) -> Self {
+        Self(Some(prompt))
+    }
+
+    fn continuation() -> Message {
+        Message::user("Continue.")
+    }
+
+    pub(crate) fn for_request(&self) -> Message {
+        self.0.clone().unwrap_or_else(Self::continuation)
+    }
+
+    pub(crate) fn append_pending_to(&self, messages: &mut Vec<Message>) {
+        messages.extend(self.0.iter().cloned());
+    }
+
+    pub(crate) fn commit(&mut self, history: &mut Vec<Message>, response: Message) {
+        history.push(self.0.take().unwrap_or_else(Self::continuation));
+        history.push(response);
+    }
+
+    pub(crate) fn commit_interrupted(
+        &mut self,
+        history: &mut Vec<Message>,
+        text: &str,
+        reasoning: &[Reasoning],
+        preserve_reasoning: bool,
+    ) {
+        let text = if text.trim().is_empty() {
+            if !preserve_reasoning || reasoning.is_empty() {
+                return;
+            }
+            ""
+        } else {
+            text
+        };
+        let response =
+            super::format::assistant_tool_message(text, reasoning, &[], preserve_reasoning, None);
+        self.commit(history, response);
+    }
+
+    pub(crate) fn inject_operator(&mut self, text: &str) {
+        let note = format!("[operator]: {text}");
+        if let Some(Message::User { content }) = &mut self.0 {
+            // Keep pending instructions and any uncommitted tool results.
+            content.push(UserContent::text(format!("\n\n{note}")));
+        } else {
+            self.0 = Some(Message::user(note));
+        }
+    }
+}
 
 use rig_core::completion::message::Origin;
 
@@ -109,6 +170,10 @@ pub(crate) trait Conversation: Send + Sync {
 
     /// Record tool-result messages into history.
     fn finish_turn(&mut self, results: Vec<rig_core::completion::Message>);
+
+    /// Commit the pending prompt and replayable output when an operator pauses
+    /// the stream. With no text or replayable reasoning the prompt stays pending.
+    fn record_interrupted_response(&mut self, text: String, reasoning: &[Reasoning]);
 
     /// Drop the most recent assistant turn from history so the turn can be
     /// re-executed cleanly.
@@ -301,8 +366,7 @@ impl std::fmt::Debug for dyn Conversation {
 #[cfg(test)]
 pub(crate) struct ConversationStub {
     history: Vec<rig_core::completion::Message>,
-    next_prompt: rig_core::completion::Message,
-    prompt_committed: bool,
+    next_prompt: PendingPrompt,
     preserve_reasoning: bool,
     last_text: String,
     finalized_messages: Option<Vec<rig_core::completion::Message>>,
@@ -313,8 +377,7 @@ impl ConversationStub {
     pub(crate) fn new(prompt: &str) -> Self {
         Self {
             history: Vec::new(),
-            next_prompt: rig_core::completion::Message::user(prompt.to_string()),
-            prompt_committed: false,
+            next_prompt: PendingPrompt::new(Message::user(prompt)),
             preserve_reasoning: false,
             last_text: String::new(),
             finalized_messages: None,
@@ -325,24 +388,17 @@ impl ConversationStub {
     pub(crate) fn with_history(prompt: &str, history: Vec<rig_core::completion::Message>) -> Self {
         Self {
             history,
-            next_prompt: rig_core::completion::Message::user(prompt.to_string()),
-            prompt_committed: false,
+            next_prompt: PendingPrompt::new(Message::user(prompt)),
             preserve_reasoning: false,
             last_text: String::new(),
             finalized_messages: None,
         }
     }
 
-    fn begin_next_turn(&mut self) {
-        self.next_prompt = rig_core::completion::Message::user("Continue.".to_string());
-        self.prompt_committed = false;
-    }
-
     fn box_self(&self) -> Box<dyn Conversation> {
         Box::new(Self {
             history: self.history.clone(),
             next_prompt: self.next_prompt.clone(),
-            prompt_committed: self.prompt_committed,
             preserve_reasoning: self.preserve_reasoning,
             last_text: self.last_text.clone(),
             finalized_messages: self.finalized_messages.clone(),
@@ -369,22 +425,28 @@ impl Conversation for ConversationStub {
         _input_tokens: Option<u64>,
         origin: Option<Origin>,
     ) {
-        // Commit the pending user prompt before the assistant message.
-        let prompt = self.next_prompt.clone();
-        self.history.push(prompt);
-        self.prompt_committed = true;
-        self.history.push(super::format::assistant_tool_message(
+        let response = super::format::assistant_tool_message(
             text,
             reasoning_items,
             tool_calls,
             self.preserve_reasoning,
             origin,
-        ));
+        );
+        self.next_prompt.commit(&mut self.history, response);
     }
 
     fn finish_turn(&mut self, results: Vec<rig_core::completion::Message>) {
         self.history.extend(results);
-        self.begin_next_turn();
+        self.set_next_prompt("Continue.");
+    }
+
+    fn record_interrupted_response(&mut self, text: String, reasoning: &[Reasoning]) {
+        self.next_prompt.commit_interrupted(
+            &mut self.history,
+            &text,
+            reasoning,
+            self.preserve_reasoning,
+        );
     }
 
     fn pop_last_assistant_turn(&mut self) {
@@ -398,9 +460,8 @@ impl Conversation for ConversationStub {
         // Pop the preceding user prompt and restore it as next_prompt.
         if let Some(rig_core::completion::Message::User { .. }) = self.history.last() {
             let prompt = self.history.pop().unwrap();
-            self.next_prompt = prompt;
+            self.next_prompt = PendingPrompt::new(prompt);
         }
-        self.prompt_committed = false;
     }
 
     async fn render_turn(
@@ -408,13 +469,14 @@ impl Conversation for ConversationStub {
         _nested: bool,
         system_prompt: Option<String>,
     ) -> Result<TurnScript, TurnScriptError> {
+        let next_user_prompt = self.next_prompt.for_request();
         let limit = crate::config::max_prompt_bytes();
         let sys_bytes = system_prompt.as_ref().map(|s| s.len() as u64).unwrap_or(0);
         let actual: u64 = sys_bytes
             + self
                 .history
                 .iter()
-                .chain(std::iter::once(&self.next_prompt))
+                .chain(std::iter::once(&next_user_prompt))
                 .map(message_text_byte_len)
                 .sum::<u64>();
         if actual > limit {
@@ -423,7 +485,7 @@ impl Conversation for ConversationStub {
         Ok(TurnScript {
             messages: self.history.clone(),
             system_prompt,
-            next_user_prompt: self.next_prompt.clone(),
+            next_user_prompt,
         })
     }
 
@@ -435,7 +497,7 @@ impl Conversation for ConversationStub {
         done: Option<&rig_core::completion::message::ToolCall>,
     ) -> RunArtifact {
         let mut messages = self.history.clone();
-        messages.push(self.next_prompt.clone());
+        messages.push(self.next_prompt.for_request());
         let final_text = if text.trim().is_empty() {
             done.and_then(|tc| {
                 tc.function
@@ -495,8 +557,7 @@ impl Conversation for ConversationStub {
         }
         Box::new(Self {
             history,
-            next_prompt: rig_core::completion::Message::user(String::new()),
-            prompt_committed: false,
+            next_prompt: PendingPrompt::default(),
             preserve_reasoning: self.preserve_reasoning,
             last_text: String::new(),
             finalized_messages: None,
@@ -508,11 +569,11 @@ impl Conversation for ConversationStub {
     }
 
     fn set_next_prompt(&mut self, prompt: &str) {
-        self.next_prompt = rig_core::completion::Message::user(prompt.to_string());
+        self.next_prompt = PendingPrompt::new(Message::user(prompt));
     }
 
     fn inject_operator(&mut self, text: &str) {
-        self.next_prompt = rig_core::completion::Message::user(text.to_string());
+        self.next_prompt.inject_operator(text);
     }
 
     fn done_rejected(
@@ -523,19 +584,9 @@ impl Conversation for ConversationStub {
         results: Vec<rig_core::completion::Message>,
         next_prompt: rig_core::completion::Message,
     ) {
-        // Commit the pending prompt before the assistant message, exactly as
-        // `StandardConversation::done_rejected` does.
-        let prompt = std::mem::replace(&mut self.next_prompt, next_prompt);
-        self.history.push(prompt);
-        self.prompt_committed = true;
-        self.history.push(super::format::assistant_tool_message(
-            text,
-            reasoning_items,
-            tool_calls,
-            self.preserve_reasoning,
-            None,
-        ));
+        self.record_turn(text, reasoning_items, tool_calls, None, None);
         self.history.extend(results);
+        self.next_prompt = PendingPrompt::new(next_prompt);
     }
 
     fn messages(&self) -> Vec<rig_core::completion::Message> {
@@ -543,9 +594,7 @@ impl Conversation for ConversationStub {
             return msgs.clone();
         }
         let mut msgs = self.history.clone();
-        if !self.prompt_committed {
-            msgs.push(self.next_prompt.clone());
-        }
+        self.next_prompt.append_pending_to(&mut msgs);
         msgs
     }
 

@@ -3,9 +3,9 @@
 
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use serde_json::Value;
-use tokio::sync::mpsc;
 
 use crate::config;
 use crate::definition::{StageSpec, StaticDefinition};
@@ -15,43 +15,47 @@ use crate::executor::state;
 use gremlins_magic_bus::emit_event;
 use gremlins_magic_bus::EventKind;
 
-use super::super::actor_client::Client;
-use super::super::lifecycle::spawn_gremlin_runner;
-use super::super::lifecycle::terminate_and_reap;
-use super::super::{error_response, ok_response, valid_id};
+use super::super::run_registry::RunRegistry;
+use super::super::session_task::SessionTaskHandle;
+use super::super::{error_response, ok_response, valid_id, SessionRegistry};
 
 pub(crate) async fn handle_session_stop(
     request: &Value,
-    actor_tx: &mpsc::UnboundedSender<super::super::actor::ActorMsg>,
-    session_id: &str,
+    registry: &Arc<RunRegistry>,
+    session_task: &SessionTaskHandle,
 ) -> Value {
     if let Some(id) = request.get("id").and_then(|v| v.as_str()) {
         // Relinquish ownership, drop the parked gremlin, then cancel the
         // in-flight turn and wait for it to drain.
-        let client = Client::new(actor_tx.clone());
-        client.session_remove_chat_id(session_id, id).await;
-        client.session_take_gremlin(session_id, id).await;
-        if let Some(mut done) = client.session_cancel_turn(session_id, Some(id)).await {
+        session_task.remove_chat_id(id).await;
+        session_task.take_gremlin(id).await;
+        if let Some(mut done) = session_task.cancel_turn(Some(id)).await {
             let _ = done.wait_for(|v| *v).await;
         }
     }
-    handle_stop(request, actor_tx).await
+    handle_stop(request, registry).await
 }
 
 /// Remove a chat gremlin from whichever session owns it and cancel its turn.
 pub(crate) async fn stop_session_chat_gremlin(
     id: &str,
-    actor_tx: &mpsc::UnboundedSender<super::super::actor::ActorMsg>,
+    registry: &Arc<RunRegistry>,
+    sessions: &SessionRegistry,
 ) {
-    let client = Client::new(actor_tx.clone());
-    let live = client.contains_run(id).await;
+    let live = registry.contains_run(id).await;
 
-    for session_id in client.session_get_all().await {
-        if !client.session_remove_chat_id(&session_id, id).await {
+    // Snapshot the handles so the registry lock is not held across an await.
+    let handles: Vec<SessionTaskHandle> = sessions.lock().unwrap().values().cloned().collect();
+    for session_task in handles {
+        if !session_task.remove_chat_id(id).await {
             continue;
         }
-        client.session_take_gremlin(&session_id, id).await;
-        let done = client.session_cancel_turn(&session_id, Some(id)).await;
+        session_task.take_gremlin(id).await;
+        // Cancel the persistent task driving this gremlin (if it still belongs
+        // to this id) so it exits promptly rather than lingering until the next
+        // chat overwrites the session handle.
+        session_task.cancel_chat_handle_if(id).await;
+        let done = session_task.cancel_turn(Some(id)).await;
         if live {
             if let Some(mut done) = done {
                 let _ = done.wait_for(|v| *v).await;
@@ -65,10 +69,7 @@ pub(crate) async fn stop_session_chat_gremlin(
 // launch
 // ---------------------------------------------------------------------------
 
-pub(crate) async fn handle_launch(
-    request: &Value,
-    actor_tx: &mpsc::UnboundedSender<super::super::actor::ActorMsg>,
-) -> Value {
+pub(crate) async fn handle_launch(request: &Value, registry: &Arc<RunRegistry>) -> Value {
     let definition = request
         .get("definition")
         .and_then(|v| v.as_str())
@@ -171,7 +172,9 @@ pub(crate) async fn handle_launch(
 
     let id = gremlin.id.to_string();
 
-    spawn_gremlin_runner(actor_tx, gremlin, "starting", None, definition_name, true);
+    registry
+        .launch_run_detached(gremlin, "starting", None, definition_name, true)
+        .await;
 
     ok_response(serde_json::json!({"id": id}))
 }
@@ -180,23 +183,19 @@ pub(crate) async fn handle_launch(
 // stop
 // ---------------------------------------------------------------------------
 
-pub(crate) async fn handle_stop(
-    request: &Value,
-    actor_tx: &mpsc::UnboundedSender<super::super::actor::ActorMsg>,
-) -> Value {
+pub(crate) async fn handle_stop(request: &Value, registry: &Arc<RunRegistry>) -> Value {
     let id = match valid_id(request) {
         Ok(id) => id,
         Err(resp) => return resp,
     };
 
-    // The actor owns the run map: it removes the entry, cancels the task,
+    // The registry owns the run map: it removes the entry, cancels the task,
     // publishes the terminal state and releases the log subscription. A
     // `Some` reply means the id was live and the reap below is still ours.
-    let client = Client::new(actor_tx.clone());
-    let stopped = client.stop_run(id).await;
+    let stopped = registry.stop_run(id).await;
 
     if stopped.is_some() {
-        terminate_and_reap(id);
+        super::super::lifecycle::terminate_and_reap(id);
         return ok_response(serde_json::json!({"id": id, "status": "stopping"}));
     }
 
@@ -332,19 +331,15 @@ fn collect_parallel_runtime_keys(stage: &StageSpec, rerun: bool, keys: &mut Para
     }
 }
 
-pub(crate) async fn handle_resume(
-    request: &Value,
-    actor_tx: &mpsc::UnboundedSender<super::super::actor::ActorMsg>,
-) -> Value {
+pub(crate) async fn handle_resume(request: &Value, registry: &Arc<RunRegistry>) -> Value {
     let id = match valid_id(request) {
         Ok(id) => id,
         Err(resp) => return resp,
     };
 
-    let client = Client::new(actor_tx.clone());
-    let _guard = client.acquire_id_lock(id).await;
+    let _guard = registry.acquire_id_lock(id).await;
 
-    if client.contains_run(id).await {
+    if registry.contains_run(id).await {
         return error_response(&format!("gremlin {id} is already running"));
     }
 
@@ -458,14 +453,15 @@ pub(crate) async fn handle_resume(
 
     let definition_name = gremlin.state.read_str("kind");
 
-    spawn_gremlin_runner(
-        actor_tx,
-        gremlin,
-        &resume_stage,
-        Some(&resume_stage),
-        &definition_name,
-        true,
-    );
+    registry
+        .launch_run_detached(
+            gremlin,
+            &resume_stage,
+            Some(&resume_stage),
+            &definition_name,
+            true,
+        )
+        .await;
 
     ok_response(serde_json::json!({ "id": id, "resume_from": resume_stage }))
 }
@@ -474,10 +470,7 @@ pub(crate) async fn handle_resume(
 // rm
 // ---------------------------------------------------------------------------
 
-pub(crate) async fn handle_rm(
-    request: &Value,
-    actor_tx: &mpsc::UnboundedSender<super::super::actor::ActorMsg>,
-) -> Value {
+pub(crate) async fn handle_rm(request: &Value, registry: &Arc<RunRegistry>) -> Value {
     let id = match valid_id(request) {
         Ok(id) => id,
         Err(resp) => return resp,
@@ -488,10 +481,9 @@ pub(crate) async fn handle_rm(
         .and_then(|v| v.as_bool())
         .unwrap_or(false);
 
-    let client = Client::new(actor_tx.clone());
-    let _guard = client.acquire_id_lock(id).await;
+    let _guard = registry.acquire_id_lock(id).await;
 
-    if client.contains_run(id).await {
+    if registry.contains_run(id).await {
         return error_response(&format!(
             "gremlin {id} is running — use `gremlins stop {id}` first"
         ));

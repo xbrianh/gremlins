@@ -9,13 +9,12 @@ use rig_core::completion::{CompletionRequest, Message, ToolDefinition, Usage};
 use rig_core::driver::DynModel;
 use rig_core::error::ProviderError;
 use rig_core::operation::Completion;
-use rig_core::streaming::Streamed;
-use tokio::sync::{mpsc, Semaphore};
+use tokio::sync::Semaphore;
 
-use crate::clients::interactive::{InteractiveCommand, InteractiveSession, PauseToken};
+use crate::clients::interactive::InteractiveSession;
 use gremlins_magic_bus::EventKind;
 
-use super::interactive::{interactive_loop, maybe_pause, InteractiveLoopResult};
+use super::interactive::{interactive_loop, InteractiveLoopResult};
 use crate::clients::cancel::{default_classify, is_retryable, CancelToken};
 use crate::clients::conversation::{Conversation, TurnScriptError};
 use crate::clients::error::ClientError;
@@ -36,14 +35,13 @@ pub(crate) use super::run_context::{LoopOpts, RunContext};
 //     ├─ LoopState::stream_turn              // one model completion turn
 //     │   ├─ prepare_stream_request           // build messages
 //     │   ├─ launch_model_stream              // error-handling + retry
-//     │   ├─ consume_stream_events            // the async event loop
-//     │   └─ finish_stream_turn               // post-stream classification
+//     │   └─ consume_stream_events            // stream output, interrupt, or retry
 //     └─ LoopState::execute_tools            // batch tool execution
 //         ├─ collect_tool_jobs                // validate + build ToolJob list
 //         ├─ dispatch_tool_jobs               // concurrent execute with cancel
 //         └─ emit_tool_results                // history + prompt roll-forward
 //
-// Supporting types: ToolJob, StreamAccumulator, StreamTurnOutcome,
+// Supporting types: ToolJob, StreamTurnOutcome,
 // LoopOpts, InteractiveSession, TurnFlow, etc.
 // ────────────────────────────────────────────────────────────────────────────
 pub(super) fn cancelled_error() -> ClientError {
@@ -97,34 +95,14 @@ pub(super) struct LoopState {
     pub(super) total_cached_tokens: Option<u64>,
     pub(super) total_cache_creation_tokens: Option<u64>,
     pub(super) total_reasoning_tokens: Option<u64>,
-    pub(super) interactive_active: bool,
-    pub(super) pending_run_one_turn: bool,
-    pub(super) cmd_rx: Option<mpsc::Receiver<InteractiveCommand>>,
-    pub(super) pause: Option<Arc<PauseToken>>,
+    pending_run_one_turn: bool,
+    pub(super) interactive: InteractiveSession,
     pub(super) remaining_turns: usize,
     pub(super) reminder_budget: usize,
     pub(super) completion_nudge_budget: usize,
     pub(super) single_turn: bool,
     /// Run-scoped id for direct bus emission of log lines and stream events.
     pub(super) message_prefix: String,
-}
-
-/// Accumulated state from one model completion stream.
-pub(super) struct StreamAccumulator {
-    pub(super) text: String,
-    pub(super) reasoning: String,
-    pub(super) reasoning_items: Vec<Reasoning>,
-    pub(super) tool_calls: Vec<ToolCall>,
-    pub(super) ended: bool,
-    pub(super) turn_usage: Option<Usage>,
-    pub(super) paused_mid_stream: bool,
-    pub(super) retry_turn: bool,
-    pub(super) retry_timeout_turn: bool,
-    pub(super) first_token: Option<Instant>,
-    pub(super) last_token: Option<Instant>,
-    /// Origin reported by the provider for this stream, used to preserve
-    /// native metadata for same-model replay.
-    pub(super) origin: Option<Origin>,
 }
 
 /// Result of streaming one turn's request: the accumulated assistant content
@@ -137,7 +115,6 @@ pub(super) struct StreamTurnOutput {
     pub(super) turn_usage: Option<Usage>,
     pub(super) first_token: Option<Instant>,
     pub(super) last_token: Option<Instant>,
-    pub(super) ended: bool,
     /// Origin of the response that produced this turn, threaded into history
     /// so same-model replay keeps provider-native items.
     pub(super) origin: Option<Origin>,
@@ -147,15 +124,22 @@ pub(super) struct StreamTurnOutput {
 pub(super) enum StreamTurnOutcome {
     /// A turn's stream completed — caller processes the accumulated output.
     Output(Box<StreamTurnOutput>),
-    /// Caller should re-execute the turn (retry / pause / idle timeout).
-    Continue,
+    /// Operator paused the stream before completion. Tool calls were not dispatched.
+    Interrupted {
+        text: String,
+        reasoning_items: Vec<Reasoning>,
+    },
+    /// Re-execute the request after a model error, preserving any active step.
+    RetryModelError,
+    /// Return to the ordinary turn boundary after an idle timeout.
+    RetryTimeout,
     /// Caller should stop the loop (terminal stream error).
     Break,
 }
 
 /// Decision from the interactive turn-boundary gate: either re-enter the
 /// interactive loop, or proceed to execute a normal turn.
-pub(super) enum InteractiveBoundary {
+enum InteractiveBoundary {
     ContinueLoop,
     RunTurn,
 }
@@ -185,21 +169,11 @@ impl LoopState {
         reminder_budget: usize,
         completion_nudge_budget: usize,
         single_turn: bool,
-        interactive: Option<InteractiveSession>,
+        interactive: InteractiveSession,
         max_turns: usize,
-        prefix: &str,
         preserve_reasoning_in_history: bool,
         message_prefix: &str,
     ) -> Self {
-        // Destructure the interactive session into its components so we can
-        // thread them independently through the loop.
-        let (cmd_rx, pause) = interactive
-            .map(|s| {
-                log::debug!("agent_loop: interactive session set up (label={prefix})");
-                (Some(s.cmd_rx), Some(s.pause))
-            })
-            .unwrap_or((None, None));
-
         let original_system_prompt = system_prompt.clone();
 
         let mut conv = prepopulated_conversation;
@@ -228,10 +202,8 @@ impl LoopState {
             total_cached_tokens: None,
             total_cache_creation_tokens: None,
             total_reasoning_tokens: None,
-            interactive_active: false,
             pending_run_one_turn: false,
-            cmd_rx,
-            pause,
+            interactive,
             remaining_turns: max_turns,
             reminder_budget,
             completion_nudge_budget,
@@ -260,7 +232,6 @@ impl LoopState {
     pub(super) async fn stream_turn(
         &mut self,
         model: &DynModel<Completion>,
-        tool_ctx: &AgentLoopRuntime,
         tool_defs: &[ToolDefinition],
         cancel: &CancelToken,
         opts: &LoopOpts<'_>,
@@ -318,13 +289,7 @@ impl LoopState {
                         self.hook_log(&format!("{prefix}exit: cancelled during retry backoff"));
                         return Err(cancelled_error());
                     }
-                    // Preserve the pending one-turn state only when
-                    // already interactive — otherwise an unconditional
-                    // set would force RunOneTurn after normal resumption.
-                    if self.interactive_active {
-                        self.pending_run_one_turn = true;
-                    }
-                    return Ok(StreamTurnOutcome::Continue);
+                    return Ok(StreamTurnOutcome::RetryModelError);
                 }
                 let retryable = is_retryable(&e, opts.classify_error);
                 if retryable {
@@ -335,29 +300,23 @@ impl LoopState {
             }
         };
 
-        // Phase 3: drive the async event loop, accumulating assistant content.
-        let acc = self
-            .consume_stream_events(
-                response,
-                model,
-                tool_ctx,
-                cancel,
-                opts,
-                prefix,
-                idle_timeout,
-                nested,
-                wants_events,
-                parent_id,
-                parent_call,
-                kind,
-                chain,
-                timeout_retry_backoff,
-                turn_retry_backoff,
-            )
-            .await?;
-
-        // Phase 4: classify the completed stream into a control-flow outcome.
-        self.finish_stream_turn(acc, tool_ctx, cancel, nested).await
+        super::stream_consume::consume_stream_events(
+            self,
+            response,
+            cancel,
+            opts,
+            prefix,
+            idle_timeout,
+            nested,
+            wants_events,
+            parent_id,
+            parent_call,
+            kind,
+            chain,
+            timeout_retry_backoff,
+            turn_retry_backoff,
+        )
+        .await
     }
 
     /// Build the [`CompletionRequest`] for one model turn: assemble the request
@@ -400,67 +359,11 @@ impl LoopState {
         Ok(builder)
     }
 
-    /// Drive the model stream to completion: forward live deltas, accumulate
-    /// assistant content, and handle cancellation, operator pause, idle
-    /// timeout, and mid-stream retry from within the event loop.
-    #[allow(clippy::too_many_arguments)]
-    async fn consume_stream_events(
-        &mut self,
-        response: Streamed<Completion>,
-        model: &DynModel<Completion>,
-        tool_ctx: &AgentLoopRuntime,
-        cancel: &CancelToken,
-        opts: &LoopOpts<'_>,
-        prefix: &str,
-        idle_timeout: f64,
-        nested: bool,
-        wants_events: bool,
-        parent_id: &str,
-        parent_call: &str,
-        kind: &str,
-        chain: &str,
-        timeout_retry_backoff: &[f64],
-        turn_retry_backoff: &[f64],
-    ) -> Result<StreamAccumulator, ClientError> {
-        super::stream_consume::consume_stream_events(
-            self,
-            response,
-            model,
-            tool_ctx,
-            cancel,
-            opts,
-            prefix,
-            idle_timeout,
-            nested,
-            wants_events,
-            parent_id,
-            parent_call,
-            kind,
-            chain,
-            timeout_retry_backoff,
-            turn_retry_backoff,
-        )
-        .await
-    }
-
-    /// Classify a completed stream into a [`StreamTurnOutcome`], applying the
-    /// pause/retry continuations and otherwise packaging the turn output.
-    pub(super) async fn finish_stream_turn(
-        &mut self,
-        acc: StreamAccumulator,
-        tool_ctx: &AgentLoopRuntime,
-        cancel: &CancelToken,
-        nested: bool,
-    ) -> Result<StreamTurnOutcome, ClientError> {
-        super::stream_consume::finish_stream_turn(self, acc, tool_ctx, cancel, nested).await
-    }
-
     #[allow(clippy::too_many_arguments)]
     pub(super) async fn execute_tools(
         &mut self,
         tool_calls: &[ToolCall],
         tool_ctx: &AgentLoopRuntime,
-        model: &DynModel<Completion>,
         prefix: &str,
         cancel: &CancelToken,
         raw: &mut Option<std::fs::File>,
@@ -472,7 +375,7 @@ impl LoopState {
 
         // Phase 2: concurrent execution (cancel/pause aware).
         let outcomes = match self
-            .dispatch_tool_jobs(&jobs, tool_ctx, model, prefix, cancel)
+            .dispatch_tool_jobs(&jobs, tool_ctx, prefix, cancel)
             .await?
         {
             ToolDispatchOutcome::Completed(outcomes) => outcomes,
@@ -558,7 +461,6 @@ impl LoopState {
         &mut self,
         jobs: &[ToolJob],
         tool_ctx: &AgentLoopRuntime,
-        model: &DynModel<Completion>,
         prefix: &str,
         cancel: &CancelToken,
     ) -> Result<ToolDispatchOutcome, ClientError> {
@@ -594,31 +496,19 @@ impl LoopState {
                 self.hook_log(&format!("{prefix}exit: cancelled mid-tool"));
                 return Err(cancelled_error());
             }
-            _ = maybe_pause(&self.pause) => {
+            _ = self.interactive.paused() => {
                 // Operator triggered debug mid-tool — drop the join_all future
                 // (cancels pending tool futures). Completed tool side effects
                 // (files written, bash commands run) are not unwound.
                 self.hook_log(&format!("agent_loop: paused mid-tool (label={})", prefix));
                 self.hook_log(&format!("{prefix}pause: entering interactive mode (mid-tool)"));
-                if let Some(ref p) = self.pause {
-                    p.reset();
-                }
-                log::debug!("agent_loop: entering interactive mode mid-tool (label={})", prefix);
 
                 // Pop the assistant turn so it can be re-executed
                 // cleanly without duplicate history entries.
                 self.conv.pop_last_assistant_turn();
 
-                match self.enter_interactive_mode(model, prefix).await? {
-                    InteractiveLoopResult::Resumed => {
-                        self.interactive_active = false;
-                        return Ok(ToolDispatchOutcome::ReexecuteTurn);
-                    }
-                    InteractiveLoopResult::RunOneTurn => {
-                        self.pending_run_one_turn = true;
-                        return Ok(ToolDispatchOutcome::ReexecuteTurn);
-                    }
-                }
+                self.pause_interrupted_turn(cancel, prefix).await?;
+                return Ok(ToolDispatchOutcome::ReexecuteTurn);
             }
         };
 
@@ -685,73 +575,77 @@ impl LoopState {
         Ok(())
     }
 
-    /// Interactive turn boundary. Two modes: no active session (check the
-    /// pause token) or an active session re-entered after RunOneTurn.
+    /// A step granted mid-stream or mid-tool runs once before stopping here again.
     async fn await_interactive_turn(
         &mut self,
-        model: &DynModel<Completion>,
+        cancel: &CancelToken,
         prefix: &str,
     ) -> Result<InteractiveBoundary, ClientError> {
-        super::interactive::await_interactive_turn(self, model, prefix).await
+        if std::mem::take(&mut self.pending_run_one_turn) {
+            return Ok(InteractiveBoundary::RunTurn);
+        }
+        if !self.interactive.is_attached() && !self.interactive.accept_pause() {
+            return Ok(InteractiveBoundary::RunTurn);
+        }
+        match self.enter_interactive_mode(cancel, prefix).await? {
+            InteractiveLoopResult::Resumed => Ok(InteractiveBoundary::ContinueLoop),
+            InteractiveLoopResult::RunOneTurn | InteractiveLoopResult::MessageDelivered => {
+                Ok(InteractiveBoundary::RunTurn)
+            }
+        }
     }
 
-    /// Enter interactive mode: amend system prompt with debug note, then
-    /// drive the interactive_loop state machine. On success, the session's
-    /// cmd_rx is restored, and on Resumed the original system_prompt is
-    /// restored. The caller handles the InteractiveLoopResult to dispatch
-    /// the appropriate control-flow action.
-    ///
-    /// The session invariant (`cmd_rx` and `pause` must both be `Some`)
-    /// is guarded before amending the system prompt so a partial session
-    /// cannot permanently consume `cmd_rx` or leak the operator debug note.
-    pub(super) async fn enter_interactive_mode(
+    /// History has already been committed (mid-stream) or rolled back (mid-tool).
+    /// Only now acknowledge the pause and accept the next operator command.
+    async fn pause_interrupted_turn(
         &mut self,
-        model: &DynModel<Completion>,
+        cancel: &CancelToken,
+        prefix: &str,
+    ) -> Result<(), ClientError> {
+        self.pending_run_one_turn = matches!(
+            self.enter_interactive_mode(cancel, prefix).await?,
+            InteractiveLoopResult::RunOneTurn
+        );
+        Ok(())
+    }
+
+    /// Enter interactive mode.  The debug system prompt note is only amended
+    /// when the operator requests a single step (RunOneTurn).  Resuming after a
+    /// Message, Quit, Bail, or disconnect keeps the original system prompt.
+    async fn enter_interactive_mode(
+        &mut self,
+        cancel: &CancelToken,
         prefix: &str,
     ) -> Result<InteractiveLoopResult, ClientError> {
-        // Guard: both must be present to enter interactive mode.
-        // Old code panicked on invariant violation; we degrade to
-        // Resumed so callers don't wedge.
-        if self.cmd_rx.is_none() || self.pause.is_none() {
-            return Ok(InteractiveLoopResult::Resumed);
-        }
-
-        let debug_note = "\n\nThe operator has connected in debug mode. Messages prefixed with\n[operator]: are direct instructions from the operator. Treat them as\nauthoritative. When the operator disconnects, continue with your\noriginal task.";
-        let amended_system = match &self.system_prompt {
-            Some(sp) => format!("{sp}{debug_note}"),
-            None => debug_note.trim_start().to_string(),
-        };
-        self.system_prompt = Some(amended_system);
-
-        let mut session = InteractiveSession {
-            cmd_rx: self.cmd_rx.take().unwrap(),
-            pause: self.pause.clone().unwrap(),
-        };
-
         match interactive_loop(
-            model,
+            cancel,
             &mut *self.conv,
-            &mut session,
+            &mut self.interactive,
             self.turn_num,
             &self.message_prefix,
         )
         .await
         {
+            Ok(InteractiveLoopResult::MessageDelivered) => {
+                // Correction injected, slot released, original prompt stays.
+                self.system_prompt = self.original_system_prompt.clone();
+                Ok(InteractiveLoopResult::MessageDelivered)
+            }
             Ok(InteractiveLoopResult::Resumed) => {
                 self.system_prompt = self.original_system_prompt.clone();
-                self.cmd_rx = Some(session.cmd_rx);
                 Ok(InteractiveLoopResult::Resumed)
             }
             Ok(InteractiveLoopResult::RunOneTurn) => {
-                self.cmd_rx = Some(session.cmd_rx);
+                let debug_note = "\n\nThe operator has connected in debug mode. Messages prefixed with\n[operator]: are direct instructions from the operator. Treat them as\nauthoritative. When the operator disconnects, continue with your\noriginal task.";
+                let amended_system = match &self.original_system_prompt {
+                    Some(sp) => format!("{sp}{debug_note}"),
+                    None => debug_note.trim_start().to_string(),
+                };
+                self.system_prompt = Some(amended_system);
                 Ok(InteractiveLoopResult::RunOneTurn)
             }
             Err(e) => {
-                self.hook_log(&format!(
-                    "agent_loop: exit (operator bailed, label={})",
-                    prefix
-                ));
-                self.hook_log(&format!("{prefix}exit: operator bailed"));
+                self.hook_log(&format!("{prefix}exit: {e}"));
                 Err(e)
             }
         }
@@ -1040,7 +934,7 @@ pub(crate) async fn run_agent_loop(
     ctx: RunContext,
     cancel: Arc<CancelToken>,
     opts: LoopOpts<'_>,
-    interactive: Option<InteractiveSession>,
+    mut interactive: InteractiveSession,
 ) -> Result<CompletedRun, ClientError> {
     let cwd = ctx.params.cwd.clone();
     let extra_env = ctx.params.extra_env.clone();
@@ -1127,14 +1021,13 @@ pub(crate) async fn run_agent_loop(
         audit_lock: Some(Arc::new(std::sync::Mutex::new(()))),
         id_prefix: String::new(),
         message_prefix: message_prefix.clone(),
-        skills_available: ctx.params.skills_available,
         discovered_skills: ctx.params.discovered_skills.clone(),
         path_context: ctx.params.path_context.clone(),
         root_raw_stream_path: raw_path.clone(),
     };
     let tool_defs = tools::tool_definitions(
         opts.tool_filter,
-        ctx.params.skills_available,
+        ctx.params.discovered_skills.is_some(),
         opts.tool_mode,
     );
 
@@ -1157,8 +1050,10 @@ pub(crate) async fn run_agent_loop(
     );
     tool_ctx.task_fn = Some(runner);
 
-    let wants_events = interactive.is_some();
-    run_agent_loop_core(
+    // Live output is routed by run id, independently of operator commands.
+    let wants_events = !message_prefix.is_empty();
+    let terminal = interactive.supervise_if_needed();
+    let result = run_agent_loop_core(
         &model,
         prompt,
         ctx.params.system_prompt.clone(),
@@ -1183,7 +1078,14 @@ pub(crate) async fn run_agent_loop(
         "",
         "",
     )
-    .await
+    .await;
+    if let Some(terminal) = terminal {
+        match &result {
+            Ok(_) => terminal.end("agent completed"),
+            Err(e) => terminal.end(&e.to_string()),
+        }
+    }
+    result
 }
 
 /// Nested agent loop — same logic as the parent loop but without raw transcript
@@ -1224,11 +1126,11 @@ pub(crate) async fn run_agent_loop_nested(
         single_turn: false,
     };
     // Nested loops never expose LoadSkill even when the parent has skills.
-    // Clear both skills_available (gates chat-only tools) and
-    // discovered_skills (gates LoadSkill's own lookup) so a sub-agent
-    // cannot emit SkillLoaded attributed to the parent run.
-    let is_chat = false;
-    let tool_defs = tools::tool_definitions(tool_filter, is_chat, ToolMode::Full);
+    // `tool_definitions(…, false, …)` omits skills-gated tools from the
+    // schema entirely; clearing `discovered_skills` is defense-in-depth at
+    // the dispatch/handler layers so a sub-agent cannot emit SkillLoaded
+    // attributed to the parent run.
+    let tool_defs = tools::tool_definitions(tool_filter, false, ToolMode::Full);
     // Open a per-task raw stream file when the root stream path is available.
     // Derive the sibling filename from the root stream stem and the task id
     // chain, e.g. stream-implement.task.0001.jsonl.  Create exclusively; if
@@ -1299,7 +1201,6 @@ pub(crate) async fn run_agent_loop_nested(
     };
     let mut captured: Option<Vec<serde_json::Value>> = None;
     let mut nested_tool_ctx = tool_ctx.clone();
-    nested_tool_ctx.skills_available = false;
     nested_tool_ctx.discovered_skills = None;
     // Nested loops keep the parent's stream (so their `ToolResult` events reach
     // the parent TUI) via the same `message_prefix`.
@@ -1336,7 +1237,7 @@ pub(crate) async fn run_agent_loop_nested(
         &[],
         0,
         completion_nudge_budget,
-        None,
+        InteractiveSession::unattached(),
         prepopulated_conversation,
         wants_events,
         parent_id,
@@ -1402,7 +1303,7 @@ pub(crate) async fn run_agent_loop_core(
     expected_artifact_paths: &[PathBuf],
     reminder_budget: usize,
     completion_nudge_budget: usize,
-    interactive: Option<InteractiveSession>,
+    interactive: InteractiveSession,
     prepopulated_conversation: Box<dyn Conversation>,
     wants_events: bool,
     parent_id: &str,
@@ -1419,7 +1320,6 @@ pub(crate) async fn run_agent_loop_core(
         opts.single_turn,
         interactive,
         max_turns,
-        prefix,
         opts.preserve_reasoning_in_history,
         &tool_ctx.message_prefix,
     );
@@ -1433,7 +1333,7 @@ pub(crate) async fn run_agent_loop_core(
             return Err(cancelled_error());
         }
 
-        match state.await_interactive_turn(model, prefix).await? {
+        match state.await_interactive_turn(cancel, prefix).await? {
             InteractiveBoundary::ContinueLoop => continue,
             InteractiveBoundary::RunTurn => {}
         }
@@ -1445,7 +1345,6 @@ pub(crate) async fn run_agent_loop_core(
         let outcome = state
             .stream_turn(
                 model,
-                tool_ctx,
                 tool_defs,
                 cancel,
                 opts,
@@ -1462,7 +1361,27 @@ pub(crate) async fn run_agent_loop_core(
             )
             .await?;
         let out = match outcome {
-            StreamTurnOutcome::Continue => continue,
+            StreamTurnOutcome::Interrupted {
+                text,
+                reasoning_items,
+            } => {
+                state.hook_log(&format!("agent_loop: paused mid-stream (label={prefix})"));
+                state.hook_log(&format!(
+                    "{prefix}pause: entering interactive mode (mid-stream)"
+                ));
+                state
+                    .conv
+                    .record_interrupted_response(text, &reasoning_items);
+                state.pause_interrupted_turn(cancel, prefix).await?;
+                continue;
+            }
+            StreamTurnOutcome::RetryModelError => {
+                if state.interactive.is_attached() {
+                    state.pending_run_one_turn = true;
+                }
+                continue;
+            }
+            StreamTurnOutcome::RetryTimeout => continue,
             StreamTurnOutcome::Break => break,
             StreamTurnOutcome::Output(out) => *out,
         };
@@ -1474,31 +1393,15 @@ pub(crate) async fn run_agent_loop_core(
             turn_usage,
             first_token,
             last_token,
-            ended,
             origin,
         } = out;
 
-        if state.timed_out || state.stream_error.is_some() {
-            log::debug!(
-                "stream ended: timed_out={} stream_error={:?} turn={}",
-                state.timed_out,
-                state.stream_error,
-                state.turn_num,
-            );
-            break;
-        }
-        if !ended && tool_calls.is_empty() && text.is_empty() {
-            log::debug!("stream ended: not-ended empty-turn turn={}", state.turn_num);
-            break;
-        }
-
         log::debug!(
-            "turn complete: turn={} text_len={} reasoning_len={} tool_calls={} ended={}",
+            "turn complete: turn={} text_len={} reasoning_len={} tool_calls={}",
             state.turn_num,
             text.len(),
             reasoning.len(),
             tool_calls.len(),
-            ended,
         );
 
         let turn_stats = turn_stats(state.turn_num, turn_usage.as_ref());
@@ -1605,16 +1508,7 @@ pub(crate) async fn run_agent_loop_core(
         );
 
         state
-            .execute_tools(
-                &tool_calls,
-                tool_ctx,
-                model,
-                prefix,
-                cancel,
-                raw,
-                captured,
-                nested,
-            )
+            .execute_tools(&tool_calls, tool_ctx, prefix, cancel, raw, captured, nested)
             .await?;
     }
 
@@ -1808,7 +1702,6 @@ pub(crate) fn test_ctx(
             task_models: None,
             cancel_token: None,
             prepopulated_conversation: conv.clone(),
-            skills_available: false,
             discovered_skills: None,
             extra_sandbox_roots: Vec::new(),
             path_context: PathContext::default(),
@@ -1835,7 +1728,6 @@ pub(crate) fn test_tool_ctx() -> crate::clients::tools::AgentLoopRuntime {
         audit_lock: Some(std::sync::Arc::new(std::sync::Mutex::new(()))),
         id_prefix: String::new(),
         message_prefix: String::new(),
-        skills_available: false,
         discovered_skills: None,
         path_context: PathContext::default(),
         root_raw_stream_path: None,
@@ -1850,11 +1742,14 @@ pub(crate) fn test_tool_ctx_with_prefix(prefix: &str) -> crate::clients::tools::
 }
 
 #[cfg(test)]
+mod interrupted_tests;
+
+#[cfg(test)]
 mod tests {
     use super::*;
     use crate::clients::conversation::ConversationStub;
     use crate::clients::format::{assistant_tool_message, key_arg};
-    use crate::clients::interactive::InteractiveChannels;
+    use crate::clients::interactive::{InteractiveCommand, InteractiveSessionFactory};
     use gremlins_magic_bus::{self, Recv};
     use http::StatusCode;
     use rig_core::completion::message::AssistantContent;
@@ -2339,7 +2234,7 @@ mod tests {
             test_ctx(None, None),
             CancelToken::new(),
             loop_opts(None),
-            None,
+            InteractiveSession::unattached(),
         )
         .await;
 
@@ -2388,7 +2283,7 @@ mod tests {
             ctx.clone(),
             cancel,
             loop_opts(None),
-            None,
+            InteractiveSession::unattached(),
         ));
         // The stream hangs forever, so each turn hits the idle timeout
         // (0.05 s). After 3 turn-level timeout retries (5 + 15 + 30 s) the
@@ -2439,7 +2334,7 @@ mod tests {
             ctx,
             cancel.clone(),
             loop_opts(None),
-            None,
+            InteractiveSession::unattached(),
         ));
 
         // Wait until the Bash child has started so the loop is in Phase 2.
@@ -2550,7 +2445,7 @@ mod tests {
             ctx.clone(),
             cancel,
             loop_opts(None),
-            None,
+            InteractiveSession::unattached(),
         )
         .await
         .unwrap();
@@ -2702,7 +2597,7 @@ mod tests {
             ctx,
             cancel,
             loop_opts_preserve_reasoning(None),
-            None,
+            InteractiveSession::unattached(),
         )
         .await
         .unwrap();
@@ -2804,7 +2699,7 @@ mod tests {
             ctx,
             cancel,
             loop_opts(None),
-            None,
+            InteractiveSession::unattached(),
         )
         .await
         .unwrap();
@@ -2897,7 +2792,7 @@ mod tests {
             ctx.clone(),
             cancel,
             loop_opts(None),
-            None,
+            InteractiveSession::unattached(),
         ));
         // Skip past the default turn-level schedule's first backoff (2s;
         // schedule [2, 5, 10, 60, 120]).
@@ -3042,7 +2937,7 @@ mod tests {
             ctx.clone(),
             cancel,
             loop_opts(None),
-            None,
+            InteractiveSession::unattached(),
         ));
         // Skip past the default turn-level schedule's first backoff (2s;
         // schedule [2, 5, 10, 60, 120]).
@@ -3098,7 +2993,7 @@ mod tests {
             ctx.clone(),
             cancel.clone(),
             loop_opts(None),
-            None,
+            InteractiveSession::unattached(),
         ));
 
         // Let the loop reach the retry backoff, then cancel mid-sleep.
@@ -3143,7 +3038,7 @@ mod tests {
             ctx.clone(),
             cancel,
             loop_opts(None),
-            None,
+            InteractiveSession::unattached(),
         ));
         // Advance past all five turn-level backoffs:
         // 2 + 5 + 10 + 60 + 120 = 197 s.
@@ -3209,7 +3104,7 @@ mod tests {
             ctx.clone(),
             cancel,
             loop_opts(None),
-            None,
+            InteractiveSession::unattached(),
         ));
         // Advance to let turn 0 complete, then the timeout fires (0.1 s),
         // then the turn-level backoff runs (2 s), then turn 1 retry
@@ -3257,7 +3152,7 @@ mod tests {
             ctx.clone(),
             cancel.clone(),
             loop_opts(None),
-            None,
+            InteractiveSession::unattached(),
         ));
 
         // Let the idle timeout fire (0.1 s), then cancel during backoff.
@@ -3307,7 +3202,7 @@ mod tests {
             ctx.clone(),
             cancel,
             loop_opts(None),
-            None,
+            InteractiveSession::unattached(),
         )
         .await
         .unwrap();
@@ -3353,7 +3248,7 @@ mod tests {
             ctx.clone(),
             cancel,
             loop_opts(None),
-            None,
+            InteractiveSession::unattached(),
         )
         .await
         .unwrap();
@@ -3407,7 +3302,7 @@ mod tests {
             ctx.clone(),
             cancel,
             loop_opts(None),
-            None,
+            InteractiveSession::unattached(),
         )
         .await
         .unwrap();
@@ -3475,7 +3370,7 @@ mod tests {
             ctx.clone(),
             cancel,
             loop_opts(Some(&filter)),
-            None,
+            InteractiveSession::unattached(),
         )
         .await
         .unwrap();
@@ -3544,7 +3439,7 @@ mod tests {
             ctx.clone(),
             cancel,
             loop_opts(None),
-            None,
+            InteractiveSession::unattached(),
         )
         .await
         .unwrap();
@@ -3606,7 +3501,7 @@ mod tests {
             ctx.clone(),
             cancel,
             loop_opts(None),
-            None,
+            InteractiveSession::unattached(),
         )
         .await
         .unwrap();
@@ -3692,7 +3587,7 @@ mod tests {
             ctx.clone(),
             cancel,
             loop_opts(None),
-            None,
+            InteractiveSession::unattached(),
         )
         .await
         .unwrap();
@@ -3771,7 +3666,7 @@ mod tests {
             ctx.clone(),
             cancel,
             loop_opts(None),
-            None,
+            InteractiveSession::unattached(),
         )
         .await
         .unwrap();
@@ -3819,7 +3714,7 @@ mod tests {
             ctx.clone(),
             cancel,
             loop_opts(None),
-            None,
+            InteractiveSession::unattached(),
         )
         .await
         .unwrap();
@@ -3897,7 +3792,7 @@ mod tests {
             ctx.clone(),
             cancel,
             loop_opts(None),
-            None,
+            InteractiveSession::unattached(),
         )
         .await
         .unwrap();
@@ -3947,7 +3842,7 @@ mod tests {
             ctx.clone(),
             cancel,
             loop_opts(None),
-            None,
+            InteractiveSession::unattached(),
         )
         .await
         .unwrap();
@@ -3998,7 +3893,7 @@ mod tests {
             ctx.clone(),
             cancel,
             loop_opts(None),
-            None,
+            InteractiveSession::unattached(),
         )
         .await
         .unwrap();
@@ -4087,7 +3982,7 @@ mod tests {
             ctx.clone(),
             cancel,
             loop_opts(None),
-            None,
+            InteractiveSession::unattached(),
         )
         .await
         .unwrap();
@@ -4149,7 +4044,7 @@ mod tests {
             ctx.clone(),
             cancel,
             loop_opts(None),
-            None,
+            InteractiveSession::unattached(),
         )
         .await
         .unwrap();
@@ -4208,7 +4103,7 @@ mod tests {
             ctx.clone(),
             cancel,
             loop_opts(None),
-            None,
+            InteractiveSession::unattached(),
         )
         .await
         .unwrap();
@@ -4311,7 +4206,7 @@ mod tests {
             ctx.clone(),
             CancelToken::new(),
             loop_opts(None),
-            None,
+            InteractiveSession::unattached(),
         )
         .await
         .unwrap();
@@ -4395,9 +4290,16 @@ mod tests {
         let cancel = CancelToken::new();
         let mut opts = loop_opts(None);
         opts.max_tokens = Some(8192);
-        run_agent_loop(model.clone().erase(), "go", ctx, cancel, opts, None)
-            .await
-            .unwrap();
+        run_agent_loop(
+            model.clone().erase(),
+            "go",
+            ctx,
+            cancel,
+            opts,
+            InteractiveSession::unattached(),
+        )
+        .await
+        .unwrap();
 
         for req in model.requests() {
             assert_eq!(
@@ -4436,9 +4338,16 @@ mod tests {
         ctx.params.idle_timeout = Some(5.0);
         let cancel = CancelToken::new();
         let opts = loop_opts(None); // max_tokens: None
-        run_agent_loop(model.clone().erase(), "go", ctx, cancel, opts, None)
-            .await
-            .unwrap();
+        run_agent_loop(
+            model.clone().erase(),
+            "go",
+            ctx,
+            cancel,
+            opts,
+            InteractiveSession::unattached(),
+        )
+        .await
+        .unwrap();
 
         for req in model.requests() {
             assert_eq!(
@@ -4512,7 +4421,7 @@ mod tests {
             ctx,
             CancelToken::new(),
             opts,
-            None,
+            InteractiveSession::unattached(),
         )
         .await
         .unwrap();
@@ -4616,7 +4525,7 @@ mod tests {
                 ctx,
                 CancelToken::new(),
                 loop_opts(None),
-                None,
+                InteractiveSession::unattached(),
             ),
         )
         .await
@@ -4736,7 +4645,7 @@ mod tests {
             ctx,
             CancelToken::new(),
             loop_opts(None),
-            None,
+            InteractiveSession::unattached(),
         )
         .await
         .unwrap();
@@ -4755,87 +4664,17 @@ mod tests {
         }
     }
 
-    // ── PauseToken tests ───────────────────────────────────────────────
-
-    /// Regression: `pause()` between flag load and `notified().await` must
-    /// not be lost. With `notify_one` the permit is stored, so the next
-    /// `notified().await` completes immediately.
-    #[tokio::test]
-    async fn pause_token_race_regression() {
-        let token = PauseToken::new();
-
-        // Simulate the race: call paused() (which creates a Notified future
-        // but does not poll it), then pause(), then poll.
-        let paused_fut = token.paused();
-        token.pause();
-        // The flag is now true AND a permit is stored. The future must
-        // resolve immediately when polled.
-        tokio::pin!(paused_fut);
-        let result = tokio::time::timeout(Duration::from_millis(100), &mut paused_fut).await;
-        assert!(
-            result.is_ok(),
-            "paused() should resolve immediately after pause()"
-        );
-        assert!(token.is_paused());
-    }
-
-    /// `paused()` must resolve immediately when the flag is already set,
-    /// even without a stored permit.
-    #[tokio::test]
-    async fn pause_token_paused_resolves_immediately_when_flag_set() {
-        let token = PauseToken::new();
-        token.pause();
-        let result = tokio::time::timeout(Duration::from_millis(100), token.paused()).await;
-        assert!(
-            result.is_ok(),
-            "paused() should resolve immediately when flag is set"
-        );
-    }
-
-    /// After `reset()`, `is_paused()` returns false and `paused()` does not
-    /// resolve (it stays pending).
-    #[tokio::test]
-    async fn pause_token_reset_clears_flag() {
-        let token = PauseToken::new();
-        token.pause();
-        assert!(token.is_paused());
-        token.reset();
-        assert!(!token.is_paused());
-        // paused() should not resolve — it stays pending.
-        let result = tokio::time::timeout(Duration::from_millis(50), token.paused()).await;
-        assert!(result.is_err(), "paused() should stay pending after reset");
-    }
-
-    /// Multiple pause/reset cycles work correctly.
-    #[tokio::test]
-    async fn pause_token_multiple_cycles() {
-        let token = PauseToken::new();
-        for _ in 0..3 {
-            token.pause();
-            assert!(token.is_paused());
-            let result = tokio::time::timeout(Duration::from_millis(100), token.paused()).await;
-            assert!(result.is_ok());
-            token.reset();
-            assert!(!token.is_paused());
-        }
-    }
-
     // ── Interactive session tests ───────────────────────────────────────
 
-    /// Pause at turn boundary: the agent loop checks `pause.is_paused()`
-    /// before making the API call, enters interactive mode, broadcasts
-    /// Ready, and waits for a command.
+    /// An attachment pauses the loop before the first API call.
     #[tokio::test]
     async fn interactive_pause_at_turn_boundary_broadcasts_ready() {
-        gremlins_magic_bus::init_bus();
-        let channels = InteractiveChannels::new();
-        let (handle, session) = channels.split();
+        let run_id = "interactive_pause_at_turn_boundary_broadcasts_ready";
+        let (mut sessions, handle) = InteractiveSessionFactory::for_chat();
+        let session = sessions.next_session();
+        let commands = handle.attach().unwrap();
 
-        // Pre-set the pause token so the agent enters interactive mode
-        // at the turn boundary before the first API call.
-        handle.pause.pause();
-
-        let tool_ctx = test_tool_ctx();
+        let tool_ctx = test_tool_ctx_with_prefix(run_id);
         let tool_defs = vec![];
         let cancel = CancelToken::new();
         let opts = loop_opts(None);
@@ -4851,7 +4690,7 @@ mod tests {
             rig_core::test_utils::MockStreamEvent::final_response_with_default_usage(),
         ]]);
         let dyn_model = model.erase();
-        let (_sub, mut evt_rx) = gremlins_magic_bus::subscribe_all();
+        let (_sub, mut evt_rx) = subscribe_log(run_id);
         let agent = tokio::spawn(async move {
             run_agent_loop_core(
                 &dyn_model,
@@ -4870,7 +4709,7 @@ mod tests {
                 &[],
                 0,
                 0,
-                Some(session),
+                session,
                 Box::new(ConversationStub::new("hi")),
                 false,
                 "",
@@ -4901,7 +4740,7 @@ mod tests {
         assert!(ready, "agent should broadcast Ready when paused");
 
         // Send Quit to resume.
-        let _ = handle.cmd_tx.send(InteractiveCommand::Quit).await;
+        commands.send(InteractiveCommand::Quit).await.unwrap();
 
         // Agent should complete normally.
         let result = tokio::time::timeout(Duration::from_secs(2), agent)
@@ -4916,7 +4755,7 @@ mod tests {
     /// it, emits TurnComplete, then Quit resumes normal operation.
     #[tokio::test]
     async fn interactive_inject_then_run_turn_then_quit() {
-        gremlins_magic_bus::init_bus();
+        let run_id = "interactive_inject_then_run_turn_then_quit";
         let dir = std::env::temp_dir().join(format!(
             "gremlins-oa-int-{}-{}",
             std::process::id(),
@@ -4927,12 +4766,11 @@ mod tests {
         ));
         std::fs::create_dir_all(&dir).unwrap();
 
-        let channels = InteractiveChannels::new();
-        let (handle, session) = channels.split();
+        let (mut sessions, handle) = InteractiveSessionFactory::for_chat();
+        let session = sessions.next_session();
+        let commands = handle.attach().unwrap();
 
-        handle.pause.pause();
-
-        let mut tool_ctx = test_tool_ctx();
+        let mut tool_ctx = test_tool_ctx_with_prefix(run_id);
         tool_ctx.sandbox = tools::SandboxMode::Roots(vec![dir.clone()]);
         let tool_defs = tools::tool_definitions(None, false, ToolMode::Full);
         let cancel = CancelToken::new();
@@ -4965,7 +4803,7 @@ mod tests {
             ],
         ]);
         let dyn_model = model.erase();
-        let (_sub, mut evt_rx) = gremlins_magic_bus::subscribe_all();
+        let (_sub, mut evt_rx) = subscribe_log(run_id);
         let agent = tokio::spawn(async move {
             run_agent_loop_core(
                 &dyn_model,
@@ -4984,7 +4822,7 @@ mod tests {
                 &[],
                 0,
                 0,
-                Some(session),
+                session,
                 Box::new(ConversationStub::new("hi")),
                 true,
                 "",
@@ -5011,10 +4849,10 @@ mod tests {
         assert!(ready);
 
         // Inject a message.
-        let _ = handle
-            .cmd_tx
+        commands
             .send(InteractiveCommand::Inject("look at this".into()))
-            .await;
+            .await
+            .unwrap();
 
         // Wait for TurnComplete.
         let tc = tokio::time::timeout(Duration::from_secs(2), async {
@@ -5034,7 +4872,7 @@ mod tests {
         assert!(tc, "should get TurnComplete after Inject");
 
         // Quit — agent resumes normal operation and completes.
-        let _ = handle.cmd_tx.send(InteractiveCommand::Quit).await;
+        commands.send(InteractiveCommand::Quit).await.unwrap();
 
         let result = tokio::time::timeout(Duration::from_secs(2), agent)
             .await
@@ -5047,13 +4885,12 @@ mod tests {
     /// Bail during interactive mode terminates the agent loop.
     #[tokio::test]
     async fn interactive_bail_terminates_agent() {
-        gremlins_magic_bus::init_bus();
-        let channels = InteractiveChannels::new();
-        let (handle, session) = channels.split();
+        let run_id = "interactive_bail_terminates_agent";
+        let (mut sessions, handle) = InteractiveSessionFactory::for_chat();
+        let session = sessions.next_session();
+        let commands = handle.attach().unwrap();
 
-        handle.pause.pause();
-
-        let tool_ctx = test_tool_ctx();
+        let tool_ctx = test_tool_ctx_with_prefix(run_id);
         let tool_defs = vec![];
         let cancel = CancelToken::new();
         let opts = loop_opts(None);
@@ -5068,7 +4905,7 @@ mod tests {
             rig_core::test_utils::MockStreamEvent::final_response_with_default_usage(),
         ]]);
         let dyn_model = model.erase();
-        let (_sub, mut evt_rx) = gremlins_magic_bus::subscribe_all();
+        let (_sub, mut evt_rx) = subscribe_log(run_id);
         let agent = tokio::spawn(async move {
             run_agent_loop_core(
                 &dyn_model,
@@ -5087,7 +4924,7 @@ mod tests {
                 &[],
                 0,
                 0,
-                Some(session),
+                session,
                 Box::new(ConversationStub::new("hi")),
                 false,
                 "",
@@ -5114,10 +4951,10 @@ mod tests {
         assert!(ready);
 
         // Bail.
-        let _ = handle
-            .cmd_tx
+        commands
             .send(InteractiveCommand::Bail("test bail".into()))
-            .await;
+            .await
+            .unwrap();
 
         let result = tokio::time::timeout(Duration::from_secs(2), agent)
             .await
@@ -5131,17 +4968,15 @@ mod tests {
         }
     }
 
-    /// When the cmd_tx sender is dropped (simulating supervisor disconnect),
-    /// the interactive loop returns Resumed gracefully.
+    /// Dropping the attachment resumes the loop without an operator command.
     #[tokio::test]
-    async fn interactive_cmd_tx_drop_resumes_gracefully() {
-        gremlins_magic_bus::init_bus();
-        let channels = InteractiveChannels::new();
-        let (handle, session) = channels.split();
+    async fn interactive_attachment_drop_resumes_gracefully() {
+        let run_id = "interactive_attachment_drop_resumes_gracefully";
+        let (mut sessions, handle) = InteractiveSessionFactory::for_chat();
+        let session = sessions.next_session();
+        let commands = handle.attach().unwrap();
 
-        handle.pause.pause();
-
-        let tool_ctx = test_tool_ctx();
+        let tool_ctx = test_tool_ctx_with_prefix(run_id);
         let tool_defs = vec![];
         let cancel = CancelToken::new();
         let opts = loop_opts(None);
@@ -5156,7 +4991,7 @@ mod tests {
             rig_core::test_utils::MockStreamEvent::final_response_with_default_usage(),
         ]]);
         let dyn_model = model.erase();
-        let (_sub, mut evt_rx) = gremlins_magic_bus::subscribe_all();
+        let (_sub, mut evt_rx) = subscribe_log(run_id);
         let agent = tokio::spawn(async move {
             run_agent_loop_core(
                 &dyn_model,
@@ -5175,7 +5010,7 @@ mod tests {
                 &[],
                 0,
                 0,
-                Some(session),
+                session,
                 Box::new(ConversationStub::new("hi")),
                 false,
                 "",
@@ -5201,8 +5036,7 @@ mod tests {
         .unwrap();
         assert!(ready);
 
-        // Drop the handle's cmd_tx to simulate disconnect.
-        drop(handle);
+        drop(commands);
 
         // Agent should resume and complete normally.
         let result = tokio::time::timeout(Duration::from_secs(2), agent)
@@ -5220,7 +5054,7 @@ mod tests {
     /// `run_agent_loop_core` directly.
     #[tokio::test]
     async fn run_agent_loop_with_interactive_session_broadcasts_ready() {
-        gremlins_magic_bus::init_bus();
+        let run_id = "run_agent_loop_with_interactive_session_broadcasts_ready";
         let dir = std::env::temp_dir().join(format!(
             "gremlins-oa-ral-int-{}-{}",
             std::process::id(),
@@ -5231,14 +5065,11 @@ mod tests {
         ));
         std::fs::create_dir_all(&dir).unwrap();
 
-        let channels = InteractiveChannels::new();
-        let (handle, session) = channels.split();
+        let (mut sessions, handle) = InteractiveSessionFactory::for_chat();
+        let session = sessions.next_session();
+        let commands = handle.attach().unwrap();
 
-        // Pre-set the pause token so the agent enters interactive mode
-        // at the turn boundary before the first API call.
-        handle.pause.pause();
-
-        let (_sub, mut evt_rx) = gremlins_magic_bus::subscribe_all();
+        let (_sub, mut evt_rx) = subscribe_log(run_id);
 
         let model = rig_core::test_utils::MockCompletionModel::from_stream_turns([[
             rig_core::test_utils::MockStreamEvent::text("ok"),
@@ -5250,20 +5081,13 @@ mod tests {
             rig_core::test_utils::MockStreamEvent::final_response_with_default_usage(),
         ]]);
         let mut ctx = test_ctx(Some(dir.clone()), None);
+        ctx.params.gremlin_id = Some(run_id.into());
         ctx.idle_timeout = 5.0;
         ctx.params.idle_timeout = Some(5.0);
         let cancel = CancelToken::new();
 
         let agent = tokio::spawn(async move {
-            run_agent_loop(
-                model.erase(),
-                "hi",
-                ctx,
-                cancel,
-                loop_opts(None),
-                Some(session),
-            )
-            .await
+            run_agent_loop(model.erase(), "hi", ctx, cancel, loop_opts(None), session).await
         });
 
         // Wait for Ready.
@@ -5287,7 +5111,7 @@ mod tests {
         );
 
         // Send Quit to resume.
-        let _ = handle.cmd_tx.send(InteractiveCommand::Quit).await;
+        commands.send(InteractiveCommand::Quit).await.unwrap();
 
         // Agent should complete normally.
         let result = tokio::time::timeout(Duration::from_secs(2), agent)
@@ -5339,7 +5163,7 @@ mod tests {
             &[],
             0,
             0,
-            None,
+            InteractiveSession::unattached(),
             Box::new(ConversationStub::new("hi")),
             false,
             "",
@@ -5423,7 +5247,7 @@ mod tests {
             &[],
             0,
             0,
-            None,
+            InteractiveSession::unattached(),
             // Run against the shipped implementation, not the stub: this test
             // guards the prompt-commit invariant in `StandardConversation`.
             crate::conversation::new_blank_conversation("hi", false, None),
@@ -5572,7 +5396,7 @@ mod tests {
             ctx.clone(),
             cancel,
             loop_opts(None),
-            None,
+            InteractiveSession::unattached(),
         )
         .await
         .unwrap();

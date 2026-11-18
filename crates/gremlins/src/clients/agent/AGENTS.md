@@ -6,15 +6,15 @@ The core turn-by-turn agent orchestration: stream a model completion, execute an
 
 ```
 agent_loop.rs       Main orchestrator: run_agent_loop / run_agent_loop_core
-                    + LoopState, StreamAccumulator, ToolJob, retry/backoff
+                    + LoopState, StreamTurnOutcome, ToolJob, retry/backoff
 stream_consume.rs   Drive the SSE/JSON-lines stream to completion
-                    (consume_stream_events, finish_stream_turn)
+                    (consume_stream_events)
 turn_flow.rs        Post-turn resolution: handle_done_decision,
                     handle_empty_turn, commit_turn_to_history,
                     fold_turn_usage, emit_turn_artifacts
 done_helpers.rs     Build the Done action-ledger + tool_result user message
 interactive.rs      Pause / interactive-session state machine
-                    (maybe_pause, interactive_loop, await_interactive_turn)
+                    (interactive_loop, await_interactive_turn)
 system_prompts.rs   Agent/task/fork system prompts + chat preamble helpers.
                     Also owns BATCHING_GUIDANCE.
 task.rs             Task runner factory: make_task_runner, task id chains
@@ -30,8 +30,8 @@ LoopState::run_agent_loop_core
   ├─ LoopState::stream_turn               // one model completion turn
   │   ├─ prepare_stream_request            // build messages
   │   ├─ launch_model_stream               // error-handling + retry
-  │   ├─ consume_stream_events             // async event loop (stream_consume.rs)
-  │   └─ finish_stream_turn                // classify outcome (stream_consume.rs)
+  │   └─ consume_stream_events             // return stream output, interrupt, or retry
+  ├─ LoopState::pause_interrupted_turn    // accept commands after recording partial history
   └─ LoopState::execute_tools             // batch tool execution
       ├─ collect_tool_jobs                 // validate + build ToolJob list
       ├─ dispatch_tool_jobs                // concurrent execute with cancel
@@ -49,7 +49,7 @@ After each tool batch, `turn_flow.rs` functions handle turn resolution:
 - **`LoopOpts`** — immutable per-run options: `tool_filter`, `temperature`, `max_tokens`, `extra`, `tool_mode`, `preserve_reasoning_in_history`.
 - **`RunContext`** — everything the caller (backend/executor) wires in: `RunParams`, sandbox roots, prefix, timeout, and artifact expectation budget.
 - **`ToolJob`** — a single tool call queued for execution: `ToolCall` + `CallId` + `ToolName`. Dispatched concurrently with cancellation racing.
-- **`StreamAccumulator`** / **`StreamTurnOutput`** / **`StreamTurnOutcome`** — the stream consumption result: text, tool calls, reasoning, usage, and the control-flow signal (Continue, Done, Empty, Bail, Quit).
+- **`StreamTurnOutcome`** — distinguishes a completed `StreamTurnOutput` from an interruption, retry, or terminal error. An interruption carries only partial text and sealed reasoning; the loop records it before entering interactive mode.
 
 ## Task subsystem
 

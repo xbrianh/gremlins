@@ -1,8 +1,10 @@
 //! Session management: session lifecycle, socket accept loop, and teardown.
 //!
-//! All session state lives in [`super::actor`] behind [`super::actor::ActorMsg`].
+//! All session state lives in a per-session task behind [`super::session_task::SessionTaskHandle`].
 //! This module is the IO layer: it owns the session sockets and translates
-//! socket requests into actor messages.
+//! socket requests into session-task messages.
+
+use std::sync::Arc;
 
 use serde_json::Value;
 use tokio::io::BufReader;
@@ -14,12 +16,12 @@ use crate::executor::socket;
 
 use gremlins_magic_bus::connection::{ConnectionGuard, SharedWriter};
 
-use super::actor::ActorMsg;
-use super::actor_client::Client;
+use super::attachment::handle_attach;
 use super::chat::{handle_cancel_chat, handle_chat};
-use super::debug::handle_debug;
 use super::log_handler::handle_log;
 use super::ops::{handle_chat_model, handle_compact, handle_session_stop};
+use super::run_registry::RunRegistry;
+use super::session_task::SessionTaskHandle;
 use super::{error_response, ok_response};
 
 /// Validate `id` as a session identifier.
@@ -45,7 +47,8 @@ pub(crate) fn validate_session_id(id: &str) -> Result<(), String> {
 pub(crate) async fn run_session_listener(
     listener: UnixListener,
     session_id: String,
-    actor_tx: mpsc::UnboundedSender<ActorMsg>,
+    registry: Arc<RunRegistry>,
+    session_task: SessionTaskHandle,
 ) {
     const SESSION_MAIN_CONNECT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
 
@@ -61,24 +64,31 @@ pub(crate) async fn run_session_listener(
     match first {
         Ok(Ok((stream, _addr))) => {
             let (read_half, write_half) = stream.into_split();
-            let actor_tx_for_task = actor_tx.clone();
+            let registry_for_task = Arc::clone(&registry);
             let session_id_for_task = session_id.clone();
+            let session_task_for_task = session_task.clone();
             let death_tx_for_task = death_tx.clone();
             let _main_handle = tokio::spawn(async move {
                 let writer = SharedWriter::new(write_half);
-                handle_session_main(read_half, writer, session_id_for_task, actor_tx_for_task)
-                    .await;
+                handle_session_main(
+                    read_half,
+                    writer,
+                    session_id_for_task,
+                    registry_for_task,
+                    session_task_for_task,
+                )
+                .await;
                 let _ = death_tx_for_task.send(true);
             });
         }
         Ok(Err(e)) => {
             log::error!("session {session_id}: first accept error: {e}");
-            request_teardown(&actor_tx, &session_id, false).await;
+            session_task.teardown(false).await;
             return;
         }
         Err(_) => {
             log::warn!("session {session_id}: timed out waiting for main connection");
-            request_teardown(&actor_tx, &session_id, false).await;
+            session_task.teardown(false).await;
             return;
         }
     }
@@ -97,27 +107,25 @@ pub(crate) async fn run_session_listener(
                 match result {
                     Ok((stream, _addr)) => {
                         let (read_half, write_half) = stream.into_split();
-                        let actor_tx_for_task = actor_tx.clone();
+                        let registry_for_task = Arc::clone(&registry);
                         let session_id_for_task = session_id.clone();
                         let aux_task = tokio::spawn(async move {
                             handle_session_aux(
                                 read_half,
                                 write_half,
                                 session_id_for_task,
-                                actor_tx_for_task,
+                                registry_for_task,
                             )
                             .await;
                         });
-                        // Register the aux socket with the actor so teardown
-                        // can abort it. A session that already closed refuses
-                        // the connection (the task aborts itself).
-                        Client::new(actor_tx.clone())
-                            .session_push_aux_socket(&session_id, aux_task)
-                            .await;
+                        // Register the aux socket with the session task so
+                        // teardown can abort it. A session that already closed
+                        // refuses the connection (the task aborts itself).
+                        session_task.push_aux_socket(aux_task).await;
                     }
                     Err(e) => {
                         log::error!("session {session_id}: accept error: {e}");
-                        request_teardown(&actor_tx, &session_id, false).await;
+                        session_task.teardown(false).await;
                         break;
                     }
                 }
@@ -132,28 +140,46 @@ pub(crate) async fn handle_session_main(
     main_read: OwnedReadHalf,
     writer: SharedWriter,
     session_id: String,
-    actor_tx: mpsc::UnboundedSender<ActorMsg>,
+    registry: Arc<RunRegistry>,
+    session_task: SessionTaskHandle,
 ) {
     // Hold the connection-count guard for the lifetime of the main connection.
-    let _guard = ConnectionGuard::new(&actor_tx, ActorMsg::ConnectionUp, ActorMsg::ConnectionDown);
+    let _guard = {
+        let registry = Arc::clone(&registry);
+        ConnectionGuard::new(
+            {
+                let registry = Arc::clone(&registry);
+                move || registry.connection_up()
+            },
+            move || registry.connection_down(),
+        )
+    };
 
     let (request_tx, request_rx) = mpsc::channel::<Value>(64);
 
-    let reader_actor_tx = actor_tx.clone();
     let reader_session_id = session_id.clone();
+    let reader_session_task = session_task.clone();
     let mut reader_handle = tokio::spawn(async move {
-        run_session_main_reader(main_read, request_tx, reader_actor_tx, reader_session_id).await;
+        run_session_main_reader(
+            main_read,
+            request_tx,
+            reader_session_id,
+            reader_session_task,
+        )
+        .await;
     });
 
-    let dispatcher_actor_tx = actor_tx.clone();
+    let dispatcher_registry = Arc::clone(&registry);
     let dispatcher_writer = writer.clone();
     let dispatcher_session_id = session_id.clone();
+    let dispatcher_session_task = session_task.clone();
     let mut dispatcher_handle = tokio::spawn(async move {
         run_session_dispatcher(
             request_rx,
             dispatcher_writer,
             dispatcher_session_id,
-            dispatcher_actor_tx,
+            dispatcher_registry,
+            dispatcher_session_task,
         )
         .await;
     });
@@ -175,16 +201,16 @@ pub(crate) async fn handle_session_main(
             let _ = reader_handle.await;
         }
     }
-    request_teardown(&actor_tx, &session_id, true).await;
+    session_task.teardown(true).await;
 }
 
 /// Read JSON-lines from main socket, forward to dispatcher. On EOF/error,
-/// mark the session closed (the actor cancels the in-flight turn).
+/// mark the session closed (the session task cancels the in-flight turn).
 pub(crate) async fn run_session_main_reader(
     main_read: OwnedReadHalf,
     request_tx: mpsc::Sender<Value>,
-    actor_tx: mpsc::UnboundedSender<ActorMsg>,
     session_id: String,
+    session_task: SessionTaskHandle,
 ) {
     let mut reader = BufReader::new(main_read);
 
@@ -197,9 +223,7 @@ pub(crate) async fn run_session_main_reader(
             }
             Ok(None) | Err(_) => {
                 log::debug!("session {session_id}: main socket EOF/error");
-                Client::new(actor_tx.clone())
-                    .session_mark_closed(&session_id)
-                    .await;
+                session_task.mark_closed().await;
                 break;
             }
         }
@@ -216,7 +240,8 @@ pub(crate) async fn run_session_dispatcher(
     mut request_rx: mpsc::Receiver<Value>,
     writer: SharedWriter,
     session_id: String,
-    actor_tx: mpsc::UnboundedSender<ActorMsg>,
+    registry: Arc<RunRegistry>,
+    session_task: SessionTaskHandle,
 ) {
     loop {
         let request = match request_rx.recv().await {
@@ -236,7 +261,16 @@ pub(crate) async fn run_session_dispatcher(
             continue;
         }
 
-        match handle_session_op(op.as_str(), &request, &writer, &session_id, &actor_tx).await {
+        match handle_session_op(
+            op.as_str(),
+            &request,
+            &writer,
+            &session_id,
+            &registry,
+            &session_task,
+        )
+        .await
+        {
             // `handle_session_op` already tore the session down (and awaited
             // it) before acknowledging, so the client cannot race ahead while
             // the gremlin is still live.
@@ -246,10 +280,7 @@ pub(crate) async fn run_session_dispatcher(
 
         // EOF may have been observed while this op was still running. Stop
         // processing queued requests for the now-dead session.
-        if Client::new(actor_tx.clone())
-            .session_is_closed(&session_id)
-            .await
-        {
+        if session_task.is_closed().await {
             break;
         }
     }
@@ -259,47 +290,48 @@ pub(crate) async fn handle_session_op(
     op: &str,
     request: &Value,
     writer: &SharedWriter,
-    session_id: &str,
-    actor_tx: &mpsc::UnboundedSender<ActorMsg>,
+    _session_id: &str,
+    registry: &Arc<RunRegistry>,
+    session_task: &SessionTaskHandle,
 ) -> SessionOp {
     match op {
         "chat" => {
-            handle_chat(request, writer, actor_tx, session_id).await;
+            handle_chat(request, writer, registry, session_task).await;
             SessionOp::Continue
         }
         "chat_model" => {
-            let resp = handle_chat_model(request, actor_tx, session_id).await;
+            let resp = handle_chat_model(request, session_task).await;
             let _ = writer.write_json_line(&resp).await;
             SessionOp::Continue
         }
         "cancel_chat" => {
-            handle_cancel_chat(request, writer, actor_tx, session_id).await;
+            handle_cancel_chat(request, writer, session_task).await;
             SessionOp::Continue
         }
         "compact" => {
-            let resp = handle_compact(request, actor_tx, session_id).await;
+            let resp = handle_compact(request, session_task).await;
             let _ = writer.write_json_line(&resp).await;
             SessionOp::Continue
         }
         "stop" => {
-            let resp = handle_session_stop(request, actor_tx, session_id).await;
+            let resp = handle_session_stop(request, registry, session_task).await;
             let _ = writer.write_json_line(&resp).await;
             SessionOp::Continue
         }
         "read_blob" => {
-            let resp = handle_read_blob(request, actor_tx).await;
+            let resp = handle_read_blob(request, registry).await;
             let _ = writer.write_json_line(&resp).await;
             SessionOp::Continue
         }
         "read_definition" => {
-            let resp = handle_read_definition(request, actor_tx).await;
+            let resp = handle_read_definition(request, registry).await;
             let _ = writer.write_json_line(&resp).await;
             SessionOp::Continue
         }
         "close_session" => {
             // Tear down before acknowledging so the client cannot race ahead
             // while the gremlin is still live.
-            request_teardown(actor_tx, session_id, true).await;
+            session_task.teardown(true).await;
             let _ = writer
                 .write_json_line(&ok_response(serde_json::json!({})))
                 .await;
@@ -314,15 +346,24 @@ pub(crate) async fn handle_session_op(
 }
 
 /// Serve a single auxiliary connection. First request names a streaming op
-/// (`log`/`debug`/`stage_stream`).
+/// (`log`/`attach`/`stage_stream`).
 pub(crate) async fn handle_session_aux(
     read_half: OwnedReadHalf,
     write_half: tokio::net::unix::OwnedWriteHalf,
     session_id: String,
-    actor_tx: mpsc::UnboundedSender<ActorMsg>,
+    registry: Arc<RunRegistry>,
 ) {
     // Hold the connection-count guard for the lifetime of the aux connection.
-    let _guard = ConnectionGuard::new(&actor_tx, ActorMsg::ConnectionUp, ActorMsg::ConnectionDown);
+    let _guard = {
+        let registry = Arc::clone(&registry);
+        ConnectionGuard::new(
+            {
+                let registry = Arc::clone(&registry);
+                move || registry.connection_up()
+            },
+            move || registry.connection_down(),
+        )
+    };
     let writer = SharedWriter::new(write_half);
     let mut reader = BufReader::new(read_half);
 
@@ -343,13 +384,13 @@ pub(crate) async fn handle_session_aux(
     let op = request.get("op").and_then(|v| v.as_str()).unwrap_or("");
     match op {
         "log" => {
-            handle_log(&request, &actor_tx, reader, &writer).await;
+            handle_log(&request, &registry, reader, &writer).await;
         }
         "stage_stream" => {
             crate::executor::stage_stream::handle_stage_stream(&request, reader, &writer).await;
         }
-        "debug" => {
-            handle_debug(&request, &actor_tx, reader, &writer).await;
+        "attach" => {
+            handle_attach(&request, &registry, reader, &writer).await;
         }
         _ => {
             let resp = error_response(&format!("unknown session op: {op:?}"));
@@ -358,7 +399,7 @@ pub(crate) async fn handle_session_aux(
     }
 }
 
-async fn handle_read_blob(request: &Value, actor_tx: &mpsc::UnboundedSender<ActorMsg>) -> Value {
+async fn handle_read_blob(request: &Value, registry: &Arc<RunRegistry>) -> Value {
     let id = match super::valid_id(request) {
         Ok(id) => id.to_string(),
         Err(resp) => return resp,
@@ -377,7 +418,7 @@ async fn handle_read_blob(request: &Value, actor_tx: &mpsc::UnboundedSender<Acto
     }
     let tail = request.get("tail").and_then(|v| v.as_u64()).unwrap_or(500) as usize;
 
-    let store = match super::ops::resolve_store_for_id(&id, actor_tx).await {
+    let store = match super::ops::resolve_store_for_id(&id, registry).await {
         Ok(store) => store,
         Err(resp) => return resp,
     };
@@ -386,16 +427,13 @@ async fn handle_read_blob(request: &Value, actor_tx: &mpsc::UnboundedSender<Acto
     ok_response(serde_json::json!({"lines": lines}))
 }
 
-async fn handle_read_definition(
-    request: &Value,
-    actor_tx: &mpsc::UnboundedSender<ActorMsg>,
-) -> Value {
+async fn handle_read_definition(request: &Value, registry: &Arc<RunRegistry>) -> Value {
     let id = match super::valid_id(request) {
         Ok(id) => id.to_string(),
         Err(resp) => return resp,
     };
 
-    let store = match super::ops::resolve_store_for_id(&id, actor_tx).await {
+    let store = match super::ops::resolve_store_for_id(&id, registry).await {
         Ok(store) => store,
         Err(resp) => return resp,
     };
@@ -438,19 +476,4 @@ pub(crate) fn verify_session_id(request: &Value, expected: &str) -> Result<(), V
         }
         None => Err(error_response("missing 'session_id' field")),
     }
-}
-
-/// Ask the actor to tear down a session and wait for the drain to finish.
-///
-/// `abort_listener` stops the listener task before the socket is unlinked.
-/// Callers *outside* the listener (the main connection) pass `true`; the
-/// listener itself passes `false` so it does not abort its own task.
-async fn request_teardown(
-    actor_tx: &mpsc::UnboundedSender<ActorMsg>,
-    session_id: &str,
-    abort_listener: bool,
-) {
-    Client::new(actor_tx.clone())
-        .session_teardown(session_id, abort_listener)
-        .await;
 }

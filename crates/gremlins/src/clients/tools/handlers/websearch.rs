@@ -17,7 +17,7 @@ pub(crate) struct WebSearchTool;
 
 #[async_trait]
 impl ToolHandler for WebSearchTool {
-    fn chat_only(&self) -> bool {
+    fn skills_gated(&self) -> bool {
         true
     }
 

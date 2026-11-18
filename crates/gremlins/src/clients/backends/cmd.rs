@@ -493,7 +493,7 @@ impl Backend for CmdBackend {
     async fn run(
         &self,
         params: RunParams,
-        _interactive: Option<InteractiveSession>,
+        _interactive: InteractiveSession,
     ) -> Result<CompletedRun, ClientError> {
         // Concatenation of harness system prompt and definition user content —
         // this is the single string bound for the child process's stdin.

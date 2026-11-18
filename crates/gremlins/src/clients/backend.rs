@@ -5,9 +5,9 @@ use std::sync::Arc;
 use super::agent::task_models::TaskModelSelector;
 use super::cancel::CancelToken;
 use super::conversation::Conversation;
-use super::interactive::InteractiveSession;
 use super::params::ResolvedParams;
 use super::protocol::{CompactionResult, CompletedRun};
+use super::InteractiveSession;
 use async_trait::async_trait;
 use indexmap::IndexMap;
 use rig_core::driver::DynModel;
@@ -51,8 +51,6 @@ pub struct RunParams {
     /// roles) is replayed verbatim; the run's `prompt` is applied on top as
     /// the next user message.
     pub(crate) prepopulated_conversation: Box<dyn Conversation>,
-    /// Whether skills are available for this chat session.
-    pub(crate) skills_available: bool,
     /// Discovered skills for this session. Session-bound so concurrent chat
     /// sessions resolve their own project's skills instead of a shared slot.
     pub(crate) discovered_skills: Option<Arc<Vec<crate::skills::LoadedSkill>>>,
@@ -94,7 +92,6 @@ impl RunParams {
             task_models: None,
             cancel_token: None,
             prepopulated_conversation: crate::conversation::new_blank_for_run_params(),
-            skills_available: false,
             discovered_skills: None,
             extra_sandbox_roots: Vec::new(),
             path_context: crate::clients::path_context::PathContext::default(),
@@ -124,7 +121,6 @@ impl Clone for RunParams {
             task_models: self.task_models.clone(),
             cancel_token: self.cancel_token.clone(),
             prepopulated_conversation: self.prepopulated_conversation.clone(),
-            skills_available: self.skills_available,
             discovered_skills: self.discovered_skills.clone(),
             extra_sandbox_roots: self.extra_sandbox_roots.clone(),
             path_context: self.path_context.clone(),
@@ -148,7 +144,7 @@ pub trait Backend: Send + Sync {
     async fn run(
         &self,
         params: RunParams,
-        interactive: Option<InteractiveSession>,
+        interactive: InteractiveSession,
     ) -> Result<CompletedRun, ClientError>;
 
     /// The model this backend instance was built for.
@@ -171,7 +167,8 @@ pub trait Backend: Send + Sync {
 
     /// Resume a paused or timed-out run.
     async fn resume(&self) -> Result<CompletedRun, ClientError> {
-        self.run(self.last_run_params()?, None).await
+        self.run(self.last_run_params()?, InteractiveSession::unattached())
+            .await
     }
 
     /// Reap all child processes for a given gremlin ID.

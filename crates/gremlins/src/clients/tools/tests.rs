@@ -86,7 +86,6 @@ fn ctx(cwd: &Path) -> AgentLoopRuntime {
         audit_lock: None,
         id_prefix: String::new(),
         message_prefix: "test.".to_string(),
-        skills_available: false,
         discovered_skills: None,
         path_context: crate::clients::path_context::PathContext::default(),
         root_raw_stream_path: None,
@@ -494,7 +493,6 @@ async fn bash_invoke_respects_cwd() {
         audit_lock: None,
         id_prefix: String::new(),
         message_prefix: String::new(),
-        skills_available: false,
         discovered_skills: None,
         path_context: crate::clients::path_context::PathContext::default(),
         root_raw_stream_path: None,
@@ -531,7 +529,6 @@ async fn bash_invoke_cwd_none_uses_project_root() {
         audit_lock: None,
         id_prefix: String::new(),
         message_prefix: String::new(),
-        skills_available: false,
         discovered_skills: None,
         path_context: crate::clients::path_context::PathContext::default(),
         root_raw_stream_path: None,
@@ -566,7 +563,6 @@ async fn bash_invoke_cwd_none_diverges_from_process_cwd() {
         audit_lock: None,
         id_prefix: String::new(),
         message_prefix: String::new(),
-        skills_available: false,
         discovered_skills: None,
         path_context: crate::clients::path_context::PathContext::default(),
         root_raw_stream_path: None,
@@ -958,14 +954,14 @@ async fn websearch_oversized_response_kept_within_cap() {
 fn tool_definitions_filter() {
     let all = tool_definitions(None, false, ToolMode::Full);
     // Read, Landscape, Edit, Bash, Write, Grep, Glob, Done, Task = 9
-    // (chat-only: WebSearch, Mischief, LoadSkill are excluded in headless)
+    // (skills-gated: WebSearch, Mischief, LoadSkill are excluded when skills unavailable)
     assert_eq!(all.len(), 9);
     let all_names: Vec<_> = all.iter().map(|t| t.name.as_str()).collect();
     assert!(all_names.contains(&"Landscape"), "got: {all_names:?}");
     let filtered = tool_definitions(Some(&["Read".into(), "Bash".into()]), false, ToolMode::Full);
     let names: Vec<_> = filtered.iter().map(|t| t.name.as_str()).collect();
     // Task and Done are always available regardless of the filter.
-    // Mischief and WebSearch are chat-only, absent from headless filters.
+    // Mischief and WebSearch are skills-gated, absent from filters when skills are unavailable.
     assert_eq!(names, ["Read", "Bash", "Done", "Task"]);
     assert!(!names.contains(&"WebSearch"), "got: {names:?}");
     assert!(!names.contains(&"Mischief"), "got: {names:?}");
@@ -982,9 +978,9 @@ fn task_and_done_always_available() {
 }
 
 #[test]
-fn mischief_passes_filter_when_chat_mode() {
-    // Mischief and WebSearch are always available to chat sessions even
-    // when the default native_block filter does not list them.
+fn mischief_passes_filter_when_skills_available() {
+    // Mischief and WebSearch are always available when skills are available
+    // even when the default native_block filter does not list them.
     let filtered = tool_definitions(Some(&["Read".into(), "Bash".into()]), true, ToolMode::Full);
     let names: Vec<_> = filtered.iter().map(|t| t.name.as_str()).collect();
     assert!(names.contains(&"Mischief"), "got: {names:?}");
@@ -995,7 +991,7 @@ fn mischief_passes_filter_when_chat_mode() {
 
 #[tokio::test]
 async fn mischief_invoke_blocked_in_headless() {
-    // Mischief is chat-only. Headless gremlins with an allowlist that
+    // Mischief is skills-gated. Headless gremlins with an allowlist that
     // omits Mischief must get "unknown tool".
     let dir = tmp();
     let c = AgentLoopRuntime {
@@ -1009,7 +1005,6 @@ async fn mischief_invoke_blocked_in_headless() {
         audit_lock: None,
         id_prefix: String::new(),
         message_prefix: String::new(),
-        skills_available: false,
         discovered_skills: None,
         path_context: crate::clients::path_context::PathContext::default(),
         root_raw_stream_path: None,
@@ -1023,7 +1018,7 @@ async fn mischief_invoke_blocked_in_headless() {
 
 #[tokio::test]
 async fn websearch_invoke_blocked_in_headless() {
-    // WebSearch is chat-only. Headless gremlins with an allowlist that
+    // WebSearch is skills-gated. Headless gremlins with an allowlist that
     // omits WebSearch must get "unknown tool".
     let dir = tmp();
     let c = AgentLoopRuntime {
@@ -1037,7 +1032,6 @@ async fn websearch_invoke_blocked_in_headless() {
         audit_lock: None,
         id_prefix: String::new(),
         message_prefix: String::new(),
-        skills_available: false,
         discovered_skills: None,
         path_context: crate::clients::path_context::PathContext::default(),
         root_raw_stream_path: None,
@@ -1057,7 +1051,7 @@ async fn websearch_invoke_blocked_in_headless() {
 
 #[tokio::test]
 async fn websearch_invoke_blocked_in_headless_no_filter() {
-    // WebSearch is chat-only. Without any allowlist the gate must still
+    // WebSearch is skills-gated. Without any allowlist the gate must still
     // reject it — the None branch must not open a bypass.
     let dir = tmp();
     let c = AgentLoopRuntime {
@@ -1071,7 +1065,6 @@ async fn websearch_invoke_blocked_in_headless_no_filter() {
         audit_lock: None,
         id_prefix: String::new(),
         message_prefix: String::new(),
-        skills_available: false,
         discovered_skills: None,
         path_context: crate::clients::path_context::PathContext::default(),
         root_raw_stream_path: None,
@@ -1091,7 +1084,7 @@ async fn websearch_invoke_blocked_in_headless_no_filter() {
 
 #[tokio::test]
 async fn websearch_invoke_blocked_in_headless_explicit_allowlist() {
-    // WebSearch is chat-only. Even when a headless allowlist explicitly
+    // WebSearch is skills-gated. Even when a headless allowlist explicitly
     // includes it the gate must reject the call.
     let dir = tmp();
     let c = AgentLoopRuntime {
@@ -1105,7 +1098,6 @@ async fn websearch_invoke_blocked_in_headless_explicit_allowlist() {
         audit_lock: None,
         id_prefix: String::new(),
         message_prefix: String::new(),
-        skills_available: false,
         discovered_skills: None,
         path_context: crate::clients::path_context::PathContext::default(),
         root_raw_stream_path: None,
@@ -1124,9 +1116,9 @@ async fn websearch_invoke_blocked_in_headless_explicit_allowlist() {
 }
 
 #[tokio::test]
-async fn mischief_invoke_allowed_in_chat() {
-    // Mischief is chat-only but always available in chat sessions even
-    // when the allowlist omits it.
+async fn mischief_invoke_allowed_when_skills_available() {
+    // Mischief is skills-gated but always available when skills are configured
+    // even when the allowlist omits it.
     let dir = tmp();
     let c = AgentLoopRuntime {
         cwd: Some(dir.clone()),
@@ -1139,8 +1131,7 @@ async fn mischief_invoke_allowed_in_chat() {
         audit_lock: None,
         id_prefix: String::new(),
         message_prefix: String::new(),
-        skills_available: true,
-        discovered_skills: None,
+        discovered_skills: Some(Arc::new(vec![])),
         path_context: crate::clients::path_context::PathContext::default(),
         root_raw_stream_path: None,
     };
@@ -1152,7 +1143,8 @@ async fn mischief_invoke_allowed_in_chat() {
 }
 
 #[test]
-fn load_skill_in_tool_definitions_when_chat_mode() {
+fn load_skill_in_tool_definitions_when_skills_available() {
+    // With skills available, LoadSkill must be emitted in the definitions.
     let defs = tool_definitions(None, true, ToolMode::Full);
     assert_eq!(defs.len(), 12);
     let names: Vec<_> = defs.iter().map(|t| t.name.as_str()).collect();
@@ -1160,17 +1152,17 @@ fn load_skill_in_tool_definitions_when_chat_mode() {
 }
 
 #[test]
-fn load_skill_not_in_tool_definitions_when_not_chat_mode() {
+fn load_skill_not_in_tool_definitions_when_skills_unavailable() {
+    // When skills are unavailable, LoadSkill must be omitted entirely.
     let defs = tool_definitions(None, false, ToolMode::Full);
     let names: Vec<_> = defs.iter().map(|t| t.name.as_str()).collect();
     assert!(!names.contains(&"LoadSkill"), "got: {names:?}");
 }
 
 #[test]
-fn load_skill_passes_filter_when_chat_mode() {
-    // With is_chat=true, LoadSkill must appear even when a
+fn load_skill_passes_filter_when_skills_available() {
     // restrictive filter is active — the default native_block filter
-    // does not include LoadSkill, and chat sessions must always expose it.
+    // does not include LoadSkill, and sessions with skills must always expose it.
     let filtered = tool_definitions(Some(&["Read".into(), "Bash".into()]), true, ToolMode::Full);
     let names: Vec<_> = filtered.iter().map(|t| t.name.as_str()).collect();
     assert!(names.contains(&"LoadSkill"), "got: {names:?}");
@@ -1210,7 +1202,6 @@ async fn load_skill_unknown_name() {
     let _lock = EnvGuard::lock();
     let mut c = ctx(&tmp());
     c.discovered_skills = Some(Arc::new(vec![]));
-    c.skills_available = true;
     let result = load_skill_invoke(&c, &serde_json::json!({"name": "nonexistent"})).await;
     assert!(
         result.starts_with("Error: skill \"nonexistent\" not found"),
@@ -1236,7 +1227,6 @@ async fn load_skill_rejects_disable_model_invocation() {
         files: vec![],
     };
     c.discovered_skills = Some(Arc::new(vec![loaded]));
-    c.skills_available = true;
     let result = load_skill_invoke(&c, &serde_json::json!({"name": "secret-ops"})).await;
     assert!(
         result.starts_with("Error: skill \"secret-ops\" is not available for model invocation"),
@@ -1263,7 +1253,6 @@ async fn load_skill_success_body_free() {
         files: vec![],
     };
     c.discovered_skills = Some(Arc::new(vec![loaded]));
-    c.skills_available = true;
     let result = load_skill_invoke(&c, &serde_json::json!({"name": "pdf"})).await;
     assert!(
         result.starts_with("Skill \"pdf\" loaded successfully."),
@@ -1272,6 +1261,60 @@ async fn load_skill_success_body_free() {
     assert!(
         !result.contains("SECRET SKILL BODY"),
         "skill body must not leak into tool result: {result}"
+    );
+}
+
+#[tokio::test]
+async fn load_skill_invoke_blocked_in_headless() {
+    // LoadSkill is skills-gated. Headless gremlins with an allowlist that
+    // omits LoadSkill must get "unknown tool".
+    let dir = tmp();
+    let c = AgentLoopRuntime {
+        cwd: Some(dir.clone()),
+        extra_env: None,
+        base_env: None,
+        sandbox: SandboxMode::Roots(vec![dir.clone()]),
+        audit_log: None,
+        allowed_tools: Some(vec!["Read".into(), "Bash".into()]),
+        task_fn: None,
+        audit_lock: None,
+        id_prefix: String::new(),
+        message_prefix: String::new(),
+        discovered_skills: None,
+        path_context: crate::clients::path_context::PathContext::default(),
+        root_raw_stream_path: None,
+    };
+    let out = invoke("tool-test-id", "LoadSkill", &c, r#"{"name":"pdf"}"#).await;
+    assert!(
+        out.contains("unknown tool"),
+        "headless LoadSkill must be rejected, got: {out}"
+    );
+}
+
+#[tokio::test]
+async fn load_skill_invoke_allowed_when_skills_available() {
+    // LoadSkill is skills-gated but always available when skills are configured
+    // even when the allowlist omits it.
+    let dir = tmp();
+    let c = AgentLoopRuntime {
+        cwd: Some(dir.clone()),
+        extra_env: None,
+        base_env: None,
+        sandbox: SandboxMode::Roots(vec![dir.clone()]),
+        audit_log: None,
+        allowed_tools: Some(vec!["Read".into(), "Bash".into()]),
+        task_fn: None,
+        audit_lock: None,
+        id_prefix: String::new(),
+        message_prefix: String::new(),
+        discovered_skills: Some(Arc::new(vec![])),
+        path_context: crate::clients::path_context::PathContext::default(),
+        root_raw_stream_path: None,
+    };
+    let out = invoke("tool-test-id", "LoadSkill", &c, r#"{"name":"pdf"}"#).await;
+    assert!(
+        !out.contains("unknown tool"),
+        "LoadSkill must bypass filter when skills available, got: {out}"
     );
 }
 
@@ -2082,7 +2125,6 @@ async fn filtered_tool_does_not_mutate_or_spawn() {
         audit_lock: None,
         id_prefix: String::new(),
         message_prefix: String::new(),
-        skills_available: false,
         discovered_skills: None,
         path_context: crate::clients::path_context::PathContext::default(),
         root_raw_stream_path: None,
@@ -3033,7 +3075,6 @@ async fn task_no_callback_returns_error() {
         audit_lock: None,
         id_prefix: String::new(),
         message_prefix: String::new(),
-        skills_available: false,
         discovered_skills: None,
         path_context: crate::clients::path_context::PathContext::default(),
         root_raw_stream_path: None,
@@ -3063,7 +3104,6 @@ async fn task_callback_called_when_set() {
         audit_lock: None,
         id_prefix: String::new(),
         message_prefix: String::new(),
-        skills_available: false,
         discovered_skills: None,
         path_context: crate::clients::path_context::PathContext::default(),
         root_raw_stream_path: None,
@@ -3091,7 +3131,6 @@ async fn task_empty_prompt_returns_error() {
         audit_lock: None,
         id_prefix: String::new(),
         message_prefix: String::new(),
-        skills_available: false,
         discovered_skills: None,
         path_context: crate::clients::path_context::PathContext::default(),
         root_raw_stream_path: None,
@@ -3126,7 +3165,6 @@ async fn task_unknown_kind_rejected_before_callback() {
         audit_lock: None,
         id_prefix: String::new(),
         message_prefix: String::new(),
-        skills_available: false,
         discovered_skills: None,
         path_context: crate::clients::path_context::PathContext::default(),
         root_raw_stream_path: None,
@@ -3157,7 +3195,6 @@ async fn task_result_is_headered_with_kind() {
         audit_lock: None,
         id_prefix: String::new(),
         message_prefix: String::new(),
-        skills_available: false,
         discovered_skills: None,
         path_context: crate::clients::path_context::PathContext::default(),
         root_raw_stream_path: None,
@@ -3606,7 +3643,6 @@ async fn invoke_does_not_cap_task() {
         audit_lock: None,
         id_prefix: String::new(),
         message_prefix: String::new(),
-        skills_available: false,
         discovered_skills: None,
         path_context: crate::clients::path_context::PathContext::default(),
         root_raw_stream_path: None,
@@ -3638,7 +3674,6 @@ fn allow_all_ctx(cwd: &Path) -> AgentLoopRuntime {
         audit_lock: None,
         id_prefix: String::new(),
         message_prefix: String::new(),
-        skills_available: false,
         discovered_skills: None,
         path_context: crate::clients::path_context::PathContext::default(),
         root_raw_stream_path: None,

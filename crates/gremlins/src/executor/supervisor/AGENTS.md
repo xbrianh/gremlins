@@ -6,19 +6,22 @@ is spawned by the CLI for every command that needs a daemon (`launch`, `stop`,
 `resume`, `ls`, etc.).
 
 The module was split from a monolithic `supervisor.rs` during the
-`break-executor` refactor. `mod.rs` remains the hub: it holds `RunHandle`,
-`RunState`, the accept loop, `dispatch_op`, shared helpers (`SharedWriter`,
-`CurrentTurn`), and re-exports.
+`break-executor` refactor. `mod.rs` remains the hub: it holds the accept loop,
+`dispatch_op`, shared helpers (`SharedWriter`, `ok_response`/`error_response`),
+and re-exports. The `RunHandle`/`RunState` types live in `run_registry.rs`, and
+`CurrentTurn` in `chat/mod.rs`.
 
 ## File map
 
 | File | Role |
 |---|---|
-| `mod.rs` | Hub: module declarations, `RunHandle`/`RunState`, `CurrentTurn`, `DebugDetachGuard`, accept loop (`run_supervisor`, `handle_connection`), `dispatch_op`, `ok_response`/`error_response`, and all pub(crate) re-exports. |
+| `mod.rs` | Hub: module declarations, accept loop (`run_supervisor`, `handle_connection`), `dispatch_op`, `ok_response`/`error_response`, and all pub(crate) re-exports. |
 | (bus crate) | The global event bus (`Bus<EventKind>`), `init_bus`, `subscribe_all`/`subscribe_run`, `emit_event`, `SharedWriter`, `BusSubGuard`, and `ConnectionGuard` live in the `gremlins-magic-bus` crate (`concrete.rs`, `connection.rs`). |
-| `lifecycle.rs` | Child gremlin lifecycle: `setup_gremlin_channels`, `run_gremlin_task`, `spawn_log_writer`, `spawn_gremlin_runner`, `launch_child`/`stop_child`, `terminate_and_reap`. |
+| `lifecycle.rs` | Child gremlin lifecycle: `setup_gremlin_channels`, `run_gremlin_task`, `spawn_log_writer`, `reap_client_for`, `terminate_and_reap`, and `LogRelay`. |
+| `run_registry.rs` | `RunHandle`/`RunState`/`LaunchResult` types plus the lock-protected `RunRegistry` owning the run map, connection counter, and chat-id sequence. |
 | `log_handler.rs` | Streaming log handler (`handle_log`) and `LogSource` enum. |
-| `debug.rs` | Interactive debug handler (`handle_debug`) and `send_debug_status`. |
+| `attachment.rs` | Attachment handler (`handle_attach`): `run`-scope stage-boundary follow and `conversation`-scope observe/control. The only op that pins a pause and injects operator text. |
+| `debug.rs` | Shared attachment helpers: `check_agent_stage` (agent-leaf validation) and `send_debug_status` (progress frames). |
 | `session.rs` | Client session IO layer: `SessionOp` enum, `run_session_listener`/`run_session_dispatcher`, `handle_session_main`/`handle_session_op`/`handle_session_aux`, and `verify_session_id`. Session state lives in `actor.rs`; this module only talks to it via `ActorMsg`. |
 | `state_view.rs` | `StateView` — a uniform JSON snapshot of a gremlin's state across live (run map) and persisted (disk) sources. Used by the read-only query ops. |
 | `chat/` | TUI chat turn lifecycle. See `chat/AGENTS.md`. |
@@ -35,7 +38,7 @@ The module was split from a monolithic `supervisor.rs` during the
 2. Each connection spawns `handle_connection`, which reads JSON-line
    requests, dispatches via `dispatch_op`, and writes JSON-line responses.
 3. Session-bearing connections (`handle_session_main`) additionally spawn
-   the session listener and dispatcher for sideline sockets (log, debug,
+   the session listener and dispatcher for sideline sockets (log, attach,
    chat).
 
 ### Run map
@@ -46,7 +49,7 @@ truth for running gremlins. Each `RunHandle` carries:
 - The tokio task handle
 - A `watch::Sender<RunState>` for status broadcasts
 - A log `broadcast::Sender<String>` for streaming logs
-- An `InteractiveHandle` for debug/command injection
+- An `InteractiveHandle` for attach/command injection
 - The gremlin's `StateStore`
 - A bus `Subscriber<EventKind>` for lifecycle events
 
@@ -72,7 +75,7 @@ and emits the terminal `DaemonEvent`.
 | `chat_model` | `handle_chat_model` | `ops/model.rs` |
 | `compact` | `handle_compact` | `ops/model.rs` |
 | `log` | `handle_log` | `log_handler.rs` |
-| `debug` | `handle_debug` | `debug.rs` |
+| `attach` | `handle_attach` | `attachment.rs` |
 | `chat` | `handle_chat` | `chat/mod.rs` |
 | `create_session` | `handle_create_session` | `ops/mod.rs` |
 | `session_stop` | `handle_session_stop` | `ops/control.rs` |
@@ -86,7 +89,7 @@ and emits the terminal `DaemonEvent`.
   bail, error — must call `finish` so the map entry is cleaned, the terminal
   state is broadcast, and bus subscribers are notified.
 - **Session sockets are per-session.** Each TUI session gets a dedicated
-  Unix socket (`<session_id>.sock`) for sideline channels (log, debug,
+  Unix socket (`<session_id>.sock`) for sideline channels (log, attach,
   chat). The session id uses a `sess-` prefix to never collide with gremlin
   ids.
 - **Chat gremlins are session-scoped.** A session owns its chat
@@ -101,10 +104,10 @@ and emits the terminal `DaemonEvent`.
 | You want to … | Look at |
 |---|---|
 | Add a new op handler | Add a function in the appropriate `ops/` sub-module, wire it in `dispatch_op` (`mod.rs`). |
-| Change child launch/stop | `lifecycle.rs::launch_child` / `stop_child` |
+| Change child launch/stop | `run_registry.rs::RunRegistry::launch_child` / `stop_and_reap` |
 | Change the event bus | `gremlins_magic_bus::concrete` (`init_bus`, `subscribe_run`, `emit_event`) |
 | Understand session lifecycle | `session.rs::run_session_listener` / `handle_session_main`; state in `actor.rs::SessionState` |
-| Debug a chat turn | `chat/turn.rs::run_chat_turn` + `chat/turn_finalizer.rs` |
-| Understand the interactive debug flow | `debug.rs::handle_debug` |
+| Debug a chat turn | `chat/turn.rs::run_turn` + `chat_handle.rs::ChatGremlinHandle` / `chat/payload.rs::PromptMsg` |
+| Understand the interactive attach flow | `attachment.rs::handle_conversation_attach` |
 | Read gremlin state for a query | `state_view.rs::state_view_for_id` |
 | Change socket/lock protocol | `supervisor` delegates to `crate::executor::socket` |

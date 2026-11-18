@@ -13,8 +13,8 @@ auditing) and from individual tool implementations (in `handlers/`).
 |---|---|
 | `mod.rs` | Module declarations and crate-internal re-exports. Centralizes the public surface the agent loop and executor consume. |
 | `defaults.rs` | Global `ToolRegistry` singleton (`OnceLock`), plus forwarding helpers (`max_per_message`, `display_truncation`, `is_completion`, `title_detail`, `title_uses_secondaries`, `secondary_args`) that look up a tool by name and delegate to its trait method. |
-| `definitions.rs` | Produces model-facing `ToolDefinition` JSON schemas from `ToolSpec` tables. Handles tool filtering, chat-only omission, and the `{TASK_MAX_PER_TURN}` / `{MAX_CONCURRENT_TOOLS}` placeholder substitution. |
-| `dispatch.rs` | The main tool-call pipeline: `invoke_with_conversation` is the single entry point. Sequence: chat-only gate → tool-filter gate → JSON parse → handler auto-repair → schema validation → sandbox check → handler invoke → audit write → output cap. |
+| `definitions.rs` | Produces model-facing `ToolDefinition` JSON schemas from `ToolSpec` tables. Handles tool filtering, skills-gated omission, and the `{TASK_MAX_PER_TURN}` / `{MAX_CONCURRENT_TOOLS}` placeholder substitution. |
+| `dispatch.rs` | The main tool-call pipeline: `invoke_with_conversation` is the single entry point. Sequence: skills-gated gate → tool-filter gate → JSON parse → handler auto-repair → schema validation → sandbox check → handler invoke → audit write → output cap. |
 | `registry.rs` | `ToolHandler` trait (the interface every handler implements) and `ToolRegistry` (name→handler map). Also contains presentation helpers (`str_detail`, `push_u64_arg`, `push_str_arg`) shared by handlers and the agent loop. |
 | `runtime.rs` | `ToolOutcome` (prose text + optional structured exit code), `SandboxMode` (Roots vs AllowAll), `AgentLoopRuntime` (the per-stage context: cwd, env, sandbox, audit log, tool filter, task callback, telemetry channels, skills, id prefix, log channel), `AgentLoopTelemetry` (stream events + live tool-output sender), `ToolOutputLine` (one live-display chunk), and `TaskFn` (the callback type for spawning nested agent loops). |
 | `sandbox.rs` | Path containment enforcement. `check_tool` delegates per-tool sandbox checks to each handler via `sandbox_check()`. `bash_check` does pre-flight static analysis of shell commands — it splits on `;`/`&&`/`||`, tracks simulated `cd` state, strips heredocs and subshells, and validates every path-looking token against canonical containment roots. Also contains the audit logging path (`audit_log_path`), the audit entry writer, and the `check_ln_symlink` defense-in-depth check. |
@@ -29,12 +29,12 @@ auditing) and from individual tool implementations (in `handlers/`).
 
 Every tool call flows through `dispatch::invoke_with_conversation`:
 
-1. **Chat-only gate** — chat-only tools (Mischief, WebSearch) are rejected in
+1. **Skills-gated gate** — skills-gated tools (Mischief, WebSearch) are rejected in
    headless mode with "unknown tool" (so the model cannot detect mode via
    error message differences).
 2. **Tool-filter gate** — when `allowed_tools` is set, only explicitly listed
-   tools pass. `always_available` (Task, Done), `bypass_filter` (LoadSkill),
-   and chat-only-in-chat bypass the filter.
+   tools pass. `always_available` (Task, Done),
+   and skills-gated-in-skills-session bypass the filter.
 3. **JSON parse** — parse args; invalid JSON returns an error and writes an
    audit entry.
 4. **Auto-repair** — handlers with `repair_args()` get a chance to fix common
@@ -67,9 +67,8 @@ tool-specific logic out of the dispatch layer:
 - `output_cap` / `output_marker` — output truncation policy
 - `completion` — whether this tool ends the turn (only Done)
 - `title_detail` / `title_uses_secondaries` / `secondary_args` — TUI presentation
-- `chat_only` — headless rejection gate
+- `skills_gated` — skills-availability rejection gate
 - `repair_args` — pre-validation argument repair (only Edit)
-- `bypass_filter` — tool-filter bypass (only LoadSkill)
 
 ### Sandbox containment
 
@@ -102,7 +101,7 @@ compatibility with the old hand-written schema.
 
 ## Key invariants
 
-- **Dispatch never names a tool for gate decisions.** Chat-only gate,
+- **Dispatch never names a tool for gate decisions.** Skills-gated gate,
   completion detection, fan-out capping, display truncation, and filter
   bypass all use trait hooks, not name comparisons. When a tool is filtered
   out, the model sees "unknown tool", not a mode-revealing message.

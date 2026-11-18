@@ -39,12 +39,12 @@ use tokio::sync::mpsc;
 
 use crate::display;
 
-use app::{App, Screen};
+use app::{App, Screen, Target};
 use commands::{dispatch, CommandResult};
 use editor::{open_editor, ReaderChannels, SuspendHandle};
 use gremlins::executor::socket;
 use input_buffer::InputBuffer;
-use screen::LiveArea;
+use screen::{new_reasoning_band, LiveArea};
 
 /// A daemon `chat_model` lookup result tagged with the session generation it
 /// was issued for. Stale generations are ignored by the event loop.
@@ -743,7 +743,7 @@ fn handle_debug_prompt_submit(
     } else if trimmed == "/quit" {
         serde_json::json!({"op": "bail", "reason": "operator stopped"})
     } else {
-        serde_json::json!({"op": "talk", "text": trimmed})
+        serde_json::json!({"op": "message", "text": trimmed})
     };
 
     let _ = cmd_tx.send(cmd);
@@ -751,6 +751,10 @@ fn handle_debug_prompt_submit(
 
 /// Events received from the daemon over a debug session socket.
 enum DebugEvent {
+    Attached {
+        id: String,
+        nonce: u64,
+    },
     Ready {
         id: String,
     },
@@ -782,12 +786,23 @@ enum DebugEvent {
         output: String,
     },
     Error(String),
+    /// A conversation display frame the debug view does not surface
+    /// (`stream_reset`, `lagged`, `operator_message`, `system_warning`, ...).
+    Ignored,
     Disconnected,
 }
 
 /// Parse a daemon debug-protocol JSON line into a [`DebugEvent`].
 fn parse_debug_event(value: &serde_json::Value) -> DebugEvent {
     match value.get("type").and_then(|v| v.as_str()) {
+        Some("attached") => DebugEvent::Attached {
+            id: value
+                .get("id")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string(),
+            nonce: value.get("nonce").and_then(|v| v.as_u64()).unwrap_or(0),
+        },
         Some("ready") => DebugEvent::Ready {
             id: value
                 .get("id")
@@ -877,6 +892,15 @@ fn parse_debug_event(value: &serde_json::Value) -> DebugEvent {
                 .unwrap_or("unknown error")
                 .to_string(),
         ),
+        // Conversation display frames that the full-screen debug view does
+        // not render. Log at debug level and drop.
+        Some(
+            t @ ("stream_reset" | "lagged" | "operator_message" | "system_warning" | "command_ack"
+            | "detached"),
+        ) => {
+            log::debug!("debug: ignoring conversation frame {t}");
+            DebugEvent::Ignored
+        }
         _ => DebugEvent::Error(format!("unexpected event: {value}")),
     }
 }
@@ -996,7 +1020,11 @@ fn is_daemon_broadcast(value: &serde_json::Value) -> bool {
 
 /// Open a fresh debug session socket for `id` and spawn a reader task.
 ///
-/// Returns a sender for forwarding commands (`talk`/`quit`/`bail`/`continue`)
+/// Sends `{"op": "attach", "scope": "conversation", "id", "session_id"}`
+/// and waits for the daemon's `attached`/`ready` frames before the session is
+/// considered live.
+///
+/// Returns a sender for forwarding commands (`message`/`quit`/`bail`)
 /// to the daemon, a receiver for incoming [`DebugEvent`] values, and the
 /// task handle (abort it to drop the write half and close the socket).
 async fn start_debug_session(
@@ -1013,8 +1041,12 @@ async fn start_debug_session(
     let stream = client.open_aux_stream().await?;
     let (read_half, mut write_half) = stream.into_split();
 
-    let request =
-        serde_json::json!({ "op": "debug", "id": id, "session_id": client.session_id().await });
+    let request = serde_json::json!({
+        "op": "attach",
+        "scope": "conversation",
+        "id": id,
+        "session_id": client.session_id().await,
+    });
     socket::write_json_line(&mut write_half, &request).await?;
 
     let (cmd_tx, mut cmd_rx) = mpsc::unbounded_channel::<serde_json::Value>();
@@ -1843,6 +1875,34 @@ async fn run_app(live_area: &mut LiveArea) -> io::Result<()> {
                                 continue;
                             }
 
+                            // Runs screen: Enter opens a debug session for the
+                            // selected gremlin.
+                            if app.screen == Screen::Runs {
+                                if let Some(selected) = app.watch_selection.clone() {
+                                    close_watch_follow(&mut app, live_area, &mut watch_follow_handle);
+                                    // Tear down any previous debug session so
+                                    // channels and task are not leaked.
+                                    if let Some(handle) = debug_task.take() {
+                                        handle.abort();
+                                    }
+                                    debug_cmd_tx = None;
+                                    debug_evt_rx = None;
+                                    match start_debug_session(&client, selected.clone()).await {
+                                        Ok((cmd_tx, evt_rx, handle)) => {
+                                            debug_cmd_tx = Some(cmd_tx);
+                                            debug_evt_rx = Some(evt_rx);
+                                            debug_task = Some(handle);
+                                            app.show_debug(selected.clone());
+                                            live_area.show_debug(selected);
+                                        }
+                                        Err(e) => {
+                                            live_area.push_transcript_line(format!("error: {e}"));
+                                        }
+                                    }
+                                }
+                                continue;
+                            }
+
                             // Any other non-chat screen has no input bar; ignore
                             // Enter until the operator returns to chat.
                             if !app.screen.is_chat() {
@@ -1886,17 +1946,24 @@ async fn run_app(live_area: &mut LiveArea) -> io::Result<()> {
                                     }
                                     CommandResult::Debug(id) => {
                                         close_watch_follow(&mut app, live_area, &mut watch_follow_handle);
-                                        app.show_debug(id.clone());
-                                        live_area.show_debug(id.clone());
+                                        // Tear down any previous debug session so
+                                        // channels and task are not leaked.
+                                        if let Some(handle) = debug_task.take() {
+                                            handle.abort();
+                                        }
+                                        debug_cmd_tx = None;
+                                        debug_evt_rx = None;
                                         // Open a fresh socket and spawn the reader.
                                         match start_debug_session(&client, id.clone()).await {
                                             Ok((cmd_tx, evt_rx, handle)) => {
                                                 debug_cmd_tx = Some(cmd_tx);
                                                 debug_evt_rx = Some(evt_rx);
                                                 debug_task = Some(handle);
+                                                app.show_debug(id.clone());
+                                                live_area.show_debug(id);
                                             }
                                             Err(e) => {
-                                                live_area.push_debug_output(format!("error: {e}"));
+                                                live_area.push_transcript_line(format!("error: {e}"));
                                             }
                                         }
                                     }
@@ -1965,6 +2032,53 @@ async fn run_app(live_area: &mut LiveArea) -> io::Result<()> {
                                     }
                                     CommandResult::Quit => {
                                         break;
+                                    }
+                                    CommandResult::AttachHome => {
+                                        if !app.selected_target.is_home() {
+                                            // Sync App state back to LiveArea for the
+                                            // current target before switching away.
+                                            live_area.sync_app_state(&app);
+                                            live_area.switch_target(Target::Home);
+                                            app.selected_target = Target::Home;
+                                            // Reset input/cursor from the
+                                            // freshly-loaded home target's state.
+                                            live_area.copy_app_state_to(&mut app);
+                                            live_area.invalidate();
+                                        }
+                                    }
+                                    CommandResult::AttachStage { run_id, stage } => {
+                                        let stage_name = stage.unwrap_or_else(|| {
+                                            app.active_runs
+                                                .get(&run_id)
+                                                .map(|r| {
+                                                    if r.sub_stage.is_empty() {
+                                                        r.stage.clone()
+                                                    } else {
+                                                        r.sub_stage.clone()
+                                                    }
+                                                })
+                                                .unwrap_or_default()
+                                        });
+                                        if stage_name.is_empty() {
+                                            live_area.push_transcript_line(format!(
+                                                "> {display_input}\nno active stage for gremlin {run_id}"
+                                            ));
+                                            continue;
+                                        }
+                                        let new_target = Target::StageExecution {
+                                            run_id,
+                                            stage: stage_name,
+                                        };
+                                        if app.selected_target == new_target {
+                                            continue;
+                                        }
+                                        // Sync current target's state back.
+                                        live_area.sync_app_state(&app);
+                                        live_area.switch_target(new_target.clone());
+                                        app.selected_target = new_target;
+                                        // Load the new target's state into App.
+                                        live_area.copy_app_state_to(&mut app);
+                                        live_area.invalidate();
                                     }
                                     CommandResult::ActivateSkill(name) => {
                                         // Discover skills to validate the name.
@@ -2177,6 +2291,66 @@ async fn run_app(live_area: &mut LiveArea) -> io::Result<()> {
                         {
                             app.watch_move(-1);
                         }
+                        KeyCode::Char('s')
+                            if key.modifiers.is_empty()
+                                && app.screen == Screen::Runs =>
+                        {
+                            let Some(selected) = app.watch_selection.clone() else {
+                                continue;
+                            };
+                            // Only send stop for running gremlins.
+                            let is_running = app.active_runs.get(&selected)
+                                .map(|r| r.status == "running")
+                                .unwrap_or(false);
+                            if !is_running {
+                                live_area.push_transcript_line(
+                                    "stop: selected gremlin is not running".to_string(),
+                                );
+                                continue;
+                            }
+                            let c = Arc::clone(&client);
+                            let tx = result_tx.clone();
+                            tokio::spawn(async move {
+                                let result = c
+                                    .send_control_request(serde_json::json!({"op": "stop", "id": selected}))
+                                    .await;
+                                let lines = match result {
+                                    Ok(resp) => format_socket_response("stop", &resp),
+                                    Err(e) => vec![format!("error: {e}")],
+                                };
+                                let _ = tx.send(lines);
+                            });
+                        }
+                        KeyCode::Char('r')
+                            if key.modifiers.is_empty()
+                                && app.screen == Screen::Runs =>
+                        {
+                            let Some(selected) = app.watch_selection.clone() else {
+                                continue;
+                            };
+                            // Only send resume for stopped or failed gremlins.
+                            let can_resume = app.active_runs.get(&selected)
+                                .map(|r| matches!(r.status.as_str(), "stopped" | "failed"))
+                                .unwrap_or(false);
+                            if !can_resume {
+                                live_area.push_transcript_line(
+                                    "resume: selected gremlin does not need resuming".to_string(),
+                                );
+                                continue;
+                            }
+                            let c = Arc::clone(&client);
+                            let tx = result_tx.clone();
+                            tokio::spawn(async move {
+                                let result = c
+                                    .send_control_request(serde_json::json!({"op": "resume", "id": selected}))
+                                    .await;
+                                let lines = match result {
+                                    Ok(resp) => format_socket_response("resume", &resp),
+                                    Err(e) => vec![format!("error: {e}")],
+                                };
+                                let _ = tx.send(lines);
+                            });
+                        }
                         KeyCode::Char(ch) => {
                             if app.history_search.is_some() {
                                 app.search_push_char(ch);
@@ -2304,6 +2478,44 @@ async fn run_app(live_area: &mut LiveArea) -> io::Result<()> {
                     }
                     gremlins_magic_bus::EventKind::Bail { id, reason } => {
                         log::info!("[{id}] bail: {reason}");
+                    }
+                    gremlins_magic_bus::EventKind::StageBoundary { id, stage, active, .. } => {
+                        if active {
+                            // Seed a target state for this stage so the
+                            // user can `/attach` to it at any time.
+                            let target = Target::StageExecution {
+                                run_id: id.clone(),
+                                stage: stage.clone(),
+                            };
+                            // Clear the full per-target state on re-entry
+                            // (the stage may replay after a reconnect /
+                            // resume). A later execution of the same stage
+                            // must not inherit the earlier transcript or
+                            // draft.
+                            live_area.reset_target_state(&target);
+                        }
+                    }
+                    gremlins_magic_bus::EventKind::ExecOutput { id, is_stderr, text, .. } => {
+                        // Find the active stage for this run and route the
+                        // output to its transcript.
+                        if let Some(run) = app.active_runs.get(&id) {
+                            let stage = if run.sub_stage.is_empty() {
+                                run.stage.as_str()
+                            } else {
+                                run.sub_stage.as_str()
+                            };
+                            if !stage.is_empty() {
+                                let target = Target::StageExecution {
+                                    run_id: id,
+                                    stage: stage.to_string(),
+                                };
+                                let kind = if is_stderr { "stderr" } else { "stdout" };
+                                let line = format!("[{kind}] {text}");
+                                live_area.with_target_transcript(&target, |transcript, _reasoning| {
+                                    transcript.push_transcript_line(line);
+                                });
+                            }
+                        }
                     }
                     gremlins_magic_bus::EventKind::TokenUsage {
                         id,
@@ -2511,6 +2723,12 @@ async fn run_app(live_area: &mut LiveArea) -> io::Result<()> {
 
             // ── Chat events ────────────────────────────────
             Some((event, turn)) = chat_rx.recv() => {
+                // All chat events belong to the home conversation target
+                // regardless of which target is currently selected for
+                // display. Stage-execution targets only receive explicit
+                // stage-stream events.
+                let home = Target::Home;
+
                 // Drop events that belong to a superseded turn (a turn that
                 // was cancelled by Esc or replaced by a newer submit).
                 // TaskProgress events are keyed by parent tool-call id, not by
@@ -2522,7 +2740,9 @@ async fn run_app(live_area: &mut LiveArea) -> io::Result<()> {
                     );
                     let stats_json = stats.as_ref().map(|s| serde_json::to_value(s).unwrap_or(serde_json::Value::Null));
                     let totals_json = totals.as_ref().map(|s| serde_json::to_value(s).unwrap_or(serde_json::Value::Null));
-                    live_area.push_task_progress(parent_id, kind, call, reasoning, text, stats_json.as_ref(), totals_json.as_ref());
+                    live_area.with_target_transcript(&home, |transcript, _reasoning| {
+                        transcript.push_task_progress(parent_id, kind, call, reasoning, text, stats_json.as_ref(), totals_json.as_ref());
+                    });
                     continue;
                 }
                 let event_turn = turn.clone();
@@ -2548,18 +2768,27 @@ async fn run_app(live_area: &mut LiveArea) -> io::Result<()> {
                 match event {
                     gremlins_magic_bus::EventKind::StreamChunk { text, .. } => {
                         log::debug!("StreamChunk len={}", text.len());
-                        live_area.push_response(&text);
+                        live_area.with_target_transcript(&home, |transcript, _| {
+                            transcript.push_response(&text);
+                        });
                     }
                     gremlins_magic_bus::EventKind::ReasoningChunk { text, .. } => {
                         log::debug!("ReasoningChunk len={}", text.len());
-                        live_area.push_reasoning_text(&text);
+                        live_area.with_target_transcript(&home, |_, reasoning| {
+                            if reasoning.title_is_empty() {
+                                reasoning.set_title(REASONING_PLACEHOLDER_TITLE);
+                            }
+                            reasoning.push_text(&text);
+                        });
                     }
                     gremlins_magic_bus::EventKind::ToolOutputChunk { id, name, call, text, .. } => {
                         log::debug!(
                             "ToolOutputChunk id={id} name={name} call={call} len={}",
                             text.len()
                         );
-                        live_area.push_tool_output_chunk(&id, &call, &text);
+                        live_area.with_target_transcript(&home, |transcript, _| {
+                            transcript.push_tool_output_chunk(&id, &call, &text);
+                        });
                     }
                     gremlins_magic_bus::EventKind::ToolResult { id, name: _, call, output, .. } => {
                         log::debug!(
@@ -2567,61 +2796,56 @@ async fn run_app(live_area: &mut LiveArea) -> io::Result<()> {
                             output.len()
                         );
                         // All tools participate uniformly in the transcript.
-                        live_area.commit_tool_result(&id, &call);
+                        live_area.with_target_transcript(&home, |transcript, _| {
+                            transcript.commit_tool_result(&id, &call);
+                        });
                     }
                     gremlins_magic_bus::EventKind::TurnComplete { turn, text, tool_calls, stats, totals } => {
                         log::debug!("TurnComplete text_len={} tool_calls={:?}", text.len(), tool_calls);
-                        live_area.clear_tool_output();
-                        // `text` is the model's full response for the just-completed
-                        // turn — the same text streamed via StreamChunk. Reconcile
-                        // `response_text` so the display shows the complete response
-                        // even when broadcast StreamChunk events were dropped due to
-                        // channel lag. `response_text` accumulates across the agent
-                        // loop, so only the current turn's trailing slice is repaired.
-                        live_area.reconcile_response(&text);
-                        // Seed the current turn's tool-call list. ToolResult events
-                        // commit each call as it finishes; this list is the safety net
-                        // that reconciles anything still uncommitted when the turn
-                        // finishes. All tools participate uniformly.
-                        live_area.reconcile_tool_calls(&tool_calls);
-                        // The reasoning stream's title row is the live stats line:
-                        // compact per-turn token/cache summary prefixed with the
-                        // agent-loop turn number so the operator can see which
-                        // iteration the stats belong to.
-                        let turn_num = turn;
-                        let stats_json = stats.as_ref().map(|s| serde_json::to_value(s).unwrap_or(serde_json::Value::Null));
-                        let totals_json = totals.as_ref().map(|s| serde_json::to_value(s).unwrap_or(serde_json::Value::Null));
-                        live_area.set_reasoning_title(&stats_title(turn_num, stats_json.as_ref(), totals_json.as_ref()));
+                        live_area.with_target_transcript(&home, |transcript, reasoning| {
+                            transcript.clear_tool_output();
+                            transcript.reconcile_response(&text);
+                            transcript.reconcile_tool_calls(&tool_calls);
+                            let turn_num = turn;
+                            let stats_json = stats.as_ref().map(|s| serde_json::to_value(s).unwrap_or(serde_json::Value::Null));
+                            let totals_json = totals.as_ref().map(|s| serde_json::to_value(s).unwrap_or(serde_json::Value::Null));
+                            reasoning.set_title(&stats_title(turn_num, stats_json.as_ref(), totals_json.as_ref()));
+                        });
                     }
                     gremlins_magic_bus::EventKind::Done { text, summary, .. } => {
                         log::debug!("Done text_len={} summary_len={} has_current_turn={}",
-                            text.len(), summary.len(), live_area.has_current_turn());
-                        if !live_area.has_current_turn() {
+                            text.len(), summary.len(), live_area.target_has_current_turn(&home));
+                        if !live_area.target_has_current_turn(&home) {
                             log::debug!("Done SKIPPED — no current turn");
                             continue;
                         }
-                        // The Done text is the Done-tool summary — gremlin
-                        // machinery. Only use it when the model produced no
-                        // streamed text (e.g. called Done without saying
-                        // anything). Otherwise the StreamChunk text IS the
-                        // response. The summary is appended to the response
-                        // (unless empty or already equal to the text on
-                        // screen) so it is displayed as part of the turn.
-                        live_area.finish_response(&text, &summary);
-
-                        // Relabel the live stats header from the in-progress
-                        // `clanking` label to the finished `clawnked` label
-                        // before `finish_turn` commits its title to the
-                        // transcript. `Done` carries no per-turn token
-                        // figures, so only the already-rendered title changes.
-                        live_area.relabel_reasoning_title();
-
-                        // Unpin the turn and clear its draft state so the
-                        // finished response is committed to the transcript.
-                        live_area.finish_turn();
-                        live_area.clear_tool_output();
+                        // Update the home target's transcript.
+                        live_area.with_target_transcript(&home, |transcript, reasoning| {
+                            if transcript.response_is_empty() && !text.is_empty() {
+                                transcript.replace_response(&text);
+                            }
+                            if !summary.is_empty() && summary != text {
+                                transcript.push_response("\n\n");
+                                transcript.push_response(&summary);
+                            }
+                            // Relabel the live stats header.
+                            let new_title = reasoning
+                                .title()
+                                .map(|t| t.replacen(REASONING_PLACEHOLDER_TITLE, REASONING_COMPLETED_TITLE, 1));
+                            if let Some(new_title) = new_title {
+                                reasoning.set_title(&new_title);
+                            }
+                            let stream = std::mem::replace(reasoning, new_reasoning_band());
+                            let had_turn = transcript.has_current_turn();
+                            transcript.finish_turn();
+                            if had_turn {
+                                transcript.commit_reasoning_title(stream);
+                            }
+                            transcript.clear_tool_output();
+                        });
 
                         app.active_request = false;
+                        live_area.set_target_active_request(&home, false);
                         active_turn = None;
 
                         // Repaint immediately so the finished response text
@@ -2630,14 +2854,22 @@ async fn run_app(live_area: &mut LiveArea) -> io::Result<()> {
                         live_area.compose(&app)?;
                     }
                     gremlins_magic_bus::EventKind::Ended { reason, .. } => {
-                        if !live_area.has_current_turn() {
+                        if !live_area.target_has_current_turn(&home) {
                             continue;
                         }
                         app.active_request = false;
+                        live_area.set_target_active_request(&home, false);
                         let msg = format!("chat ended: {reason}");
-                        live_area.finish_turn();
-                        live_area.clear_tool_output();
-                        live_area.push_transcript_line(msg);
+                        live_area.with_target_transcript(&home, |transcript, reasoning| {
+                            let had_turn = transcript.has_current_turn();
+                            let stream = std::mem::replace(reasoning, new_reasoning_band());
+                            transcript.finish_turn();
+                            transcript.clear_tool_output();
+                            if had_turn {
+                                transcript.commit_reasoning_title(stream);
+                            }
+                            transcript.push_transcript_line(msg);
+                        });
 
                         // When the turn was soft-interrupted, keep the
                         // turn id alive so a second ESC within the
@@ -2658,26 +2890,36 @@ async fn run_app(live_area: &mut LiveArea) -> io::Result<()> {
                         live_area.compose(&app)?;
                     }
                     gremlins_magic_bus::EventKind::Error { message: msg, .. } => {
-                        if !live_area.has_current_turn() {
+                        if !live_area.target_has_current_turn(&home) {
                             continue;
                         }
                         app.active_request = false;
+                        live_area.set_target_active_request(&home, false);
                         active_turn = None;
                         let full = format!("chat error: {msg}");
-                        live_area.finish_turn();
-                        live_area.clear_tool_output();
-                        live_area.push_transcript_line(full);
+                        live_area.with_target_transcript(&home, |transcript, reasoning| {
+                            let stream = std::mem::replace(reasoning, new_reasoning_band());
+                            let had_turn = transcript.has_current_turn();
+                            transcript.finish_turn();
+                            if had_turn {
+                                transcript.commit_reasoning_title(stream);
+                            }
+                            transcript.clear_tool_output();
+                            transcript.push_transcript_line(full);
+                        });
 
                         // Repaint immediately so the error state is visible
                         // without waiting for the next input event.
                         live_area.compose(&app)?;
                     }
                     gremlins_magic_bus::EventKind::SystemWarning { message: msg, .. } => {
-                        if !live_area.has_current_turn() {
+                        if !live_area.target_has_current_turn(&home) {
                             continue;
                         }
                         let full = format!("⚠ {msg}");
-                        live_area.push_transcript_line(full);
+                        live_area.with_target_transcript(&home, |transcript, _| {
+                            transcript.push_transcript_line(full);
+                        });
                     }
                     gremlins_magic_bus::EventKind::TaskProgress { .. } => unreachable!("handled above"),
                     _ => {}
@@ -2687,6 +2929,10 @@ async fn run_app(live_area: &mut LiveArea) -> io::Result<()> {
             // ── Debug session events ──────────────────────────
             Some(event) = recv_debug(&mut debug_evt_rx) => {
                 match event {
+                    DebugEvent::Attached { id, nonce } => {
+                        log::debug!("debug: attached to {id} (nonce {nonce})");
+                        live_area.push_debug_output(format!("attached to gremlin {id}"));
+                    }
                     DebugEvent::Ready { id } => {
                         live_area.mark_debug_ready();
                         live_area.push_debug_output(format!("connected to gremlin {id}"));
@@ -2744,6 +2990,7 @@ async fn run_app(live_area: &mut LiveArea) -> io::Result<()> {
                     DebugEvent::Error(msg) => {
                         live_area.push_debug_output(format!("debug: error: {msg}"));
                     }
+                    DebugEvent::Ignored => {}
                     DebugEvent::Disconnected => {
                         live_area.push_debug_output("debug: disconnected".to_string());
                         live_area.set_debug_connected(false);

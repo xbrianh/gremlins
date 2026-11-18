@@ -194,7 +194,7 @@ impl Backend for AzureOpenAiBackend {
     async fn run(
         &self,
         params: RunParams,
-        interactive: Option<InteractiveSession>,
+        interactive: InteractiveSession,
     ) -> Result<CompletedRun, ClientError> {
         let ctx = self.state.prepare_context(params.clone());
         let cancel = params.cancel_token.clone().unwrap_or_else(CancelToken::new);

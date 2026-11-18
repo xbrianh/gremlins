@@ -97,9 +97,10 @@ returns `RunError::Reported` so the CLI exits nonzero without printing it again.
 
 ### Debug sessions
 `DebugEvent` variants arrive on `debug_evt_rx` (via `recv_debug`, which pends forever when no session is active):
-- `Ready` → `live_area.mark_debug_ready()`
+- `Attached` → log/announce the attachment acknowledgment (first frame of an `attach` conversation scope); `Ready` → `live_area.mark_debug_ready()`
 - `TurnComplete` / `Done` / `Ended` / `StreamChunk` / `ReasoningChunk` / `ToolResult` / `Error` / `Disconnected` → `live_area.push_debug_output()`, update connection state via `live_area.set_debug_connected()`
 - `ToolOutputChunk` is **ignored** — debug tool output is never routed into the chat transcript's live tool slot (the two sockets are independent, and a background chat turn must not commit a debug call into its tool segment). Debug shows final results via `ToolResult`.
+- `Ignored` covers conversation display frames the debug view does not surface (`stream_reset`, `lagged`, `operator_message`, `system_warning`, `command_ack`, `detached`)
 
 ## Rendering
 

@@ -16,6 +16,7 @@ pub(crate) mod error;
 pub(crate) mod format;
 pub mod github_auth;
 pub(crate) mod interactive;
+pub use interactive::InteractiveSession;
 pub(crate) mod lazy_auth_http;
 pub(crate) mod naked_conversation;
 pub(crate) mod native;

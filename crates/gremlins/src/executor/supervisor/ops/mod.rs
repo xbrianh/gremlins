@@ -12,63 +12,73 @@ pub(crate) use control::{
 };
 
 use serde_json::Value;
-use tokio::sync::{mpsc, oneshot};
+use std::sync::Arc;
 
 use crate::config;
 
 use crate::executor::socket;
+use crate::executor::state;
 
-use super::actor::ActorMsg;
+use super::run_registry::RunRegistry;
 use super::session::run_session_listener;
-use super::{error_response, ok_response};
+use super::session_task::{spawn_session_task, SessionTaskHandle};
+use super::{error_response, ok_response, SessionRegistry};
 
 // Create session stays here — it's the coordinating factory, not purely
 // control or query.
 pub(crate) async fn handle_create_session(
     _request: &Value,
-    actor_tx: &mpsc::UnboundedSender<super::actor::ActorMsg>,
+    registry: &Arc<RunRegistry>,
+    sessions: &SessionRegistry,
 ) -> Value {
     // Session ids use the same charset as gremlin ids but a distinct prefix
-    // so a session id can never collide with a gremlin id. The actor allocates
-    // and registers the session so a concurrent create cannot race.
-    let (respond, rx) = oneshot::channel();
-    if actor_tx.send(ActorMsg::CreateSession { respond }).is_err() {
-        return error_response("supervisor is shutting down");
-    }
-    let session_id = match rx.await {
-        Ok(session_id) => session_id,
-        Err(_) => return error_response("supervisor is shutting down"),
+    // so a session id can never collide with a gremlin id. The registry lock
+    // is held across both the collision check and the insert, so two
+    // concurrent `create_session` calls cannot reserve the same id.
+    let state_root = config::state_root();
+    let registry_for_session = Arc::clone(registry);
+    let (session_id, session_handle) = {
+        let mut registry = sessions.lock().unwrap();
+        loop {
+            let candidate = format!("sess-{}", state::token_hex(8));
+            if !registry.contains_key(&candidate) {
+                let handle: SessionTaskHandle = spawn_session_task(
+                    state_root.clone(),
+                    candidate.clone(),
+                    Arc::clone(&registry_for_session),
+                    Some(sessions.clone()),
+                );
+                registry.insert(candidate.clone(), handle.clone());
+                break (candidate, handle);
+            }
+        }
     };
 
-    let state_root = config::state_root();
     let listener = match socket::bind_session_socket(&state_root, &session_id) {
         Ok(listener) => listener,
         Err(e) => {
-            // Roll back the registration so a failed bind doesn't leak a
-            // permanently-unusable session.
-            let (respond, _rx) = oneshot::channel();
-            let _ = actor_tx.send(ActorMsg::RemoveSession {
-                session_id: session_id.clone(),
-                respond,
-            });
+            // Roll the session back so a failed bind does not leak a
+            // registry entry or a session task.
+            session_handle.teardown(false).await;
             return error_response(&e);
         }
     };
 
-    let listener_actor_tx = actor_tx.clone();
+    let listener_registry = Arc::clone(registry);
     let listener_session_id = session_id.clone();
+    let listener_session_task = session_handle.clone();
     let listener_task = tokio::spawn(async move {
-        run_session_listener(listener, listener_session_id, listener_actor_tx).await;
+        run_session_listener(
+            listener,
+            listener_session_id,
+            listener_registry,
+            listener_session_task,
+        )
+        .await;
     });
 
-    // Stash the listener handle so teardown/supervisor shutdown can abort it
-    // and stop accepting new connections.
-    let (respond, _rx) = oneshot::channel();
-    let _ = actor_tx.send(ActorMsg::SessionSetListenerTask {
-        session_id: session_id.clone(),
-        task: listener_task,
-        respond,
-    });
+    // Stash the listener handle with the session task so teardown can abort it.
+    session_handle.set_listener_task(listener_task).await;
 
     ok_response(serde_json::json!({
         "session_id": session_id,

@@ -8,8 +8,8 @@
 //! `render_turn` returns the raw `next_prompt` with no prefix assembly — the
 //! rendered prompt is always identical to the pending prompt.
 //! `record_turn`, `done_rejected`, and `finalize` commit `next_prompt` directly.
-//! A `prompt_committed` flag prevents `messages()` from appending a
-//! duplicate when `record_turn` has already committed the prompt.
+//! Once the prompt is committed it no longer counts as pending. If the
+//! response was interrupted, a continuation or operator correction follows it.
 //!
 //! ## Compaction
 //!
@@ -31,7 +31,9 @@ use std::sync::Arc;
 use crate::clients::agent::done_helpers::done_user_message;
 use crate::clients::backend::Backend;
 use crate::clients::compaction::compaction_block_as_message;
-use crate::clients::conversation::{Conversation, RunArtifact, TurnScript, TurnScriptError};
+use crate::clients::conversation::{
+    Conversation, PendingPrompt, RunArtifact, TurnScript, TurnScriptError,
+};
 use crate::clients::format::assistant_tool_message;
 use crate::conversation::compaction::{
     compaction_cut_index, run_local_compaction, CompactionReport, CompactionStrategy,
@@ -49,11 +51,7 @@ pub(crate) struct StandardConversation {
     /// The harness's next user message — committed into [`history`] by
     /// [`record_turn`] and [`done_rejected`], replaced by [`finish_turn`]
     /// and [`set_next_prompt`].
-    next_prompt: Message,
-    /// When `true`, `record_turn` has already committed the prompt into
-    /// `history` so `messages()` must not append a duplicate. Reset by
-    /// `pop_last_assistant_turn` and `begin_next_turn`.
-    prompt_committed: bool,
+    next_prompt: PendingPrompt,
     preserve_reasoning_in_history: bool,
     last_text: String,
     /// Prompt token count reported by the provider for the previous turn.
@@ -88,8 +86,7 @@ impl StandardConversation {
         let threshold = crate::config::compaction_threshold_tokens();
         Self {
             history,
-            next_prompt: Message::user(prompt.to_string()),
-            prompt_committed: false,
+            next_prompt: PendingPrompt::new(Message::user(prompt)),
             preserve_reasoning_in_history: preserve_reasoning,
             last_text: String::new(),
             last_prompt_tokens: None,
@@ -98,12 +95,6 @@ impl StandardConversation {
             compacted_prefix: false,
             compaction_threshold_tokens: threshold,
         }
-    }
-
-    /// Roll prompt-forward bookkeeping after a tool batch.
-    fn begin_next_turn(&mut self) {
-        self.next_prompt = Message::user("Continue.".to_string());
-        self.prompt_committed = false;
     }
 
     /// The committed durable transcript only — excludes the unsubmitted
@@ -206,7 +197,6 @@ impl Conversation for StandardConversation {
         Box::new(Self {
             history: self.history.clone(),
             next_prompt: self.next_prompt.clone(),
-            prompt_committed: self.prompt_committed,
             preserve_reasoning_in_history: self.preserve_reasoning_in_history,
             last_text: self.last_text.clone(),
             last_prompt_tokens: self.last_prompt_tokens,
@@ -231,23 +221,29 @@ impl Conversation for StandardConversation {
         input_tokens: Option<u64>,
         origin: Option<Origin>,
     ) {
-        // Commit the pending user prompt before the assistant message.
-        let prompt = self.next_prompt.clone();
-        self.history.push(prompt);
-        self.prompt_committed = true;
-        self.history.push(assistant_tool_message(
+        let response = assistant_tool_message(
             text,
             reasoning_items,
             tool_calls,
             self.preserve_reasoning_in_history,
             origin,
-        ));
+        );
+        self.next_prompt.commit(&mut self.history, response);
         self.last_prompt_tokens = input_tokens;
     }
 
     fn finish_turn(&mut self, results: Vec<Message>) {
         self.history.extend(results);
-        self.begin_next_turn();
+        self.set_next_prompt("Continue.");
+    }
+
+    fn record_interrupted_response(&mut self, text: String, reasoning: &[Reasoning]) {
+        self.next_prompt.commit_interrupted(
+            &mut self.history,
+            &text,
+            reasoning,
+            self.preserve_reasoning_in_history,
+        );
     }
 
     fn pop_last_assistant_turn(&mut self) {
@@ -259,9 +255,8 @@ impl Conversation for StandardConversation {
         // and restore it as next_prompt for clean turn re-execution.
         if let Some(Message::User { .. }) = self.history.last() {
             let prompt = self.history.pop().unwrap();
-            self.next_prompt = prompt;
+            self.next_prompt = PendingPrompt::new(prompt);
         }
-        self.prompt_committed = false;
     }
 
     async fn render_turn(
@@ -270,7 +265,7 @@ impl Conversation for StandardConversation {
         system_prompt: Option<String>,
     ) -> Result<TurnScript, TurnScriptError> {
         let combined_system = system_prompt;
-        let next_user_prompt = self.next_prompt.clone();
+        let next_user_prompt = self.next_prompt.for_request();
 
         // Auto-compact when the previous turn's prompt grew past the
         // configured token threshold, before the byte-size gate below.
@@ -320,7 +315,7 @@ impl Conversation for StandardConversation {
         done: Option<&ToolCall>,
     ) -> RunArtifact {
         let mut messages = self.history.clone();
-        messages.push(self.next_prompt.clone());
+        messages.push(self.next_prompt.for_request());
         let final_text = if text.trim().is_empty() {
             done.and_then(|tc| {
                 tc.function
@@ -378,8 +373,7 @@ impl Conversation for StandardConversation {
         }
         Box::new(Self {
             history,
-            next_prompt: Message::user(String::new()),
-            prompt_committed: false,
+            next_prompt: PendingPrompt::default(),
             // Fork children start with empty last_text — matching the old
             // prepopulated_messages semantics where only raw messages were
             // carried forward.
@@ -403,8 +397,7 @@ impl Conversation for StandardConversation {
     }
 
     fn set_next_prompt(&mut self, prompt: &str) {
-        self.next_prompt = Message::user(prompt.to_string());
-        self.prompt_committed = false;
+        self.next_prompt = PendingPrompt::new(Message::user(prompt));
     }
 
     fn set_preserve_reasoning(&mut self, preserve: bool) {
@@ -412,32 +405,7 @@ impl Conversation for StandardConversation {
     }
 
     fn inject_operator(&mut self, text: &str) {
-        if let Message::User { content: existing } = self.next_prompt.clone() {
-            use rig_core::completion::message::{Text, UserContent};
-            let has_tool_result = existing
-                .iter()
-                .any(|c| matches!(c, UserContent::ToolResult(_)));
-            if has_tool_result {
-                // Append to the pending tool-result user message.
-                let mut merged = existing;
-                merged.push(UserContent::Text(Text::new(format!("[operator]: {text}"))));
-                self.next_prompt = Message::User { content: merged };
-            } else {
-                // Append the operator note to the pending user prompt so
-                // the original task is not discarded.
-                let mut merged = existing;
-                merged.push(UserContent::Text(Text::new(format!(
-                    "\n\n[operator]: {text}"
-                ))));
-                self.history
-                    .push(Message::user(format!("[operator]: {text}")));
-                self.next_prompt = Message::User { content: merged };
-            }
-        } else {
-            self.history
-                .push(Message::user(format!("[operator]: {text}")));
-            self.next_prompt = Message::user(text);
-        }
+        self.next_prompt.inject_operator(text);
     }
 
     fn done_rejected(
@@ -448,19 +416,15 @@ impl Conversation for StandardConversation {
         results: Vec<Message>,
         next_prompt: Message,
     ) {
-        // Commit the pending prompt before the assistant message, matching
-        // the record_turn invariant.
-        let prompt = std::mem::replace(&mut self.next_prompt, next_prompt);
-        self.history.push(prompt);
-        self.prompt_committed = true;
-        self.history.push(assistant_tool_message(
+        self.record_turn(
             text,
             reasoning_items,
             tool_calls,
-            self.preserve_reasoning_in_history,
+            self.last_prompt_tokens,
             None,
-        ));
+        );
         self.history.extend(results);
+        self.next_prompt = PendingPrompt::new(next_prompt);
     }
 
     fn messages(&self) -> Vec<Message> {
@@ -468,9 +432,7 @@ impl Conversation for StandardConversation {
             return finalized.clone();
         }
         let mut all = self.history.clone();
-        if !self.prompt_committed {
-            all.push(self.next_prompt.clone());
-        }
+        self.next_prompt.append_pending_to(&mut all);
         all
     }
 
@@ -481,11 +443,12 @@ impl Conversation for StandardConversation {
 
 #[cfg(test)]
 mod tests {
-    use rig_core::completion::message::{AssistantContent, UserContent};
+    use rig_core::completion::message::{AssistantContent, AssistantMessage, UserContent};
     use rig_core::completion::Message;
 
     use crate::clients::agent::agent_loop::*;
     use crate::clients::cancel::CancelToken;
+    use crate::clients::interactive::InteractiveSession;
     use crate::conversation::new_blank_conversation;
 
     fn user_message_text(message: &Message) -> String {
@@ -500,6 +463,55 @@ mod tests {
                 .join(""),
             _ => String::new(),
         }
+    }
+
+    #[test]
+    fn interrupted_reasoning_only_respects_backend_replay_setting() {
+        let reasoning = rig_core::message::Reasoning::new("sealed payload");
+        for preserve in [false, true] {
+            let mut expected = vec![Message::user("original")];
+            if preserve {
+                expected.push(Message::Assistant(AssistantMessage::new(vec![
+                    AssistantContent::Reasoning(reasoning.clone()),
+                ])));
+            }
+            for blank in ["", " \n"] {
+                let mut conv = new_blank_conversation("original", preserve, None);
+                conv.record_interrupted_response(blank.into(), std::slice::from_ref(&reasoning));
+                assert_eq!(conv.messages(), expected);
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn correction_before_output_keeps_pending_tool_result_once() {
+        use rig_core::message::{ToolCall, ToolFunction, ToolName};
+
+        let call = ToolCall::from_wire(
+            "done",
+            ToolFunction::new(ToolName::new("Done").unwrap(), serde_json::json!({})),
+        );
+        let result = Message::tool_result(call.id.clone(), call.function.name.clone(), "rejected");
+        let mut conv = new_blank_conversation("original", false, None);
+        conv.done_rejected("", &[], std::slice::from_ref(&call), vec![], result.clone());
+        conv.record_interrupted_response(String::new(), &[]);
+        conv.inject_operator("Try this instead.");
+
+        let script = conv.render_turn(false, None).await.unwrap();
+        assert_eq!(
+            script.messages,
+            [
+                Message::user("original"),
+                Message::Assistant(AssistantMessage::new(vec![AssistantContent::ToolCall(
+                    call
+                ),])),
+            ]
+        );
+        let Message::User { mut content } = result else {
+            unreachable!()
+        };
+        content.push(UserContent::text("\n\n[operator]: Try this instead."));
+        assert_eq!(script.next_user_prompt, Message::User { content });
     }
 
     // Override test_ctx to use StandardConversation (context-aware) instead of
@@ -572,7 +584,7 @@ mod tests {
             ctx,
             CancelToken::new(),
             loop_opts(None),
-            None,
+            InteractiveSession::unattached(),
         )
         .await
         .unwrap();
@@ -699,7 +711,7 @@ mod tests {
             ctx,
             CancelToken::new(),
             loop_opts(None),
-            None,
+            InteractiveSession::unattached(),
         )
         .await
         .unwrap();
@@ -783,7 +795,7 @@ mod tests {
             ctx,
             cancel,
             loop_opts_preserve_reasoning(None),
-            None,
+            InteractiveSession::unattached(),
         )
         .await
         .unwrap();

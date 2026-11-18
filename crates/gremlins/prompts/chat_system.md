@@ -55,7 +55,7 @@ this section — do not try to run them yourself.
 | `/stop <id>` | stop a gremlin |
 | `/resume <id>` | resume a gremlin |
 | `/log <id>` | show gremlin log |
-| `/watch` | show the running gremlins table; j/k/arrow keys select, `Ctrl+O` toggles an inline live log |
+| `/watch` | show the running gremlins table; j/k/arrow keys select, Enter opens the selected gremlin's chat, s/r stop/resume, `Ctrl+O` toggles an inline live log |
 | `/debug <id>` | open a full-screen interactive debug session |
 | `/model` / `/model <spec>` / `/model clear` | show, set, or clear the TUI chat model (`model://provider/model` or `provider/model`) |
 | `/compact` | compact conversation history to reduce context usage |
@@ -73,6 +73,9 @@ this section — do not try to run them yourself.
 - `Ctrl+W` — enter the watch screen from chat; inside `/watch`, toggle the selected gremlin's live log (open it, or close an open pane); exits to chat when there is no selection left to follow.
 - `Ctrl+O` — in `/watch`: open or close the selected gremlin's live log.
 - `j` / `k` / `Up` / `Down` — in `/watch`: move the gremlin selection.
+- `Enter` — in `/watch`: open the selected gremlin's chat.
+- `s` — in `/watch`: stop the selected gremlin.
+- `r` — in `/watch`: resume the selected gremlin.
 - `Ctrl+G` — open the external editor to compose multi-line input.
 
 ### Interaction model
