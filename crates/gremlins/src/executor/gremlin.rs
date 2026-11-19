@@ -276,6 +276,9 @@ pub struct Gremlin {
     /// [`crate::clients::backend::RunParams::extra_sandbox_roots`] →
     /// the agent-loop sandbox assembly.
     pub(crate) extra_sandbox_roots: Vec<PathBuf>,
+    /// A definition holding native (non-serializable) stage functions, kept
+    /// alive in process until [`Gremlin::init_runtime`] installs it.
+    pub(crate) native_definition: Option<StaticDefinition>,
 }
 
 impl Gremlin {
@@ -310,6 +313,15 @@ impl Gremlin {
         // touching the filesystem. The hex suffix only adds alphanumeric
         // chars, so a valid name guarantees a valid candidate.
         validate_gremlin_id(definition_name).map_err(RunError::Message)?;
+
+        // A native function cannot be persisted: only an in-process
+        // (ephemeral) run may carry one, and it keeps the live definition.
+        let native_stage = _definition.native_check_stage();
+        if let (Some(stage), false) = (native_stage, config.ephemeral) {
+            return Err(RunError::Message(format!(
+                "stage {stage:?} has a native done check and cannot be launched from a persisted definition; use an ephemeral run"
+            )));
+        }
 
         // 1. Generate a gremlin id with collision-avoidance.
         let gremlin_id = if config.ephemeral {
@@ -437,7 +449,7 @@ impl Gremlin {
         // Write the hermetic definition.json snapshot now, before we
         // return the handle, so the spawned child always sees the
         // definition as it was at launch time — no TOCTTOU window.
-        {
+        if native_stage.is_none() {
             let yaml_bytes = _definition
                 .serialize()
                 .map_err(|e| RunError::Message(format!("failed to serialize definition: {e}")))?;
@@ -481,6 +493,7 @@ impl Gremlin {
             enclosing_model: None,
             discovered_skills: None,
             extra_sandbox_roots: config.extra_sandbox_roots.clone(),
+            native_definition: native_stage.map(|_| _definition.clone()),
         };
 
         // 5. Create an empty log file.
@@ -614,6 +627,7 @@ impl Gremlin {
             enclosing_model: None,
             discovered_skills: None,
             extra_sandbox_roots: Vec::new(),
+            native_definition: None,
         })
     }
 
@@ -649,7 +663,14 @@ impl Gremlin {
             )));
         };
 
-        let mut definition = if self.state.exists("definition.json") {
+        let native = self.native_definition.clone();
+        let mut definition = if let Some(live) = &native {
+            live.reload_keeping_native_checks(
+                self.model_override.as_deref(),
+                self.runtime_config.default_model.as_deref(),
+            )
+            .map_err(|error| RunError::Message(error.to_string()))?
+        } else if self.state.exists("definition.json") {
             // Read the hermetic snapshot through the store's name-validated
             // blob path, then parse the already-expanded bytes directly.
             let bytes = {
@@ -685,7 +706,7 @@ impl Gremlin {
 
         // Write the hermetic definition.json snapshot so every entry point
         // that calls run() gets one — resume, fork, and fresh launch alike.
-        if !self.state.exists("definition.json") {
+        if native.is_none() && !self.state.exists("definition.json") {
             let yaml_bytes = definition
                 .serialize()
                 .map_err(|e| RunError::Message(format!("failed to serialize definition: {e}")))?;
@@ -732,6 +753,7 @@ impl Gremlin {
             definition.goto(name);
         }
         self.definition = Box::new(definition);
+        self.native_definition = None;
         self.client = client;
 
         // Populate clean commands from the definition if not already set
@@ -991,6 +1013,7 @@ impl Gremlin {
             enclosing_model: effective_model.cloned(),
             discovered_skills: None,
             extra_sandbox_roots: self.extra_sandbox_roots.clone(),
+            native_definition: None,
         })
     }
 
@@ -2237,6 +2260,7 @@ mod tests {
             enclosing_model: None,
             discovered_skills: None,
             extra_sandbox_roots: Vec::new(),
+            native_definition: None,
         }
     }
 
@@ -2831,6 +2855,85 @@ mod tests {
         let workdir2 = workdir.clone();
         drop(gremlin);
         assert!(!workdir2.exists(), "workdir cleaned on drop");
+    }
+
+    fn nested_definition(with_check: bool) -> StaticDefinition {
+        use crate::builders::{AgentBuilder, DefinitionBuilder, DoneVerdict, SequenceBuilder};
+        use crate::model_uri::ModelURI;
+        let mut agent = AgentBuilder::new("inner").prompt("hi");
+        if with_check {
+            agent = agent.done_check(|_| async { DoneVerdict::Accept });
+        }
+        let seq = SequenceBuilder::new("outer")
+            .stage(agent.build().unwrap())
+            .build()
+            .unwrap();
+        DefinitionBuilder::new("nested", ModelURI::parse("cmd/true").unwrap())
+            .stage(seq)
+            .build()
+            .unwrap()
+    }
+
+    #[tokio::test]
+    async fn native_check_in_nested_stage_rejects_serialization_and_persistent_launch() {
+        let fx = GitSandbox::new();
+        if fx.is_skipped() {
+            return;
+        }
+        let definition = nested_definition(true);
+        assert_eq!(definition.native_check_stage(), Some("inner"));
+        let err = definition.serialize().unwrap_err().to_string();
+        assert!(err.contains("inner"), "{err}");
+
+        let err = Gremlin::init(
+            "gr-native",
+            fx.definition_path(),
+            &definition,
+            &HashMap::new(),
+            None,
+            &GremlinConfig::default(),
+        )
+        .err()
+        .expect("persistent launch must fail")
+        .to_string();
+        assert!(err.contains("inner") && err.contains("ephemeral"), "{err}");
+    }
+
+    #[tokio::test]
+    async fn native_check_survives_ephemeral_init_runtime_and_plain_definition_round_trips() {
+        let fx = GitSandbox::new();
+        if fx.is_skipped() {
+            return;
+        }
+        let cfg = GremlinConfig {
+            ephemeral: true,
+            ..Default::default()
+        };
+        let mut gremlin = Gremlin::init(
+            "gr-native-ok",
+            fx.definition_path(),
+            &nested_definition(true),
+            &HashMap::new(),
+            None,
+            &cfg,
+        )
+        .unwrap();
+        assert!(!gremlin.state.exists("definition.json"));
+        gremlin.init_runtime(None).await.unwrap();
+        use crate::definition::ExecutorStage;
+        let ExecutorStage::Sequence(seq) = gremlin.definition.next_stage().await.unwrap() else {
+            panic!("expected sequence");
+        };
+        let ExecutorStage::Agent { stage, .. } = &seq.stages[0] else {
+            panic!("expected agent");
+        };
+        assert!(stage.done_check.is_some(), "live callable must be retained");
+
+        let plain = nested_definition(false);
+        let bytes = plain.serialize().unwrap();
+        let reloaded = StaticDefinition::deserialize_owned(&bytes).unwrap();
+        assert_eq!(reloaded.native_check_stage(), None);
+        assert_eq!(reloaded.stage_names(), plain.stage_names());
     }
 
     #[tokio::test]

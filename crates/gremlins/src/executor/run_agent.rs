@@ -11,6 +11,7 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 
 use crate::artifacts::uri::Uri;
+use crate::clients::agent::done_assess::DoneAssessment;
 use crate::clients::backend::{ClientError, RunParams};
 use crate::clients::client::ModelURI;
 use crate::config;
@@ -274,6 +275,13 @@ pub(crate) async fn run_agent(
     let prepopulated_conversation: Box<dyn crate::clients::conversation::Conversation> =
         Box::new(conv);
 
+    let required_outputs = prepared.required_outputs();
+    let done_assessment =
+        (!required_outputs.is_empty() || agent.done_check.is_some()).then(|| DoneAssessment {
+            outputs: required_outputs,
+            check: agent.done_check.clone(),
+        });
+
     let params = RunParams {
         prompt: prepared.user_prompt(),
         label: prepared.name.clone(),
@@ -292,11 +300,8 @@ pub(crate) async fn run_agent(
         artifact_dir: Some(artifact_dir.clone()),
         idle_timeout: None,
         extra_env: Some(stage_env),
-        expected_artifact_paths: prepared
-            .expected_artifact_paths
-            .iter()
-            .map(PathBuf::from)
-            .collect(),
+        expected_artifact_paths: Vec::new(),
+        done: done_assessment,
         system_prompt: Some(system_prompt),
         gremlin_id: Some(gremlin.id.to_string()),
         base_env: Some(gremlin.env.clone()),

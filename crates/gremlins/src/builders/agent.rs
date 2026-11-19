@@ -10,6 +10,7 @@ use crate::definition::r#static::expand::key_referenced_in_text;
 use crate::schemas::error::SchemaError;
 use crate::stage_spec::agent::Agent;
 use crate::stage_spec::constants::FRAMEWORK_KEYS;
+use crate::stage_spec::done_check::{DoneCheck, DoneContext, DoneVerdict};
 use crate::stage_spec::node::StageSpec;
 
 /// Build an [`Agent`] stage.
@@ -38,6 +39,7 @@ pub struct AgentBuilder {
     model: Option<ModelURI>,
     task_models: Option<IndexMap<String, String>>,
     landscape: bool,
+    done_check: Option<DoneCheck>,
 }
 
 impl AgentBuilder {
@@ -52,6 +54,7 @@ impl AgentBuilder {
             model: None,
             task_models: None,
             landscape: true,
+            done_check: None,
         }
     }
 
@@ -131,6 +134,41 @@ impl AgentBuilder {
     /// only gates whether agents may call it.
     pub fn landscape(mut self, landscape: bool) -> Self {
         self.landscape = landscape;
+        self
+    }
+
+    /// Attach a native async assessor of the agent's proposed `Done`.
+    ///
+    /// On every standalone top-level `Done`, required outputs are checked
+    /// first; only when they are all present is `check` invoked with the
+    /// proposed summary, working directory, required outputs and a
+    /// cancellation signal. [`DoneVerdict::Accept`] completes the stage;
+    /// [`DoneVerdict::Retry`] returns the diagnostic to the same model
+    /// conversation (consuming one artifact reminder; once the reminder
+    /// budget is spent the `Done` falls through to completion);
+    /// [`DoneVerdict::Error`] fails the run. The function must be reusable
+    /// (`Fn`) and lives only in this process: a definition holding it cannot
+    /// be serialized or launched from a persisted snapshot.
+    ///
+    /// ```ignore
+    /// let stage = AgentBuilder::new("plan")
+    ///     .prompt("write the plan to {plan}")
+    ///     .output("plan", output("artifact://plan.md"))
+    ///     .done_check(|ctx| async move {
+    ///         if ctx.summary.is_empty() {
+    ///             DoneVerdict::Retry("summarize your work".into())
+    ///         } else {
+    ///             DoneVerdict::Accept
+    ///         }
+    ///     })
+    ///     .build()?;
+    /// ```
+    pub fn done_check<F, Fut>(mut self, check: F) -> Self
+    where
+        F: Fn(DoneContext) -> Fut + Send + Sync + 'static,
+        Fut: std::future::Future<Output = DoneVerdict> + Send + 'static,
+    {
+        self.done_check = Some(DoneCheck::new(check));
         self
     }
 
@@ -235,6 +273,7 @@ impl AgentBuilder {
             interpolation_map: self.interpolation_map,
             outputs_map: self.outputs_map,
             landscape: self.landscape,
+            done_check: self.done_check,
         };
         Ok(StageSpec::Agent {
             stage,

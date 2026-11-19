@@ -5,6 +5,7 @@ pub(crate) mod azure_openai_responses_http;
 pub mod backend;
 pub mod backends;
 pub(crate) mod cancel;
+pub use cancel::CancelToken;
 pub(crate) mod cancels;
 pub mod chatgpt_auth;
 pub mod client;

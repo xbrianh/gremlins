@@ -1,5 +1,7 @@
 use std::collections::HashMap;
-use std::path::Path;
+use std::path::{Path, PathBuf};
+
+use crate::stage_spec::done_check::DoneOutput;
 
 use thiserror::Error;
 
@@ -36,8 +38,27 @@ pub struct AgentPrepared {
     /// A stage-supplied system prompt override. When present, this replaces
     /// the harness default in [`AgentPrepared::system_prompt`].
     pub system_prompt: Option<String>,
-} // AgentError
-  // ---------------------------------------------------------------------------
+}
+
+impl AgentPrepared {
+    /// Required (non-optional) outputs with their resolved local write paths.
+    pub(crate) fn required_outputs(&self) -> Vec<DoneOutput> {
+        self.output_uris
+            .iter()
+            .filter(|(_, _, optional)| !optional)
+            .filter_map(|(key, uri, _)| {
+                self.output_paths.get(key).map(|path| DoneOutput {
+                    key: key.clone(),
+                    uri: uri.clone(),
+                    path: PathBuf::from(path),
+                })
+            })
+            .collect()
+    }
+}
+
+// AgentError
+// ---------------------------------------------------------------------------
 
 #[derive(Error, Debug)]
 pub enum AgentError {
@@ -104,6 +125,12 @@ pub async fn prepare_agent(
         let k = vars::substitute_vars(raw_key, &str_opts, &interpolation_map, framework_subs);
         let optional = k.ends_with('?');
         let key = k.trim_end_matches('?').to_string();
+        if output_paths.contains_key(&key) {
+            return Err(AgentError::Generic {
+                name: name.clone(),
+                detail: format!("multiple outputs resolve to the same key {key:?}"),
+            });
+        }
         let mut uri_str =
             vars::substitute_vars(raw_uri_str, &str_opts, &interpolation_map, framework_subs);
         if !loop_iter.is_empty() {
@@ -149,7 +176,12 @@ pub async fn prepare_agent(
         .and_then(|v| v.as_str())
         .map(|raw| vars::substitute_vars(raw, &str_opts, &subst_vars, framework_subs));
 
-    let expected_artifact_paths: Vec<String> = output_paths.values().cloned().collect();
+    // Only required outputs gate `Done`; optional ones may stay unwritten.
+    let expected_artifact_paths: Vec<String> = output_uris
+        .iter()
+        .filter(|(_, _, optional)| !optional)
+        .filter_map(|(key, _, _)| output_paths.get(key).cloned())
+        .collect();
 
     // The gremlin's kind is "chat" (set programmatically by the chat builder,
     // never by user YAML), so containment cannot be disabled by arbitrary
@@ -288,6 +320,7 @@ mod tests {
             )]),
             outputs_map: HashMap::new(),
             landscape: true,
+            done_check: None,
         };
         let fw = HashMap::new();
         let prepared = prepare_agent(&agent, &store, &store, "", &fw)
@@ -312,6 +345,7 @@ mod tests {
             )]),
             outputs_map: HashMap::new(),
             landscape: true,
+            done_check: None,
         };
         let fw = HashMap::from([("name".to_string(), "from-fw".to_string())]);
         let prepared = prepare_agent(&agent, &store, &store, "", &fw)
@@ -337,6 +371,7 @@ mod tests {
             )]),
             outputs_map: HashMap::from([("key".to_string(), "artifact://out.md".to_string())]),
             landscape: true,
+            done_check: None,
         };
         let fw = HashMap::new();
         let prepared = prepare_agent(&agent, &store, &store, "", &fw)
@@ -363,6 +398,7 @@ mod tests {
             interpolation_map: HashMap::from([("missing".to_string(), "nonexistent".to_string())]),
             outputs_map: HashMap::new(),
             landscape: true,
+            done_check: None,
         };
         let fw = HashMap::new();
         let err = prepare_agent(&agent, &store, &store, "", &fw)
@@ -386,6 +422,7 @@ mod tests {
                 "artifact://{loop_iter}/out.txt".to_string(),
             )]),
             landscape: true,
+            done_check: None,
         };
         let fw = HashMap::new();
         let prepared = prepare_agent(&agent, &store, &store, "my-agent~3", &fw)
@@ -416,6 +453,7 @@ mod tests {
             )]),
             outputs_map: HashMap::new(),
             landscape: true,
+            done_check: None,
         };
         let fw = HashMap::new();
         let prepared = prepare_agent(&agent, &store, &store, "my-agent~2", &fw)
@@ -436,6 +474,7 @@ mod tests {
             interpolation_map: HashMap::new(),
             outputs_map: HashMap::from([("result?".to_string(), "artifact://out.md".to_string())]),
             landscape: true,
+            done_check: None,
         };
         let fw = HashMap::new();
         let prepared = prepare_agent(&agent, &store, &store, "", &fw)
@@ -443,6 +482,25 @@ mod tests {
             .unwrap();
         assert_eq!(prepared.output_uris[0].0, "result");
         assert!(prepared.output_uris[0].2); // optional
+    }
+
+    #[tokio::test]
+    async fn test_prepare_rejects_colliding_required_and_optional_output_keys() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let store = make_state_store(ensure_artifact_dir(&tmp));
+        let mut agent = agent_with_bind("report", "artifact://required.md");
+        agent
+            .outputs_map
+            .insert("{alias}?".into(), "artifact://optional.md".into());
+        let fw = HashMap::from([("alias".into(), "report".into())]);
+
+        let err = prepare_agent(&agent, &store, &store, "", &fw)
+            .await
+            .unwrap_err();
+        assert_eq!(
+            err.to_string(),
+            "agent test: multiple outputs resolve to the same key \"report\""
+        );
     }
 
     #[tokio::test]
@@ -464,6 +522,7 @@ mod tests {
             )]),
             outputs_map: HashMap::new(),
             landscape: true,
+            done_check: None,
         };
         let fw = HashMap::new();
         let prepared = prepare_agent(&agent, &store, &store, "", &fw)
@@ -484,6 +543,7 @@ mod tests {
             interpolation_map: HashMap::new(),
             outputs_map: HashMap::new(),
             landscape: true,
+            done_check: None,
         };
         let fw = HashMap::new();
         let prepared = prepare_agent(&agent, &store, &store, "", &fw)
@@ -504,6 +564,7 @@ mod tests {
             interpolation_map: HashMap::new(),
             outputs_map: HashMap::new(),
             landscape: true,
+            done_check: None,
         };
         let fw = HashMap::new();
         let mut prepared = prepare_agent(&agent, &store, &store, "", &fw)
@@ -530,6 +591,7 @@ mod tests {
             interpolation_map: HashMap::new(),
             outputs_map: HashMap::new(),
             landscape: true,
+            done_check: None,
         };
         let fw = HashMap::new();
         let mut prepared = prepare_agent(&agent, &store, &store, "", &fw)
@@ -559,6 +621,7 @@ mod tests {
                 "artifact://{name}.md".to_string(),
             )]),
             landscape: true,
+            done_check: None,
         };
         let fw = HashMap::from([("name".to_string(), "my-agent".to_string())]);
         let prepared = prepare_agent(&agent, &store, &store, "", &fw)
@@ -584,6 +647,7 @@ mod tests {
             interpolation_map: HashMap::new(),
             outputs_map: HashMap::new(),
             landscape: true,
+            done_check: None,
         };
         let fw = HashMap::new();
         let prepared = prepare_agent(&agent, &store, &store, "", &fw)
@@ -608,6 +672,7 @@ mod tests {
             )]),
             outputs_map: HashMap::new(),
             landscape: true,
+            done_check: None,
         };
         let fw = HashMap::new();
         let prepared = prepare_agent(&agent, &store, &store, "", &fw)
@@ -634,6 +699,7 @@ mod tests {
             interpolation_map: HashMap::new(),
             outputs_map: HashMap::new(),
             landscape: true,
+            done_check: None,
         };
         let fw = HashMap::new();
         let prepared = prepare_agent(&agent, &store, &store, "", &fw)
@@ -659,6 +725,7 @@ mod tests {
                 ("c".to_string(), "artifact://c.md".to_string()),
             ]),
             landscape: true,
+            done_check: None,
         };
         let fw = HashMap::from([("cwd".to_string(), tmp.path().to_string_lossy().into_owned())]);
         let prepared = prepare_agent(&agent, &store, &store, "", &fw)
@@ -681,6 +748,7 @@ mod tests {
             interpolation_map: HashMap::new(),
             outputs_map: HashMap::new(),
             landscape: true,
+            done_check: None,
         };
         let fw = HashMap::new();
         let prepared = prepare_agent(&agent, &store, &store, "", &fw)
@@ -710,6 +778,7 @@ mod tests {
             interpolation_map: HashMap::new(),
             outputs_map: HashMap::from([(key.to_string(), uri.to_string())]),
             landscape: true,
+            done_check: None,
         }
     }
 
@@ -769,6 +838,7 @@ mod tests {
                 ("b".to_string(), "artifact://b.md".to_string()),
             ]),
             landscape: true,
+            done_check: None,
         };
         let mut prepared = prepare_agent(&agent, &store, &store, "", &HashMap::new())
             .await
@@ -798,6 +868,7 @@ mod tests {
                 ("b?".to_string(), "artifact://b.md".to_string()),
             ]),
             landscape: true,
+            done_check: None,
         };
         let prepared = prepare_agent(&agent, &store, &store, "", &HashMap::new())
             .await
@@ -837,6 +908,7 @@ mod tests {
             interpolation_map: HashMap::new(),
             outputs_map: HashMap::new(),
             landscape: true,
+            done_check: None,
         };
         let fw = HashMap::new();
         let prepared = prepare_agent(&agent, &store, &store, "", &fw)
@@ -857,6 +929,7 @@ mod tests {
             interpolation_map: HashMap::new(),
             outputs_map: HashMap::new(),
             landscape: true,
+            done_check: None,
         };
         let fw = HashMap::new();
         let mut prepared = prepare_agent(&agent, &store, &store, "", &fw)

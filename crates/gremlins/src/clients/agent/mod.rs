@@ -1,4 +1,5 @@
 pub(crate) mod agent_loop;
+pub(crate) mod done_assess;
 pub(crate) mod done_helpers;
 pub(crate) mod interactive;
 pub(crate) mod run_context;

@@ -1,5 +1,7 @@
 use std::collections::HashMap;
 
+use super::done_check::DoneCheck;
+
 // ---------------------------------------------------------------------------
 // Agent struct
 // ---------------------------------------------------------------------------
@@ -15,6 +17,8 @@ pub struct Agent {
     /// Defaults to `true`. The tool is registry-backed and contributes
     /// nothing to the system prompt.
     pub landscape: bool,
+    /// Native in-process assessor of a proposed `Done`. Never serialized.
+    pub done_check: Option<DoneCheck>,
 }
 
 // ---------------------------------------------------------------------------
@@ -37,6 +41,7 @@ mod tests {
             interpolation_map: HashMap::new(),
             outputs_map: HashMap::from([("bind-key".to_string(), "bind-val".to_string())]),
             landscape: true,
+            done_check: None,
         };
 
         assert_eq!(agent.name, "test-agent");

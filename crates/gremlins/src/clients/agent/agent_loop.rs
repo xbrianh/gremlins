@@ -1,5 +1,4 @@
 use std::io::Write;
-use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -14,6 +13,7 @@ use tokio::sync::Semaphore;
 use crate::clients::interactive::InteractiveSession;
 use gremlins_magic_bus::EventKind;
 
+use super::done_assess::DoneAssessment;
 use super::interactive::{interactive_loop, InteractiveLoopResult};
 use crate::clients::cancel::{default_classify, is_retryable, CancelToken};
 use crate::clients::conversation::{Conversation, TurnScriptError};
@@ -720,7 +720,7 @@ impl LoopState {
         text: &str,
         reasoning_items: &[Reasoning],
         tool_calls: &[ToolCall],
-        expected_artifact_paths: &[PathBuf],
+        done: Option<&DoneAssessment>,
         captured: &mut Option<Vec<serde_json::Value>>,
         loop_start: Instant,
         prefix: &str,
@@ -733,7 +733,7 @@ impl LoopState {
             text,
             reasoning_items,
             tool_calls,
-            expected_artifact_paths,
+            done,
             captured,
             loop_start,
             prefix,
@@ -750,20 +750,20 @@ impl LoopState {
         text: &str,
         reasoning: &str,
         reasoning_items: &[Reasoning],
-        expected_artifact_paths: &[PathBuf],
+        done: Option<&DoneAssessment>,
         input_tokens: Option<u64>,
         loop_start: Instant,
         raw: &mut Option<std::fs::File>,
         captured: &mut Option<Vec<serde_json::Value>>,
         prefix: &str,
-    ) -> EmptyTurnAction {
+    ) -> Result<EmptyTurnAction, ClientError> {
         super::turn_flow::handle_empty_turn(
             self,
             nested,
             text,
             reasoning,
             reasoning_items,
-            expected_artifact_paths,
+            done,
             input_tokens,
             loop_start,
             raw,
@@ -1052,6 +1052,11 @@ pub(crate) async fn run_agent_loop(
 
     // Live output is routed by run id, independently of operator commands.
     let wants_events = !message_prefix.is_empty();
+    let done = ctx
+        .params
+        .done
+        .clone()
+        .or_else(|| DoneAssessment::from_paths(&ctx.expected_artifact_paths));
     let terminal = interactive.supervise_if_needed();
     let result = run_agent_loop_core(
         &model,
@@ -1067,7 +1072,7 @@ pub(crate) async fn run_agent_loop(
         &mut raw,
         &mut captured,
         false,
-        &ctx.expected_artifact_paths,
+        done.as_ref(),
         ctx.reminder_budget,
         ctx.completion_nudge_budget,
         interactive,
@@ -1234,7 +1239,7 @@ pub(crate) async fn run_agent_loop_nested(
         &mut raw,
         &mut captured,
         true,
-        &[],
+        None,
         0,
         completion_nudge_budget,
         InteractiveSession::unattached(),
@@ -1300,7 +1305,7 @@ pub(crate) async fn run_agent_loop_core(
     raw: &mut Option<std::fs::File>,
     captured: &mut Option<Vec<serde_json::Value>>,
     nested: bool,
-    expected_artifact_paths: &[PathBuf],
+    done: Option<&DoneAssessment>,
     reminder_budget: usize,
     completion_nudge_budget: usize,
     interactive: InteractiveSession,
@@ -1463,7 +1468,7 @@ pub(crate) async fn run_agent_loop_core(
                 &text,
                 &reasoning_items,
                 &tool_calls,
-                expected_artifact_paths,
+                done,
                 captured,
                 loop_start,
                 prefix,
@@ -1487,13 +1492,13 @@ pub(crate) async fn run_agent_loop_core(
                 &text,
                 &reasoning,
                 &reasoning_items,
-                expected_artifact_paths,
+                done,
                 turn_usage.as_ref().and_then(|u| u.input_tokens),
                 loop_start,
                 raw,
                 captured,
                 prefix,
-            ) {
+            )? {
                 EmptyTurnAction::ContinueLoop => continue,
                 EmptyTurnAction::ReturnRun(run) => return Ok(*run),
             }
@@ -1695,6 +1700,7 @@ pub(crate) fn test_ctx(
             idle_timeout: Some(0.05),
             extra_env: None,
             expected_artifact_paths: vec![],
+            done: None,
             system_prompt: None,
             gremlin_id: None,
             base_env: None,
@@ -4053,6 +4059,203 @@ mod tests {
         assert_eq!(model.requests().len(), 1);
     }
 
+    // ── native Done assessment edge cases ────────────────────────────
+
+    fn native_done(id: &str) -> rig_core::test_utils::MockStreamEvent {
+        rig_core::test_utils::MockStreamEvent::tool_call(
+            id,
+            "Done",
+            serde_json::json!({"summary": "finished"}),
+        )
+    }
+
+    fn native_end() -> rig_core::test_utils::MockStreamEvent {
+        rig_core::test_utils::MockStreamEvent::final_response_with_default_usage()
+    }
+
+    /// A counting accepting check plus its invocation counter.
+    fn native_counter() -> (
+        crate::stage_spec::done_check::DoneCheck,
+        std::sync::Arc<std::sync::atomic::AtomicUsize>,
+    ) {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        let calls = std::sync::Arc::new(AtomicUsize::new(0));
+        let counter = calls.clone();
+        let check = crate::stage_spec::done_check::DoneCheck::new(move |_| {
+            counter.fetch_add(1, Ordering::SeqCst);
+            async { crate::stage_spec::done_check::DoneVerdict::Accept }
+        });
+        (check, calls)
+    }
+
+    fn native_ctx(
+        dir: &std::path::Path,
+        outputs: Vec<std::path::PathBuf>,
+        check: Option<crate::stage_spec::done_check::DoneCheck>,
+        reminder_budget: usize,
+    ) -> RunContext {
+        let mut ctx = test_ctx(Some(dir.to_path_buf()), None);
+        ctx.idle_timeout = 5.0;
+        ctx.params.idle_timeout = Some(5.0);
+        ctx.reminder_budget = reminder_budget;
+        ctx.completion_nudge_budget = 0;
+        ctx.params.done = Some(DoneAssessment {
+            outputs: outputs
+                .into_iter()
+                .map(|path| crate::stage_spec::done_check::DoneOutput {
+                    key: "k".into(),
+                    uri: "artifact://k".into(),
+                    path,
+                })
+                .collect(),
+            check,
+        });
+        ctx
+    }
+
+    async fn native_run(
+        model: &rig_core::test_utils::MockCompletionModel,
+        ctx: RunContext,
+    ) -> Result<CompletedRun, ClientError> {
+        run_agent_loop(
+            model.clone().erase(),
+            "go",
+            ctx,
+            CancelToken::new(),
+            loop_opts(None),
+            InteractiveSession::unattached(),
+        )
+        .await
+    }
+
+    #[tokio::test]
+    async fn mixed_done_does_not_invoke_stage_check() {
+        use rig_core::test_utils::{MockCompletionModel, MockStreamEvent};
+        let _env = crate::test_support::EnvGuard::lock();
+        let dir = tempfile::tempdir().unwrap();
+        let target = dir.path().join("w.txt");
+        let model = MockCompletionModel::from_stream_turns([
+            vec![
+                MockStreamEvent::tool_call(
+                    "c1",
+                    "Write",
+                    serde_json::json!({"file_path": target.to_str().unwrap(), "content": "x"}),
+                ),
+                native_done("d1"),
+                native_end(),
+            ],
+            vec![native_done("d2"), native_end()],
+        ]);
+        let (check, calls) = native_counter();
+        let ctx = native_ctx(dir.path(), vec![], Some(check), 0);
+        native_run(&model, ctx).await.unwrap();
+        assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn duplicate_done_is_rejected_before_stage_check() {
+        use rig_core::test_utils::MockCompletionModel;
+        let dir = tempfile::tempdir().unwrap();
+        let model = MockCompletionModel::from_stream_turns([
+            vec![native_done("d1"), native_done("d2"), native_end()],
+            vec![native_done("solo"), native_end()],
+        ]);
+        let (check, calls) = native_counter();
+        let ctx = native_ctx(dir.path(), vec![], Some(check), 0);
+        native_run(&model, ctx).await.unwrap();
+        assert_eq!(model.requests().len(), 2, "duplicate Done must retry");
+        assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn nested_task_done_does_not_invoke_stage_check() {
+        use rig_core::test_utils::{MockCompletionModel, MockStreamEvent};
+        let dir = tempfile::tempdir().unwrap();
+        let model = MockCompletionModel::from_stream_turns([
+            vec![
+                MockStreamEvent::tool_call(
+                    "t1",
+                    "Task",
+                    serde_json::json!({"kind": "Scout", "prompt": "look"}),
+                ),
+                native_end(),
+            ],
+            vec![
+                MockStreamEvent::text("found"),
+                native_done("child"),
+                native_end(),
+            ],
+            vec![native_done("outer"), native_end()],
+        ]);
+        let (check, calls) = native_counter();
+        let ctx = native_ctx(dir.path(), vec![], Some(check), 0);
+        native_run(&model, ctx).await.unwrap();
+        assert_eq!(
+            calls.load(std::sync::atomic::Ordering::SeqCst),
+            1,
+            "only the outer Done is assessed"
+        );
+    }
+
+    #[tokio::test]
+    async fn text_only_reminds_for_required_only_and_never_calls_check() {
+        use rig_core::test_utils::{MockCompletionModel, MockStreamEvent};
+        let dir = tempfile::tempdir().unwrap();
+        let required = dir.path().join("required.md");
+        let text_turn = |t: &str| vec![MockStreamEvent::text(t), native_end()];
+
+        // Required output missing: one reminder, then fall through.
+        let (check, calls) = native_counter();
+        let model = MockCompletionModel::from_stream_turns([text_turn("a"), text_turn("b")]);
+        let ctx = native_ctx(dir.path(), vec![required.clone()], Some(check), 1);
+        native_run(&model, ctx).await.unwrap();
+        assert_eq!(model.requests().len(), 2, "one artifact reminder");
+        assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 0);
+
+        // Only an optional output is absent: it is not in `outputs`, no reminder.
+        let (check, calls) = native_counter();
+        let model = MockCompletionModel::from_stream_turns([text_turn("a")]);
+        let ctx = native_ctx(dir.path(), vec![], Some(check), 1);
+        native_run(&model, ctx).await.unwrap();
+        assert_eq!(model.requests().len(), 1, "no reminder for optional-only");
+        assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 0);
+    }
+
+    #[tokio::test]
+    async fn sibling_same_named_file_does_not_satisfy_and_nothing_is_created() {
+        use rig_core::test_utils::MockCompletionModel;
+        let dir = tempfile::tempdir().unwrap();
+        let mine = dir.path().join("mine");
+        let sibling = dir.path().join("sibling");
+        std::fs::create_dir_all(&mine).unwrap();
+        std::fs::create_dir_all(&sibling).unwrap();
+        std::fs::write(sibling.join("out.txt"), "other").unwrap();
+        let model = MockCompletionModel::from_stream_turns([
+            vec![native_done("d1"), native_end()],
+            vec![native_done("d2"), native_end()],
+        ]);
+        let (check, calls) = native_counter();
+        let ctx = native_ctx(&mine, vec![mine.join("out.txt")], Some(check), 1);
+        native_run(&model, ctx).await.unwrap();
+        assert_eq!(model.requests().len(), 2, "first Done was sent back");
+        assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 0);
+        assert!(
+            !mine.join("out.txt").exists(),
+            "presence check creates nothing"
+        );
+        assert_eq!(std::fs::read_dir(&mine).unwrap().count(), 0);
+    }
+
+    #[tokio::test]
+    async fn stage_without_outputs_or_function_completes_on_first_done() {
+        use rig_core::test_utils::MockCompletionModel;
+        let dir = tempfile::tempdir().unwrap();
+        let model = MockCompletionModel::from_stream_turns([vec![native_done("d"), native_end()]]);
+        let ctx = native_ctx(dir.path(), vec![], None, 3);
+        native_run(&model, ctx).await.unwrap();
+        assert_eq!(model.requests().len(), 1);
+    }
+
     /// A single message can request at most the Task fan-out cap; the excess
     /// short-circuit instead of spawning more child loops.
     #[tokio::test]
@@ -4709,7 +4912,7 @@ mod tests {
                 &mut None,
                 &mut None,
                 false,
-                &[],
+                None,
                 0,
                 0,
                 session,
@@ -4822,7 +5025,7 @@ mod tests {
                 &mut None,
                 &mut None,
                 false,
-                &[],
+                None,
                 0,
                 0,
                 session,
@@ -4924,7 +5127,7 @@ mod tests {
                 &mut None,
                 &mut None,
                 false,
-                &[],
+                None,
                 0,
                 0,
                 session,
@@ -5010,7 +5213,7 @@ mod tests {
                 &mut None,
                 &mut None,
                 false,
-                &[],
+                None,
                 0,
                 0,
                 session,
@@ -5163,7 +5366,7 @@ mod tests {
             &mut None,
             &mut None,
             false,
-            &[],
+            None,
             0,
             0,
             InteractiveSession::unattached(),
@@ -5247,7 +5450,7 @@ mod tests {
             &mut None,
             &mut None,
             false,
-            &[],
+            None,
             0,
             0,
             InteractiveSession::unattached(),
@@ -5436,5 +5639,224 @@ mod tests {
             done_count, 1,
             "Done tool_use must appear exactly once in artifact-exhausted path, got {done_count}"
         );
+    }
+
+    // ── native done assessment ────────────────────────────────────────────
+
+    fn done_turn(id: &str) -> Vec<rig_core::test_utils::MockStreamEvent> {
+        vec![
+            rig_core::test_utils::MockStreamEvent::tool_call(
+                id,
+                "Done",
+                serde_json::json!({"summary": "all done"}),
+            ),
+            rig_core::test_utils::MockStreamEvent::final_response_with_default_usage(),
+        ]
+    }
+
+    fn assessed_ctx(
+        reminder_budget: usize,
+        check: super::super::done_assess::DoneAssessment,
+    ) -> RunContext {
+        let mut ctx = test_ctx(None, None);
+        ctx.idle_timeout = 5.0;
+        ctx.params.idle_timeout = Some(5.0);
+        ctx.params.done = Some(check);
+        ctx.reminder_budget = reminder_budget;
+        ctx.completion_nudge_budget = 0;
+        ctx
+    }
+
+    fn counting_check(
+        verdicts: Vec<crate::stage_spec::done_check::DoneVerdict>,
+    ) -> (
+        super::super::done_assess::DoneAssessment,
+        Arc<std::sync::atomic::AtomicUsize>,
+    ) {
+        let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let counter = calls.clone();
+        let verdicts = Arc::new(std::sync::Mutex::new(verdicts.into_iter()));
+        let check = crate::stage_spec::done_check::DoneCheck::new(move |ctx| {
+            counter.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            assert_eq!(ctx.summary, "all done");
+            let verdict = verdicts.lock().unwrap().next().expect("verdict scripted");
+            async move { verdict }
+        });
+        (
+            super::super::done_assess::DoneAssessment {
+                outputs: vec![],
+                check: Some(check),
+            },
+            calls,
+        )
+    }
+
+    async fn run_assessed(
+        model: &rig_core::test_utils::MockCompletionModel,
+        ctx: RunContext,
+        cancel: Arc<CancelToken>,
+    ) -> Result<CompletedRun, ClientError> {
+        run_agent_loop(
+            model.clone().erase(),
+            "go",
+            ctx,
+            cancel,
+            loop_opts(None),
+            InteractiveSession::unattached(),
+        )
+        .await
+    }
+
+    #[tokio::test]
+    async fn done_check_retry_reaches_same_conversation_then_accepts() {
+        use crate::stage_spec::done_check::DoneVerdict;
+        let model = rig_core::test_utils::MockCompletionModel::from_stream_turns([
+            done_turn("d1"),
+            done_turn("d2"),
+        ]);
+        let (check, calls) = counting_check(vec![
+            DoneVerdict::Retry("DISTINCTIVE-DIAGNOSTIC".into()),
+            DoneVerdict::Accept,
+        ]);
+        let run = run_assessed(&model, assessed_ctx(1, check), CancelToken::new())
+            .await
+            .unwrap();
+        assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 2);
+        assert_eq!(run.summary.as_deref(), Some("all done"));
+        let reqs = model.requests();
+        assert_eq!(reqs.len(), 2);
+        assert!(format!("{:?}", reqs[1]).contains("DISTINCTIVE-DIAGNOSTIC"));
+    }
+
+    #[tokio::test]
+    async fn done_check_retry_at_zero_budget_falls_through() {
+        use crate::stage_spec::done_check::DoneVerdict;
+        let model = rig_core::test_utils::MockCompletionModel::from_stream_turns([done_turn("d1")]);
+        let (check, calls) = counting_check(vec![DoneVerdict::Retry("nope".into())]);
+        let run = run_assessed(&model, assessed_ctx(0, check), CancelToken::new())
+            .await
+            .unwrap();
+        assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 1);
+        assert_eq!(run.summary.as_deref(), Some("all done"));
+    }
+
+    fn assert_no_done_event(rx: &mut gremlins_magic_bus::ReceiverHalf<EventKind>) {
+        let mut saw_request = false;
+        while let Ok(event) = rx.try_recv() {
+            assert!(!matches!(event.kind(), EventKind::Done { .. }));
+            saw_request |= matches!(event.kind(), EventKind::PromptRequest { .. });
+        }
+        assert!(saw_request, "expected events from the assessed run");
+    }
+
+    #[tokio::test]
+    async fn done_check_error_fails_run_even_at_zero_budget() {
+        use crate::stage_spec::done_check::DoneVerdict;
+        let model = rig_core::test_utils::MockCompletionModel::from_stream_turns([done_turn("d1")]);
+        let (check, _) = counting_check(vec![DoneVerdict::Error("boom".into())]);
+        let run_id = "done-error-at-zero";
+        let (_guard, mut rx) = subscribe_log(run_id);
+        let mut ctx = assessed_ctx(0, check);
+        ctx.params.gremlin_id = Some(run_id.into());
+        let err = run_assessed(&model, ctx, CancelToken::new())
+            .await
+            .unwrap_err();
+        assert!(err.to_string().contains("boom"), "{err}");
+        assert_eq!(model.requests().len(), 1);
+        assert_no_done_event(&mut rx);
+    }
+
+    #[tokio::test]
+    async fn done_check_cancellation_wins_over_pending_assessor() {
+        struct DropSignal(Option<tokio::sync::oneshot::Sender<()>>);
+        impl Drop for DropSignal {
+            fn drop(&mut self) {
+                if let Some(tx) = self.0.take() {
+                    let _ = tx.send(());
+                }
+            }
+        }
+        let model = rig_core::test_utils::MockCompletionModel::from_stream_turns([
+            done_turn("d1"),
+            done_turn("d2"),
+        ]);
+        let (entered_tx, entered_rx) = tokio::sync::oneshot::channel();
+        let (dropped_tx, dropped_rx) = tokio::sync::oneshot::channel::<()>();
+        let entered = Arc::new(std::sync::Mutex::new(Some(entered_tx)));
+        let dropped = Arc::new(std::sync::Mutex::new(Some(dropped_tx)));
+        let check = crate::stage_spec::done_check::DoneCheck::new(move |ctx| {
+            if let Some(tx) = entered.lock().unwrap().take() {
+                let _ = tx.send(ctx.cancel);
+            }
+            let guard = DropSignal(dropped.lock().unwrap().take());
+            async move {
+                let _guard = guard;
+                std::future::pending::<crate::stage_spec::done_check::DoneVerdict>().await
+            }
+        });
+        let mut ctx = assessed_ctx(
+            1,
+            super::super::done_assess::DoneAssessment {
+                outputs: vec![],
+                check: Some(check),
+            },
+        );
+        let run_id = "done-cancel-while-pending";
+        let (_guard, mut rx) = subscribe_log(run_id);
+        ctx.params.gremlin_id = Some(run_id.into());
+        let cancel = CancelToken::new();
+        let run = tokio::spawn({
+            let model = model.clone();
+            let cancel = cancel.clone();
+            async move { run_assessed(&model, ctx, cancel).await }
+        });
+        let deadline = Duration::from_secs(5);
+        let signal = tokio::time::timeout(deadline, entered_rx)
+            .await
+            .expect("assessor never entered")
+            .unwrap();
+        cancel.cancel();
+        let result = tokio::time::timeout(deadline, run)
+            .await
+            .expect("agent did not stop after cancellation")
+            .unwrap();
+        assert!(matches!(result, Err(ClientError::Cancelled)));
+        assert!(signal.is_cancelled());
+        tokio::time::timeout(deadline, dropped_rx)
+            .await
+            .expect("assessor future not dropped")
+            .unwrap();
+        assert_no_done_event(&mut rx);
+        assert_eq!(model.requests().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn text_only_turn_never_calls_done_check() {
+        use crate::stage_spec::done_check::DoneVerdict;
+        let dir = tempfile::tempdir().unwrap();
+        let required = dir.path().join("required.md");
+        let model = rig_core::test_utils::MockCompletionModel::from_stream_turns([
+            vec![
+                rig_core::test_utils::MockStreamEvent::text("no tools"),
+                rig_core::test_utils::MockStreamEvent::final_response_with_default_usage(),
+            ],
+            vec![
+                rig_core::test_utils::MockStreamEvent::text("still no tools"),
+                rig_core::test_utils::MockStreamEvent::final_response_with_default_usage(),
+            ],
+        ]);
+        let (mut check, calls) = counting_check(vec![DoneVerdict::Accept]);
+        check.outputs = vec![crate::stage_spec::done_check::DoneOutput {
+            key: "r".into(),
+            uri: "artifact://r".into(),
+            path: required.clone(),
+        }];
+        let run = run_assessed(&model, assessed_ctx(1, check), CancelToken::new())
+            .await
+            .unwrap();
+        assert_eq!(run.text_result.as_deref(), Some("still no tools"));
+        assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 0);
+        assert!(format!("{:?}", model.requests()[1]).contains("required.md"));
+        assert!(!required.exists());
     }
 }

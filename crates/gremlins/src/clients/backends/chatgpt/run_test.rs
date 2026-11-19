@@ -194,8 +194,9 @@ async fn oauth_run_refreshes_expired_sign_in_on_next_tool_turn() {
         MockHttpResponse::success(r#"{"access_token":"next-token","refresh_token":"rotated"}"#),
         done_response(),
     ]);
-    let backend =
-        build(DynHttpClient::new(http.clone()).with_middleware(ExpireSignInOnResponse(path.clone())));
+    let backend = build(
+        DynHttpClient::new(http.clone()).with_middleware(ExpireSignInOnResponse(path.clone())),
+    );
     run(backend.as_ref(), root.path()).await;
 
     let requests = http.requests();
@@ -220,4 +221,272 @@ async fn oauth_run_refreshes_expired_sign_in_on_next_tool_turn() {
             .any(|item| item["type"] == "function_call_output"),
         "second request must continue the tool turn, not replay the prompt"
     );
+}
+
+const REPORT: &str = "artifact://report.txt";
+const EMPTY: &str = "artifact://empty.txt";
+const OPTIONAL: &str = "artifact://notes.txt";
+const DIAGNOSTIC: &str = "DISTINCTIVE-RETRY-DIAGNOSTIC";
+
+fn producer_definition(
+    model: &str,
+    configure: impl FnOnce(crate::builders::AgentBuilder) -> crate::builders::AgentBuilder,
+) -> crate::definition::StaticDefinition {
+    use crate::builders::{AgentBuilder, DefinitionBuilder, SequenceBuilder};
+    let producer = AgentBuilder::new("inner")
+        .output("report", REPORT)
+        .output("empty", EMPTY)
+        .output("notes?", OPTIONAL)
+        .prompt("report={report}\nempty={empty}\nnotes={notes}");
+    let seq = SequenceBuilder::new("outer")
+        .stage(configure(producer).build().unwrap())
+        .build()
+        .unwrap();
+    DefinitionBuilder::new("nested", crate::model_uri::ModelURI::parse(model).unwrap())
+        .stage(seq)
+        .build()
+        .unwrap()
+}
+
+fn proposed_done(summary: &str, turn: usize) -> MockHttpResponse {
+    let sse = include_str!("done.sse")
+        .replace("Hello from ChatGPT", summary)
+        .replace("_1\"", &format!("_{turn}\""));
+    MockHttpResponse::success_typed(sse, "text/event-stream")
+}
+
+fn result_text(request: &CapturedHttpRequest, call_id: &str) -> String {
+    let body: serde_json::Value = serde_json::from_slice(&request.body).unwrap();
+    body["input"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|item| item["type"] == "function_call_output" && item["call_id"] == call_id)
+        .and_then(|item| item["output"].as_str())
+        .unwrap_or_else(|| panic!("missing tool result for {call_id}: {}", body["input"]))
+        .to_owned()
+}
+
+// Act as the scripted producer between the first rejection and the next Done.
+// Read its actual write destinations from the interpolated model prompt, not
+// from the assessor (which must not have run yet) or the rejection message.
+struct WriteAfterReminder {
+    http: SequencedHttpClient,
+    state: std::sync::Weak<dyn crate::executor::state::StateStore + Send + Sync>,
+    calls: Arc<std::sync::atomic::AtomicUsize>,
+    main_state_dir: PathBuf,
+}
+
+impl HttpMiddleware for WriteAfterReminder {
+    fn after_response<'a>(
+        &'a self,
+        _: Exchange<'a>,
+        _: http::StatusCode,
+        _: &'a http::HeaderMap,
+    ) -> WasmBoxedFuture<'a, HttpResult<()>> {
+        Box::pin(async move {
+            let requests = self.http.requests();
+            let state = self.state.upgrade().expect("run still owns the state");
+            for uri in [REPORT, EMPTY, OPTIONAL] {
+                assert!(!state.is_registered(uri).await, "premature commit of {uri}");
+            }
+            if requests.len() != 2 {
+                return Ok(());
+            }
+            assert_eq!(self.calls.load(std::sync::atomic::Ordering::SeqCst), 0);
+            let reminder = result_text(&requests[1], "call_1");
+            let body: serde_json::Value = serde_json::from_slice(&requests[0].body).unwrap();
+            let prompt = body["input"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .filter_map(|item| item["content"][0]["text"].as_str())
+                .find(|text| text.lines().any(|line| line.starts_with("report=")))
+                .unwrap();
+            for (key, uri, contents) in [
+                ("report", REPORT, Some("produced")),
+                ("empty", EMPTY, Some("")),
+                ("notes", OPTIONAL, None),
+            ] {
+                let prefix = format!("{key}=");
+                let path = Path::new(
+                    prompt
+                        .lines()
+                        .find_map(|line| line.strip_prefix(&prefix))
+                        .unwrap(),
+                );
+                assert!(
+                    path.is_absolute() && path.ends_with(uri.trim_start_matches("artifact://"))
+                );
+                assert!(
+                    !path.starts_with(&self.main_state_dir),
+                    "not a checkout: {path:?}"
+                );
+                assert!(!path.exists(), "presence check created {path:?}");
+                assert_eq!(
+                    reminder.contains(path.to_str().unwrap()),
+                    contents.is_some(),
+                    "{reminder}"
+                );
+                if let Some(text) = contents {
+                    tokio::fs::write(path, text).await.unwrap();
+                }
+            }
+            Ok(())
+        })
+    }
+}
+
+async fn run_producer(
+    fx: &crate::test_support::GitSandbox,
+    definition: &crate::definition::StaticDefinition,
+    model: &str,
+    summaries: &[&str],
+    calls: Arc<std::sync::atomic::AtomicUsize>,
+) -> (crate::executor::gremlin::Gremlin, Vec<CapturedHttpRequest>) {
+    use crate::clients::client::{install_test_backend, Client};
+    use crate::executor::gremlin::{Gremlin, GremlinConfig};
+    use gremlins_magic_bus::{subscribe_run, EventKind};
+
+    let mut gremlin = Gremlin::init(
+        "gr-producer",
+        fx.definition_path(),
+        definition,
+        &HashMap::new(),
+        None,
+        &GremlinConfig {
+            ephemeral: true,
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    // A same-named file outside the producer's artifact checkout must not satisfy Done.
+    fs::write(gremlin.cwd().join("report.txt"), "decoy").unwrap();
+    let http = SequencedHttpClient::new(
+        summaries
+            .iter()
+            .enumerate()
+            .map(|(i, s)| proposed_done(s, i + 1)),
+    );
+    seed_oauth();
+    let transport = DynHttpClient::new(http.clone()).with_middleware(WriteAfterReminder {
+        http: http.clone(),
+        state: Arc::downgrade(&gremlin.state.store_handle()),
+        calls,
+        main_state_dir: gremlin.state.state_dir().canonicalize().unwrap(),
+    });
+    let spec = Client::parse(model).unwrap();
+    let backend =
+        ChatGptBackend::build_with(spec.model(), &HashMap::new(), &IndexMap::new(), transport)
+            .unwrap();
+    install_test_backend(&spec.to_string(), backend);
+    let (sub, mut events) = subscribe_run(gremlin.id.as_str());
+    let _guard = gremlins_magic_bus::connection::BusSubGuard::new(sub);
+    let exit = tokio::time::timeout(Duration::from_secs(30), gremlin.run(None))
+        .await
+        .expect("producer timed out")
+        .unwrap();
+    assert_eq!(exit, 0);
+    let mut completions = Vec::new();
+    while let Ok(event) = events.try_recv() {
+        if let EventKind::Done { summary, .. } = event.kind() {
+            completions.push(summary.clone());
+        }
+    }
+    assert_eq!(completions, [*summaries.last().unwrap()]);
+    assert_eq!(http.requests().len(), summaries.len());
+    assert_eq!(
+        gremlin.state.content(REPORT, None).await.unwrap(),
+        "produced"
+    );
+    assert_eq!(gremlin.state.content(EMPTY, None).await.unwrap(), "");
+    assert!(!gremlin.state.is_registered(OPTIONAL).await);
+    (gremlin, http.requests())
+}
+
+#[tokio::test]
+async fn nested_native_done_check_retries_same_conversation_through_public_run() {
+    use crate::builders::DoneVerdict;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    let fx = crate::test_support::GitSandbox::new();
+    if fx.is_skipped() {
+        return;
+    }
+    let model = "chatgpt/gpt-done-check";
+    let calls = Arc::new(AtomicUsize::new(0));
+    let seen = calls.clone();
+    let observed = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let contexts = observed.clone();
+    let definition = producer_definition(model, |agent| {
+        agent.done_check(move |ctx| {
+            let n = seen.fetch_add(1, Ordering::SeqCst);
+            assert_eq!(ctx.summary, ["review", "accepted"][n]);
+            assert!(!ctx.cancel.is_cancelled());
+            assert_eq!(ctx.outputs.len(), 2);
+            for (key, uri, contents) in [("report", REPORT, "produced"), ("empty", EMPTY, "")] {
+                let output = ctx.outputs.iter().find(|o| o.key == key).unwrap();
+                assert_eq!(output.uri, uri);
+                assert_eq!(fs::read_to_string(&output.path).unwrap(), contents);
+            }
+            contexts.lock().unwrap().push(ctx);
+            async move {
+                if n == 0 {
+                    DoneVerdict::Retry(DIAGNOSTIC.into())
+                } else {
+                    DoneVerdict::Accept
+                }
+            }
+        })
+    });
+    let (gremlin, requests) = run_producer(
+        &fx,
+        &definition,
+        model,
+        &["missing", "review", "accepted"],
+        calls.clone(),
+    )
+    .await;
+    assert_eq!(calls.load(Ordering::SeqCst), 2);
+    assert!(result_text(&requests[2], "call_2").contains(DIAGNOSTIC));
+    let missing = result_text(&requests[1], "call_1");
+    let committed_report = PathBuf::from(gremlin.state.data_uri(REPORT).await.unwrap());
+    let committed_empty = PathBuf::from(gremlin.state.data_uri(EMPTY).await.unwrap());
+    for ctx in observed.lock().unwrap().iter() {
+        assert_eq!(ctx.cwd, gremlin.cwd());
+        for output in &ctx.outputs {
+            let committed = if output.uri == REPORT {
+                &committed_report
+            } else {
+                &committed_empty
+            };
+            assert_ne!(
+                &output.path, committed,
+                "assessor saw the main registry path"
+            );
+            assert_eq!(output.path.file_name(), committed.file_name());
+            assert!(missing.contains(output.path.to_str().unwrap()));
+        }
+    }
+}
+
+#[tokio::test]
+async fn round_tripped_producer_runs_with_only_the_builtin_done_check() {
+    use crate::definition::{GremlinDefinition, StaticDefinition};
+    let fx = crate::test_support::GitSandbox::new();
+    if fx.is_skipped() {
+        return;
+    }
+    let model = "chatgpt/gpt-round-trip";
+    let bytes = producer_definition(model, |agent| agent)
+        .serialize()
+        .unwrap();
+    let reloaded = StaticDefinition::deserialize_owned(&bytes).unwrap();
+    run_producer(
+        &fx,
+        &reloaded,
+        model,
+        &["missing", "accepted"],
+        Arc::default(),
+    )
+    .await;
 }
