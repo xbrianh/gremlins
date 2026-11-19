@@ -233,6 +233,11 @@ impl AgentBuilder {
                 }
             }
 
+            if let Some(check) = self.options.get("done_check").and_then(|v| v.as_str()) {
+                text.push_str(check);
+                text.push('\n');
+            }
+
             // Check interpolation keys
             for key in self.interpolation_map.keys() {
                 if key.contains('{') {

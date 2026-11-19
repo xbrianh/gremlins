@@ -224,7 +224,6 @@ impl GitSandbox {
     }
 
     /// The sandbox root (`GREMLINS_SANDBOX_ROOT`).
-    #[expect(dead_code)]
     pub(crate) fn sandbox_path(&self) -> &Path {
         self.sandbox.path()
     }

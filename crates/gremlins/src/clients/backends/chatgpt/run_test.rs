@@ -654,6 +654,16 @@ async fn drive(
     model: &str,
     transport: DynHttpClient,
 ) -> (Result<i32, String>, Vec<String>) {
+    let (result, completions, _) = drive_with_stages(gremlin, model, transport).await;
+    (result, completions)
+}
+
+/// Like [`drive`], also returning the leaf stages entered, in order.
+async fn drive_with_stages(
+    gremlin: &mut crate::executor::gremlin::Gremlin,
+    model: &str,
+    transport: DynHttpClient,
+) -> (Result<i32, String>, Vec<String>, Vec<String>) {
     use crate::clients::client::{install_test_backend, Client};
     use gremlins_magic_bus::{subscribe_run, EventKind};
     seed_oauth();
@@ -668,13 +678,17 @@ async fn drive(
         .await
         .expect("run timed out")
         .map_err(|e| e.to_string());
-    let mut completions = Vec::new();
+    let (mut completions, mut stages) = (Vec::new(), Vec::new());
     while let Ok(event) = events.try_recv() {
-        if let EventKind::Done { summary, .. } = event.kind() {
-            completions.push(summary.clone());
+        match event.kind() {
+            EventKind::Done { summary, .. } => completions.push(summary.clone()),
+            EventKind::StageTransition { stage, sub_stage, .. } => {
+                stages.push(sub_stage.clone().unwrap_or_else(|| stage.clone()));
+            }
+            _ => {}
         }
     }
-    (result, completions)
+    (result, completions, stages)
 }
 
 /// Writes the empty required output of the loop producer once the third
@@ -1221,4 +1235,355 @@ fn round_tripped_producer_reloads_as_dsl_stage() {
     let reloaded = reload(&producer_definition("chatgpt/gpt-round-trip", |agent| agent));
     let json = reloaded.to_expanded_json().to_string();
     assert!(json.contains("artifact://"), "{json}");
+}
+
+// ── shared `implement` stage: no-new-changes nudge ──────────────────────────
+
+const IMPLEMENT_DEFINITION: &str = r#"{
+  prompt_dir: "prompts",
+  bootstrap: {
+    source: { plan: { type: "filepath" } },
+    launch_cmds: [
+      'gremlins:bind_artifact("artifact://plan.md", plan)',
+      'SHA=$(git -C "$GREMLINS_PROJECT_ROOT" rev-parse HEAD) && git -C "$GREMLINS_PROJECT_ROOT" worktree add --detach "$GREMLIN_WORKDIR" "$SHA" && echo "$SHA" > "$GREMLINS_STATE_DIR/artifacts/base_sha"',
+    ],
+    cli_out: { base_sha: "artifact://base_sha" },
+    env: 'export PATH="${GREMLINS_PROJECT_ROOT}/.gremlins/bin:${PATH}"\n',
+  },
+  default_model: "chatgpt/gpt-implement-nudge",
+  "stage-definitions": { "check-and-fix": "check-and-fix" },
+  stages: [
+    {
+      name: "implement-and-qa",
+      type: "implement-and-qa",
+      options: { verify_cmds: "true" },
+    },
+  ],
+}"#;
+
+const RETRY_MARKER: &str = "retry-plan-marker-7f3a";
+
+/// A disposable project carrying the checked-in `.gremlins` definitions.
+fn implement_project(definition: &str) -> crate::test_support::GitSandbox {
+    let mut fx = crate::test_support::GitSandbox::with_definition(definition);
+    assert!(!fx.is_skipped(), "git sandbox setup must succeed");
+    use_checkout_cli(&mut fx);
+    let source = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../.gremlins");
+    let overlay = fx.repo_path().join(".gremlins");
+    for dir in ["stages", "prompts", "bin"] {
+        let copied = std::process::Command::new("cp")
+            .arg("-R")
+            .arg(source.join(dir))
+            .arg(&overlay)
+            .status()
+            .unwrap();
+        assert!(copied.success());
+    }
+    for (key, value) in [("user.name", "Test"), ("user.email", "test@example.com")] {
+        let set = crate::test_support::git(fx.repo_path(), &["config", key, value]);
+        assert!(set.status.success());
+    }
+    fs::write(fx.repo_path().join("plan.txt"), "do the thing\n").unwrap();
+    fs::write(fx.repo_path().join("feature.txt"), "zero\n").unwrap();
+    crate::test_support::git(fx.repo_path(), &["add", "."]);
+    let commit = crate::test_support::git(fx.repo_path(), &["commit", "-qm", "project"]);
+    assert!(commit.status.success());
+    fx
+}
+
+fn find_files(dir: &Path, name: &str, found: &mut Vec<PathBuf>) {
+    for entry in fs::read_dir(dir).into_iter().flatten().flatten() {
+        let path = entry.path();
+        if path.is_dir() {
+            find_files(&path, name, found);
+        } else if path.file_name().is_some_and(|n| n == name) {
+            found.push(path);
+        }
+    }
+}
+
+fn judge_verdict_path(request: &CapturedHttpRequest) -> PathBuf {
+    let body = String::from_utf8(request.body.to_vec()).unwrap();
+    let rest = body.split("Your only writable file is `").nth(1).unwrap();
+    PathBuf::from(rest.split('`').next().unwrap())
+}
+
+/// Plays the implementer and judge between scripted model responses.
+struct ImplementScript {
+    http: SequencedHttpClient,
+    cwd: PathBuf,
+    commits_at_nudge: Arc<std::sync::atomic::AtomicUsize>,
+    stop: Arc<crate::clients::CancelToken>,
+    /// Live stage transitions, drained into `stages_at_nudge` at the nudge.
+    events: std::sync::Mutex<gremlins_magic_bus::ReceiverHalf<gremlins_magic_bus::EventKind>>,
+    stages_at_nudge: Arc<std::sync::Mutex<Vec<String>>>,
+}
+
+impl ImplementScript {
+    fn drain_stages(&self) {
+        use gremlins_magic_bus::EventKind;
+        let mut events = self.events.lock().unwrap();
+        let mut seen = self.stages_at_nudge.lock().unwrap();
+        while let Ok(event) = events.try_recv() {
+            if let EventKind::StageTransition { stage, sub_stage, .. } = event.kind() {
+                seen.push(sub_stage.clone().unwrap_or_else(|| stage.clone()));
+            }
+        }
+    }
+
+    fn commits(&self) -> usize {
+        let out = crate::test_support::git(&self.cwd, &["rev-list", "--count", "HEAD"]);
+        String::from_utf8_lossy(&out.stdout).trim().parse().unwrap()
+    }
+}
+
+impl HttpMiddleware for ImplementScript {
+    fn after_response<'a>(
+        &'a self,
+        _: Exchange<'a>,
+        _: http::StatusCode,
+        _: &'a http::HeaderMap,
+    ) -> WasmBoxedFuture<'a, HttpResult<()>> {
+        Box::pin(async move {
+            let requests = self.http.requests();
+            match requests.len() {
+                // Attempt one edits, then proposes Done.
+                1 => fs::write(self.cwd.join("feature.txt"), "one\n").unwrap(),
+                2 => fs::write(
+                    judge_verdict_path(&requests[1]),
+                    format!("RETRY\n{RETRY_MARKER}: finish the rest\n"),
+                )
+                .unwrap(),
+                // Attempt two's second Done: after the nudge, before any edit.
+                4 => {
+                    self.drain_stages();
+                    self.commits_at_nudge
+                        .store(self.commits(), std::sync::atomic::Ordering::SeqCst);
+                    fs::write(self.cwd.join("feature.txt"), "two\n").unwrap();
+                }
+                5 => fs::write(judge_verdict_path(&requests[4]), "COMPLETE\n").unwrap(),
+                // Approval entered QA; the release gate is satisfied.
+                6 => self.stop.cancel(),
+                _ => {}
+            }
+            Ok(())
+        })
+    }
+}
+
+fn init_project_gremlin(
+    fx: &crate::test_support::GitSandbox,
+    id: &str,
+    supervisor: &crate::executor::supervisor::ArtifactTestSupervisor,
+) -> crate::executor::gremlin::Gremlin {
+    use crate::executor::gremlin::{Gremlin, GremlinConfig};
+    let inputs = HashMap::from([(
+        "plan".to_string(),
+        fx.repo_path().join("plan.txt").display().to_string(),
+    )]);
+    let mut gremlin = Gremlin::init(
+        id,
+        fx.definition_path(),
+        &crate::definition::StaticDefinition::from_json5_file(fx.definition_path(), None, None)
+            .unwrap(),
+        &inputs,
+        None,
+        &GremlinConfig {
+            ephemeral: true,
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    gremlin.runtime_config.registry = Some(supervisor.registry());
+    gremlin
+}
+
+#[tokio::test]
+async fn unchanged_second_attempt_is_nudged_after_judge_retry() {
+    let fx = implement_project(IMPLEMENT_DEFINITION);
+    let supervisor = crate::executor::supervisor::ArtifactTestSupervisor::start();
+    let mut gremlin = init_project_gremlin(&fx, "gr-nudge", &supervisor);
+    let http = SequencedHttpClient::new((1..=6).map(|turn| proposed_done("done", turn)));
+    let commits_at_nudge = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let stages_at_nudge = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let (sub, events) = gremlins_magic_bus::subscribe_run(gremlin.id.as_str());
+    let _guard = gremlins_magic_bus::connection::BusSubGuard::new(sub);
+    let stop = crate::clients::CancelToken::new();
+    gremlin.cancel_token = Some(stop.clone());
+    // The workdir is a worktree only once bootstrap has run; the script reads
+    // its path lazily from the handle's cwd, which is fixed at init.
+    let transport = DynHttpClient::new(http.clone()).with_middleware(ImplementScript {
+        http: http.clone(),
+        cwd: gremlin.cwd(),
+        commits_at_nudge: commits_at_nudge.clone(),
+        stop: stop.clone(),
+        events: std::sync::Mutex::new(events),
+        stages_at_nudge: stages_at_nudge.clone(),
+    });
+    let (result, _, stages) =
+        drive_with_stages(&mut gremlin, "chatgpt/gpt-implement-nudge", transport).await;
+
+    let requests = http.requests();
+    assert!(requests.len() >= 5, "run stalled after {} requests: {result:?}", requests.len());
+    // Attempt two starts with the judge's feedback and, unedited, is nudged.
+    let second_prompt = String::from_utf8(requests[2].body.to_vec()).unwrap();
+    assert!(second_prompt.contains(RETRY_MARKER), "{second_prompt}");
+    let nudge = result_text(&requests[3], "call_3");
+    assert!(nudge.contains("No new changes"), "{nudge}");
+    // Init, project and attempt one's commit existed; no judge ran before the nudge.
+    assert_eq!(commits_at_nudge.load(std::sync::atomic::Ordering::SeqCst), 3);
+    // Stages observed by the nudged request: attempt one's commit stage and
+    // judge each ran exactly once, and the second attempt had begun.
+    let at_nudge = stages_at_nudge.lock().unwrap().clone();
+    for stage in ["git-commit", "judge"] {
+        let ran = at_nudge.iter().filter(|s| *s == stage).count();
+        assert_eq!(ran, 1, "{stage} through the nudge: {at_nudge:?}");
+    }
+    let attempts = at_nudge.iter().filter(|s| *s == "implement-2").count();
+    assert_eq!(attempts, 2, "{at_nudge:?}");
+    assert!(stages.starts_with(&at_nudge), "{at_nudge:?} vs {stages:?}");
+    // The edited second Done was accepted and committed before the judge.
+    let log = crate::test_support::git(&gremlin.cwd(), &["log", "--format=%s"]);
+    let log = String::from_utf8_lossy(&log.stdout).into_owned();
+    assert_eq!(log.matches("implement plan").count(), 2, "{log}");
+
+    // The judge's COMPLETE was routed to approval.
+    let mut approvals = Vec::new();
+    find_files(&gremlin.state.state_dir(), "implementation-approved", &mut approvals);
+    assert_eq!(approvals.len(), 1, "{approvals:?}");
+
+    // Distinct baselines; the second is the tree the first commit produced.
+    let mut baselines = Vec::new();
+    find_files(&gremlin.state.state_dir(), "implement-baseline", &mut baselines);
+    let mut trees: Vec<String> = baselines
+        .iter()
+        .map(|p| fs::read_to_string(p).unwrap().trim().to_owned())
+        .collect();
+    assert_eq!(trees.len(), 2, "{baselines:?}");
+    trees.sort();
+    trees.dedup();
+    assert_eq!(trees.len(), 2, "baselines must differ");
+    let first_commit = crate::test_support::git(&gremlin.cwd(), &["rev-parse", "HEAD~1^{tree}"]);
+    let first_commit = String::from_utf8_lossy(&first_commit.stdout).trim().to_owned();
+    assert!(trees.contains(&first_commit), "{trees:?} vs {first_commit}");
+}
+
+#[tokio::test]
+async fn capture_failure_stops_stage_before_the_agent_starts() {
+    let fx = implement_project(IMPLEMENT_DEFINITION);
+    let helper = fx.repo_path().join(".gremlins/bin/tree_snapshot");
+    let ran = fx.sandbox_path().join("capture-ran");
+    let script = format!("#!/bin/sh\necho ran > '{}'\necho boom >&2\nexit 1\n", ran.display());
+    fs::write(&helper, script).unwrap();
+    let commit = crate::test_support::git(fx.repo_path(), &["commit", "-qam", "break"]);
+    assert!(commit.status.success());
+    let supervisor = crate::executor::supervisor::ArtifactTestSupervisor::start();
+    let mut gremlin = init_project_gremlin(&fx, "gr-capture-fail", &supervisor);
+    let http = SequencedHttpClient::new((1..=2).map(|turn| proposed_done("done", turn)));
+    let transport = DynHttpClient::new(http.clone());
+    let (result, _, stages) =
+        drive_with_stages(&mut gremlin, "chatgpt/gpt-implement-nudge", transport).await;
+    assert!(result.is_err() || result == Ok(1), "{result:?}");
+    assert!(ran.exists(), "the failing capture never ran: {stages:?}");
+    assert_eq!(
+        stages.last().map(String::as_str),
+        Some("capture-implement-baseline"),
+        "capture must be the last stage entered: {stages:?}"
+    );
+    assert!(http.requests().is_empty(), "the agent must not start");
+}
+
+/// Collects every stage object satisfying `matches` anywhere in a definition.
+fn collect_stages<'a>(
+    json: &'a serde_json::Value,
+    matches: &dyn Fn(&serde_json::Value) -> bool,
+    found: &mut Vec<&'a serde_json::Value>,
+) {
+    match json {
+        serde_json::Value::Object(map) => {
+            if matches(json) {
+                found.push(json);
+            }
+            map.values().for_each(|v| collect_stages(v, matches, found));
+        }
+        serde_json::Value::Array(items) => {
+            items.iter().for_each(|v| collect_stages(v, matches, found))
+        }
+        _ => {}
+    }
+}
+
+/// The baseline artifact URI declared under `interpolation.<side>.baseline`.
+fn baseline_key(stage: &serde_json::Value, side: &str) -> String {
+    let declared = stage["interpolation"][side]["baseline"].as_str().unwrap();
+    declared
+        .strip_prefix("content(\"")
+        .and_then(|rest| rest.strip_suffix("\")"))
+        .unwrap_or(declared)
+        .to_owned()
+}
+
+#[test]
+fn callers_resolve_baseline_producer_and_consumer_to_one_key() {
+    let fx = implement_project(IMPLEMENT_DEFINITION);
+    let source = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../.gremlins");
+    let overlay = fx.repo_path().join(".gremlins");
+    // (definition, namespaces of its implement-and-qa invocations)
+    let callers: [(&str, &[&str]); 4] = [
+        ("local", &[""]),
+        ("gh", &[""]),
+        ("drag-optimizer", &["drag/"]),
+        ("undrag", &["", "drag/"]),
+    ];
+    for (name, namespaces) in &callers {
+        let path = overlay.join(format!("{name}.json5"));
+        fs::copy(source.join(format!("{name}.json5")), &path).unwrap();
+        let def = crate::definition::StaticDefinition::from_json5_file(&path, Some("cmd/true"), None)
+            .unwrap_or_else(|e| panic!("{name}: {e}"));
+        let json = def.to_expanded_json();
+        let (mut captures, mut implements) = (Vec::new(), Vec::new());
+        // Stage names are de-duplicated on expansion, so find the consumer by
+        // its `done_check` rather than its name.
+        collect_stages(
+            &json,
+            &|stage| stage["name"] == "capture-implement-baseline",
+            &mut captures,
+        );
+        collect_stages(
+            &json,
+            &|stage| {
+                stage["options"]["done_check"]
+                    .as_str()
+                    .is_some_and(|check| check.contains("tree_snapshot check"))
+            },
+            &mut implements,
+        );
+        assert_eq!(captures.len(), namespaces.len(), "{name}");
+        assert_eq!(implements.len(), namespaces.len(), "{name}: {json}");
+
+        let mut seen = Vec::new();
+        let consumed_keys: Vec<String> =
+            implements.iter().map(|s| baseline_key(s, "inputs")).collect();
+        for capture in &captures {
+            let produced = baseline_key(capture, "outputs");
+            let consumed = consumed_keys
+                .iter()
+                .find(|key| **key == produced)
+                .unwrap_or_else(|| panic!("{name}: no consumer for {produced}"));
+            assert_eq!(&produced, consumed);
+            assert!(produced.contains("{loop_iter}"), "{name}: {produced}");
+            seen.push(produced);
+        }
+        let mut expected: Vec<String> = namespaces
+            .iter()
+            .map(|ns| format!("artifact://{ns}{{loop_iter}}/implement-baseline"))
+            .collect();
+        let (mut seen_sorted, mut distinct) = (seen.clone(), seen.clone());
+        seen_sorted.sort();
+        expected.sort();
+        assert_eq!(seen_sorted, expected, "{name}");
+        distinct.sort();
+        distinct.dedup();
+        assert_eq!(distinct.len(), seen.len(), "{name}: keys must be distinct");
+    }
 }
