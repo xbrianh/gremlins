@@ -64,6 +64,8 @@ pub enum EventKind {
     PromptRequest { id: String, json: String },
 
     // ── From InteractiveEvent ─────────────────────────────────────────
+    #[serde(rename = "turn_started")]
+    TurnStarted { execution_id: String },
     #[serde(rename = "ready")]
     Ready { turn: usize },
     #[serde(rename = "turn_complete")]
@@ -178,7 +180,8 @@ impl EventKind {
     pub fn is_chat_event(&self) -> bool {
         matches!(
             self,
-            EventKind::StreamChunk { .. }
+            EventKind::TurnStarted { .. }
+                | EventKind::StreamChunk { .. }
                 | EventKind::ReasoningChunk { .. }
                 | EventKind::ToolOutputChunk { .. }
                 | EventKind::ToolResult { .. }

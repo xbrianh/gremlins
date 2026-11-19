@@ -1,7 +1,7 @@
 //! The run handle publishes pause requests; only the loop that accepts a
 //! request receives that attachment's commands. Stream events stay on the bus.
 
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, Weak};
 
 use crate::clients::protocol::UsageStats;
@@ -82,18 +82,20 @@ impl DebugTerminal {
 enum PauseState {
     #[default]
     Idle,
-    /// A debugger placed a pause request. Crosses turn boundaries. The u64 is
-    /// the execution nonce under which the request was made; it lets
+    /// A debugger placed a pause request. Crosses turn boundaries. The nonce
+    /// is the execution nonce under which the request was made; it lets
     /// [`InteractiveSessionFactory::next_session`] distinguish a between-turn
-    /// request from a stale leftover.
-    DebuggerRequested(CommandInbox, u64),
+    /// request from a stale leftover. The acquisition is the lease generation
+    /// the attachment acquired, carried so a release can verify its own token.
+    DebuggerRequested(CommandInbox, u64, u64),
     /// A message/correction placed a pause request. Does NOT cross turn
-    /// boundaries. The u64 is the execution nonce under which the request was
-    /// made.
-    Requested(CommandInbox, u64),
-    /// The agent loop has accepted the pause. The u64 records the
-    /// execution nonce at the time of acceptance.
-    Accepted(u64),
+    /// boundaries. The nonce is the execution nonce under which the request
+    /// was made; the acquisition is the lease generation.
+    Requested(CommandInbox, u64, u64),
+    /// The agent loop has accepted the pause. Records the execution nonce and
+    /// the lease acquisition at the time of acceptance.
+    #[allow(dead_code)]
+    Accepted { nonce: u64, acquisition: u64 },
 }
 
 impl PauseState {
@@ -103,8 +105,9 @@ impl PauseState {
 
     fn accept(&mut self) -> Option<CommandInbox> {
         match std::mem::replace(self, Self::Idle) {
-            Self::Requested(inbox, nonce) | Self::DebuggerRequested(inbox, nonce) => {
-                *self = Self::Accepted(nonce);
+            Self::Requested(inbox, nonce, acquisition)
+            | Self::DebuggerRequested(inbox, nonce, acquisition) => {
+                *self = Self::Accepted { nonce, acquisition };
                 Some(inbox)
             }
             previous => {
@@ -119,6 +122,11 @@ impl PauseState {
 pub(crate) struct PauseSlot {
     state: Mutex<PauseState>,
     requested: Notify,
+    /// The end signal for the *current* execution. Replaced when a new
+    /// execution is minted; each [`InteractiveSession`] also holds its own
+    /// clone so it signals the right one on drop even after a successor has
+    /// been minted.
+    end_signal: Mutex<EndSignal>,
     /// Identifies one execution (one agent loop invocation). Incremented when
     /// a new session is minted from this slot.
     nonce: AtomicU64,
@@ -171,6 +179,62 @@ impl PauseSlot {
             .unwrap_or_else(|e| e.into_inner())
             .clone()
     }
+
+    /// The end signal of the current execution, cloned for an observer.
+    pub(crate) fn current_end_signal(&self) -> EndSignal {
+        self.end_signal
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone()
+    }
+
+    /// End the current execution and install a fresh signal for the next one,
+    /// returning the fresh signal. Signals the outgoing one so observers of the
+    /// replaced execution wake even before the slot's nonce is bumped.
+    fn rotate_end_signal(&self) -> EndSignal {
+        let mut guard = self.end_signal.lock().unwrap_or_else(|e| e.into_inner());
+        guard.signal();
+        *guard = EndSignal::default();
+        guard.clone()
+    }
+}
+
+/// A per-execution end signal: a latch plus a wakeup that an observer can
+/// hold independently of the slot.
+///
+/// `notify_waiters` stores no permit, so an observer that registers after the
+/// execution ended would hang. The latch closes that race: [`Self::wait`]
+/// registers its wakeup *before* re-checking the flag, so an end that fires at
+/// any point — including while the observer is still setting up — is observed.
+#[derive(Clone, Debug, Default)]
+pub(crate) struct EndSignal {
+    ended: Arc<AtomicBool>,
+    notify: Arc<Notify>,
+}
+
+impl EndSignal {
+    /// Mark the execution ended and wake every registered observer.
+    fn signal(&self) {
+        self.ended.store(true, Ordering::Release);
+        self.notify.notify_waiters();
+    }
+
+    fn is_ended(&self) -> bool {
+        self.ended.load(Ordering::Acquire)
+    }
+
+    /// Wait until the execution ends, returning immediately if it already has.
+    pub(crate) async fn wait(&self) {
+        // Register the wakeup before consulting the latch so a `signal` racing
+        // this call cannot slip between the check and the await.
+        let notified = self.notify.notified();
+        tokio::pin!(notified);
+        notified.as_mut().enable();
+        if self.is_ended() {
+            return;
+        }
+        notified.await;
+    }
 }
 
 /// The published run handle points to one execution at a time. A debugger
@@ -183,11 +247,30 @@ impl InteractiveHandle {
         self.0.lock().unwrap().clone()
     }
 
+    /// A handle to the pause slot's end signal, if the target is still alive.
+    ///
+    /// The returned [`EndSignal`] fires when the captured execution ends —
+    /// return, error, cancellation, or replacement by a successor. An
+    /// attachment awaiting it stops observing even when no terminal event is
+    /// emitted on the bus. The signal latches, so an observer that registers
+    /// after the execution already ended still observes it. `None` when the
+    /// slot has already been dropped, in which case the caller should treat
+    /// the execution as ended.
+    pub(crate) fn end_signal(&self) -> Option<EndSignal> {
+        let target = self.0.lock().unwrap();
+        target.slot.upgrade()?;
+        Some(target.end_signal.clone())
+    }
+
     fn publish(&self, slot: &Arc<PauseSlot>) {
         *self.0.lock().unwrap() = DebugTarget {
             slot: Arc::downgrade(slot),
             nonce: slot.nonce.load(Ordering::Relaxed),
             execution_id: slot.execution_id(),
+            // Captured under the slot lock, in the same write that publishes
+            // the nonce, so the snapshot's signal always belongs to the
+            // snapshot's execution — never a successor's.
+            end_signal: slot.current_end_signal(),
         };
     }
 
@@ -205,6 +288,9 @@ pub(crate) struct DebugTarget {
     nonce: u64,
     /// The opaque execution ID captured when the target was published.
     execution_id: Option<String>,
+    /// The end signal for the execution this snapshot describes, captured
+    /// atomically with `nonce` so it cannot be confused with a successor's.
+    end_signal: EndSignal,
 }
 
 impl DebugTarget {
@@ -251,15 +337,16 @@ impl DebugTarget {
             ended: Some(terminal),
         };
         *state = if debugger {
-            PauseState::DebuggerRequested(inbox, self.nonce)
+            PauseState::DebuggerRequested(inbox, self.nonce, acquisition)
         } else {
-            PauseState::Requested(inbox, self.nonce)
+            PauseState::Requested(inbox, self.nonce, acquisition)
         };
         slot.requested.notify_one();
         Ok(DebugAttachment {
             slot: self.slot.clone(),
             nonce: self.nonce,
             acquisition,
+            execution_id: self.execution_id.clone(),
             commands,
             ready,
             ended,
@@ -278,6 +365,9 @@ pub(crate) struct DebugAttachment {
     /// The lease generation this attachment acquired. Drop only clears slot
     /// state when both nonce and acquisition still match.
     acquisition: u64,
+    /// The opaque execution ID captured at attach time. Lets the caller
+    /// correlate this lease with the execution it targeted.
+    execution_id: Option<String>,
     commands: mpsc::Sender<InteractiveCommand>,
     pub(crate) ready: oneshot::Receiver<()>,
     #[allow(dead_code)]
@@ -311,6 +401,12 @@ impl Drop for DebugAttachment {
 }
 
 impl DebugAttachment {
+    /// The opaque execution ID captured when this lease was acquired.
+    #[allow(dead_code)]
+    pub(crate) fn execution_id(&self) -> Option<&str> {
+        self.execution_id.as_deref()
+    }
+
     pub(crate) fn try_send(
         &self,
         command: InteractiveCommand,
@@ -338,6 +434,9 @@ pub(crate) struct InteractiveSessionFactory {
     slot: Arc<PauseSlot>,
     chat: bool,
     next_terminal: Option<DebugTerminal>,
+    /// A session minted eagerly by [`Self::prepare_next`], handed back by the
+    /// next call to [`Self::next_session`].
+    prepared: Option<InteractiveSession>,
 }
 
 impl InteractiveSessionFactory {
@@ -359,6 +458,7 @@ impl InteractiveSessionFactory {
                 slot,
                 chat,
                 next_terminal: None,
+                prepared: None,
             },
             handle,
         )
@@ -375,7 +475,39 @@ impl InteractiveSessionFactory {
     }
 
     pub(crate) fn next_session(&mut self) -> InteractiveSession {
+        if let Some(mut session) = self.prepared.take() {
+            // Always prefer a fresher debugger reservation over whatever
+            // terminal the prepared session carries (if any).
+            if let Some(terminal) = self.next_terminal.take() {
+                session.terminal = Some(terminal);
+            }
+            return session;
+        }
+        let mut session = self.mint();
+        session.terminal = self.next_terminal.take();
+        session
+    }
+
+    /// Mint the next execution eagerly and return its published
+    /// `execution_id`, stashing the session for [`Self::next_session`].
+    ///
+    /// Chat turns use this to announce the execution identity at turn start,
+    /// before `run_agent` asks for the session.
+    #[allow(dead_code)]
+    pub(crate) fn prepare_next(&mut self) -> String {
+        let session = self.mint();
+        let execution_id = session.slot.execution_id().unwrap_or_default();
+        self.prepared = Some(session);
+        execution_id
+    }
+
+    /// Mint a fresh execution: signal the previous one's end, bump the nonce,
+    /// publish the execution ID and handle, and sweep stale pause state.
+    fn mint(&mut self) -> InteractiveSession {
         let slot = self.slot.clone();
+        // End the execution we are replacing (waking its observers) and install
+        // a fresh, unlatched end signal for the new one.
+        let end_signal = slot.rotate_end_signal();
         // Mint a fresh execution identity *before* sweeping stale state
         // so that the sweep is atomic with respect to the new nonce — a
         // between-turn debugger that has not yet attached sees the new
@@ -394,19 +526,22 @@ impl InteractiveSessionFactory {
             // Stale acceptance (left over from a previous execution whose
             // agent loop is gone) or a message request: reset to Idle so a
             // new debugger can attach.
-            PauseState::Accepted(old_nonce) | PauseState::Requested(_, old_nonce)
+            PauseState::Accepted {
+                nonce: old_nonce, ..
+            }
+            | PauseState::Requested(_, old_nonce, _)
                 if *old_nonce != nonce =>
             {
                 *state = PauseState::Idle;
             }
             // Debugger request placed between turns under the previous
             // nonce. Carry it forward to the new execution (chat only).
-            PauseState::DebuggerRequested(_, old_nonce) if *old_nonce != nonce => {
+            PauseState::DebuggerRequested(_, old_nonce, _) if *old_nonce != nonce => {
                 if self.chat {
-                    if let PauseState::DebuggerRequested(inbox, _) =
+                    if let PauseState::DebuggerRequested(inbox, _, acquisition) =
                         std::mem::replace(&mut *state, PauseState::Idle)
                     {
-                        *state = PauseState::DebuggerRequested(inbox, nonce);
+                        *state = PauseState::DebuggerRequested(inbox, nonce, acquisition);
                     }
                 } else {
                     *state = PauseState::Idle;
@@ -419,7 +554,8 @@ impl InteractiveSessionFactory {
             slot,
             nonce,
             active: None,
-            terminal: self.next_terminal.take(),
+            terminal: None,
+            end_signal,
         }
     }
 }
@@ -433,6 +569,19 @@ pub struct InteractiveSession {
     nonce: u64,
     active: Option<CommandInbox>,
     terminal: Option<DebugTerminal>,
+    /// This execution's end signal, held so dropping the session signals the
+    /// right execution even after a successor has rotated the slot's signal.
+    end_signal: EndSignal,
+}
+
+/// Ending the execution — return, error or cancellation — wakes every
+/// observer waiting on this execution's end signal, even if no successor
+/// starts. An `unattached` session carries an isolated signal with no
+/// observers, so the drop is a no-op there.
+impl Drop for InteractiveSession {
+    fn drop(&mut self) {
+        self.end_signal.signal();
+    }
 }
 
 impl InteractiveSession {
@@ -546,6 +695,111 @@ mod tests {
             (&mut debugger.ended).await,
             Ok(DebugOutcome::Ended { reason }) if reason == "interrupted"
         ));
+    }
+
+    #[tokio::test]
+    async fn end_signal_fires_when_the_execution_drops() {
+        let (mut sessions, handle) = InteractiveSessionFactory::for_chat();
+        let session = sessions.next_session();
+
+        // An observer captures the end signal and registers a waiter before
+        // the execution ends.
+        let signal = handle.end_signal().expect("slot is live");
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        let waiter = tokio::spawn(async move {
+            signal.wait().await;
+            let _ = tx.send(());
+        });
+        // Let the spawned waiter reach `wait()` (register) first.
+        tokio::task::yield_now().await;
+
+        // Dropping the execution wakes the observer even though no terminal
+        // bus event is ever emitted.
+        drop(session);
+        tokio::time::timeout(std::time::Duration::from_secs(1), rx)
+            .await
+            .expect("end signal must fire when the execution ends")
+            .expect("waiter task ended without signalling");
+        waiter.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn end_signal_latches_so_a_late_waiter_still_observes_it() {
+        let (mut sessions, handle) = InteractiveSessionFactory::for_chat();
+        let session = sessions.next_session();
+        let signal = handle.end_signal().expect("slot is live");
+
+        // The execution ends *before* the observer registers: this is the
+        // window `notify_waiters` alone would drop. The latch must still make
+        // the wait complete.
+        drop(session);
+        tokio::time::timeout(std::time::Duration::from_secs(1), signal.wait())
+            .await
+            .expect("an already-ended execution must complete wait immediately");
+    }
+
+    #[tokio::test]
+    async fn end_signal_fires_when_a_successor_execution_starts() {
+        let (mut sessions, handle) = InteractiveSessionFactory::for_chat();
+        let first = sessions.next_session();
+        let signal = handle.end_signal().expect("slot is live");
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        let waiter = tokio::spawn(async move {
+            signal.wait().await;
+            let _ = tx.send(());
+        });
+        tokio::task::yield_now().await;
+
+        // Minting the next execution replaces this one; the observer of the
+        // replaced execution is woken.
+        let _second = sessions.next_session();
+        tokio::time::timeout(std::time::Duration::from_secs(1), rx)
+            .await
+            .expect("a successor execution must wake the previous observer")
+            .expect("waiter task ended without signalling");
+        waiter.await.unwrap();
+        drop(first);
+    }
+
+    #[tokio::test]
+    async fn end_signal_rotates_per_execution() {
+        let (mut sessions, handle) = InteractiveSessionFactory::for_chat();
+        let first = sessions.next_session();
+        let first_signal = handle.end_signal().expect("slot is live");
+        let second = sessions.next_session();
+        let second_signal = handle.end_signal().expect("slot is live");
+
+        // Ending the first execution must not end the second: the signals are
+        // distinct and only the outgoing one is latched.
+        drop(first);
+
+        // Use a oneshot wired to the second signal to detect an erroneous
+        // early completion. The oneshot fires only if second_signal completes
+        // before we explicitly drop second — which must not happen.
+        let (tx, mut rx) = tokio::sync::oneshot::channel();
+        let second_signal_clone = second_signal.clone();
+        tokio::spawn(async move {
+            second_signal_clone.wait().await;
+            let _ = tx.send(());
+        });
+        // Not yielded: the spawned task races us. If the signal fires
+        // spuriously, rx will produce a value.
+        assert!(
+            rx.try_recv().is_err(),
+            "the new execution's signal must stay unlatched"
+        );
+        // The outgoing execution's signal is latched.
+        tokio::time::timeout(std::time::Duration::from_secs(1), first_signal.wait())
+            .await
+            .expect("the replaced execution's signal must be latched");
+        drop(second);
+    }
+
+    #[tokio::test]
+    async fn end_signal_is_absent_once_the_slot_is_gone() {
+        let (sessions, handle) = InteractiveSessionFactory::for_chat();
+        drop(sessions);
+        assert!(handle.end_signal().is_none());
     }
 
     #[tokio::test]

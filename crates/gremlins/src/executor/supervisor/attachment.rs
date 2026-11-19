@@ -34,7 +34,7 @@ use serde_json::Value;
 use tokio::io::BufReader;
 
 use crate::clients::interactive::{
-    AttachError, DebugAttachment, InteractiveCommand, InteractiveHandle,
+    AttachError, DebugAttachment, EndSignal, InteractiveCommand, InteractiveHandle,
 };
 use crate::executor::gremlin::validate_gremlin_id;
 use crate::executor::socket;
@@ -257,7 +257,8 @@ fn event_run_id_matches(kind: &EventKind, target: &str) -> bool {
         | EventKind::OperatorMessage { id, .. }
         | EventKind::PromptRequest { id, .. } => id == target,
         // Variants that carry no per-run id: match everything.
-        EventKind::StreamChunk { .. }
+        EventKind::TurnStarted { .. }
+        | EventKind::StreamChunk { .. }
         | EventKind::ReasoningChunk { .. }
         | EventKind::TurnComplete { .. }
         | EventKind::ToolOutputChunk { .. }
@@ -290,6 +291,10 @@ pub(crate) async fn handle_conversation_attach(
     let target = handle.target();
     let execution_nonce = target.nonce();
     let execution_id = target.execution_id().map(|s| s.to_string());
+    // Capture the end signal for this execution so a passive observer can
+    // stop when the execution ends even if no terminal event is emitted on
+    // the bus (e.g. the run is cancelled before `Done`/`Ended`).
+    let end_signal = handle.end_signal();
 
     // 3. Check if the caller wants passive observation only. Conversation
     //    scope is interactive by default: a client that names no mode expects
@@ -344,7 +349,7 @@ pub(crate) async fn handle_conversation_attach(
     }
 
     if mode == "passive" {
-        handle_passive_conversation(id, &mut reader, writer, &mut evt_rx).await;
+        handle_passive_conversation(id, &mut reader, writer, &mut evt_rx, end_signal).await;
         return;
     }
 
@@ -801,12 +806,57 @@ async fn acquire_lease(
 }
 
 /// Passive conversation: stream events until the execution ends.
+///
+/// The event loop exits on a terminal bus event (`Done`/`Ended`), on socket
+/// EOF, or when `end_signal` fires — the last covering executions that end
+/// without ever emitting a terminal event (e.g. cancellation).
 async fn handle_passive_conversation(
     _id: &str,
     reader: &mut BufReader<tokio::net::unix::OwnedReadHalf>,
     writer: &SharedWriter,
     evt_rx: &mut gremlins_magic_bus::ReceiverHalf<EventKind>,
+    end_signal: Option<EndSignal>,
 ) {
+    // When the slot is already gone (`end_signal` is `None`), drain
+    // remaining events synchronously then return — no racing against the
+    // immediate-completion future in the select loop.
+    let end_signal = match end_signal {
+        Some(signal) => signal,
+        None => loop {
+            match evt_rx.recv().await {
+                Recv::Event(dispatch) => {
+                    let kind = dispatch.into_kind();
+                    let payload = conversation_display_event(&kind);
+                    if let Some(p) = payload {
+                        if writer.write_json_line(&p).await.is_err() {
+                            return;
+                        }
+                    }
+                    if matches!(kind, EventKind::Done { .. } | EventKind::Ended { .. }) {
+                        return;
+                    }
+                }
+                Recv::Lagged(skipped) => {
+                    let payload = serde_json::json!({
+                        "type": "lagged",
+                        "skipped": skipped,
+                    });
+                    if writer.write_json_line(&payload).await.is_err() {
+                        return;
+                    }
+                }
+                Recv::Closed => return,
+            }
+        },
+    };
+
+    // Pinned once so its registration is not dropped between iterations: an
+    // end signal that fires while an event arm is running must still complete
+    // the future. `EndSignal` latches, so an execution that ended before this
+    // future was first polled still completes immediately.
+    let end = end_signal.wait();
+    tokio::pin!(end);
+
     loop {
         tokio::select! {
             result = evt_rx.recv() => {
@@ -832,6 +882,9 @@ async fn handle_passive_conversation(
                     Recv::Closed => break,
                 }
             }
+            // The execution ended (return, error, cancellation, or a
+            // successor execution started) without a terminal bus event.
+            _ = &mut end => break,
             _ = socket::read_json_line(reader) => break,
         }
     }

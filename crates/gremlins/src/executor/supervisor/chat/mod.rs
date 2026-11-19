@@ -64,6 +64,10 @@ pub(crate) struct CurrentTurn {
     /// finished still proceeds immediately.
     pub(crate) done: watch::Receiver<bool>,
     pub(crate) hard: Arc<AtomicBool>,
+    /// The opaque execution ID published at turn start. The attachment
+    /// handler uses this to bind observation to one execution, not the
+    /// resettable run-id/nonce pair.
+    pub(crate) execution_id: Option<String>,
 }
 
 pub(crate) fn base_process_env() -> &'static HashMap<String, String> {
@@ -209,21 +213,57 @@ pub(crate) async fn handle_chat(
             let _ = writer.write_json_line(&resp).await;
             return;
         }
-        // Validate the client-supplied execution ID when present.
+        // Validate the client-supplied execution ID. The authoritative
+        // descriptor is the one the turn announced at start
+        // (`CurrentTurn.execution_id`), not a value sampled from the run
+        // map after enqueue.
+        //
+        // Chat turns: reject if `CurrentTurn` hasn't published its
+        // execution_id yet — the live-target snapshot would describe the
+        // *previous* execution between `prepare_next` and the
+        // `CurrentTurn` update. Pipeline runs (no matching turn) fall
+        // back to the live target's execution_id.
+        let current_turn = session_task.get_current_turn().await;
+        let is_chat_turn = current_turn.as_ref().is_some_and(|cur| cur.id == target_id);
+        let announced_execution_id = current_turn
+            .as_ref()
+            .filter(|cur| cur.id == target_id)
+            .and_then(|cur| cur.execution_id.clone());
+        let bound_execution_id = if is_chat_turn {
+            // For our own chat turn, only the announced descriptor is
+            // authoritative. Don't fall back to the live target.
+            announced_execution_id
+        } else {
+            // Pipeline run or cross-session target: use the live
+            // target's execution_id as the binding descriptor.
+            announced_execution_id.or_else(|| execution_id.clone())
+        };
         let client_execution_id = target_obj.get("execution_id").and_then(|v| v.as_str());
         if let Some(client_eid) = client_execution_id {
-            match debug_target.execution_id() {
+            match bound_execution_id.as_deref() {
                 Some(actual) if actual != client_eid => {
                     let resp = error_response("execution_id mismatch: target has been replaced");
                     let _ = writer.write_json_line(&resp).await;
                     return;
                 }
                 None => {
-                    // No execution ID published yet; the nonce check above
-                    // already guards against stale targets.
+                    // No execution ID published yet for this
+                    // execution. For a chat turn this means
+                    // `TurnStarted` hasn't been emitted; for a
+                    // pipeline run it means the interactive slot
+                    // hasn't been minted. Reject.
+                    let resp = error_response("execution not yet started; retry after TurnStarted");
+                    let _ = writer.write_json_line(&resp).await;
+                    return;
                 }
                 _ => {}
             }
+        } else {
+            // The plan requires rejecting missing execution_id — a
+            // client must identify the target execution.
+            let resp = error_response("execution_id required for targeted correction");
+            let _ = writer.write_json_line(&resp).await;
+            return;
         }
 
         // `attach()` checks the nonce under the slot lock, closing the
@@ -459,35 +499,16 @@ pub(crate) async fn handle_chat(
 
     // 6. Acknowledge the request so the TUI's `send_request` completes. Chat
     //    events themselves are unsolicited lines written by the task above and
-    //    classified separately by the client read loop. Include the current
-    //    execution nonce so the client can target a correction. Omit `nonce`
-    //    when the run is not yet registered (a transient startup window) —
-    //    the client must not conflate a missing lookup with a legitimate
-    //    nonce of 0.
-    let ack = match registry.get_run_nonce(&handle.id).await {
-        Some(nonce) => {
-            let execution_id = match registry.get_run_interactive(&handle.id).await {
-                Some((interactive, _, _)) => {
-                    interactive.target().execution_id().map(|s| s.to_string())
-                }
-                None => None,
-            };
-            match execution_id {
-                Some(execution_id) => serde_json::json!({
-                    "id": handle.id,
-                    "status": "streaming",
-                    "nonce": nonce,
-                    "execution_id": execution_id,
-                }),
-                None => serde_json::json!({
-                    "id": handle.id,
-                    "status": "streaming",
-                    "nonce": nonce,
-                }),
-            }
-        }
-        None => serde_json::json!({"id": handle.id, "status": "streaming"}),
-    };
+    //    classified separately by the client read loop.
+    //
+    //    Deliberately no `nonce` / `execution_id` here: the turn has not
+    //    started yet (the prompt was only just queued), so any identity
+    //    sampled from the run map now describes the *previous* execution.
+    //    The turn that starts publishes its execution identity on
+    //    `CurrentTurn.execution_id` (see `chat/turn.rs::run_turn`), and
+    //    attachments bind to that descriptor; corrections validate against it
+    //    below.
+    let ack = serde_json::json!({"id": handle.id, "status": "streaming"});
     let _ = writer.write_json_line(&ok_response(ack)).await;
 }
 

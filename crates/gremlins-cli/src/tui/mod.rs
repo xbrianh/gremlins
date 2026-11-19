@@ -2766,6 +2766,9 @@ async fn run_app(live_area: &mut LiveArea) -> io::Result<()> {
                 }
 
                 match event {
+                    gremlins_magic_bus::EventKind::TurnStarted { execution_id } => {
+                        log::debug!("chat turn started: execution_id={execution_id}");
+                    }
                     gremlins_magic_bus::EventKind::StreamChunk { text, .. } => {
                         log::debug!("StreamChunk len={}", text.len());
                         live_area.with_target_transcript(&home, |transcript, _| {

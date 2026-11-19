@@ -213,6 +213,11 @@ async fn run_turn(
     let done_tx = Arc::new(done_tx);
     let hard = Arc::new(AtomicBool::new(false));
 
+    // Prepare this turn's interactive session eagerly so the execution_id is
+    // published before `run_agent` asks for the session, letting the turn
+    // announce it at start (stored on `CurrentTurn` below).
+    let execution_id = gremlin.prepare_interactive_session();
+
     // Announce the in-flight turn so cancel / stop / compact can find it.
     session_task
         .set_current_turn(CurrentTurn {
@@ -221,6 +226,7 @@ async fn run_turn(
             cancel: turn_cancel.clone(),
             done: done_rx,
             hard: hard.clone(),
+            execution_id: execution_id.clone(),
         })
         .await;
 
@@ -235,6 +241,18 @@ async fn run_turn(
         done: done_tx,
         hard,
     });
+
+    // Announce this turn's execution identity before any stream event so the
+    // client can target a correction at exactly this execution. Chat gremlins
+    // always carry an interactive factory; `None` (no factory) is a naked-run
+    // case where there is nothing to target.
+    if let Some(execution_id) = execution_id {
+        let event = serde_json::to_value(EventKind::TurnStarted {
+            execution_id: execution_id.clone(),
+        })
+        .expect("TurnStarted must serialize");
+        runner.write(event).await;
+    }
 
     // Rebuild the parsed model handle for the reused gremlin so a `/model`
     // change takes effect on the next turn rather than only after the chat

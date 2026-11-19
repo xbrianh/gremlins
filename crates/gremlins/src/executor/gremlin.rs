@@ -339,6 +339,18 @@ impl Gremlin {
         )
     }
 
+    /// Mint the next interactive session eagerly and return its execution_id.
+    ///
+    /// Chat turns call this at turn start to announce the execution identity
+    /// before `run_agent` asks for the session via
+    /// [`Self::next_interactive_session`], which then hands back the prepared
+    /// session instead of minting another one.
+    pub(crate) fn prepare_interactive_session(&mut self) -> Option<String> {
+        self.interactive_sessions
+            .as_mut()
+            .map(|sessions| sessions.prepare_next())
+    }
+
     /// Start a fresh run: generate an id, reserve the state directory, create
     /// a workspace directory, write `state.json` and a hermetic `definition.json`,
     /// and return a handle ready for [`Gremlin::run`].

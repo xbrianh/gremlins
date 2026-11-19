@@ -236,16 +236,6 @@ impl RunRegistry {
         })
     }
 
-    /// Return the current execution nonce for a run, or `None` if the run
-    /// is not live.
-    pub(crate) async fn get_run_nonce(&self, id: &str) -> Option<u64> {
-        self.runs
-            .read()
-            .await
-            .get(id)
-            .map(|handle| handle.interactive.target().nonce())
-    }
-
     /// Combined liveness check + bus subscribe under one lock guard.
     pub(crate) async fn get_run_log_flush_and_subscribe(
         &self,
