@@ -1,4 +1,8 @@
-Implement the following plan.
+Implement the following plan. On retries, address the judge’s feedback below.
+
+<previous-judge-feedback>
+{feedback}
+</previous-judge-feedback>
 
 A dedicated verify stage runs `make check && make test` after this stage
 finishes. Do **not** run `make test` or `make check` yourself — the verify
