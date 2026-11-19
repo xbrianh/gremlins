@@ -3,6 +3,7 @@
 
 use std::io::ErrorKind;
 use std::path::Path;
+use std::sync::Arc;
 
 use crate::clients::cancel::CancelToken;
 use crate::clients::error::ClientError;
@@ -17,6 +18,8 @@ pub(crate) struct DoneAssessment {
     pub(crate) outputs: Vec<DoneOutput>,
     /// The stage's custom assessor, if any.
     pub(crate) check: Option<DoneCheck>,
+    /// Replaces the native presence check when set (DSL stages use the CLI).
+    pub(crate) artifact: Option<DoneCheck>,
 }
 
 impl DoneAssessment {
@@ -32,6 +35,7 @@ impl DoneAssessment {
                 })
                 .collect(),
             check: None,
+            artifact: None,
         })
     }
 }
@@ -52,6 +56,7 @@ fn operational(message: String) -> ClientError {
 /// A regular file (even an empty one) is present; absent, dangling and
 /// non-file paths are unsatisfied; any other metadata error is operational.
 /// Nothing is created and no contents are read.
+#[cfg(test)]
 pub(crate) fn unsatisfied(outputs: &[DoneOutput]) -> Result<Vec<&DoneOutput>, ClientError> {
     let mut missing = Vec::new();
     for output in outputs {
@@ -91,6 +96,40 @@ pub(crate) fn artifact_reminder(missing: &[&DoneOutput]) -> String {
     )
 }
 
+/// The reminder text for unmet required outputs, or `None` when satisfied.
+/// Uses the stage's artifact predicate when present, else a file check.
+pub(crate) async fn missing_outputs(
+    done: &DoneAssessment,
+    cwd: Option<&Path>,
+    summary: &str,
+    cancel: &Arc<CancelToken>,
+) -> Result<Option<String>, ClientError> {
+    if let Some(artifact) = &done.artifact {
+        let verdict = artifact
+            .call(DoneContext {
+                summary: summary.to_string(),
+                cwd: cwd.map(Path::to_path_buf).unwrap_or_default(),
+                outputs: done.outputs.clone(),
+                cancel: cancel.clone(),
+            })
+            .await;
+        return match verdict {
+            DoneVerdict::Accept => Ok(None),
+            DoneVerdict::Retry(diagnostic) => Ok(Some(diagnostic)),
+            DoneVerdict::Error(message) => {
+                Err(operational(format!("artifact check failed: {message}")))
+            }
+        };
+    }
+    let mut missing = Vec::new();
+    for output in &done.outputs {
+        if !present(output, tokio::fs::metadata(&output.path).await)? {
+            missing.push(output);
+        }
+    }
+    Ok((!missing.is_empty()).then(|| artifact_reminder(&missing)))
+}
+
 /// Run the built-in output check, then the custom function if it passes.
 /// Cancellation wins over a pending assessor, which is dropped.
 pub(crate) async fn assess(
@@ -100,19 +139,15 @@ pub(crate) async fn assess(
     cancel: &CancelToken,
 ) -> Result<Assessment, ClientError> {
     let signal = CancelToken::new();
+    let in_check = std::sync::atomic::AtomicBool::new(false);
     let assessment = async {
-        let mut missing = Vec::new();
-        for output in &done.outputs {
-            if !present(output, tokio::fs::metadata(&output.path).await)? {
-                missing.push(output);
-            }
+        if cancel.is_cancelled() {
+            return Err(cancelled_error());
         }
-        if !missing.is_empty() {
-            let reminder = format!(
-                "Done rejected: {}\nWrite each file using the Write tool, then call Done.",
-                artifact_reminder(&missing)
-            );
-            return Ok(Assessment::Retry(reminder));
+        if let Some(reminder) = missing_outputs(done, cwd, summary, &signal).await? {
+            return Ok(Assessment::Retry(format!(
+                "Done rejected: {reminder}\nWrite each file using the Write tool, then call Done."
+            )));
         }
         let Some(check) = &done.check else {
             return Ok(Assessment::Accept);
@@ -120,6 +155,7 @@ pub(crate) async fn assess(
         if cancel.is_cancelled() {
             return Err(cancelled_error());
         }
+        in_check.store(true, std::sync::atomic::Ordering::SeqCst);
         match check
             .call(DoneContext {
                 summary: summary.to_string(),
@@ -138,15 +174,61 @@ pub(crate) async fn assess(
             }
         }
     };
-    tokio::pin!(assessment);
+    cancellable(
+        cancel,
+        &signal,
+        || grace_for(done, in_check.load(std::sync::atomic::Ordering::SeqCst)),
+        assessment,
+    )
+    .await
+}
+
+/// Only DSL checks own child processes they reap on cancellation; native
+/// callbacks and the built-in file check are signalled and dropped at once.
+/// Only the currently active check (custom when `in_check`, else artifact)
+/// decides whether cancellation waits.
+pub(super) fn grace_for(done: &DoneAssessment, in_check: bool) -> std::time::Duration {
+    let active = if in_check {
+        &done.check
+    } else {
+        &done.artifact
+    };
+    let reaping = active.iter().any(DoneCheck::reaps_on_cancel);
+    if reaping {
+        CANCEL_GRACE
+    } else {
+        std::time::Duration::ZERO
+    }
+}
+
+/// How long a cancelled check may take to stop its own work before it is
+/// dropped; a native callback that ignores its token cannot stall the run.
+pub(super) const CANCEL_GRACE: std::time::Duration = std::time::Duration::from_secs(5);
+
+/// Drive `work`, which observes `signal`. On run cancellation the signal is
+/// raised and the work is given a bounded grace period to stop and release
+/// its resources (child processes, pending scopes) before cancellation is
+/// reported; its result is discarded.
+pub(crate) async fn cancellable<T>(
+    cancel: &CancelToken,
+    signal: &CancelToken,
+    grace: impl Fn() -> std::time::Duration,
+    work: impl std::future::Future<Output = Result<T, ClientError>>,
+) -> Result<T, ClientError> {
+    tokio::pin!(work);
     tokio::select! {
         biased;
         _ = cancel.cancelled() => {
             signal.cancel();
+            if !grace().is_zero() {
+                // Reaping work must finish stopping its process group and
+                // releasing its scope; dropping it early would leak both.
+                let _ = (&mut work).await;
+            }
             Err(cancelled_error())
         }
-        // Cancellation can also arrive during the assessment's final poll.
-        result = &mut assessment => {
+        // Cancellation can also arrive during the work's final poll.
+        result = &mut work => {
             if cancel.is_cancelled() {
                 signal.cancel();
                 Err(cancelled_error())
@@ -179,6 +261,7 @@ mod tests {
         let counter = calls.clone();
         let done = DoneAssessment {
             outputs: vec![output(path.clone())],
+            artifact: None,
             check: Some(DoneCheck::new(move |_| {
                 counter.fetch_add(1, Ordering::SeqCst);
                 async { DoneVerdict::Accept }
@@ -205,6 +288,7 @@ mod tests {
             let done = DoneAssessment {
                 outputs: vec![output(path)],
                 check: None,
+                artifact: None,
             };
             assert!(matches!(
                 assess(&done, None, "s", &cancel).await,
@@ -226,6 +310,7 @@ mod tests {
             let done = DoneAssessment {
                 outputs: vec![output(dir.path().join("missing"))],
                 check: None,
+                artifact: None,
             };
             let cancel = CancelToken::new();
             let (entered_tx, entered_rx) = tokio::sync::oneshot::channel();
@@ -254,6 +339,7 @@ mod tests {
         let trigger = cancel.clone();
         let done = DoneAssessment {
             outputs: vec![],
+            artifact: None,
             check: Some(DoneCheck::new(move |_| {
                 let trigger = trigger.clone();
                 async move {
@@ -293,10 +379,109 @@ mod tests {
         assert_eq!(unsatisfied(&outputs).unwrap().len(), 1);
         let done = DoneAssessment {
             outputs: vec![],
+            artifact: None,
             check: Some(DoneCheck::new(|_| async {
                 DoneVerdict::Error("boom".into())
             })),
         };
         assert!(assess(&done, None, "s", &CancelToken::new()).await.is_err());
+    }
+
+    #[tokio::test]
+    async fn noncooperative_native_check_is_not_awaited_despite_reaping_artifact() {
+        let cancel = CancelToken::new();
+        let done = DoneAssessment {
+            outputs: vec![],
+            artifact: Some(DoneCheck::new(|_| async { DoneVerdict::Accept }).reaping()),
+            check: Some(DoneCheck::new(|_| async {
+                tokio::time::sleep(std::time::Duration::from_secs(60)).await;
+                DoneVerdict::Accept
+            })),
+        };
+        let c = cancel.clone();
+        tokio::spawn(async move {
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+            c.cancel();
+        });
+        let result = tokio::time::timeout(
+            std::time::Duration::from_secs(2),
+            assess(&done, None, "s", &cancel),
+        )
+        .await
+        .expect("native check must not be awaited");
+        assert!(matches!(result, Err(ClientError::Cancelled)));
+    }
+
+    #[tokio::test]
+    async fn cancellation_waits_for_cooperative_cleanup() {
+        let cancel = CancelToken::new();
+        let signal = CancelToken::new();
+        let cleaned = Arc::new(AtomicUsize::new(0));
+        let flag = cleaned.clone();
+        let (s, c) = (signal.clone(), cancel.clone());
+        tokio::spawn(async move {
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+            c.cancel();
+        });
+        let work = async move {
+            s.cancelled().await;
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+            flag.fetch_add(1, Ordering::SeqCst);
+            Ok::<(), ClientError>(())
+        };
+        let result = cancellable(&cancel, &signal, || CANCEL_GRACE, work).await;
+        assert!(matches!(result, Err(ClientError::Cancelled)));
+        assert_eq!(
+            cleaned.load(Ordering::SeqCst),
+            1,
+            "cleanup must finish first"
+        );
+    }
+
+    #[tokio::test]
+    async fn cancelling_a_running_dsl_check_stops_and_reaps_it_before_returning() {
+        use crate::executor::dsl_done::{dsl_done_check, DslDoneParams};
+        let dir = tempfile::tempdir().unwrap();
+        let (started, pid, late) = (
+            dir.path().join("started"),
+            dir.path().join("pid"),
+            dir.path().join("late"),
+        );
+        let command = format!(
+            "echo $$ > {}; (sleep 1; touch {}) & touch {}; wait",
+            pid.display(),
+            late.display(),
+            started.display()
+        );
+        let done = DoneAssessment {
+            outputs: vec![],
+            artifact: None,
+            check: Some(dsl_done_check(DslDoneParams {
+                command,
+                env: [("PATH".to_string(), "/usr/bin:/bin".to_string())].into(),
+            })),
+        };
+        let cancel = CancelToken::new();
+        let trigger = cancel.clone();
+        let flag = started.clone();
+        tokio::spawn(async move {
+            while !flag.exists() {
+                tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+            }
+            trigger.cancel();
+        });
+        let began = std::time::Instant::now();
+        let result = assess(&done, Some(dir.path()), "s", &cancel).await;
+        assert!(matches!(result, Err(ClientError::Cancelled)));
+        assert!(began.elapsed() < std::time::Duration::from_secs(1));
+        let pid: i32 = std::fs::read_to_string(&pid)
+            .unwrap()
+            .trim()
+            .parse()
+            .unwrap();
+        // SAFETY: signal 0 only probes for existence.
+        assert_ne!(unsafe { libc::kill(pid, 0) }, 0, "process outlived return");
+        tokio::time::sleep(std::time::Duration::from_millis(1300)).await;
+        assert!(!late.exists(), "descendant wrote after cancellation");
     }
 }

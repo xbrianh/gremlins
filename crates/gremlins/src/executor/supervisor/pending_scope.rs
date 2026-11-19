@@ -41,7 +41,6 @@ pub(crate) struct PendingScopeGuard {
 
 impl PendingScopeGuard {
     /// The secret token; hand it only to the invocation's check subprocess.
-    #[allow(dead_code)]
     pub(crate) fn token(&self) -> &str {
         &self.token
     }
@@ -67,7 +66,6 @@ impl PendingScopes {
     }
 
     /// Open a fresh scope for one invocation of `run_id`.
-    #[allow(dead_code)]
     pub(crate) fn open(
         &self,
         run_id: &str,

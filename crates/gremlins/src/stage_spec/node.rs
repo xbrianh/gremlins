@@ -204,6 +204,11 @@ impl StageSpec {
         match (self, source) {
             (StageSpec::Agent { stage, .. }, StageSpec::Agent { stage: from, .. }) => {
                 stage.done_check = from.done_check.clone();
+                // A native builder stage must not be reclassified as DSL by the reload.
+                let key = crate::executor::dsl_done::DSL_STAGE_KEY;
+                if !from.options.contains_key(key) {
+                    stage.options.remove(key);
+                }
                 Ok(())
             }
             (

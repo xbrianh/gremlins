@@ -15,7 +15,7 @@ use std::time::Instant;
 use rig_core::completion::message::{Origin, Reasoning, ToolCall};
 use rig_core::completion::Usage;
 
-use super::done_assess::{artifact_reminder, assess, unsatisfied, Assessment, DoneAssessment};
+use super::done_assess::{assess, missing_outputs, Assessment, DoneAssessment};
 use super::done_helpers::done_user_message;
 use crate::clients::cancel::CancelToken;
 use crate::clients::conversation::Conversation;
@@ -216,18 +216,20 @@ pub(super) async fn handle_done_decision(
 /// Handle a turn that produced no tool calls: continue (interactive / or
 /// nudged / reminded) or return the exhausted run.
 #[allow(clippy::too_many_arguments)]
-pub(super) fn handle_empty_turn(
+pub(super) async fn handle_empty_turn(
     state: &mut LoopState,
     nested: bool,
     text: &str,
     reasoning: &str,
     reasoning_items: &[Reasoning],
     done: Option<&DoneAssessment>,
+    cwd: Option<&std::path::Path>,
     input_tokens: Option<u64>,
     loop_start: Instant,
     raw: &mut Option<std::fs::File>,
     captured: &mut Option<Vec<serde_json::Value>>,
     prefix: &str,
+    cancel: &CancelToken,
 ) -> Result<EmptyTurnAction, ClientError> {
     if state.interactive.is_attached() {
         return Ok(EmptyTurnAction::ContinueLoop);
@@ -251,21 +253,28 @@ pub(super) fn handle_empty_turn(
     );
 
     if !nested && state.reminder_budget > 0 && !text.is_empty() {
-        let missing = match done {
-            Some(done) => unsatisfied(&done.outputs)?,
-            None => Vec::new(),
+        let reminder = match done {
+            Some(done) => {
+                let signal = CancelToken::new();
+                super::done_assess::cancellable(
+                    cancel,
+                    &signal,
+                    || super::done_assess::grace_for(done, false),
+                    missing_outputs(done, cwd, "", &signal),
+                )
+                .await?
+            }
+            None => None,
         };
-        if !missing.is_empty() {
+        if let Some(reminder) = reminder {
             state.reminder_budget -= 1;
             state.hook_log(&format!(
-                "reminder: {} missing artifact(s) — nudging agent (remaining_budget={})",
-                missing.len(),
+                "reminder: missing artifact(s) — nudging agent (remaining_budget={})",
                 state.reminder_budget,
             ));
             state
                 .conv
                 .record_turn(text, reasoning_items, &[], input_tokens, None);
-            let reminder = artifact_reminder(&missing);
             write_raw(
                 raw,
                 &serde_json::json!({"type": "reminder", "message": reminder}),

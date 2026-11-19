@@ -207,6 +207,11 @@ impl GitSandbox {
         }
     }
 
+    /// Set an environment variable for the sandbox's lifetime.
+    pub(crate) fn set_env(&mut self, key: &'static str, value: impl AsRef<OsStr>) {
+        self._env.set(key, value);
+    }
+
     /// True when git is unavailable or `init_repo` failed — the test should
     /// return early.
     pub(crate) fn is_skipped(&self) -> bool {

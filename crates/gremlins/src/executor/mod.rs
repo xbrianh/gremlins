@@ -77,6 +77,7 @@ mod active_leaf;
 pub mod agent_runner;
 pub mod blob_io;
 pub mod bootstrap;
+pub(crate) mod dsl_done;
 pub mod exec_runner;
 pub mod gremlin;
 pub mod parallel;

@@ -39,6 +39,12 @@ impl ArtifactTestSupervisor {
         }
     }
 
+    /// The registry served by this supervisor, for in-process executors.
+    #[cfg(test)]
+    pub(crate) fn registry(&self) -> Arc<RunRegistry> {
+        self.registry.clone()
+    }
+
     pub fn open(
         &self,
         id: &str,

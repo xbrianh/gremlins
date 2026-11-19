@@ -141,7 +141,6 @@ impl RunRegistry {
     /// never from a socket request. Destinations are resolved paths beneath
     /// that checkout (not URI-derived paths). Keep the guard with the producer
     /// invocation; dropping it on any exit, including cancellation, revokes it.
-    #[allow(dead_code)]
     pub(crate) fn open_pending_scope(
         &self,
         run_id: &str,

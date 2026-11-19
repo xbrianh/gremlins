@@ -744,18 +744,20 @@ impl LoopState {
     /// Handle a turn that produced no tool calls: continue (interactive / or
     /// nudged / reminded) or return the exhausted run.
     #[allow(clippy::too_many_arguments)]
-    fn handle_empty_turn(
+    async fn handle_empty_turn(
         &mut self,
         nested: bool,
         text: &str,
         reasoning: &str,
         reasoning_items: &[Reasoning],
         done: Option<&DoneAssessment>,
+        cwd: Option<&std::path::Path>,
         input_tokens: Option<u64>,
         loop_start: Instant,
         raw: &mut Option<std::fs::File>,
         captured: &mut Option<Vec<serde_json::Value>>,
         prefix: &str,
+        cancel: &CancelToken,
     ) -> Result<EmptyTurnAction, ClientError> {
         super::turn_flow::handle_empty_turn(
             self,
@@ -764,12 +766,15 @@ impl LoopState {
             reasoning,
             reasoning_items,
             done,
+            cwd,
             input_tokens,
             loop_start,
             raw,
             captured,
             prefix,
+            cancel,
         )
+        .await
     }
 
     /// Append the current assistant turn to the conversation history.
@@ -1487,18 +1492,23 @@ pub(crate) async fn run_agent_loop_core(
             .collect();
 
         if tool_calls.is_empty() {
-            match state.handle_empty_turn(
-                nested,
-                &text,
-                &reasoning,
-                &reasoning_items,
-                done,
-                turn_usage.as_ref().and_then(|u| u.input_tokens),
-                loop_start,
-                raw,
-                captured,
-                prefix,
-            )? {
+            match state
+                .handle_empty_turn(
+                    nested,
+                    &text,
+                    &reasoning,
+                    &reasoning_items,
+                    done,
+                    tool_ctx.cwd.as_deref(),
+                    turn_usage.as_ref().and_then(|u| u.input_tokens),
+                    loop_start,
+                    raw,
+                    captured,
+                    prefix,
+                    cancel,
+                )
+                .await?
+            {
                 EmptyTurnAction::ContinueLoop => continue,
                 EmptyTurnAction::ReturnRun(run) => return Ok(*run),
             }
@@ -4100,6 +4110,7 @@ mod tests {
         ctx.reminder_budget = reminder_budget;
         ctx.completion_nudge_budget = 0;
         ctx.params.done = Some(DoneAssessment {
+            artifact: None,
             outputs: outputs
                 .into_iter()
                 .map(|path| crate::stage_spec::done_check::DoneOutput {
@@ -5686,6 +5697,7 @@ mod tests {
             super::super::done_assess::DoneAssessment {
                 outputs: vec![],
                 check: Some(check),
+                artifact: None,
             },
             calls,
         )
@@ -5799,6 +5811,7 @@ mod tests {
             super::super::done_assess::DoneAssessment {
                 outputs: vec![],
                 check: Some(check),
+                artifact: None,
             },
         );
         let run_id = "done-cancel-while-pending";

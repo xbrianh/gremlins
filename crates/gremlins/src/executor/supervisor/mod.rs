@@ -5,9 +5,9 @@
 //! dispatches socket requests to the appropriate handlers, which reach the
 //! registry directly instead of through an actor mailbox.
 
-#[cfg(feature = "artifact-test-support")]
+#[cfg(any(test, feature = "artifact-test-support"))]
 mod artifact_test_support;
-#[cfg(feature = "artifact-test-support")]
+#[cfg(any(test, feature = "artifact-test-support"))]
 #[doc(hidden)]
 pub use artifact_test_support::ArtifactTestSupervisor;
 

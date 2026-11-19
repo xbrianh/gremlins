@@ -53,7 +53,11 @@ type CheckFn = dyn Fn(DoneContext) -> BoxFuture<'static, DoneVerdict> + Send + S
 
 /// A cloneable handle to a native async done-check.
 #[derive(Clone)]
-pub struct DoneCheck(Arc<CheckFn>);
+pub struct DoneCheck {
+    check: Arc<CheckFn>,
+    /// Set for checks that own child processes and reap them on cancellation.
+    reaps: bool,
+}
 
 impl DoneCheck {
     /// Wrap a reusable async function.
@@ -62,11 +66,24 @@ impl DoneCheck {
         F: Fn(DoneContext) -> Fut + Send + Sync + 'static,
         Fut: Future<Output = DoneVerdict> + Send + 'static,
     {
-        DoneCheck(Arc::new(move |ctx| Box::pin(check(ctx))))
+        DoneCheck {
+            check: Arc::new(move |ctx| Box::pin(check(ctx))),
+            reaps: false,
+        }
+    }
+
+    /// Mark this check as awaiting its own cleanup once cancelled.
+    pub(crate) fn reaping(mut self) -> Self {
+        self.reaps = true;
+        self
+    }
+
+    pub(crate) fn reaps_on_cancel(&self) -> bool {
+        self.reaps
     }
 
     pub(crate) fn call(&self, ctx: DoneContext) -> BoxFuture<'static, DoneVerdict> {
-        (self.0)(ctx)
+        (self.check)(ctx)
     }
 }
 
@@ -78,6 +95,6 @@ impl fmt::Debug for DoneCheck {
 
 impl PartialEq for DoneCheck {
     fn eq(&self, other: &Self) -> bool {
-        Arc::ptr_eq(&self.0, &other.0)
+        Arc::ptr_eq(&self.check, &other.check)
     }
 }

@@ -21,6 +21,13 @@ pub(crate) const SANDBOX_ALLOW_ALL_KEY: &str = "sandbox_allow_all";
 // AgentPrepared — fully resolved pre-run state
 // ---------------------------------------------------------------------------
 
+/// A `done_check` shell command whose substituted values live in `env`.
+#[derive(Debug, Clone)]
+pub struct DoneCommand {
+    pub source: String,
+    pub env: HashMap<String, String>,
+}
+
 #[derive(Debug)]
 pub struct AgentPrepared {
     pub name: String,
@@ -38,6 +45,8 @@ pub struct AgentPrepared {
     /// A stage-supplied system prompt override. When present, this replaces
     /// the harness default in [`AgentPrepared::system_prompt`].
     pub system_prompt: Option<String>,
+    /// The author's `done_check` command with stage substitutions applied.
+    pub done_check: Option<DoneCommand>,
 }
 
 impl AgentPrepared {
@@ -202,6 +211,27 @@ pub async fn prepare_agent(
         .and_then(|v| v.as_str())
         .map(str::to_owned);
 
+    let done_check = agent
+        .options
+        .get(crate::executor::dsl_done::DONE_CHECK_KEY)
+        .and_then(|v| v.as_str())
+        .filter(|c| !c.trim().is_empty())
+        .map(|raw| {
+            // Resolved values travel in the child environment, never in
+            // shell source, exactly as for exec stages.
+            let mut env = HashMap::new();
+            let source = vars::substitute_vars_to_env(
+                raw,
+                &str_opts,
+                &subst_vars,
+                framework_subs,
+                &mut env,
+                &mut HashMap::new(),
+                &mut HashMap::new(),
+            );
+            DoneCommand { source, env }
+        });
+
     Ok(AgentPrepared {
         name: name.clone(),
         prompt,
@@ -213,6 +243,7 @@ pub async fn prepare_agent(
         artifact_dir: String::new(),
         allow_all,
         system_prompt,
+        done_check,
     })
 }
 
@@ -939,5 +970,68 @@ mod tests {
         let expected =
             crate::clients::agent::system_prompts::agent_system_prompt(Path::new("/work"));
         assert_eq!(prepared.system_prompt(), expected);
+    }
+
+    #[tokio::test]
+    async fn prepared_done_check_passes_author_quoted_value_as_one_argument() {
+        use crate::clients::cancel::CancelToken;
+        use crate::executor::dsl_done::{dsl_done_check, DslDoneParams};
+        use crate::stage_spec::done_check::{DoneContext, DoneVerdict};
+
+        let tmp = tempfile::TempDir::new().unwrap();
+        let store = make_state_store(ensure_artifact_dir(&tmp));
+        let value = "a b; touch pwned $(id) 'q' \"d\"";
+        let command =
+            "set -- \"{value}\"; printf '%s\\n%s\\n%s' \"$#\" \"$1\" \"{sentinel}\" > out; \
+                       printf '\\n%s' \"$STAGE_ONLY\" >> out; \
+                       test -z \"${GREMLINS_ARTIFACT_CHECK_SCOPE+x}\"";
+        let agent = Agent {
+            name: "test".to_string(),
+            prompts: vec![],
+            options: HashMap::from([(
+                crate::executor::dsl_done::DONE_CHECK_KEY.to_string(),
+                serde_json::json!(command),
+            )]),
+            interpolation_map: HashMap::new(),
+            outputs_map: HashMap::new(),
+            landscape: true,
+            done_check: None,
+        };
+        let fw = HashMap::from([
+            ("value".to_string(), value.to_string()),
+            ("sentinel".to_string(), "stage-env".to_string()),
+        ]);
+        let prepared = prepare_agent(&agent, &store, &store, "", &fw)
+            .await
+            .unwrap();
+        let done = prepared.done_check.unwrap();
+        assert!(!done.source.contains("touch pwned"), "{}", done.source);
+        let stage_env = HashMap::from([
+            ("PATH".to_string(), "/usr/bin:/bin".to_string()),
+            ("STAGE_ONLY".to_string(), "from-gremlin-env".to_string()),
+            (
+                "GREMLINS_ARTIFACT_CHECK_SCOPE".to_string(),
+                "secret".to_string(),
+            ),
+        ]);
+        let env = crate::executor::run_agent::done_check_env(&stage_env, &done);
+        let check = dsl_done_check(DslDoneParams {
+            command: done.source,
+            env,
+        });
+        let cwd = tmp.path().join("cwd");
+        std::fs::create_dir_all(&cwd).unwrap();
+        let verdict = check
+            .call(DoneContext {
+                summary: String::new(),
+                cwd: cwd.clone(),
+                outputs: vec![],
+                cancel: CancelToken::new(),
+            })
+            .await;
+        assert_eq!(verdict, DoneVerdict::Accept);
+        let recorded = std::fs::read_to_string(cwd.join("out")).unwrap();
+        assert_eq!(recorded, format!("1\n{value}\nstage-env\nfrom-gremlin-env"));
+        assert!(!cwd.join("pwned").exists());
     }
 }
