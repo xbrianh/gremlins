@@ -487,16 +487,6 @@ pub(super) fn resolve_catalog_session(
     })
 }
 
-/// Resolve a session credential through the shared resolver, exposing
-/// [`resolve_session`] to the catalog's integration tests.
-#[cfg(test)]
-#[allow(private_bounds, private_interfaces)]
-pub(crate) fn resolve_session_for_test(
-    make_exchanger: impl FnOnce() -> Result<Arc<dyn CopilotTokenExchanger>, String>,
-) -> Result<(CopilotSession, CopilotTokenRefreshMiddleware), String> {
-    resolve_session(make_exchanger)
-}
-
 fn static_session(token: String) -> CopilotSession {
     CopilotSession {
         token,
