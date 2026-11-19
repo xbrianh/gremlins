@@ -3,13 +3,24 @@
   "required-prompt": true,
   stages: [
     {
+      name: "select-implementation-plan",
+      type: "exec",
+      interpolation: {
+        inputs: {
+          original: 'artifact://{{options.artifact_ns | default("")}}plan.md',
+          retry: 'content("artifact://{prev_loop_iter}/retry-plan.md")?',
+        },
+        outputs: { selected: "artifact://{loop_iter}/implementation-plan.md" },
+      },
+      options: {
+        cmds: ['if [ -n "{retry}" ]; then printf "%s\\n" "{retry}" > "{selected}"; else cp "{original}" "{selected}"; fi'],
+      },
+    },
+    {
       name: "implement",
       type: "agent",
       interpolation: {
-        inputs: {
-          feedback: 'content("artifact://{prev_loop_iter}/implementation-verdict.md")?',
-          plan: 'content("artifact://{{options.artifact_ns | default(\"\")}}plan.md")',
-        },
+        inputs: { plan: 'content("artifact://{loop_iter}/implementation-plan.md")' },
       },
       prompt: ["{{prompt}}"],
       options: {

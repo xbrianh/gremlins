@@ -15,8 +15,8 @@
     {
       name: "implement-until-approved",
       type: "sequence",
-      // One initial attempt plus up to three retries; only approval enters QA.
-      "max-iterations": 4,
+      // One initial attempt plus up to five retries; only approval enters QA.
+      "max-iterations": 6,
       skip_if_exists: "artifact://{loop_iter}/implementation-approved",
       body: [
         {
@@ -50,12 +50,13 @@
           interpolation: {
             inputs: { verdict: "artifact://{loop_iter}/implementation-verdict.md" },
             outputs: {
+              "retry_plan?": "artifact://{loop_iter}/retry-plan.md",
               "approved?": "artifact://{loop_iter}/implementation-approved",
             },
           },
           options: {
             cmds: [
-              'case "$(head -n 1 "{verdict}")" in COMPLETE) touch "{approved}" ;; RETRY) : ;; *) echo "Invalid implementation verdict; expected COMPLETE or RETRY" >&2; exit 1 ;; esac',
+              'case "$(head -n 1 "{verdict}")" in COMPLETE) touch "{approved}" ;; RETRY) tail -n +2 "{verdict}" > "{retry_plan}" && grep -q "[^[:space:]]" "{retry_plan}" || { echo "RETRY requires a nonempty gap-closing plan" >&2; exit 1; } ;; *) echo "Invalid implementation verdict; expected COMPLETE or RETRY" >&2; exit 1 ;; esac',
             ],
           },
         },
