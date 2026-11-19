@@ -1,14 +1,12 @@
-Implement the following plan. On retries, address the judge’s feedback below.
+Implement every required item in the plan below, including the requested tests.
+If the plan is large, break it into smaller tasks without reducing its scope.
 
-<previous-judge-feedback>
-{feedback}
-</previous-judge-feedback>
-
-A dedicated verify stage runs `make check && make test` after this stage
-finishes. Do **not** run `make test` or `make check` yourself — the verify
-stage handles both. A targeted `cargo test -p gremlins --lib -- <specific_test>`
-or `cargo check` is fine for the code you changed.
+Use targeted tests for quick feedback. Run `make check` and `make test` when
+requested by the plan or useful for verifying your changes.
 
 <plan>
 {plan}
 </plan>
+
+Before calling `Done`, check each requirement against the code and tests.
+If anything is missing, implement it rather than ending with a progress summary.

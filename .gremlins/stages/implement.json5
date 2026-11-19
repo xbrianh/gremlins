@@ -3,16 +3,43 @@
   "required-prompt": true,
   stages: [
     {
+      name: "select-implementation-plan",
+      type: "exec",
+      interpolation: {
+        inputs: {
+          original: 'artifact://{{options.artifact_ns | default("")}}plan.md',
+          retry: 'content("artifact://{prev_loop_iter}/retry-plan.md")?',
+        },
+        outputs: { selected: "artifact://{loop_iter}/implementation-plan.md" },
+      },
+      options: {
+        cmds: ['if [ -n "{retry}" ]; then printf "%s\\n" "{retry}" > "{selected}"; else cp "{original}" "{selected}"; fi'],
+      },
+    },
+    {
+      // Records the tree before each attempt; `{loop_iter}` keeps judge
+      // retries distinct, the namespace keeps nested callers distinct.
+      name: "capture-implement-baseline",
+      type: "exec",
+      interpolation: {
+        outputs: {
+          baseline: 'artifact://{{options.artifact_ns | default("")}}{loop_iter}/implement-baseline',
+        },
+      },
+      options: { cmds: ['tree_snapshot capture > "{baseline}"'] },
+    },
+    {
       name: "implement",
       type: "agent",
       interpolation: {
         inputs: {
-          feedback: 'content("artifact://{prev_loop_iter}/implementation-verdict.md")?',
-          plan: 'content("artifact://{{options.artifact_ns | default(\"\")}}plan.md")',
+          plan: 'content("artifact://{loop_iter}/implementation-plan.md")',
+          baseline: 'content("artifact://{{options.artifact_ns | default("")}}{loop_iter}/implement-baseline")',
         },
       },
       prompt: ["{{prompt}}"],
       options: {
+        done_check: 'tree_snapshot check "{baseline}"',
         idle_timeout: 600,
         capture_events: true,
       },

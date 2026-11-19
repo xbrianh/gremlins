@@ -37,4 +37,4 @@ Write findings as markdown to `{filepath}` using this structure:
 
 End with a 2–4 sentence overall summary.
 
-**Reminder: review the diff and plan above. Do not read source files, do not run tools, do not look at anything outside the <plan> and <diff> blocks.**
+Use only the supplied plan and diff as evidence. Use `Write` to save the complete review to `{filepath}`. Once `Write` succeeds, call `Done` as your next and final action. Do not rewrite the review or run any other tools.

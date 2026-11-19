@@ -638,5 +638,6 @@ pub(crate) fn create_chat_gremlin(
         enclosing_model: None,
         discovered_skills: None,
         extra_sandbox_roots: Vec::new(),
+        native_definition: None,
     })
 }

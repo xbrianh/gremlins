@@ -1,5 +1,7 @@
 use std::collections::HashMap;
-use std::path::Path;
+use std::path::{Path, PathBuf};
+
+use crate::stage_spec::done_check::DoneOutput;
 
 use thiserror::Error;
 
@@ -19,6 +21,13 @@ pub(crate) const SANDBOX_ALLOW_ALL_KEY: &str = "sandbox_allow_all";
 // AgentPrepared — fully resolved pre-run state
 // ---------------------------------------------------------------------------
 
+/// A `done_check` shell command whose substituted values live in `env`.
+#[derive(Debug, Clone)]
+pub struct DoneCommand {
+    pub source: String,
+    pub env: HashMap<String, String>,
+}
+
 #[derive(Debug)]
 pub struct AgentPrepared {
     pub name: String,
@@ -36,8 +45,29 @@ pub struct AgentPrepared {
     /// A stage-supplied system prompt override. When present, this replaces
     /// the harness default in [`AgentPrepared::system_prompt`].
     pub system_prompt: Option<String>,
-} // AgentError
-  // ---------------------------------------------------------------------------
+    /// The author's `done_check` command with stage substitutions applied.
+    pub done_check: Option<DoneCommand>,
+}
+
+impl AgentPrepared {
+    /// Required (non-optional) outputs with their resolved local write paths.
+    pub(crate) fn required_outputs(&self) -> Vec<DoneOutput> {
+        self.output_uris
+            .iter()
+            .filter(|(_, _, optional)| !optional)
+            .filter_map(|(key, uri, _)| {
+                self.output_paths.get(key).map(|path| DoneOutput {
+                    key: key.clone(),
+                    uri: uri.clone(),
+                    path: PathBuf::from(path),
+                })
+            })
+            .collect()
+    }
+}
+
+// AgentError
+// ---------------------------------------------------------------------------
 
 #[derive(Error, Debug)]
 pub enum AgentError {
@@ -104,6 +134,12 @@ pub async fn prepare_agent(
         let k = vars::substitute_vars(raw_key, &str_opts, &interpolation_map, framework_subs);
         let optional = k.ends_with('?');
         let key = k.trim_end_matches('?').to_string();
+        if output_paths.contains_key(&key) {
+            return Err(AgentError::Generic {
+                name: name.clone(),
+                detail: format!("multiple outputs resolve to the same key {key:?}"),
+            });
+        }
         let mut uri_str =
             vars::substitute_vars(raw_uri_str, &str_opts, &interpolation_map, framework_subs);
         if !loop_iter.is_empty() {
@@ -149,7 +185,12 @@ pub async fn prepare_agent(
         .and_then(|v| v.as_str())
         .map(|raw| vars::substitute_vars(raw, &str_opts, &subst_vars, framework_subs));
 
-    let expected_artifact_paths: Vec<String> = output_paths.values().cloned().collect();
+    // Only required outputs gate `Done`; optional ones may stay unwritten.
+    let expected_artifact_paths: Vec<String> = output_uris
+        .iter()
+        .filter(|(_, _, optional)| !optional)
+        .filter_map(|(key, _, _)| output_paths.get(key).cloned())
+        .collect();
 
     // The gremlin's kind is "chat" (set programmatically by the chat builder,
     // never by user YAML), so containment cannot be disabled by arbitrary
@@ -170,6 +211,27 @@ pub async fn prepare_agent(
         .and_then(|v| v.as_str())
         .map(str::to_owned);
 
+    let done_check = agent
+        .options
+        .get(crate::executor::dsl_done::DONE_CHECK_KEY)
+        .and_then(|v| v.as_str())
+        .filter(|c| !c.trim().is_empty())
+        .map(|raw| {
+            // Resolved values travel in the child environment, never in
+            // shell source, exactly as for exec stages.
+            let mut env = HashMap::new();
+            let source = vars::substitute_vars_to_env(
+                raw,
+                &str_opts,
+                &subst_vars,
+                framework_subs,
+                &mut env,
+                &mut HashMap::new(),
+                &mut HashMap::new(),
+            );
+            DoneCommand { source, env }
+        });
+
     Ok(AgentPrepared {
         name: name.clone(),
         prompt,
@@ -181,6 +243,7 @@ pub async fn prepare_agent(
         artifact_dir: String::new(),
         allow_all,
         system_prompt,
+        done_check,
     })
 }
 
@@ -288,6 +351,7 @@ mod tests {
             )]),
             outputs_map: HashMap::new(),
             landscape: true,
+            done_check: None,
         };
         let fw = HashMap::new();
         let prepared = prepare_agent(&agent, &store, &store, "", &fw)
@@ -312,6 +376,7 @@ mod tests {
             )]),
             outputs_map: HashMap::new(),
             landscape: true,
+            done_check: None,
         };
         let fw = HashMap::from([("name".to_string(), "from-fw".to_string())]);
         let prepared = prepare_agent(&agent, &store, &store, "", &fw)
@@ -337,6 +402,7 @@ mod tests {
             )]),
             outputs_map: HashMap::from([("key".to_string(), "artifact://out.md".to_string())]),
             landscape: true,
+            done_check: None,
         };
         let fw = HashMap::new();
         let prepared = prepare_agent(&agent, &store, &store, "", &fw)
@@ -363,6 +429,7 @@ mod tests {
             interpolation_map: HashMap::from([("missing".to_string(), "nonexistent".to_string())]),
             outputs_map: HashMap::new(),
             landscape: true,
+            done_check: None,
         };
         let fw = HashMap::new();
         let err = prepare_agent(&agent, &store, &store, "", &fw)
@@ -386,6 +453,7 @@ mod tests {
                 "artifact://{loop_iter}/out.txt".to_string(),
             )]),
             landscape: true,
+            done_check: None,
         };
         let fw = HashMap::new();
         let prepared = prepare_agent(&agent, &store, &store, "my-agent~3", &fw)
@@ -416,6 +484,7 @@ mod tests {
             )]),
             outputs_map: HashMap::new(),
             landscape: true,
+            done_check: None,
         };
         let fw = HashMap::new();
         let prepared = prepare_agent(&agent, &store, &store, "my-agent~2", &fw)
@@ -436,6 +505,7 @@ mod tests {
             interpolation_map: HashMap::new(),
             outputs_map: HashMap::from([("result?".to_string(), "artifact://out.md".to_string())]),
             landscape: true,
+            done_check: None,
         };
         let fw = HashMap::new();
         let prepared = prepare_agent(&agent, &store, &store, "", &fw)
@@ -443,6 +513,25 @@ mod tests {
             .unwrap();
         assert_eq!(prepared.output_uris[0].0, "result");
         assert!(prepared.output_uris[0].2); // optional
+    }
+
+    #[tokio::test]
+    async fn test_prepare_rejects_colliding_required_and_optional_output_keys() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let store = make_state_store(ensure_artifact_dir(&tmp));
+        let mut agent = agent_with_bind("report", "artifact://required.md");
+        agent
+            .outputs_map
+            .insert("{alias}?".into(), "artifact://optional.md".into());
+        let fw = HashMap::from([("alias".into(), "report".into())]);
+
+        let err = prepare_agent(&agent, &store, &store, "", &fw)
+            .await
+            .unwrap_err();
+        assert_eq!(
+            err.to_string(),
+            "agent test: multiple outputs resolve to the same key \"report\""
+        );
     }
 
     #[tokio::test]
@@ -464,6 +553,7 @@ mod tests {
             )]),
             outputs_map: HashMap::new(),
             landscape: true,
+            done_check: None,
         };
         let fw = HashMap::new();
         let prepared = prepare_agent(&agent, &store, &store, "", &fw)
@@ -484,6 +574,7 @@ mod tests {
             interpolation_map: HashMap::new(),
             outputs_map: HashMap::new(),
             landscape: true,
+            done_check: None,
         };
         let fw = HashMap::new();
         let prepared = prepare_agent(&agent, &store, &store, "", &fw)
@@ -504,6 +595,7 @@ mod tests {
             interpolation_map: HashMap::new(),
             outputs_map: HashMap::new(),
             landscape: true,
+            done_check: None,
         };
         let fw = HashMap::new();
         let mut prepared = prepare_agent(&agent, &store, &store, "", &fw)
@@ -530,6 +622,7 @@ mod tests {
             interpolation_map: HashMap::new(),
             outputs_map: HashMap::new(),
             landscape: true,
+            done_check: None,
         };
         let fw = HashMap::new();
         let mut prepared = prepare_agent(&agent, &store, &store, "", &fw)
@@ -559,6 +652,7 @@ mod tests {
                 "artifact://{name}.md".to_string(),
             )]),
             landscape: true,
+            done_check: None,
         };
         let fw = HashMap::from([("name".to_string(), "my-agent".to_string())]);
         let prepared = prepare_agent(&agent, &store, &store, "", &fw)
@@ -584,6 +678,7 @@ mod tests {
             interpolation_map: HashMap::new(),
             outputs_map: HashMap::new(),
             landscape: true,
+            done_check: None,
         };
         let fw = HashMap::new();
         let prepared = prepare_agent(&agent, &store, &store, "", &fw)
@@ -608,6 +703,7 @@ mod tests {
             )]),
             outputs_map: HashMap::new(),
             landscape: true,
+            done_check: None,
         };
         let fw = HashMap::new();
         let prepared = prepare_agent(&agent, &store, &store, "", &fw)
@@ -634,6 +730,7 @@ mod tests {
             interpolation_map: HashMap::new(),
             outputs_map: HashMap::new(),
             landscape: true,
+            done_check: None,
         };
         let fw = HashMap::new();
         let prepared = prepare_agent(&agent, &store, &store, "", &fw)
@@ -659,6 +756,7 @@ mod tests {
                 ("c".to_string(), "artifact://c.md".to_string()),
             ]),
             landscape: true,
+            done_check: None,
         };
         let fw = HashMap::from([("cwd".to_string(), tmp.path().to_string_lossy().into_owned())]);
         let prepared = prepare_agent(&agent, &store, &store, "", &fw)
@@ -681,6 +779,7 @@ mod tests {
             interpolation_map: HashMap::new(),
             outputs_map: HashMap::new(),
             landscape: true,
+            done_check: None,
         };
         let fw = HashMap::new();
         let prepared = prepare_agent(&agent, &store, &store, "", &fw)
@@ -710,6 +809,7 @@ mod tests {
             interpolation_map: HashMap::new(),
             outputs_map: HashMap::from([(key.to_string(), uri.to_string())]),
             landscape: true,
+            done_check: None,
         }
     }
 
@@ -769,6 +869,7 @@ mod tests {
                 ("b".to_string(), "artifact://b.md".to_string()),
             ]),
             landscape: true,
+            done_check: None,
         };
         let mut prepared = prepare_agent(&agent, &store, &store, "", &HashMap::new())
             .await
@@ -798,6 +899,7 @@ mod tests {
                 ("b?".to_string(), "artifact://b.md".to_string()),
             ]),
             landscape: true,
+            done_check: None,
         };
         let prepared = prepare_agent(&agent, &store, &store, "", &HashMap::new())
             .await
@@ -837,6 +939,7 @@ mod tests {
             interpolation_map: HashMap::new(),
             outputs_map: HashMap::new(),
             landscape: true,
+            done_check: None,
         };
         let fw = HashMap::new();
         let prepared = prepare_agent(&agent, &store, &store, "", &fw)
@@ -857,6 +960,7 @@ mod tests {
             interpolation_map: HashMap::new(),
             outputs_map: HashMap::new(),
             landscape: true,
+            done_check: None,
         };
         let fw = HashMap::new();
         let mut prepared = prepare_agent(&agent, &store, &store, "", &fw)
@@ -866,5 +970,68 @@ mod tests {
         let expected =
             crate::clients::agent::system_prompts::agent_system_prompt(Path::new("/work"));
         assert_eq!(prepared.system_prompt(), expected);
+    }
+
+    #[tokio::test]
+    async fn prepared_done_check_passes_author_quoted_value_as_one_argument() {
+        use crate::clients::cancel::CancelToken;
+        use crate::executor::dsl_done::{dsl_done_check, DslDoneParams};
+        use crate::stage_spec::done_check::{DoneContext, DoneVerdict};
+
+        let tmp = tempfile::TempDir::new().unwrap();
+        let store = make_state_store(ensure_artifact_dir(&tmp));
+        let value = "a b; touch pwned $(id) 'q' \"d\"";
+        let command =
+            "set -- \"{value}\"; printf '%s\\n%s\\n%s' \"$#\" \"$1\" \"{sentinel}\" > out; \
+                       printf '\\n%s' \"$STAGE_ONLY\" >> out; \
+                       test -z \"${GREMLINS_ARTIFACT_CHECK_SCOPE+x}\"";
+        let agent = Agent {
+            name: "test".to_string(),
+            prompts: vec![],
+            options: HashMap::from([(
+                crate::executor::dsl_done::DONE_CHECK_KEY.to_string(),
+                serde_json::json!(command),
+            )]),
+            interpolation_map: HashMap::new(),
+            outputs_map: HashMap::new(),
+            landscape: true,
+            done_check: None,
+        };
+        let fw = HashMap::from([
+            ("value".to_string(), value.to_string()),
+            ("sentinel".to_string(), "stage-env".to_string()),
+        ]);
+        let prepared = prepare_agent(&agent, &store, &store, "", &fw)
+            .await
+            .unwrap();
+        let done = prepared.done_check.unwrap();
+        assert!(!done.source.contains("touch pwned"), "{}", done.source);
+        let stage_env = HashMap::from([
+            ("PATH".to_string(), "/usr/bin:/bin".to_string()),
+            ("STAGE_ONLY".to_string(), "from-gremlin-env".to_string()),
+            (
+                "GREMLINS_ARTIFACT_CHECK_SCOPE".to_string(),
+                "secret".to_string(),
+            ),
+        ]);
+        let env = crate::executor::run_agent::done_check_env(&stage_env, &done);
+        let check = dsl_done_check(DslDoneParams {
+            command: done.source,
+            env,
+        });
+        let cwd = tmp.path().join("cwd");
+        std::fs::create_dir_all(&cwd).unwrap();
+        let verdict = check
+            .call(DoneContext {
+                summary: String::new(),
+                cwd: cwd.clone(),
+                outputs: vec![],
+                cancel: CancelToken::new(),
+            })
+            .await;
+        assert_eq!(verdict, DoneVerdict::Accept);
+        let recorded = std::fs::read_to_string(cwd.join("out")).unwrap();
+        assert_eq!(recorded, format!("1\n{value}\nstage-env\nfrom-gremlin-env"));
+        assert!(!cwd.join("pwned").exists());
     }
 }

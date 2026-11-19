@@ -1,0 +1,135 @@
+#!/usr/bin/env bash
+# Snapshot the tree that the next `git add -A` would commit.
+#
+# Usage:
+#   tree_snapshot capture          print the snapshot tree ID
+#   tree_snapshot check <tree-id>  exit 0 if the snapshot differs from <tree-id>,
+#                                  1 if unchanged, 2+ on operational failure
+#
+# The snapshot is computed in a private copy of this worktree's effective
+# index, so the real index, worktree, refs and commits are never touched.
+set -uo pipefail
+
+fail() {
+    printf '%s\n' "tree_snapshot: $*" >&2
+    exit 2
+}
+
+scratch=""
+cleanup() {
+    local status=$?
+    if [ -n "$scratch" ] && ! rm -rf "$scratch"; then
+        printf '%s\n' "tree_snapshot: cannot remove scratch dir '$scratch'" >&2
+        exit 2
+    fi
+    exit "$status"
+}
+trap cleanup EXIT
+
+# Prints the physical absolute path of directory $1.
+physical_dir() { (cd "$1" 2>/dev/null && pwd -P); }
+
+# Succeeds when $1 lies at or below directory $2 (both physical).
+is_within() { [ "$1" = "$2" ] || [[ "$1" == "${2%/}/"* ]]; }
+
+# Prints a physical scratch parent outside the compared tree.
+scratch_parent() {
+    local root="$1" candidate dir
+    for candidate in "${TMPDIR:-}" /tmp; do
+        [ -n "$candidate" ] || continue
+        dir="$(physical_dir "$candidate")" || continue
+        is_within "$dir" "$root" || { printf '%s\n' "$dir"; return 0; }
+    done
+    return 1
+}
+
+# Copies the effective index to $2, keeping its modification time: Git
+# compares entry mtimes against the index mtime to detect racy entries, so a
+# fresh timestamp would hide same-size edits the real index would rehash.
+# An absent index is legitimate, an unreadable or invalid path is not.
+copy_index() {
+    local index="$1" dest="$2" parent
+    if [ -e "$index" ]; then
+        [ -f "$index" ] && [ -r "$index" ] || return 1
+        cp "$index" "$dest" && touch -r "$index" "$dest"
+        return
+    fi
+    [ ! -L "$index" ] || return 1
+    parent="$(dirname "$index")"
+    [ -d "$parent" ] && [ -x "$parent" ]
+}
+
+snapshot() {
+    local root="$1" real_index
+    if [ -n "${GIT_INDEX_FILE:-}" ]; then
+        real_index="$GIT_INDEX_FILE"
+        [[ "$real_index" == /* ]] || real_index="$PWD/$real_index"
+    else
+        real_index="$(git rev-parse --path-format=absolute --git-path index)" || return 1
+    fi
+    copy_index "$real_index" "$scratch/index" || return 1
+    (
+        cd "$root" || exit 1
+        export GIT_INDEX_FILE="$scratch/index"
+        # Hooks (e.g. post-index-change) could write into the real worktree.
+        # Both `add` and `write-tree` rewrite the private index.
+        mkdir "$scratch/no-hooks" || exit 1
+        # `-c` layers on top of any inherited GIT_CONFIG_* settings.
+        # A split index would write `sharedindex.*` files into the real Git
+        # directory, so flatten the private copy into one self-contained
+        # file and keep Git from splitting it again.
+        git_private=(git -c core.hooksPath="$scratch/no-hooks" -c core.splitIndex=false)
+        "${git_private[@]}" update-index --no-split-index || exit 1
+        "${git_private[@]}" add -A >/dev/null || exit 1
+        "${git_private[@]}" write-tree
+    )
+}
+
+# Sets $current; runs in the main shell so the EXIT trap owns the scratch dir.
+take_snapshot() {
+    local root parent tree
+    root="$(git rev-parse --show-toplevel)" || fail "not inside a git worktree"
+    root="$(physical_dir "$root")" || fail "cannot resolve worktree root"
+    parent="$(scratch_parent "$root")" || fail "no temp directory outside the worktree"
+    scratch="$(mktemp -d "$parent/tree-snapshot.XXXXXX")" || fail "cannot create temp dir"
+    scratch="$(physical_dir "$scratch")" || fail "cannot resolve temp dir"
+    is_within "$scratch" "$root" && fail "temp dir lies inside the worktree"
+    tree="$(snapshot "$root")" || fail "could not snapshot the working tree"
+    [[ "$tree" =~ ^[0-9a-f]{40,64}$ ]] || fail "snapshot produced an invalid tree ID"
+    current="$tree"
+}
+
+# Validates $1 as a full tree object ID (one trailing newline allowed).
+validate_baseline() {
+    local id="${1%$'\n'}" format length
+    format="$(git rev-parse --show-object-format)" || fail "cannot read object format"
+    case "$format" in
+    sha1) length=40 ;;
+    sha256) length=64 ;;
+    *) fail "unknown object format '$format'" ;;
+    esac
+    [[ "$id" =~ ^[0-9a-f]+$ && ${#id} -eq $length ]] \
+        || fail "baseline is not a full $format object ID"
+    [ "$(git cat-file -t "$id" 2>/dev/null)" = tree ] \
+        || fail "baseline '$id' is not an existing tree"
+    baseline="$id"
+}
+
+case "${1:-}" in
+capture)
+    take_snapshot
+    printf '%s\n' "$current" || fail "cannot write snapshot ID"
+    ;;
+check)
+    validate_baseline "${2-}"
+    take_snapshot
+    if [ "$current" = "$baseline" ]; then
+        printf '%s\n' "No new changes since this attempt began. Apply the plan or the judge feedback to the working tree before calling Done." \
+            || fail "cannot write result"
+        exit 1
+    fi
+    ;;
+*)
+    fail "usage: tree_snapshot capture | check <tree-id>"
+    ;;
+esac

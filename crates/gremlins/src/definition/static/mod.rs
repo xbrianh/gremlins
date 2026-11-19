@@ -173,6 +173,38 @@ impl StaticDefinition {
         }
     }
 
+    /// The first stage (searched recursively) holding a native done-check.
+    pub fn native_check_stage(&self) -> Option<&str> {
+        self.stages.iter().find_map(StageSpec::native_check_stage)
+    }
+
+    /// Reload this definition from its own expanded JSON (applying the same
+    /// model resolution as a snapshot reload) while keeping every native
+    /// done-check of the typed tree alive.
+    pub(crate) fn reload_keeping_native_checks(
+        &self,
+        model_override: Option<&str>,
+        config_default_model: Option<&str>,
+    ) -> Result<StaticDefinition, DefinitionError> {
+        let bytes = serde_json::to_vec(&self.to_expanded_json()).map_err(|e| {
+            DefinitionError::Message(format!("failed to serialize definition: {e}"))
+        })?;
+        let mut reloaded =
+            StaticDefinition::from_expanded_bytes(&bytes, model_override, config_default_model)
+                .map_err(|e| DefinitionError::Message(e.to_string()))?;
+        if reloaded.stages.len() != self.stages.len() {
+            return Err(DefinitionError::Message(
+                "stage structure changed on reload; native done check would be lost".into(),
+            ));
+        }
+        for (stage, source) in reloaded.stages.iter_mut().zip(&self.stages) {
+            stage
+                .graft_done_checks(source)
+                .map_err(DefinitionError::Message)?;
+        }
+        Ok(reloaded)
+    }
+
     /// Whether `name` is a top-level stage in this definition.
     pub(crate) fn has_top_level_stage(&self, name: &str) -> bool {
         self.stages.iter().any(|stage| stage.name() == name)
@@ -452,6 +484,11 @@ impl GremlinDefinition for StaticDefinition {
     }
 
     fn serialize(&self) -> Result<Vec<u8>, DefinitionError> {
+        if let Some(stage) = self.native_check_stage() {
+            return Err(DefinitionError::Message(format!(
+                "stage {stage:?} has a native done check, which cannot be serialized"
+            )));
+        }
         let json = self.to_expanded_json();
         serde_json::to_string(&json)
             .map(|s| s.into_bytes())
@@ -681,6 +718,7 @@ mod tests {
                 interpolation_map: std::collections::HashMap::new(),
                 outputs_map: std::collections::HashMap::new(),
                 landscape: true,
+                done_check: None,
             },
             model: None,
             task_models: None,
@@ -788,6 +826,7 @@ mod tests {
                 interpolation_map: std::collections::HashMap::new(),
                 outputs_map: std::collections::HashMap::new(),
                 landscape: true,
+                done_check: None,
             },
             model: Some(model("xai/grok-5")),
             task_models: None,
@@ -834,6 +873,7 @@ mod tests {
                 interpolation_map: std::collections::HashMap::new(),
                 outputs_map: std::collections::HashMap::new(),
                 landscape: true,
+                done_check: None,
             },
             model: None,
             task_models: None,

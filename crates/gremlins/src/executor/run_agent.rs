@@ -11,6 +11,7 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 
 use crate::artifacts::uri::Uri;
+use crate::clients::agent::done_assess::DoneAssessment;
 use crate::clients::backend::{ClientError, RunParams};
 use crate::clients::client::ModelURI;
 use crate::config;
@@ -274,6 +275,58 @@ pub(crate) async fn run_agent(
     let prepopulated_conversation: Box<dyn crate::clients::conversation::Conversation> =
         Box::new(conv);
 
+    let required_outputs = prepared.required_outputs();
+    let mut done_check = agent.done_check.clone();
+    let mut artifact_check = None;
+    let is_dsl = agent
+        .options
+        .get(crate::executor::dsl_done::DSL_STAGE_KEY)
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
+    if is_dsl {
+        if let Some(command) = prepared.done_check.clone() {
+            done_check = Some(crate::executor::dsl_done::dsl_done_check(
+                crate::executor::dsl_done::DslDoneParams {
+                    env: done_check_env(&gremlin.env, &command),
+                    command: command.source,
+                },
+            ));
+        }
+        // Standalone runs have no supervisor to serve the CLI query. Leave
+        // `artifact` unset so Done checks the resolved checkout paths instead.
+        if let (false, Some(registry)) = (
+            required_outputs.is_empty(),
+            gremlin.runtime_config.registry.clone(),
+        ) {
+            let scope_outputs = prepared
+                .output_uris
+                .iter()
+                .filter_map(|(key, uri, _)| {
+                    prepared
+                        .output_paths
+                        .get(key)
+                        .map(|p| (uri.clone(), PathBuf::from(p)))
+                })
+                .collect();
+            artifact_check = Some(crate::executor::dsl_done::dsl_artifact_check(
+                crate::executor::dsl_done::ArtifactParams {
+                    run_id: gremlin.id.to_string(),
+                    registry,
+                    env: gremlin.env.clone(),
+                    checkout_root: artifact_dir.canonicalize()?,
+                    scope_outputs,
+                    required_uris: required_outputs.iter().map(|o| o.uri.clone()).collect(),
+                },
+            ));
+        }
+    }
+    let done_assessment =
+        (!required_outputs.is_empty() || done_check.is_some()).then(|| DoneAssessment {
+            outputs: required_outputs,
+            check: done_check,
+            artifact: artifact_check,
+        });
+
     let params = RunParams {
         prompt: prepared.user_prompt(),
         label: prepared.name.clone(),
@@ -292,11 +345,8 @@ pub(crate) async fn run_agent(
         artifact_dir: Some(artifact_dir.clone()),
         idle_timeout: None,
         extra_env: Some(stage_env),
-        expected_artifact_paths: prepared
-            .expected_artifact_paths
-            .iter()
-            .map(PathBuf::from)
-            .collect(),
+        expected_artifact_paths: Vec::new(),
+        done: done_assessment,
         system_prompt: Some(system_prompt),
         gremlin_id: Some(gremlin.id.to_string()),
         base_env: Some(gremlin.env.clone()),
@@ -579,4 +629,17 @@ pub(crate) async fn persist_compacted_conversation(
         gremlin.state.write_into_registry(&uri, "[]").await?;
     }
     Ok(())
+}
+
+/// The environment of the author's `done_check`: the stage environment with
+/// the command's substituted values layered on top.
+pub(crate) fn done_check_env(
+    stage_env: &HashMap<String, String>,
+    command: &crate::executor::agent_runner::DoneCommand,
+) -> HashMap<String, String> {
+    stage_env
+        .iter()
+        .chain(&command.env)
+        .map(|(k, v)| (k.clone(), v.clone()))
+        .collect()
 }

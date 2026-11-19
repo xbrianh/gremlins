@@ -183,6 +183,51 @@ impl StageSpec {
         }
     }
 
+    /// The name of the first agent stage in this subtree carrying a native
+    /// done-check, if any.
+    pub fn native_check_stage(&self) -> Option<&str> {
+        match self {
+            StageSpec::Agent { stage, .. } => stage.done_check.is_some().then_some(&*stage.name),
+            StageSpec::Exec { .. } => None,
+            StageSpec::Sequence { body, .. } | StageSpec::Parallel { body, .. } => {
+                body.iter().find_map(StageSpec::native_check_stage)
+            }
+        }
+    }
+
+    /// Copy native done-checks from a structurally identical `source` tree
+    /// (for example, the original of a JSON round-trip) onto this one.
+    ///
+    /// Errors when the two trees differ in shape, so a check is never
+    /// dropped or attached to the wrong stage.
+    pub(crate) fn graft_done_checks(&mut self, source: &StageSpec) -> Result<(), String> {
+        match (self, source) {
+            (StageSpec::Agent { stage, .. }, StageSpec::Agent { stage: from, .. }) => {
+                stage.done_check = from.done_check.clone();
+                // A native builder stage must not be reclassified as DSL by the reload.
+                let key = crate::executor::dsl_done::DSL_STAGE_KEY;
+                if !from.options.contains_key(key) {
+                    stage.options.remove(key);
+                }
+                Ok(())
+            }
+            (
+                StageSpec::Sequence { body, .. } | StageSpec::Parallel { body, .. },
+                StageSpec::Sequence { body: from, .. } | StageSpec::Parallel { body: from, .. },
+            ) => {
+                if body.len() != from.len() {
+                    return Err("stage structure changed on reload".to_string());
+                }
+                for (child, source) in body.iter_mut().zip(from) {
+                    child.graft_done_checks(source)?;
+                }
+                Ok(())
+            }
+            (StageSpec::Exec { .. }, StageSpec::Exec { .. }) => Ok(()),
+            _ => Err("stage structure changed on reload".to_string()),
+        }
+    }
+
     /// The stage's children — empty for leaves.
     pub fn body(&self) -> &[StageSpec] {
         match self {
@@ -558,6 +603,7 @@ mod tests {
                 interpolation_map: HashMap::new(),
                 outputs_map,
                 landscape: true,
+                done_check: None,
             },
             model: None,
             task_models: None,

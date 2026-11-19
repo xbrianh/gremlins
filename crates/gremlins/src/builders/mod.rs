@@ -31,6 +31,7 @@ pub mod composite;
 pub mod definition;
 pub mod exec;
 // Re-export everything at the module root
+pub use crate::stage_spec::done_check::{DoneCheck, DoneContext, DoneOutput, DoneVerdict};
 pub use agent::AgentBuilder;
 pub use artifacts::{content, output, InterpolationValue, OutputTarget};
 pub use composite::{ParallelBuilder, SequenceBuilder};

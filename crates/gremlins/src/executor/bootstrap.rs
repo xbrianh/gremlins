@@ -704,6 +704,7 @@ mod tests {
             enclosing_model: None,
             discovered_skills: None,
             extra_sandbox_roots: Vec::new(),
+            native_definition: None,
         };
         (sandbox, gremlin)
     }

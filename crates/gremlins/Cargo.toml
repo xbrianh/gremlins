@@ -10,6 +10,8 @@ crate-type = ["rlib"]
 [features]
 # Internal endpoint routing for CLI acceptance tests.
 copilot-test-support = []
+# In-process supervisor fixture for scoped artifact CLI acceptance tests.
+artifact-test-support = []
 
 [dependencies]
 libc = "0.2"

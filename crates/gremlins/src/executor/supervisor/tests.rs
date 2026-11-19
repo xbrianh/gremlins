@@ -1740,3 +1740,99 @@ async fn registry_idle_shutdown_with_contended_write_lock() {
         "idle shutdown must fire after write lock is released"
     );
 }
+
+#[tokio::test]
+async fn exists_scopes_are_per_invocation_and_revocable() {
+    let _sandbox = Sandbox::new();
+    let (registry, _shutdown) = spawn_test_actor().await;
+    let mut initial = serde_json::Map::new();
+    initial.insert("id".into(), Value::String("gr-1".into()));
+    crate::executor::state::FileSystemStateStore::create("gr-1", &initial, false).unwrap();
+
+    let uri = "artifact://out.txt";
+    let (a, b) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
+    let open = |dir: &tempfile::TempDir| {
+        registry
+            .open_pending_scope(
+                "gr-1",
+                dir.path().to_path_buf(),
+                [(uri.to_string(), dir.path().join("out.txt"))],
+            )
+            .unwrap()
+    };
+    let (guard_a, guard_b) = (open(&a), open(&b));
+    std::fs::write(a.path().join("out.txt"), "").unwrap();
+
+    let ask = |token: String, id: &'static str, uri: &'static str| {
+        let registry = Arc::clone(&registry);
+        async move {
+            let req = serde_json::json!({
+                "op": "artifact", "id": id, "exists": [uri], "scope": token,
+            });
+            handle_artifact(&req, &registry).await
+        }
+    };
+    let missing = |resp: &Value| resp["missing"].as_array().map(|m| m.len());
+
+    let resp = ask(guard_a.token().into(), "gr-1", "artifact://out.txt").await;
+    assert_eq!(missing(&resp), Some(0), "{resp}");
+    let resp = ask(guard_b.token().into(), "gr-1", "artifact://out.txt").await;
+    assert_eq!(missing(&resp), Some(1), "{resp}");
+    let ordinary = handle_artifact(
+        &serde_json::json!({"op": "artifact", "id": "gr-1", "exists": [uri]}),
+        &registry,
+    )
+    .await;
+    assert_eq!(missing(&ordinary), Some(1));
+
+    for resp in [
+        ask(guard_a.token().into(), "gr-1", "artifact://undeclared").await,
+        ask(guard_a.token().into(), "gr-other", "artifact://out.txt").await,
+        ask("guess".into(), "gr-1", "artifact://out.txt").await,
+    ] {
+        assert_eq!(resp["type"], "error", "{resp}");
+    }
+
+    let token_a = guard_a.token().to_string();
+    drop(guard_a);
+    let resp = ask(token_a, "gr-1", "artifact://out.txt").await;
+    assert_eq!(resp["type"], "error", "{resp}");
+    let resp = ask(guard_b.token().into(), "gr-1", "artifact://out.txt").await;
+    assert_eq!(missing(&resp), Some(1));
+}
+
+#[tokio::test]
+async fn artifact_exists_handler_validates_the_entire_request() {
+    let _sandbox = Sandbox::new();
+    let (registry, _shutdown) = spawn_test_actor().await;
+    let initial = serde_json::Map::from_iter([("id".into(), "gr-1".into())]);
+    crate::executor::state::FileSystemStateStore::create("gr-1", &initial, false).unwrap();
+    let req = serde_json::json!({"id": "gr-1", "exists": ["artifact://b", "artifact://a", "artifact://b"]});
+    let result = handle_artifact(&req, &registry).await;
+    assert_eq!(
+        result["missing"],
+        serde_json::json!(["artifact://b", "artifact://a"])
+    );
+
+    for (field, value) in [
+        ("exists", serde_json::json!([])),
+        ("exists", serde_json::json!(["artifact://missing", 3])),
+        (
+            "exists",
+            serde_json::json!(["artifact://missing", "artifact://../escape"]),
+        ),
+        ("exists", serde_json::json!(["artifact:///absolute"])),
+        ("exists", serde_json::json!(["http://other"])),
+        ("scope", Value::Null),
+        ("artifact", "artifact://read".into()),
+        ("list", true.into()),
+        ("put", "".into()),
+        ("json_path", "key".into()),
+    ] {
+        let mut invalid = req.clone();
+        invalid[field] = value;
+        let result = handle_artifact(&invalid, &registry).await;
+        assert_eq!(result["type"], "error", "{invalid}: {result}");
+        assert!(result.get("missing").is_none());
+    }
+}

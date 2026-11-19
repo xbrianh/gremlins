@@ -4,6 +4,8 @@ plans/completed/
 .at_venv
 .claude/
 .gremlins/secret_env
+.tmpqa/
+plans/
 
 # Rust
 target/

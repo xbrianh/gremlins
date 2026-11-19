@@ -597,6 +597,14 @@ fn agent_from_json(
     let prompts = json_string_list(mapping, "prompt")?;
     let (interpolation_map, bind_map) = json_interpolation_nested(mapping)?;
     let options = json_options(mapping)?;
+    if let Some(check) = options.get("done_check") {
+        if !check.as_str().is_some_and(|s| !s.trim().is_empty()) {
+            return Err(SchemaError::Stage {
+                name: name.to_string(),
+                msg: "option \"done_check\" must be a nonblank string".into(),
+            });
+        }
+    }
     let model = json_model(mapping, settings)?;
     let task_models = json_task_models(mapping, settings, effective_profile)?;
 
@@ -613,6 +621,10 @@ fn agent_from_json(
     for (k, v) in options {
         builder = builder.option(k, v);
     }
+    builder = builder.option(
+        crate::executor::dsl_done::DSL_STAGE_KEY,
+        serde_json::Value::Bool(true),
+    );
     if let Some(c) = model {
         builder = builder.model(c);
     }
@@ -1236,8 +1248,22 @@ model-profiles:
     }
 
     #[test]
+    fn done_check_option_must_be_nonblank_string() {
+        let settings = config::Config::default();
+        for bad in [serde_json::json!("  "), serde_json::json!(3)] {
+            let m = serde_json::json!({"type":"agent","name":"a","prompt":["p"],"options":{"done_check":bad}});
+            let err = stage_from_json(m.as_object().unwrap(), Some(&settings), None);
+            assert!(err.is_err());
+        }
+        let m = serde_json::json!({"type":"agent","name":"a","prompt":["p"],"options":{"done_check":"true"}});
+        let stage = stage_from_json(m.as_object().unwrap(), Some(&settings), None).unwrap();
+        assert_round_trip(&stage);
+    }
+
+    #[test]
     fn agent_to_json_round_trip() {
         let stage = AgentBuilder::new("plan")
+            .option(crate::executor::dsl_done::DSL_STAGE_KEY, true)
             .prompt("write the plan using {input} to {plan}")
             .interpolate(
                 "input",
@@ -1255,7 +1281,11 @@ model-profiles:
 
     #[test]
     fn agent_to_json_round_trip_minimal() {
-        let stage = AgentBuilder::new("min").prompt("hi").build().unwrap();
+        let stage = AgentBuilder::new("min")
+            .option(crate::executor::dsl_done::DSL_STAGE_KEY, true)
+            .prompt("hi")
+            .build()
+            .unwrap();
         assert_round_trip(&stage);
     }
 
@@ -1264,6 +1294,7 @@ model-profiles:
         // Build with landscape: false, verify the field does NOT appear in
         // serialized JSON, and that a re-parsed stage always gets landscape: true.
         let stage = AgentBuilder::new("plan")
+            .option(crate::executor::dsl_done::DSL_STAGE_KEY, true)
             .prompt("hi")
             .landscape(false)
             .build()
@@ -1449,12 +1480,14 @@ model-profiles:
         let stage = ParallelBuilder::new("reviews")
             .stage(
                 AgentBuilder::new("review-a")
+                    .option(crate::executor::dsl_done::DSL_STAGE_KEY, true)
                     .prompt("review")
                     .build()
                     .unwrap(),
             )
             .stage(
                 AgentBuilder::new("review-b")
+                    .option(crate::executor::dsl_done::DSL_STAGE_KEY, true)
                     .prompt("review")
                     .build()
                     .unwrap(),

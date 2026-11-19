@@ -57,6 +57,16 @@ fn backend_pool() -> &'static Mutex<HashMap<String, Arc<dyn Backend>>> {
     POOL.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
+/// Pre-seed the backend pool so a test can drive the public run path through a
+/// scripted transport instead of a network backend.
+#[cfg(test)]
+pub(crate) fn install_test_backend(spec: &str, backend: Arc<dyn Backend>) {
+    backend_pool()
+        .lock()
+        .expect("backend pool poisoned")
+        .insert(spec.to_string(), backend);
+}
+
 /// A resolved model reference plus the harness-side runtime handle.
 ///
 /// Backend construction is delegated to a module-level pool so that every

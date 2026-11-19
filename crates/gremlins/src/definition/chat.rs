@@ -225,6 +225,7 @@ impl GremlinDefinition for ChatDefinition {
             interpolation_map: HashMap::new(),
             outputs_map: HashMap::new(),
             landscape: true,
+            done_check: None,
         };
 
         Ok(ExecutorStage::Agent {

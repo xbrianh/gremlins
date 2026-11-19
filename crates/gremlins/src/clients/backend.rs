@@ -26,6 +26,9 @@ pub struct RunParams {
     pub idle_timeout: Option<f64>,
     pub extra_env: Option<HashMap<String, String>>,
     pub expected_artifact_paths: Vec<PathBuf>,
+    /// Native assessment of a proposed `Done` (required outputs plus an
+    /// optional user function). Execution-local; never serialized.
+    pub(crate) done: Option<crate::clients::agent::done_assess::DoneAssessment>,
     pub system_prompt: Option<String>,
     pub gremlin_id: Option<String>,
     /// Base process environment for tool sandboxing.
@@ -85,6 +88,7 @@ impl RunParams {
             idle_timeout: None,
             extra_env: None,
             expected_artifact_paths: Vec::new(),
+            done: None,
             system_prompt: None,
             gremlin_id: None,
             base_env: None,
@@ -114,6 +118,7 @@ impl Clone for RunParams {
             idle_timeout: self.idle_timeout,
             extra_env: self.extra_env.clone(),
             expected_artifact_paths: self.expected_artifact_paths.clone(),
+            done: self.done.clone(),
             system_prompt: self.system_prompt.clone(),
             gremlin_id: self.gremlin_id.clone(),
             base_env: self.base_env.clone(),

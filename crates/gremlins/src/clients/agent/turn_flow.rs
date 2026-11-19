@@ -10,12 +10,12 @@
 // pipeline self-contained while still accessing LoopState fields through
 // pub(super) visibility.
 
-use std::path::PathBuf;
 use std::time::Instant;
 
 use rig_core::completion::message::{Origin, Reasoning, ToolCall};
 use rig_core::completion::Usage;
 
+use super::done_assess::{assess, missing_outputs, Assessment, DoneAssessment};
 use super::done_helpers::done_user_message;
 use crate::clients::cancel::CancelToken;
 use crate::clients::conversation::Conversation;
@@ -27,26 +27,6 @@ use crate::clients::tools::{self, AgentLoopRuntime};
 use gremlins_magic_bus::{emit_run_event_async, EventKind};
 
 use super::agent_loop::{cancelled_error, DoneDecision, EmptyTurnAction, LoopState};
-
-fn missing_artifacts(expected: &[PathBuf]) -> Vec<&PathBuf> {
-    expected
-        .iter()
-        .filter(|p| !p.exists() || p.metadata().map(|m| m.len()).unwrap_or(0) == 0)
-        .collect()
-}
-
-fn artifact_reminder(missing: &[&PathBuf]) -> String {
-    let paths: Vec<String> = missing
-        .iter()
-        .map(|p| format!("  - {}", p.display()))
-        .collect();
-    format!(
-        "The following expected output file(s) were not written:\n{}\n\
-         Please write each file using the Write tool now. Do not explain \
-         \u{2014} just write the files.",
-        paths.join("\n")
-    )
-}
 
 fn usage_stats(
     turns: usize,
@@ -88,26 +68,23 @@ fn completed_run(
 #[allow(clippy::too_many_arguments)]
 pub(super) async fn handle_done_decision(
     state: &mut LoopState,
-    _tool_ctx: &AgentLoopRuntime,
+    tool_ctx: &AgentLoopRuntime,
     cancel: &CancelToken,
     nested: bool,
     text: &str,
     reasoning_items: &[Reasoning],
     tool_calls: &[ToolCall],
-    expected_artifact_paths: &[PathBuf],
+    done: Option<&DoneAssessment>,
     captured: &mut Option<Vec<serde_json::Value>>,
     loop_start: Instant,
     prefix: &str,
 ) -> Result<DoneDecision, ClientError> {
-    let has_non_done = tool_calls
-        .iter()
-        .any(|tc| !tools::is_completion(tc.function.name.as_str()));
     let done_call = tool_calls
         .iter()
         .find(|tc| tools::is_completion(tc.function.name.as_str()));
 
-    match (done_call, has_non_done) {
-        (Some(_done_tc), true) => {
+    match done_call {
+        Some(_) if tool_calls.len() != 1 => {
             let mut results = Vec::with_capacity(tool_calls.len());
             for tc in tool_calls {
                 let body = if tools::is_completion(tc.function.name.as_str()) {
@@ -132,12 +109,12 @@ pub(super) async fn handle_done_decision(
                 results,
                 rig_core::completion::Message::user(
                     "Done was rejected because it was combined with other tool calls. \
-                     Try again — this time either use tools, or call Done. Never both.",
+                     Try again — either use tools without Done, or call Done exactly once by itself.",
                 ),
             );
             return Ok(DoneDecision::RetryNeeded);
         }
-        (Some(done_tc), false) => {
+        Some(done_tc) => {
             let done_summary = done_tc
                 .function
                 .arguments
@@ -146,34 +123,30 @@ pub(super) async fn handle_done_decision(
                 .unwrap_or("")
                 .to_string();
             state.hook_log(&format!("{prefix}tool: Done {}", trunc(&done_summary, 200)));
-            if !nested && !expected_artifact_paths.is_empty() {
-                let missing = missing_artifacts(expected_artifact_paths);
-                if !missing.is_empty() && state.reminder_budget > 0 {
-                    state.reminder_budget -= 1;
-                    let reminder = format!(
-                        "Done rejected: {}\nWrite each file using the Write \
-                         tool, then call Done.",
-                        artifact_reminder(&missing),
-                    );
-                    state.conv.done_rejected(
-                        text,
-                        reasoning_items,
-                        std::slice::from_ref(done_tc),
-                        vec![],
-                        {
-                            let rejected_ledger = format!(
-                                "[turn {}]: Done {} (rejected)\n\n{}",
-                                state.turn_num, done_summary, reminder
-                            );
+            if let (false, Some(done)) = (nested, done) {
+                match assess(done, tool_ctx.cwd.as_deref(), &done_summary, cancel).await? {
+                    Assessment::Accept => {}
+                    Assessment::Retry(reminder) if state.reminder_budget > 0 => {
+                        state.reminder_budget -= 1;
+                        let rejected_ledger = format!(
+                            "[turn {}]: Done {} (rejected)\n\n{}",
+                            state.turn_num, done_summary, reminder
+                        );
+                        state.conv.done_rejected(
+                            text,
+                            reasoning_items,
+                            std::slice::from_ref(done_tc),
+                            vec![],
                             done_user_message(
                                 &rejected_ledger,
                                 done_tc.id.clone(),
                                 done_tc.function.name.clone(),
                                 &reminder,
-                            )
-                        },
-                    );
-                    return Ok(DoneDecision::RetryNeeded);
+                            ),
+                        );
+                        return Ok(DoneDecision::RetryNeeded);
+                    }
+                    Assessment::Retry(_) => {}
                 }
             }
 
@@ -235,7 +208,7 @@ pub(super) async fn handle_done_decision(
                 Some(state.conv.clone_box()),
             ))));
         }
-        _ => {}
+        None => {}
     }
     Ok(DoneDecision::NotDone)
 }
@@ -243,21 +216,23 @@ pub(super) async fn handle_done_decision(
 /// Handle a turn that produced no tool calls: continue (interactive / or
 /// nudged / reminded) or return the exhausted run.
 #[allow(clippy::too_many_arguments)]
-pub(super) fn handle_empty_turn(
+pub(super) async fn handle_empty_turn(
     state: &mut LoopState,
     nested: bool,
     text: &str,
     reasoning: &str,
     reasoning_items: &[Reasoning],
-    expected_artifact_paths: &[PathBuf],
+    done: Option<&DoneAssessment>,
+    cwd: Option<&std::path::Path>,
     input_tokens: Option<u64>,
     loop_start: Instant,
     raw: &mut Option<std::fs::File>,
     captured: &mut Option<Vec<serde_json::Value>>,
     prefix: &str,
-) -> EmptyTurnAction {
+    cancel: &CancelToken,
+) -> Result<EmptyTurnAction, ClientError> {
     if state.interactive.is_attached() {
-        return EmptyTurnAction::ContinueLoop;
+        return Ok(EmptyTurnAction::ContinueLoop);
     }
 
     if text.is_empty() && !reasoning.is_empty() && !state.single_turn {
@@ -266,7 +241,7 @@ pub(super) fn handle_empty_turn(
             .conv
             .record_turn("", reasoning_items, &[], input_tokens, None);
         state.conv.set_next_prompt("Continue.");
-        return EmptyTurnAction::ContinueLoop;
+        return Ok(EmptyTurnAction::ContinueLoop);
     }
 
     log::warn!(
@@ -278,18 +253,28 @@ pub(super) fn handle_empty_turn(
     );
 
     if !nested && state.reminder_budget > 0 && !text.is_empty() {
-        let missing = missing_artifacts(expected_artifact_paths);
-        if !missing.is_empty() {
+        let reminder = match done {
+            Some(done) => {
+                let signal = CancelToken::new();
+                super::done_assess::cancellable(
+                    cancel,
+                    &signal,
+                    || super::done_assess::grace_for(done, false),
+                    missing_outputs(done, cwd, "", &signal),
+                )
+                .await?
+            }
+            None => None,
+        };
+        if let Some(reminder) = reminder {
             state.reminder_budget -= 1;
             state.hook_log(&format!(
-                "reminder: {} missing artifact(s) — nudging agent (remaining_budget={})",
-                missing.len(),
+                "reminder: missing artifact(s) — nudging agent (remaining_budget={})",
                 state.reminder_budget,
             ));
             state
                 .conv
                 .record_turn(text, reasoning_items, &[], input_tokens, None);
-            let reminder = artifact_reminder(&missing);
             write_raw(
                 raw,
                 &serde_json::json!({"type": "reminder", "message": reminder}),
@@ -298,7 +283,7 @@ pub(super) fn handle_empty_turn(
                 evts.push(serde_json::json!({"type": "reminder", "message": reminder}));
             }
             state.conv.set_next_prompt(&reminder);
-            return EmptyTurnAction::ContinueLoop;
+            return Ok(EmptyTurnAction::ContinueLoop);
         }
     }
 
@@ -321,7 +306,7 @@ pub(super) fn handle_empty_turn(
             .conv
             .record_turn(text, reasoning_items, &[], input_tokens, None);
         state.conv.set_next_prompt(nudge_msg);
-        return EmptyTurnAction::ContinueLoop;
+        return Ok(EmptyTurnAction::ContinueLoop);
     }
 
     log::warn!(
@@ -355,13 +340,13 @@ pub(super) fn handle_empty_turn(
     let artifact = state
         .conv
         .finalize(state.turn_num, text, reasoning_items, None);
-    EmptyTurnAction::ReturnRun(Box::new(completed_run(
+    Ok(EmptyTurnAction::ReturnRun(Box::new(completed_run(
         Some(artifact.final_text),
         None,
         captured,
         usage,
         Some(state.conv.clone_box()),
-    )))
+    ))))
 }
 
 /// Append the current assistant turn to the conversation history.
