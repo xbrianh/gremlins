@@ -50,13 +50,11 @@
           interpolation: {
             inputs: { verdict: "artifact://{loop_iter}/implementation-verdict.md" },
             outputs: {
-              feedback: 'artifact://{{options.artifact_ns | default("")}}implementation-feedback.md',
               "approved?": "artifact://{loop_iter}/implementation-approved",
             },
           },
           options: {
             cmds: [
-              'cp "{verdict}" "{feedback}"',
               'case "$(head -n 1 "{verdict}")" in COMPLETE) touch "{approved}" ;; RETRY) : ;; *) echo "Invalid implementation verdict; expected COMPLETE or RETRY" >&2; exit 1 ;; esac',
             ],
           },

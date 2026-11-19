@@ -231,6 +231,7 @@ inject the caller's values:
 | `artifact://<name>` | Required artifact path. Fails if not produced. |
 | `artifact://<name>?` | Optional artifact. Resolves to empty string if missing. |
 | `artifact://{loop_iter}/<name>` | Scoped artifact within a sequence loop iteration. |
+| `content("artifact://{prev_loop_iter}/<name>")?` | Read the preceding iteration of the same sequence and attempt; empty on the first iteration. |
 
 ## Interpolation shapes
 
