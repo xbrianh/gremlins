@@ -5,6 +5,7 @@ plans/completed/
 .claude/
 .gremlins/secret_env
 .tmpqa/
+plans/
 
 # Rust
 target/
