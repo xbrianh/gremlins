@@ -144,9 +144,9 @@ pub(super) static TOOL_SPECS: &[ToolSpec] = &[
     },
     ToolSpec {
         name: "Done",
-        description: "Signal that your work is complete — call Done(summary) alongside your final message to finish. The summary parameter briefly describes what you accomplished.",
+        description: "End the current assignment. Call only after fulfilling the request, with your final message and no other tool calls. If work remains, continue it instead of calling Done with a progress update.",
         fields: &[
-            FieldSpec { name: "summary", description: "Brief summary of what was accomplished", ty: "string", required: true, validated: true },
+            FieldSpec { name: "summary", description: "Briefly state the result that fulfills the request, not progress or next steps.", ty: "string", required: true, validated: true },
         ],
         skills_gated: false,
     },
