@@ -151,6 +151,29 @@ struct ProviderInner {
     persist: Option<Arc<dyn RefreshTokenPersister>>,
 }
 
+/// Refresh diagnostics must not carry the OAuth document or transport error
+/// (both can contain credentials). Retain only the actual HTTP status.
+#[derive(Debug)]
+pub(crate) struct RefreshError(pub(crate) Option<reqwest::StatusCode>);
+
+impl std::fmt::Display for RefreshError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "GitHub app credential refresh failed")?;
+        if let Some(status) = self.0 {
+            write!(f, " (HTTP {})", status.as_u16())?;
+        }
+        Ok(())
+    }
+}
+
+fn refresh_url() -> String {
+    #[cfg(feature = "copilot-test-support")]
+    if let Some(url) = crate::clients::copilot_test_refresh_url() {
+        return url;
+    }
+    DEFAULT_ACCESS_TOKEN_URL.to_owned()
+}
+
 impl GitHubAppTokenProvider {
     /// Create a provider that persists refresh tokens to `providers.yaml`.
     pub fn new(client_id: impl Into<String>, refresh_token: impl Into<String>) -> Self {
@@ -158,7 +181,7 @@ impl GitHubAppTokenProvider {
             client_id.into(),
             refresh_token.into(),
             Some(Arc::new(ProvidersFilePersister::new("copilot"))),
-            DEFAULT_ACCESS_TOKEN_URL.to_string(),
+            refresh_url(),
         )
     }
 
@@ -168,12 +191,7 @@ impl GitHubAppTokenProvider {
         client_id: impl Into<String>,
         refresh_token: impl Into<String>,
     ) -> Self {
-        Self::with_parts(
-            client_id.into(),
-            refresh_token.into(),
-            None,
-            DEFAULT_ACCESS_TOKEN_URL.to_string(),
-        )
+        Self::with_parts(client_id.into(), refresh_token.into(), None, refresh_url())
     }
 
     /// Full constructor for tests and internal wiring.
@@ -205,7 +223,7 @@ impl GitHubAppTokenProvider {
     /// `providers.yaml.lock` and re-reads the latest refresh token from
     /// `providers.yaml` so that multiple backends or processes sharing the
     /// same credential do not race to consume the single-use refresh token.
-    pub(crate) fn access_token_sync(&self) -> Result<String, String> {
+    pub(crate) fn access_token_sync(&self) -> Result<String, RefreshError> {
         let mut state = self.inner.state.lock().unwrap();
 
         // Check the cache while we hold the lock.
@@ -217,7 +235,7 @@ impl GitHubAppTokenProvider {
 
         // Acquire cross-process advisory lock before refreshing.
         #[cfg(unix)]
-        let _lock = acquire_providers_lock()?;
+        let _lock = acquire_providers_lock().map_err(|_| RefreshError(None))?;
 
         // Re-read the latest refresh token from disk — another process or
         // backend may have rotated it since we loaded our in-memory
@@ -246,9 +264,7 @@ impl GitHubAppTokenProvider {
             }
         }
 
-        let access_token = response
-            .access_token
-            .ok_or_else(|| "token refresh returned no access token".to_string())?;
+        let access_token = response.access_token.ok_or(RefreshError(None))?;
         state.access_token = Some(CachedAccessToken {
             token: access_token.clone(),
             expires_at: access_token_expires_at(response.expires_in),
@@ -258,20 +274,12 @@ impl GitHubAppTokenProvider {
 
     /// Async access for external consumers (e.g., CLI status).
     pub async fn access_token(&self) -> Result<String, String> {
-        // Check the cache first on the async path to avoid a pointless
-        // spawn when the token is still fresh.
-        {
-            let state = self.inner.state.lock().unwrap();
-            if let Some(cached) = &state.access_token {
-                if cached.expires_at > Instant::now() {
-                    return Ok(cached.token.clone());
-                }
-            }
-        }
+        // Even a cache lookup can wait behind an in-flight blocking refresh.
         let provider = self.clone();
         tokio::task::spawn_blocking(move || provider.access_token_sync())
             .await
             .map_err(|err| format!("GitHub token refresh task failed: {err}"))?
+            .map_err(|err| err.to_string())
     }
 }
 
@@ -449,24 +457,46 @@ fn refresh_access_token(
     token_url: &str,
     client_id: &str,
     refresh_token: &str,
-) -> Result<OAuthTokenResponse, String> {
-    let response = request_oauth_token(
+) -> Result<OAuthTokenResponse, RefreshError> {
+    let response = post_oauth_token(
         token_url,
         &[
             ("client_id", client_id),
             ("grant_type", "refresh_token"),
             ("refresh_token", refresh_token),
         ],
-    )?;
+    )
+    .map_err(|err| RefreshError(err.status()))?;
+    let status = response.status();
+    if !status.is_success() {
+        return Err(RefreshError(Some(status)));
+    }
+    // OAuth can also return an error document with a successful HTTP status.
+    let parsed: OAuthTokenResponse =
+        serde_json::from_reader(response).map_err(|_| RefreshError(Some(status)))?;
+    if parsed.error.is_some()
+        || parsed
+            .access_token
+            .as_deref()
+            .is_none_or(|t| t.trim().is_empty())
+    {
+        return Err(RefreshError(Some(status)));
+    }
+    Ok(parsed)
+}
 
-    if let Some(err) = response.error {
-        let detail = response.error_description.unwrap_or(err);
-        return Err(format!("token refresh failed: {detail}"));
-    }
-    if response.access_token.is_none() {
-        return Err("token refresh returned no access token".to_string());
-    }
-    Ok(response)
+fn post_oauth_token(
+    token_url: &str,
+    form: &[(&str, &str)],
+) -> Result<reqwest::blocking::Response, reqwest::Error> {
+    reqwest::blocking::Client::builder()
+        .timeout(GITHUB_OAUTH_TIMEOUT)
+        .build()?
+        .post(token_url)
+        .header("Accept", "application/json")
+        .header("Content-Type", "application/x-www-form-urlencoded")
+        .body(form_body(form))
+        .send()
 }
 
 /// Low-level OAuth token endpoint POST, returning the parsed response
@@ -479,17 +509,7 @@ fn request_oauth_token(
     token_url: &str,
     form: &[(&str, &str)],
 ) -> Result<OAuthTokenResponse, String> {
-    let client = reqwest::blocking::Client::builder()
-        .timeout(GITHUB_OAUTH_TIMEOUT)
-        .build()
-        .map_err(|err| format!("failed to build HTTP client: {err}"))?;
-
-    let response = client
-        .post(token_url)
-        .header("Accept", "application/json")
-        .header("Content-Type", "application/x-www-form-urlencoded")
-        .body(form_body(form))
-        .send()
+    let response = post_oauth_token(token_url, form)
         .map_err(|err| format!("OAuth token request failed: {err}"))?;
 
     let status = response.status();
@@ -559,6 +579,36 @@ mod tests {
     use std::io::{Read, Write};
     use std::net::TcpListener;
     use std::time::Instant;
+
+    #[test]
+    fn refresh_failure_keeps_wire_status_not_oauth_details() {
+        for status in ["401 Unauthorized", "200 OK"] {
+            let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+            let url = format!("http://{}/token", listener.local_addr().unwrap());
+            let server = std::thread::spawn(move || {
+                let (mut stream, _) = listener.accept().unwrap();
+                let mut buf = [0; 4096];
+                let _ = stream.read(&mut buf).unwrap();
+                let body =
+                    r#"{"error":"secret-code","error_description":"HTTP 599 secret-description"}"#;
+                write!(
+                    stream,
+                    "HTTP/1.1 {status}\r\nContent-Length: {}\r\n\r\n{body}",
+                    body.len()
+                )
+                .unwrap();
+            });
+            let error = refresh_access_token(&url, "secret-id", "secret-refresh").unwrap_err();
+            server.join().unwrap();
+            assert_eq!(
+                error.to_string(),
+                format!(
+                    "GitHub app credential refresh failed (HTTP {})",
+                    &status[..3]
+                )
+            );
+        }
+    }
 
     #[test]
     fn complete_device_flow_missing_refresh_token() {

@@ -228,8 +228,13 @@ enum CopilotAuthCmds {
 
 #[tokio::main]
 async fn main() {
-    let cli = Cli::parse();
+    run_cli(Cli::parse()).await;
+}
 
+#[cfg(test)]
+mod copilot_cli_tests;
+
+async fn run_cli(cli: Cli) {
     // Compute the default log level from the parsed command and flag.
     // `serve` (the executor daemon) keeps `info` — its stderr goes to
     // executor.log, not the terminal. Every other command defaults to
