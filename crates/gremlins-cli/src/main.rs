@@ -117,6 +117,20 @@ enum Cmds {
         /// Extract a JSON path from artifact content when reading.
         #[arg(long)]
         json_path: Option<String>,
+        /// Check that every listed artifact exists (batch mode).
+        ///
+        /// Exit 0 silently when all exist; exit 1 with each missing URI on
+        /// stderr (request order) otherwise; exit 2 or more on invalid
+        /// arguments, an invalid run or scope, or transport/store errors.
+        /// Inside a producer command, GREMLINS_ARTIFACT_CHECK_SCOPE selects
+        /// that invocation's declared, not-yet-registered outputs.
+        #[arg(
+            long,
+            num_args = 1..,
+            value_name = "ARTIFACT_URI",
+            conflicts_with_all = ["artifact", "put", "list", "json_path"]
+        )]
+        exists: Vec<String>,
     },
     /// Follow a gremlin's log file with `less +F`.
     Log {
@@ -226,15 +240,25 @@ enum CopilotAuthCmds {
     Logout,
 }
 
+fn main() {
+    // Consume the capability before creating worker threads. A CLI that has to
+    // start a daemon must not leak the token into that daemon or its children.
+    let scope = std::env::var_os(ARTIFACT_CHECK_SCOPE_ENV);
+    if scope.is_some() {
+        std::env::remove_var(ARTIFACT_CHECK_SCOPE_ENV);
+    }
+    start_cli(Cli::parse(), scope);
+}
+
 #[tokio::main]
-async fn main() {
-    run_cli(Cli::parse()).await;
+async fn start_cli(cli: Cli, scope: Option<std::ffi::OsString>) {
+    run_cli(cli, scope).await;
 }
 
 #[cfg(test)]
 mod copilot_cli_tests;
 
-async fn run_cli(cli: Cli) {
+async fn run_cli(cli: Cli, scope: Option<std::ffi::OsString>) {
     // Compute the default log level from the parsed command and flag.
     // `serve` (the executor daemon) keeps `info` — its stderr goes to
     // executor.log, not the terminal. Every other command defaults to
@@ -272,12 +296,16 @@ async fn run_cli(cli: Cli) {
         Some(Cmds::Stop { id }) => stop(&id).await,
         Some(Cmds::Resume { id, stage }) => resume(&id, stage.as_deref()).await,
         Some(Cmds::Snapshot { id }) => snapshot(&id).await,
+        Some(Cmds::Artifact { id, exists, .. }) if !exists.is_empty() => {
+            exists_cmd(&id, &exists, scope).await
+        }
         Some(Cmds::Artifact {
             id,
             artifact,
             put,
             list,
             json_path,
+            ..
         }) => {
             artifact_cmd(
                 &id,
@@ -1060,6 +1088,89 @@ async fn snapshot(id: &str) -> Result<(), String> {
 // ---------------------------------------------------------------------------
 // artifact (read/write)
 // ---------------------------------------------------------------------------
+
+/// Environment variable carrying a pending-output scope token to `--exists`.
+const ARTIFACT_CHECK_SCOPE_ENV: &str = "GREMLINS_ARTIFACT_CHECK_SCOPE";
+
+/// Exit status for operational failures of `artifact --exists`.
+const EXISTS_ERROR_EXIT: i32 = 2;
+
+/// `artifact --exists`: exit 0 when all present, 1 when some are missing,
+/// 2 on any operational failure.
+async fn exists_cmd(
+    id: &str,
+    uris: &[String],
+    scope: Option<std::ffi::OsString>,
+) -> Result<(), String> {
+    match query_missing(id, uris, scope).await {
+        Ok(missing) if missing.is_empty() => Ok(()),
+        Ok(missing) => {
+            for uri in &missing {
+                eprintln!("{uri}");
+            }
+            std::process::exit(1);
+        }
+        Err(e) => {
+            eprintln!("gremlins: {e}");
+            std::process::exit(EXISTS_ERROR_EXIT);
+        }
+    }
+}
+
+async fn query_missing(
+    id: &str,
+    uris: &[String],
+    scope: Option<std::ffi::OsString>,
+) -> Result<Vec<String>, String> {
+    config::init_global().map_err(|e| e.to_string())?;
+    validate_gremlin_id(id).map_err(|_| {
+        format!("invalid gremlin id {id:?} — ids may contain only letters, numbers, '-', and '_'")
+    })?;
+    let mut request = serde_json::json!({ "op": "artifact", "id": id, "exists": uris });
+    if let Some(scope) = scope {
+        let scope = scope
+            .into_string()
+            .map_err(|_| format!("{ARTIFACT_CHECK_SCOPE_ENV} is not valid UTF-8"))?;
+        request["scope"] = Value::String(scope);
+    }
+    let response = executor_request(request).await?;
+    check_error(&response)?;
+    if response.get("type").and_then(Value::as_str) != Some("ok")
+        || response.get("id").and_then(Value::as_str) != Some(id)
+    {
+        return Err("daemon reply has wrong type or run id (protocol mismatch?)".into());
+    }
+    parse_missing(&response, uris)
+}
+
+/// Validate an `--exists` reply: `missing` must be a strictly ordered
+/// subsequence of the deduplicated request.
+fn parse_missing(response: &Value, uris: &[String]) -> Result<Vec<String>, String> {
+    let missing: Vec<String> = response
+        .get("missing")
+        .and_then(|v| v.as_array())
+        .ok_or_else(|| "daemon response missing 'missing' field (protocol mismatch?)".to_string())?
+        .iter()
+        .map(|v| {
+            v.as_str()
+                .map(String::from)
+                .ok_or_else(|| "daemon returned a non-string missing entry".to_string())
+        })
+        .collect::<Result<_, _>>()?;
+    // Replies must be a strictly ordered subsequence of the deduplicated request.
+    let mut remaining = uris
+        .iter()
+        .enumerate()
+        .filter(|(i, u)| !uris[..*i].contains(u))
+        .map(|(_, u)| u);
+    if !missing.iter().all(|m| remaining.any(|u| u == m)) {
+        return Err(
+            "daemon reported unrequested, duplicate or reordered missing URIs (protocol mismatch?)"
+                .into(),
+        );
+    }
+    Ok(missing)
+}
 
 /// Read or write a gremlin's artifacts through the daemon.
 async fn artifact_cmd(
@@ -2686,6 +2797,23 @@ fn auth_copilot_logout() -> Result<(), String> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn exists_reply_validation() {
+        let uris: Vec<String> = ["artifact://a", "artifact://b", "artifact://a"]
+            .map(String::from)
+            .to_vec();
+        let parse = |v: serde_json::Value| super::parse_missing(&v, &uris);
+        assert!(parse(serde_json::json!({})).is_err());
+        assert!(parse(serde_json::json!({"missing": [1]})).is_err());
+        assert!(parse(serde_json::json!({"missing": ["artifact://z"]})).is_err());
+        assert!(parse(serde_json::json!({"missing": ["artifact://b", "artifact://a"]})).is_err());
+        assert!(parse(serde_json::json!({"missing": ["artifact://a", "artifact://a"]})).is_err());
+        assert_eq!(
+            parse(serde_json::json!({"missing": ["artifact://a", "artifact://b"]})).unwrap(),
+            ["artifact://a", "artifact://b"]
+        );
+    }
+
     use super::*;
     use gremlins::schemas::bootstrap::{InputSource, InputSources};
     use std::fs;

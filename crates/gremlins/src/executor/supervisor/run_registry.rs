@@ -24,6 +24,7 @@ use crate::executor::str_field;
 use super::lifecycle::reap_client_for;
 use super::lifecycle::LogRelay;
 use super::lifecycle::{run_gremlin_task, setup_gremlin_channels};
+use super::pending_scope::{PendingScopeGuard, PendingScopes};
 use gremlins_magic_bus::{emit_event, init_bus, subscribe_run};
 use gremlins_magic_bus::{EventKind, ReceiverHalf, Subscriber};
 
@@ -104,6 +105,8 @@ pub(crate) struct RunRegistry {
     id_locks: RwLock<HashMap<String, Arc<tokio::sync::Mutex<()>>>>,
     /// Monotonic counter for `chat-{seq:04x}` ids.
     chat_seq: RwLock<usize>,
+    /// Live pending-output scopes (in memory only, never serialized).
+    pending_scopes: PendingScopes,
 }
 
 /// Pure helper shared with `state_view`: extract a human-readable definition
@@ -129,7 +132,33 @@ impl RunRegistry {
             shutdown_tx,
             id_locks: RwLock::new(HashMap::new()),
             chat_seq: RwLock::new(0),
+            pending_scopes: PendingScopes::default(),
         }
+    }
+
+    /// Open a pending-output scope for one producer invocation of `run_id`.
+    /// `checkout_root` and `outputs` must come from executor-side preparation,
+    /// never from a socket request. Destinations are resolved paths beneath
+    /// that checkout (not URI-derived paths). Keep the guard with the producer
+    /// invocation; dropping it on any exit, including cancellation, revokes it.
+    #[allow(dead_code)]
+    pub(crate) fn open_pending_scope(
+        &self,
+        run_id: &str,
+        checkout_root: std::path::PathBuf,
+        outputs: impl IntoIterator<Item = (String, std::path::PathBuf)>,
+    ) -> std::io::Result<PendingScopeGuard> {
+        self.pending_scopes.open(run_id, checkout_root, outputs)
+    }
+
+    /// Missing URIs among a live scope's declared outputs.
+    pub(crate) fn missing_in_scope(
+        &self,
+        run_id: &str,
+        token: &str,
+        uris: &[String],
+    ) -> Result<Vec<String>, String> {
+        self.pending_scopes.missing(run_id, token, uris)
     }
 
     // ── Connection counter ──────────────────────────────────────────────

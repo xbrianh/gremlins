@@ -189,6 +189,14 @@ pub(crate) async fn handle_artifact(request: &Value, registry: &Arc<RunRegistry>
         Err(resp) => return resp,
     };
 
+    if request.get("exists").is_some() {
+        return handle_artifact_exists(id, request, registry).await;
+    }
+
+    if request.get("scope").is_some() {
+        return error_response("'scope' requires 'exists'");
+    }
+
     if request.get("put").and_then(|v| v.as_str()).is_some() {
         let _guard = registry.acquire_id_lock(id).await;
 
@@ -261,6 +269,62 @@ pub(crate) async fn handle_artifact(request: &Value, registry: &Arc<RunRegistry>
     match store.content(artifact, json_path).await {
         Ok(content) => ok_response(serde_json::json!({ "id": id, "content": content })),
         Err(e) => error_response(&format!("artifact {artifact:?}: {e}")),
+    }
+}
+
+/// Validate one `--exists` URI: a file `artifact://` URI with a safe relative name.
+fn valid_exists_uri(uri: &str) -> bool {
+    uri.strip_prefix("artifact://").is_some_and(|name| {
+        !name.contains(|c: char| c == '\\' || c.is_control())
+            && name.split('/').all(|seg| !matches!(seg, "" | "." | ".."))
+    })
+}
+
+/// Existence-only artifact query: replies with the missing URIs (request
+/// order, deduplicated) or an operational error, which takes precedence.
+async fn handle_artifact_exists(id: &str, request: &Value, registry: &Arc<RunRegistry>) -> Value {
+    for conflicting in ["put", "list", "artifact", "json_path"] {
+        if request.get(conflicting).is_some() {
+            return error_response(&format!("'exists' conflicts with '{conflicting}'"));
+        }
+    }
+    let Some(items) = request.get("exists").and_then(|v| v.as_array()) else {
+        return error_response("'exists' must be an array of artifact URIs");
+    };
+    if items.is_empty() {
+        return error_response("'exists' requires at least one artifact URI");
+    }
+    let mut uris: Vec<String> = Vec::new();
+    let mut seen = std::collections::HashSet::new();
+    for item in items {
+        let Some(uri) = item.as_str() else {
+            return error_response("'exists' entries must be strings");
+        };
+        if !valid_exists_uri(uri) {
+            return error_response("expected an artifact:// URI with a safe relative name");
+        }
+        if seen.insert(uri) {
+            uris.push(uri.to_string());
+        }
+    }
+
+    let result = match request.get("scope") {
+        None => {
+            let store = match resolve_store_for_id(id, registry).await {
+                Ok(store) => store,
+                Err(resp) => return resp,
+            };
+            store
+                .missing_artifacts(&uris)
+                .await
+                .map_err(|e| format!("gremlin {id}: {e}"))
+        }
+        Some(Value::String(token)) => registry.missing_in_scope(id, token, &uris),
+        Some(_) => Err("'scope' must be a string".to_string()),
+    };
+    match result {
+        Ok(missing) => ok_response(serde_json::json!({ "id": id, "missing": missing })),
+        Err(e) => error_response(&e),
     }
 }
 

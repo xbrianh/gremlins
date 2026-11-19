@@ -242,6 +242,16 @@ pub trait StateStore: Send + Sync + Debug {
     /// All artifact URIs currently registered.
     async fn keys(&self) -> Vec<String>;
 
+    /// The subset of `uris` with no registered regular file behind them, in
+    /// request order. Read-only; I/O and registry errors are reported, never
+    /// folded into "missing".
+    async fn missing_artifacts(
+        &self,
+        _uris: &[String],
+    ) -> Result<Vec<String>, Box<dyn std::error::Error>> {
+        Err("artifact existence queries are unsupported by this store".into())
+    }
+
     /// Merge every artifact from `other` into `self`.
     ///
     /// When `key_prefix` is set, each key from `other` is registered under
@@ -798,6 +808,54 @@ impl FileSystemStateStore {
         self.read_registry_json().await.into_keys().collect()
     }
 
+    /// Strict registry read for existence queries: an absent registry is
+    /// empty, anything else unreadable is an error.
+    async fn read_registry_strict(&self) -> std::io::Result<HashMap<String, String>> {
+        match tokio::fs::read_to_string(self.registry_path()).await {
+            Ok(content) => serde_json::from_str(&content).map_err(|_| {
+                std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    "artifact registry is corrupt",
+                )
+            }),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                // Only a missing registry in an existing store is empty. A
+                // dangling registry symlink or vanished store is a broken query.
+                match tokio::fs::symlink_metadata(self.registry_path()).await {
+                    Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
+                        tokio::fs::metadata(self.root_dir()).await?;
+                        Ok(HashMap::new())
+                    }
+                    Err(err) => Err(err),
+                    Ok(_) => Err(e),
+                }
+            }
+            Err(e) => Err(e),
+        }
+    }
+
+    pub async fn missing_artifacts(
+        &self,
+        uris: &[String],
+    ) -> Result<Vec<String>, Box<dyn std::error::Error>> {
+        let registry = self.read_registry_strict().await?;
+        let mut missing = Vec::new();
+        for uri in uris {
+            let present = match registry.get(uri) {
+                None => false,
+                Some(path) => match tokio::fs::metadata(path).await {
+                    Ok(meta) => meta.is_file(),
+                    Err(e) if e.kind() == std::io::ErrorKind::NotFound => false,
+                    Err(e) => return Err(Box::new(e)),
+                },
+            };
+            if !present {
+                missing.push(uri.clone());
+            }
+        }
+        Ok(missing)
+    }
+
     /// Merge that prefers a direct file copy when `other` is also a
     /// [`FileSystemStateStore`], falling back to the content-based
     /// path otherwise.
@@ -1330,6 +1388,13 @@ impl StateStore for FileSystemStateStore {
         self.keys().await
     }
 
+    async fn missing_artifacts(
+        &self,
+        uris: &[String],
+    ) -> Result<Vec<String>, Box<dyn std::error::Error>> {
+        self.missing_artifacts(uris).await
+    }
+
     async fn join(
         &self,
         other: &(dyn StateStore + Sync),
@@ -1812,6 +1877,16 @@ impl StateStore for ScopedFileSystemStateStore {
         self.allowed_keys.iter().cloned().collect()
     }
 
+    async fn missing_artifacts(
+        &self,
+        uris: &[String],
+    ) -> Result<Vec<String>, Box<dyn std::error::Error>> {
+        for uri in uris {
+            self.check_key(uri)?;
+        }
+        self.inner.missing_artifacts(uris).await
+    }
+
     async fn fork(
         &self,
         child_gremlin_id: &str,
@@ -2059,6 +2134,14 @@ fn rand_hex(n_bytes: usize) -> String {
         }
     }
     buf.iter().map(|b| format!("{b:02x}")).collect()
+}
+
+/// Unpredictable hex token from the OS entropy source; fails rather than
+/// falling back to a guessable value.
+pub fn secure_token_hex(n_bytes: usize) -> std::io::Result<String> {
+    let mut buf = vec![0u8; n_bytes];
+    File::open("/dev/urandom")?.read_exact(&mut buf)?;
+    Ok(buf.iter().map(|b| format!("{b:02x}")).collect())
 }
 
 pub fn token_hex(n_bytes: usize) -> String {
@@ -3079,6 +3162,71 @@ mod tests {
     async fn write_file(store: &FileSystemStateStore, name: &str, content: &str) -> String {
         let uri = Uri::parse(&format!("artifact://{name}")).unwrap();
         store.write_into_registry(&uri, content).await.unwrap()
+    }
+
+    #[tokio::test]
+    async fn missing_artifacts_uses_only_registered_files_without_writes() {
+        let (tmp, artifacts) = setup_registry();
+        let store = FileSystemStateStore::from_path(tmp.path().to_owned());
+        let keys = ["nested/orphan", "marker", "deleted", "directory", "unbound"]
+            .map(|name| format!("artifact://{name}"));
+        assert_eq!(store.missing_artifacts(&keys).await.unwrap(), keys);
+        assert!(!store.registry_path().exists());
+        assert!(!artifacts.join("nested").exists());
+
+        let marker = tmp.path().join("non-default-marker");
+        std::fs::write(&marker, []).unwrap();
+        std::fs::write(artifacts.join("unbound"), []).unwrap();
+        let deleted = tmp.path().join("deleted");
+        std::fs::write(&deleted, []).unwrap();
+        for (key, path) in keys[1..4]
+            .iter()
+            .zip([marker, deleted.clone(), artifacts.clone()])
+        {
+            store.commit(key, path.to_str().unwrap()).await.unwrap();
+        }
+        std::fs::remove_file(deleted).unwrap();
+        let before = std::fs::read(store.registry_path()).unwrap();
+        assert_eq!(
+            store.missing_artifacts(&keys).await.unwrap(),
+            [&keys[0], &keys[2], &keys[3], &keys[4]].map(String::as_str)
+        );
+        assert_eq!(std::fs::read(store.registry_path()).unwrap(), before);
+        assert!(!artifacts.join("nested").exists());
+    }
+
+    #[tokio::test]
+    async fn missing_artifacts_preserves_operational_errors_and_checkout_restrictions() {
+        let (tmp, _) = setup_registry();
+        let store = FileSystemStateStore::from_path(tmp.path().to_owned());
+        let keys = [
+            "artifact://first".to_string(),
+            "artifact://second".to_string(),
+        ];
+        let checkout = store.checkout_registry(&keys[..1]).await.unwrap();
+        assert_eq!(
+            checkout.store.missing_artifacts(&keys[..1]).await.unwrap(),
+            keys[..1]
+        );
+        assert!(checkout.store.missing_artifacts(&keys).await.is_err());
+
+        // A self-referential symlink deterministically fails metadata lookup,
+        // including when tests run with elevated filesystem permissions.
+        let cyclic = tmp.path().join("cycle");
+        std::os::unix::fs::symlink(&cyclic, &cyclic).unwrap();
+        store
+            .commit(&keys[1], cyclic.to_str().unwrap())
+            .await
+            .unwrap();
+        assert!(store.missing_artifacts(&keys).await.is_err());
+        std::fs::write(store.registry_path(), "not json").unwrap();
+        assert!(store.missing_artifacts(&keys).await.is_err());
+        assert!(store.keys().await.is_empty()); // Recovery semantics of existing readers.
+        std::fs::remove_file(store.registry_path()).unwrap();
+        std::os::unix::fs::symlink("absent", store.registry_path()).unwrap();
+        assert!(store.missing_artifacts(&keys).await.is_err());
+        drop(tmp);
+        assert!(store.missing_artifacts(&keys).await.is_err());
     }
 
     #[test]

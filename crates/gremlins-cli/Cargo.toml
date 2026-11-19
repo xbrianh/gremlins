@@ -31,5 +31,5 @@ syntect = { version = "5", default-features = false, features = ["parsing", "def
 telemetry = []
 
 [dev-dependencies]
-gremlins = { path = "../gremlins", features = ["copilot-test-support"] }
+gremlins = { path = "../gremlins", features = ["copilot-test-support", "artifact-test-support"] }
 tokio = { version = "1", features = ["net", "process", "io-util", "time"] }

@@ -5,6 +5,12 @@
 //! dispatches socket requests to the appropriate handlers, which reach the
 //! registry directly instead of through an actor mailbox.
 
+#[cfg(feature = "artifact-test-support")]
+mod artifact_test_support;
+#[cfg(feature = "artifact-test-support")]
+#[doc(hidden)]
+pub use artifact_test_support::ArtifactTestSupervisor;
+
 pub(crate) mod attachment;
 pub(crate) mod chat;
 pub(crate) mod chat_handle;
@@ -13,6 +19,7 @@ pub(crate) mod debug;
 pub(crate) mod lifecycle;
 pub(crate) mod log_handler;
 pub(crate) mod ops;
+pub(crate) mod pending_scope;
 pub(crate) mod prompt_msg;
 pub(crate) mod run_registry;
 pub(crate) mod session;
@@ -98,15 +105,21 @@ pub async fn run_supervisor(
     state_root: PathBuf,
     _lock: GremlinsDaemonLock,
 ) {
+    let (shutdown_tx, shutdown_rx) = watch::channel(false);
+    let registry = Arc::new(RunRegistry::new(shutdown_tx));
+    accept_loop(listener, state_root, registry, shutdown_rx).await;
+}
+
+async fn accept_loop(
+    listener: UnixListener,
+    state_root: PathBuf,
+    registry: Arc<RunRegistry>,
+    mut shutdown_rx: watch::Receiver<bool>,
+) {
     init_bus();
     // Capture the base environment once at daemon startup. This is the
     // snapshot chat requests without an explicit `env` field fall back to.
     let _ = base_process_env();
-    let (shutdown_tx, mut shutdown_rx) = watch::channel(false);
-
-    // Build the shared registry — it owns the run map, connection counter,
-    // id locks, chat-id sequence, and idle-shutdown logic.
-    let registry = Arc::new(RunRegistry::new(shutdown_tx));
     let sessions: SessionRegistry = Arc::new(Mutex::new(HashMap::new()));
 
     loop {

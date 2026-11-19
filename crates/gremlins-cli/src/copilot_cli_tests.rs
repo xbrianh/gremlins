@@ -37,7 +37,11 @@ async fn child() {
         unsafe { libc::dup2(file.as_raw_fd(), libc::STDOUT_FILENO) },
         -1
     );
-    run_cli(Cli::parse_from(["gremlins", "list-models", "copilot"])).await;
+    run_cli(
+        Cli::parse_from(["gremlins", "list-models", "copilot"]),
+        None,
+    )
+    .await;
     std::io::stdout().flush().unwrap();
     std::process::exit(0);
 }
