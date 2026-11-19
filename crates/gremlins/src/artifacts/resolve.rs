@@ -60,6 +60,18 @@ pub enum ResolveError {
     Other(Box<dyn std::error::Error>),
 }
 
+/// Repeating sequences append `~name~iteration[~attempt]` to the parent scope.
+fn previous_loop_iter(scope: &str) -> Option<String> {
+    let (prefix, last) = scope.rsplit_once('~')?;
+    let (parent, iteration, suffix) = if let Ok(iteration) = last.parse::<u32>() {
+        (prefix, iteration, String::new())
+    } else {
+        let (parent, iteration) = prefix.rsplit_once('~')?;
+        (parent, iteration.parse().ok()?, format!("~{last}"))
+    };
+    (iteration > 1).then(|| format!("{parent}~{}{suffix}", iteration - 1))
+}
+
 pub async fn resolve_interpolation_map(
     artifacts: &(impl StateStore + ?Sized),
     interpolation_map: &HashMap<String, String>,
@@ -75,6 +87,16 @@ pub async fn resolve_interpolation_map(
             let mut uri_str = caps.get(1).unwrap().as_str().to_string();
             if !loop_iter.is_empty() {
                 uri_str = uri_str.replace("{loop_iter}", loop_iter);
+            }
+            if uri_str.contains("{prev_loop_iter}") {
+                let Some(previous) = previous_loop_iter(loop_iter) else {
+                    if optional {
+                        result.insert(var.clone(), String::new());
+                        continue;
+                    }
+                    return Err(ResolveError::MissingArtifact(uri_str));
+                };
+                uri_str = uri_str.replace("{prev_loop_iter}", &previous);
             }
             let json_path = caps.get(2).map(|m| m.as_str());
             let content_raw = caps.get(3).is_some() || caps.get(4).is_some();
@@ -235,6 +257,24 @@ mod tests {
 
         let result = unwrap_result(resolve_interpolation_map(&reg, &map, "1").await);
         assert_eq!(result.get("var").unwrap(), &path_1);
+    }
+
+    #[tokio::test]
+    async fn retry_reads_previous_iteration_feedback() {
+        let (_tmp, reg) = setup_registry();
+        let first = "1~outer~4~attempt~implement~1~attempt";
+        register_file(&reg, &format!("{first}/verdict"), "RETRY").await;
+        let map = HashMap::from([(
+            "feedback".to_owned(),
+            r#"content("artifact://{prev_loop_iter}/verdict")?"#.to_owned(),
+        )]);
+        for (scope, expected) in [
+            (first, ""),
+            ("1~outer~4~attempt~implement~2~attempt", "RETRY"),
+        ] {
+            let inputs = unwrap_result(resolve_interpolation_map(&reg, &map, scope).await);
+            assert_eq!(inputs["feedback"], expected);
+        }
     }
 
     #[test]
