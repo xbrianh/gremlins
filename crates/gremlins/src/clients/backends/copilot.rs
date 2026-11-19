@@ -5,7 +5,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use async_trait::async_trait;
 use rig_core::http_client::middleware::HttpMiddleware;
 use rig_core::http_client::{
-    Error as HttpError, HeaderMap, HeaderValue, Result as HttpResult,
+    DynHttpClient, Error as HttpError, HeaderMap, HeaderValue, HttpClientExt, Result as HttpResult,
 };
 use rig_core::providers::copilot::DIALECT as COPILOT_DIALECT;
 use rig_core::providers::openai::{OpenAI, OpenAIConfig};
@@ -120,9 +120,10 @@ pub fn check_copilot_oauth_credential(
     client_id: &str,
     refresh_token: &str,
 ) -> Result<CopilotCredentialStatus, String> {
-    let provider =
-        github_auth::GitHubAppTokenProvider::new(client_id, refresh_token);
-    let access_token = provider.access_token_sync()?;
+    let provider = github_auth::GitHubAppTokenProvider::new(client_id, refresh_token);
+    let access_token = provider
+        .access_token_sync()
+        .map_err(|err| err.to_string())?;
     status_from_exchange(&BlockingCopilotTokenExchanger::new(), &access_token)
 }
 
@@ -203,6 +204,10 @@ pub(super) struct BlockingCopilotTokenExchanger {
 
 impl BlockingCopilotTokenExchanger {
     pub(super) fn new() -> Self {
+        #[cfg(feature = "copilot-test-support")]
+        if let Some(url) = crate::clients::copilot_test_exchange_url() {
+            return Self::with_url(&url);
+        }
         Self::with_url(GITHUB_COPILOT_TOKEN_URL)
     }
 
@@ -235,19 +240,20 @@ impl CopilotTokenExchanger for BlockingCopilotTokenExchanger {
             .send()
             .map_err(|err| format!("GitHub Copilot token exchange failed: {err}"))?;
 
-        if !response.status().is_success() {
-            let status = response.status();
-            let body = response.text().unwrap_or_default();
-            return Err(format!(
-                "GitHub Copilot token exchange failed with HTTP {status}{}",
-                token_exchange_error_detail(&body)
-            ));
+        let status = response.status();
+        let failure = || {
+            format!(
+                "GitHub Copilot token exchange failed with HTTP {}",
+                status.as_u16()
+            )
+        };
+        if !status.is_success() {
+            return Err(failure());
         }
-
-        let record: CopilotTokenResponse = response.json().map_err(|err| {
-            format!("GitHub Copilot token exchange response was invalid: {err}")
-        })?;
-        session_from_response(record)
+        let record = response
+            .json()
+            .map_err(|_| format!("{}: response was invalid", failure()))?;
+        session_from_response(record).map_err(|reason| format!("{}: {reason}", failure()))
     }
 }
 
@@ -318,7 +324,7 @@ impl CopilotSessionProvider {
         }
     }
 
-    async fn ensure_fresh(&self) -> Result<CopilotSession, String> {
+    async fn ensure_fresh(&self) -> Result<CopilotSession, RenewalError> {
         let mut guard = self.session.lock().await;
         if let Some(session) = guard.as_ref() {
             if !session_expired(session) {
@@ -330,12 +336,29 @@ impl CopilotSessionProvider {
             .token_provider
             .get_token(github_auth::GITHUB_SCOPE_COPILOT)
             .await
-            .map_err(|e| format!("failed to refresh GitHub access token: {e}"))?;
-        let fresh =
-            exchange_github_token_async(self.exchanger.clone(), access_token).await?;
+            .map_err(|e| {
+                RenewalError::AppRefresh(match e {
+                    TokenProviderError::Provider(message) => message
+                        .strip_prefix("GitHub app credential refresh failed (HTTP ")
+                        .and_then(|s| s.strip_suffix(')'))
+                        .and_then(|s| http::StatusCode::from_bytes(s.as_bytes()).ok()),
+                    _ => None,
+                })
+            })?;
+        let fresh = exchange_github_token_async(self.exchanger.clone(), access_token)
+            .await
+            .map_err(RenewalError::Exchange)?;
         *guard = Some(fresh.clone());
         Ok(fresh)
     }
+}
+
+#[derive(Debug, thiserror::Error)]
+enum RenewalError {
+    #[error("Copilot app credential refresh failed; check your client-id and refresh-token")]
+    AppRefresh(Option<http::StatusCode>),
+    #[error("Copilot session exchange failed; check your GitHub credential and Copilot access")]
+    Exchange(String),
 }
 
 /// A [`TokenProvider`] that always yields a fixed GitHub access token.
@@ -374,39 +397,12 @@ impl HttpMiddleware for CopilotTokenRefreshMiddleware {
                 .sessions
                 .ensure_fresh()
                 .await
-                .map_err(|message| HttpError::instance(std::io::Error::other(message)))?;
+                .map_err(HttpError::instance)?;
             let value = HeaderValue::from_str(&format!("Bearer {}", session.token))?;
             headers.insert(http::header::AUTHORIZATION, value);
             Ok(())
         })
     }
-}
-
-/// Render a small, non-empty response body snippet for exchange errors.
-fn token_exchange_error_detail(body: &str) -> String {
-    const MAX_BODY_BYTES: usize = 512;
-
-    let body = body.trim();
-    if body.is_empty() {
-        return String::new();
-    }
-
-    let mut end = body.len().min(MAX_BODY_BYTES);
-    while !body.is_char_boundary(end) {
-        end -= 1;
-    }
-    let snippet = &body[..end];
-    if end < body.len() {
-        format!(": {snippet}...")
-    } else {
-        format!(": {snippet}")
-    }
-}
-
-pub(super) fn copilot_transport(
-    middleware: CopilotTokenRefreshMiddleware,
-) -> rig_core::http_client::DynHttpClient {
-    rig_core::http_client::DynHttpClient::new(rig_reqwest::shared()).with_middleware(middleware)
 }
 
 /// The single credential resolver shared by completions and discovery.
@@ -442,9 +438,15 @@ fn resolve_session(
         // access_token_sync refreshes stored credentials only; unlike the
         // device-flow methods, it never starts interactive login.
         let provider = Arc::new(github_auth::GitHubAppTokenProvider::new(id, refresh));
-        let token = provider
-            .access_token_sync()
-            .map_err(|e| format!("{COPILOT_APP_REFRESH_ERROR}: {e}"))?;
+        // Backend construction is synchronous and can run inside a Tokio task.
+        let worker = provider.clone();
+        let token = std::thread::spawn(move || worker.access_token_sync())
+            .join()
+            .map_err(|_| COPILOT_APP_REFRESH_ERROR.to_owned())?
+            .map_err(|err| match err.0 {
+                Some(status) => format!("{COPILOT_APP_REFRESH_ERROR}: {}", status.as_u16()),
+                None => COPILOT_APP_REFRESH_ERROR.to_owned(),
+            })?;
         (provider as Arc<dyn TokenProvider>, token)
     } else {
         let token = providers
@@ -459,7 +461,9 @@ fn resolve_session(
                 )
             })?;
         (
-            Arc::new(StaticTokenProvider { token: token.clone() }) as Arc<dyn TokenProvider>,
+            Arc::new(StaticTokenProvider {
+                token: token.clone(),
+            }) as Arc<dyn TokenProvider>,
             token,
         )
     };
@@ -505,7 +509,9 @@ fn static_session(token: String) -> CopilotSession {
 
 pub(super) fn static_session_middleware(session: CopilotSession) -> CopilotTokenRefreshMiddleware {
     let provider = Arc::new(CopilotSessionProvider::with_session(
-        Arc::new(StaticTokenProvider { token: String::new() }),
+        Arc::new(StaticTokenProvider {
+            token: String::new(),
+        }),
         Arc::new(BlockingCopilotTokenExchanger::new()),
         session,
     ));
@@ -516,13 +522,22 @@ fn copilot_client_with_session(
     session: CopilotSession,
     middleware: CopilotTokenRefreshMiddleware,
 ) -> OpenAI {
-    let transport = copilot_transport(middleware);
+    let (config, transport) =
+        authenticated_copilot_parts(rig_reqwest::shared(), session, middleware);
+    config.connect(transport)
+}
+
+fn authenticated_copilot_parts(
+    http: impl HttpClientExt + 'static,
+    session: CopilotSession,
+    middleware: CopilotTokenRefreshMiddleware,
+) -> (OpenAIConfig, DynHttpClient) {
     let config = OpenAIConfig::with_key(&COPILOT_DIALECT, session.token);
     let config = match session.api_base {
         Some(api_base) => config.with_base_url(api_base),
         None => config,
     };
-    config.connect(transport)
+    (config, DynHttpClient::new(http).with_middleware(middleware))
 }
 
 // ── CopilotRunState ──────────────────────────────────────────────────────
@@ -578,15 +593,9 @@ impl CopilotBackend {
         native_block: &HashMap<String, Vec<String>>,
         extra_params: &indexmap::IndexMap<String, String>,
     ) -> Result<Arc<dyn Backend>, String> {
-        Self::build_with_exchanger(
-            model,
-            native_block,
-            extra_params,
-            || {
-                Ok(Arc::new(BlockingCopilotTokenExchanger::new())
-                    as Arc<dyn CopilotTokenExchanger>)
-            },
-        )
+        Self::build_with_exchanger(model, native_block, extra_params, || {
+            Ok(Arc::new(BlockingCopilotTokenExchanger::new()) as Arc<dyn CopilotTokenExchanger>)
+        })
     }
 
     /// Shared construction path; `make_exchanger` is a parameter so tests can
@@ -615,13 +624,7 @@ impl CopilotBackend {
                 client,
                 strict_tools,
                 tool_result_array_content,
-                native: NativeRunState::new(
-                    (),
-                    model,
-                    tool_filter,
-                    resolved,
-                    "CopilotBackend",
-                ),
+                native: NativeRunState::new((), model, tool_filter, resolved, "CopilotBackend"),
             },
         }))
     }
@@ -652,7 +655,10 @@ impl Backend for CopilotBackend {
     ) -> Result<CompletedRun, ClientError> {
         let ctx = self.state.native.prepare_context(params.clone());
         let cancel = params.cancel_token.clone().unwrap_or_else(CancelToken::new);
-        let model_name = self.state.native.effective_model(ctx.params.model.as_deref());
+        let model_name = self
+            .state
+            .native
+            .effective_model(ctx.params.model.as_deref());
 
         let client = &self.state.client;
         let strict_tools = self.state.strict_tools;
@@ -724,10 +730,10 @@ impl Backend for CopilotBackend {
 
 #[cfg(test)]
 mod tests {
-    use crate::clients::cancel::CancelToken;
     use super::*;
-    use rig_core::http_client::{HttpClientExt, Method, Uri};
+    use crate::clients::cancel::CancelToken;
     use crate::test_support::EnvGuard;
+    use rig_core::http_client::{HttpClientExt, Method, Uri};
     use std::io::{Read, Write};
     use std::net::TcpListener;
     use std::sync::atomic::{AtomicUsize, Ordering as AtomicOrdering};
@@ -928,8 +934,14 @@ mod tests {
         assert!(err.contains("GITHUB_TOKEN"), "got: {err}");
         assert!(err.contains("GH_TOKEN"), "got: {err}");
         assert!(err.contains("client-id"), "got: {err}");
-        assert!(!err.contains("gh auth"), "error should not mention gh CLI: {err}");
-        assert!(!err.contains("gh "), "error should not mention gh CLI: {err}");
+        assert!(
+            !err.contains("gh auth"),
+            "error should not mention gh CLI: {err}"
+        );
+        assert!(
+            !err.contains("gh "),
+            "error should not mention gh CLI: {err}"
+        );
     }
 
     #[test]
@@ -961,10 +973,7 @@ mod tests {
         let mut guard = isolated_env();
         guard.set("GH_TOKEN", "from-gh-token");
         guard.set("GITHUB_TOKEN", "from-github-token");
-        assert_eq!(
-            github_access_token().as_deref(),
-            Some("from-github-token")
-        );
+        assert_eq!(github_access_token().as_deref(), Some("from-github-token"));
     }
 
     #[test]
@@ -990,7 +999,10 @@ mod tests {
         assert_eq!(session.expires_at, Some(9999999999));
 
         let request = server.join().unwrap().to_ascii_lowercase();
-        assert!(request.contains("get /copilot_internal/v2/token"), "{request}");
+        assert!(
+            request.contains("get /copilot_internal/v2/token"),
+            "{request}"
+        );
         assert!(
             request.contains("authorization: token gh-token"),
             "{request}"
@@ -1035,7 +1047,7 @@ mod tests {
     }
 
     #[test]
-    fn exchange_http_error_includes_status_and_body() {
+    fn exchange_http_error_includes_status_not_body() {
         let (url, server) = serve_once(
             "HTTP/1.1 500 Internal Server Error",
             r#"{"message":"bad token"}"#,
@@ -1044,7 +1056,7 @@ mod tests {
         let err = exchanger.exchange("gh-token").unwrap_err();
 
         assert!(err.contains("HTTP 500"), "{err}");
-        assert!(err.contains("bad token"), "{err}");
+        assert!(!err.contains("bad token"), "{err}");
         server.join().unwrap();
     }
 
@@ -1183,7 +1195,6 @@ mod tests {
             "Bearer tid=1;exp=9999999999"
         );
     }
-
 
     // ── parse_extra_params tests ─────────────────────────────────────
 

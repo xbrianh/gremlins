@@ -13,6 +13,15 @@ pub(crate) use client::run_naked;
 pub(crate) mod compaction;
 pub mod config;
 pub mod conversation;
+#[cfg(feature = "copilot-test-support")]
+mod copilot_test_support;
+#[cfg(feature = "copilot-test-support")]
+#[doc(hidden)]
+pub use copilot_test_support::with_copilot_test_endpoints;
+#[cfg(feature = "copilot-test-support")]
+pub(crate) use copilot_test_support::{
+    copilot_test_catalog_base, copilot_test_exchange_url, copilot_test_refresh_url,
+};
 pub(crate) mod error;
 pub(crate) mod format;
 pub mod github_auth;
