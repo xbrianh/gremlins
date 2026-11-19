@@ -31,7 +31,7 @@ by pattern), Bash (shell commands), Task, Done\n\
 Edit is for code changes (not Bash scripts/sed). Read/Grep/Glob are for file inspection (not shell sed/grep/tail).\n\
 </tools>\n\
 {batching}\n\
-`Done` signals turn completion and must be the sole call in its message — never batch it with other tools.\n\
+`Done` ends your task. It must be the sole call in its message — never batch it with other tools.\n\
 ALWAYS use Landscape first when exploring unknown code — it maps structure without reading files.\nCall Done(summary) alongside your final message when your work is complete. The summary parameter briefly describes what you accomplished.\n\
 <directories>\n\
 Work root:     {work}\n\
@@ -63,7 +63,7 @@ by pattern), Bash (shell commands), Task, Done\n\
 Edit is for code changes (not Bash scripts/sed). Read/Grep/Glob are for file inspection (not shell sed/grep/tail).\n\
 </tools>\n\
 {batching}\n\
-`Done` signals turn completion and must be the sole call in its message — never batch it with other tools.\n\
+`Done` ends your task. It must be the sole call in its message — never batch it with other tools.\n\
 ALWAYS use Landscape first when exploring unknown code — it maps structure without reading files.\nCall Done(summary) alongside your final message when your work is complete. The summary parameter briefly describes what you accomplished.\n\
 <directories>\n\
 Work root:     {work}\n\
@@ -87,7 +87,7 @@ replacements), Grep (regex search), Glob (find files \
 by pattern), Bash (shell commands), Done\n\
 </tools>\n\
 {batching}\n\
-`Done` signals turn completion and must be the sole call in its message — never batch it with other tools.\n\
+`Done` ends your task. It must be the sole call in its message — never batch it with other tools.\n\
 Use Landscape first when exploring code — it maps structure without reading files.\nThis is a forked child agent with the parent's full context. Do not call \
 Task.\n\
 Call Done(summary) alongside your final message when your work is complete. The summary parameter briefly describes what you accomplished.\n\
