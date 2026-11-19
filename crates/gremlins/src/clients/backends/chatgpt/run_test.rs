@@ -1227,14 +1227,24 @@ async fn custom_exit_two_fails_the_run_at_zero_nudges() {
     );
 }
 
-/// A serialized definition reloads as a DSL stage, whose required outputs are
-/// checked through the real CLI rather than the native predicate (that path is
-/// exercised end to end by the CLI integration tests).
-#[test]
-fn round_tripped_producer_reloads_as_dsl_stage() {
-    let reloaded = reload(&producer_definition("chatgpt/gpt-round-trip", |agent| agent));
-    let json = reloaded.to_expanded_json().to_string();
-    assert!(json.contains("artifact://"), "{json}");
+#[tokio::test]
+async fn standalone_reloaded_dsl_agent_checks_checkout_files() {
+    let fx = crate::test_support::GitSandbox::new();
+    assert!(!fx.is_skipped(), "git sandbox setup must succeed");
+    let model = "chatgpt/gpt-standalone-dsl";
+    let definition = reload(&producer_definition(model, |agent| agent));
+    let (_, requests) = run_producer(
+        &fx,
+        &definition,
+        model,
+        &["missing", "accepted"],
+        Default::default(),
+        None,
+        None,
+    )
+    .await;
+    let reminder = result_text(&requests[1], "call_1");
+    assert!(!reminder.contains("artifact://"), "{reminder}");
 }
 
 // ── shared `implement` stage: no-new-changes nudge ──────────────────────────

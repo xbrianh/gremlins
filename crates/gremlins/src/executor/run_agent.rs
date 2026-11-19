@@ -292,11 +292,8 @@ pub(crate) async fn run_agent(
                 },
             ));
         }
-        if !required_outputs.is_empty() && gremlin.runtime_config.registry.is_none() {
-            artifact_check = Some(crate::executor::dsl_done::unavailable_artifact_check(
-                "no run registry is available to serve the artifact check",
-            ));
-        }
+        // Standalone runs have no supervisor to serve the CLI query. Leave
+        // `artifact` unset so Done checks the resolved checkout paths instead.
         if let (false, Some(registry)) = (
             required_outputs.is_empty(),
             gremlin.runtime_config.registry.clone(),

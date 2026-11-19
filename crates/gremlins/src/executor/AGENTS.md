@@ -163,9 +163,9 @@ rather than leaking runner-specific types to the daemon.
 
 An agent stage may set `options.done_check` to a nonblank shell command
 (`executor/dsl_done.rs`). On every standalone `Done`, required outputs are
-checked first through the real `gremlins artifact <id> --exists <uri>...`
-CLI (literal, resolved URIs; skipped when none are required) under a
-pending-output scope; only when it passes is the command run (interpolated with
+checked first. Supervised runs query the real `gremlins artifact <id> --exists
+<uri>...` CLI under a pending-output scope; in-process runs without a supervisor
+check the resolved checkout files directly. Only when this check passes is the command run (interpolated with
 stage substitutions, cwd = stage cwd, `GREMLINS_DONE_SUMMARY` and
 `GREMLINS_OUTPUT_<KEY>` in env). Exit 0 accepts, exit 1 returns bounded output
 to the model as a retry (consumes the reminder budget; when spent, `Done`

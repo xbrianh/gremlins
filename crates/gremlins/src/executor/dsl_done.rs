@@ -87,7 +87,7 @@ async fn run_artifact_check(params: &ArtifactParams, ctx: DoneContext) -> DoneVe
     let mut cmd = tokio::process::Command::new("gremlins");
     cmd.args(["artifact", &params.run_id, "--exists"])
         .args(&params.required_uris);
-    let verdict = run_process(cmd, &ctx.cwd, &env, &ctx, "artifact check").await;
+    let verdict = run_process(cmd, &ctx.cwd, &env, &ctx, "artifact check", CHECK_TIMEOUT).await;
     drop(guard);
     verdict
 }
@@ -113,7 +113,7 @@ async fn run_custom_check(params: &DslDoneParams, ctx: DoneContext) -> DoneVerdi
     put_exe_dir_on_path(&mut env);
     let mut cmd = tokio::process::Command::new("sh");
     cmd.arg("-c").arg(&params.command);
-    run_process(cmd, &ctx.cwd, &env, &ctx, "done_check").await
+    run_process(cmd, &ctx.cwd, &env, &ctx, "done_check", CHECK_TIMEOUT).await
 }
 
 fn put_exe_dir_on_path(env: &mut HashMap<String, String>) {
@@ -167,17 +167,13 @@ impl Drop for GroupGuard {
     }
 }
 
-/// A predicate that always fails: the stage needs the CLI but it cannot run.
-pub(crate) fn unavailable_artifact_check(reason: &'static str) -> DoneCheck {
-    DoneCheck::new(move |_| async move { DoneVerdict::Error(reason.to_string()) })
-}
-
 async fn run_process(
     mut cmd: tokio::process::Command,
     cwd: &Path,
     env: &HashMap<String, String>,
     ctx: &DoneContext,
     label: &str,
+    timeout: Duration,
 ) -> DoneVerdict {
     cmd.current_dir(cwd)
         .env_clear()
@@ -191,44 +187,35 @@ async fn run_process(
         Ok(child) => child,
         Err(e) => return DoneVerdict::Error(format!("{label} failed to start: {e}")),
     };
-    let pid = child.id();
-    let _group = GroupGuard(pid);
-    let stdout = tokio::spawn(read_bounded(child.stdout.take().expect("piped")));
-    let stderr = tokio::spawn(read_bounded(child.stderr.take().expect("piped")));
-
-    enum Outcome {
-        Exited(std::io::Result<std::process::ExitStatus>),
-        Cancelled,
-        TimedOut,
-    }
-    let outcome = tokio::select! {
-        status = child.wait() => Outcome::Exited(status),
-        _ = ctx.cancel.cancelled() => Outcome::Cancelled,
-        _ = tokio::time::sleep(CHECK_TIMEOUT) => Outcome::TimedOut,
+    let mut group = Some(GroupGuard(child.id()));
+    let stdout = read_bounded(child.stdout.take().expect("piped"));
+    let stderr = read_bounded(child.stderr.take().expect("piped"));
+    let collect = async {
+        let wait = async {
+            let status = child.wait().await;
+            // Close pipes held by stragglers in the original process group.
+            drop(group.take());
+            status
+        };
+        tokio::join!(wait, stdout, stderr)
     };
-    let status = match outcome {
-        Outcome::Exited(status) => status,
-        other => {
-            // Kill the whole group and reap before returning.
-            if let Some(pid) = pid {
-                kill_group(pid);
-            }
+    // A descendant outside the group can retain either pipe even after wait().
+    // Keep the readers in this select so interruption drops them instead of
+    // leaving detached tasks waiting for EOF.
+    let result = tokio::select! {
+        result = collect => Ok(result),
+        _ = ctx.cancel.cancelled() => Err(format!("{label} cancelled")),
+        _ = tokio::time::sleep(timeout) => Err(format!("{label} timed out after {}s", timeout.as_secs())),
+    };
+    let (status, out, err) = match result {
+        Ok(result) => result,
+        Err(message) => {
+            drop(group);
             let _ = child.kill().await;
             let _ = child.wait().await;
-            stdout.abort();
-            stderr.abort();
-            return DoneVerdict::Error(match other {
-                Outcome::Cancelled => format!("{label} cancelled"),
-                _ => format!("{label} timed out after {}s", CHECK_TIMEOUT.as_secs()),
-            });
+            return DoneVerdict::Error(message);
         }
     };
-    // Reap stragglers still holding the group.
-    if let Some(pid) = pid {
-        kill_group(pid);
-    }
-    let out = stdout.await.unwrap_or_default();
-    let err = stderr.await.unwrap_or_default();
     let status = match status {
         Ok(s) => s,
         Err(e) => return DoneVerdict::Error(format!("{label} wait failed: {e}")),
@@ -335,6 +322,71 @@ mod tests {
             DoneVerdict::Retry(text) => assert!(text.len() <= MAX_DIAGNOSTIC_BYTES * 2),
             other => panic!("{other:?}"),
         }
+    }
+
+    async fn check_with_inherited_pipes(cancel_after_exit: bool) -> DoneVerdict {
+        let dir = tempfile::tempdir().unwrap();
+        let mut cmd = tokio::process::Command::new("/bin/bash");
+        // Job control gives sleep its own process group, outside GroupGuard.
+        cmd.args([
+            "-c",
+            "set -m; /bin/sleep 15 & echo $! > holder; echo $$ > shell",
+        ]);
+        let cancel = CancelToken::new();
+        let context = ctx(cancel.clone());
+        let env = HashMap::new();
+        let timeout = if cancel_after_exit {
+            CHECK_TIMEOUT
+        } else {
+            Duration::from_secs(1)
+        };
+        let check = run_process(cmd, dir.path(), &env, &context, "check", timeout);
+        let observe_exit = async {
+            let shell_path = dir.path().join("shell");
+            loop {
+                if let Some(pid) = std::fs::read_to_string(&shell_path)
+                    .ok()
+                    .and_then(|s| s.trim().parse::<i32>().ok())
+                {
+                    // SAFETY: signal zero probes whether the direct child is reaped.
+                    if unsafe { libc::kill(pid, 0) } == -1 {
+                        break;
+                    }
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+            let pid = std::fs::read_to_string(dir.path().join("holder"))
+                .unwrap()
+                .trim()
+                .parse::<u32>()
+                .unwrap();
+            if cancel_after_exit {
+                cancel.cancel();
+            }
+            GroupGuard(Some(pid))
+        };
+        let (verdict, _holder) = tokio::time::timeout(Duration::from_secs(5), async {
+            tokio::join!(check, observe_exit)
+        })
+        .await
+        .expect("pipe reader did not stop");
+        verdict
+    }
+
+    #[tokio::test]
+    async fn timeout_interrupts_pipe_collection_after_exit() {
+        assert_eq!(
+            check_with_inherited_pipes(false).await,
+            DoneVerdict::Error("check timed out after 1s".into())
+        );
+    }
+
+    #[tokio::test]
+    async fn cancellation_interrupts_pipe_collection_after_exit() {
+        assert_eq!(
+            check_with_inherited_pipes(true).await,
+            DoneVerdict::Error("check cancelled".into())
+        );
     }
 
     #[tokio::test]

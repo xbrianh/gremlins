@@ -220,10 +220,9 @@ pub(crate) async fn cancellable<T>(
         biased;
         _ = cancel.cancelled() => {
             signal.cancel();
-            if !grace().is_zero() {
-                // Reaping work must finish stopping its process group and
-                // releasing its scope; dropping it early would leak both.
-                let _ = (&mut work).await;
+            let grace = grace();
+            if !grace.is_zero() {
+                let _ = tokio::time::timeout(grace, &mut work).await;
             }
             Err(cancelled_error())
         }
@@ -410,6 +409,26 @@ mod tests {
         .await
         .expect("native check must not be awaited");
         assert!(matches!(result, Err(ClientError::Cancelled)));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn stuck_reaping_check_is_dropped_after_cancel_grace() {
+        let done = DoneAssessment {
+            outputs: vec![],
+            artifact: None,
+            check: Some(DoneCheck::new(|_| std::future::pending()).reaping()),
+        };
+        let cancel = CancelToken::new();
+        let assessment = assess(&done, None, "s", &cancel);
+        tokio::pin!(assessment);
+        assert!(futures::poll!(&mut assessment).is_pending());
+        cancel.cancel();
+        assert!(futures::poll!(&mut assessment).is_pending());
+        tokio::time::advance(CANCEL_GRACE).await;
+        assert!(matches!(
+            futures::poll!(&mut assessment),
+            std::task::Poll::Ready(Err(ClientError::Cancelled))
+        ));
     }
 
     #[tokio::test]
