@@ -6,7 +6,9 @@ use std::path::Path;
 
 /// Shared batching guidance used by every system prompt. Kept in one place so
 /// the agent, task, and fork prompts never drift apart.
-pub(crate) const BATCHING_GUIDANCE: &str = "Before every turn, scan the tools you're about to call. When two or more calls are independent (neither depends on the other's result), batch them in a single message. Good: Read foo.rs + Grep \"pattern\" + Bash \"cargo check\" — three independent operations in one turn. Bad: those same three calls spread across three serial turns. After writing files, batch all spot-checks (Reads and Greps) into one turn rather than one check per turn; if the build passes and spot-checks look correct, call Done.";
+pub(crate) const BATCHING_GUIDANCE: &str = "Before every turn, scan the tools you're about to call. When two or more calls are independent (neither depends on the other's result), batch them in a single message. Good: Read foo.rs + Grep \"pattern\" + Bash \"cargo check\" — three independent operations in one turn. Bad: those same three calls spread across three serial turns. After writing files, batch all spot-checks (Reads and Greps) into one turn rather than one check per turn.";
+
+const COMPLETION_GUIDANCE: &str = "`Done` ends your assignment. Before calling it, check what you were asked to do against what you have actually done. If any part remains, keep working; do not use Done to report progress or describe what you intend to do next. Call Done(summary) alongside your final message when the request is fulfilled. Summarize the result and make Done the only tool call in that message.";
 
 /// System prompt injected into every agent stage. Carries the tool roster,
 /// directory layout, and pragmatic guidance (e.g. delegation policy).
@@ -31,8 +33,8 @@ by pattern), Bash (shell commands), Task, Done\n\
 Edit is for code changes (not Bash scripts/sed). Read/Grep/Glob are for file inspection (not shell sed/grep/tail).\n\
 </tools>\n\
 {batching}\n\
-`Done` ends your task. It must be the sole call in its message — never batch it with other tools.\n\
-ALWAYS use Landscape first when exploring unknown code — it maps structure without reading files.\nCall Done(summary) alongside your final message when your work is complete. The summary parameter briefly describes what you accomplished.\n\
+{COMPLETION_GUIDANCE}\n\
+ALWAYS use Landscape first when exploring unknown code — it maps structure without reading files.\n\
 <directories>\n\
 Work root:     {work}\n\
 </directories>\n\
@@ -63,8 +65,8 @@ by pattern), Bash (shell commands), Task, Done\n\
 Edit is for code changes (not Bash scripts/sed). Read/Grep/Glob are for file inspection (not shell sed/grep/tail).\n\
 </tools>\n\
 {batching}\n\
-`Done` ends your task. It must be the sole call in its message — never batch it with other tools.\n\
-ALWAYS use Landscape first when exploring unknown code — it maps structure without reading files.\nCall Done(summary) alongside your final message when your work is complete. The summary parameter briefly describes what you accomplished.\n\
+{COMPLETION_GUIDANCE}\n\
+ALWAYS use Landscape first when exploring unknown code — it maps structure without reading files.\n\
 <directories>\n\
 Work root:     {work}\n\
 </directories>\
@@ -87,10 +89,9 @@ replacements), Grep (regex search), Glob (find files \
 by pattern), Bash (shell commands), Done\n\
 </tools>\n\
 {batching}\n\
-`Done` ends your task. It must be the sole call in its message — never batch it with other tools.\n\
+{COMPLETION_GUIDANCE}\n\
 Use Landscape first when exploring code — it maps structure without reading files.\nThis is a forked child agent with the parent's full context. Do not call \
 Task.\n\
-Call Done(summary) alongside your final message when your work is complete. The summary parameter briefly describes what you accomplished.\n\
 <directories>\n\
 Work root:     {work}\n\
 </directories>\
@@ -201,7 +202,7 @@ mod tests {
 
     #[test]
     fn test_all_prompts_share_batching_guidance() {
-        let expected = r#"Before every turn, scan the tools you're about to call. When two or more calls are independent (neither depends on the other's result), batch them in a single message. Good: Read foo.rs + Grep "pattern" + Bash "cargo check" — three independent operations in one turn. Bad: those same three calls spread across three serial turns. After writing files, batch all spot-checks (Reads and Greps) into one turn rather than one check per turn; if the build passes and spot-checks look correct, call Done."#;
+        let expected = r#"Before every turn, scan the tools you're about to call. When two or more calls are independent (neither depends on the other's result), batch them in a single message. Good: Read foo.rs + Grep "pattern" + Bash "cargo check" — three independent operations in one turn. Bad: those same three calls spread across three serial turns. After writing files, batch all spot-checks (Reads and Greps) into one turn rather than one check per turn."#;
         assert_eq!(
             BATCHING_GUIDANCE, expected,
             "BATCHING_GUIDANCE constant must match the expected literal; update both or neither"
@@ -211,6 +212,7 @@ mod tests {
         let task = task_system_prompt(Path::new("/work"));
         let fork = fork_system_prompt(Path::new("/work"));
         for (name, prompt) in [("agent", &agent), ("task", &task), ("fork", &fork)] {
+            assert!(prompt.contains(COMPLETION_GUIDANCE));
             assert!(
                 prompt.contains(expected),
                 "{name} prompt must include the shared batching guidance; got: {prompt}"

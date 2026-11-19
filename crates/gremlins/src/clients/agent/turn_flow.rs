@@ -308,9 +308,8 @@ pub(super) fn handle_empty_turn(
             "empty turn — nudging agent (remaining_budget={})",
             state.completion_nudge_budget,
         ));
-        let nudge_msg = "You produced text but no tool calls. If your work is complete, \
-             call the Done tool. If you still need to make changes, use the \
-             appropriate tool now.";
+        let nudge_msg = "You produced text but no tool calls. If the request is unfinished, \
+             continue the work now. Only call the Done tool when the request is fulfilled.";
         write_raw(
             raw,
             &serde_json::json!({"type": "reminder", "message": nudge_msg}),
