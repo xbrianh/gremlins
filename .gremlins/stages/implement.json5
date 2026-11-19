@@ -7,6 +7,7 @@
       type: "agent",
       interpolation: {
         inputs: {
+          feedback: 'content("artifact://{{options.artifact_ns | default(\"\")}}implementation-feedback.md")?',
           plan: 'content("artifact://{{options.artifact_ns | default(\"\")}}plan.md")',
         },
       },

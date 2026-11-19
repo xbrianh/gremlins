@@ -13,16 +13,54 @@
   stages: [
     // ── implement ────────────────────────────────────────────────────
     {
-      name: "implement",
-      type: "implement",
-      options: {
-        artifact_ns: '{{options.artifact_ns | default("")}}',
-      },
-      prompt: [
-        "task-guide.md",
-        "style_guide.md",
-        "dev-env-howto.md",
-        "implement.md",
+      name: "implement-until-approved",
+      type: "sequence",
+      // One initial attempt plus up to three retries; only approval enters QA.
+      "max-iterations": 4,
+      skip_if_exists: "artifact://{loop_iter}/implementation-approved",
+      body: [
+        {
+          name: "implement",
+          type: "implement",
+          options: {
+            artifact_ns: '{{options.artifact_ns | default("")}}',
+          },
+          prompt: [
+            "task-guide.md",
+            "style_guide.md",
+            "dev-env-howto.md",
+            "implement.md",
+          ],
+        },
+        {
+          // Leave model unset so model-by-stage can select a dedicated judge.
+          name: "judge",
+          type: "agent",
+          prompt: ["implementation-judge.md"],
+          interpolation: {
+            inputs: {
+              plan: 'content("artifact://{{options.artifact_ns | default(\"\")}}plan.md")',
+            },
+            outputs: { verdict: "artifact://{loop_iter}/implementation-verdict.md" },
+          },
+        },
+        {
+          name: "route-implementation-verdict",
+          type: "exec",
+          interpolation: {
+            inputs: { verdict: "artifact://{loop_iter}/implementation-verdict.md" },
+            outputs: {
+              feedback: 'artifact://{{options.artifact_ns | default("")}}implementation-feedback.md',
+              "approved?": "artifact://{loop_iter}/implementation-approved",
+            },
+          },
+          options: {
+            cmds: [
+              'cp "{verdict}" "{feedback}"',
+              'case "$(head -n 1 "{verdict}")" in COMPLETE) touch "{approved}" ;; RETRY) : ;; *) echo "Invalid implementation verdict; expected COMPLETE or RETRY" >&2; exit 1 ;; esac',
+            ],
+          },
+        },
       ],
     },
     // ── verify implementation ────────────────────────────────────────
