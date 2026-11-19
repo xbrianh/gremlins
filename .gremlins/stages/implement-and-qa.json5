@@ -16,7 +16,7 @@
       name: "implement-until-approved",
       type: "sequence",
       // One initial attempt plus up to five retries; only approval enters QA.
-      "max-iterations": 6,
+      "max-iterations": 11,
       skip_if_exists: "artifact://{loop_iter}/implementation-approved",
       body: [
         {
