@@ -371,15 +371,29 @@ fn persist_resume_model(
         &serde_json::to_vec(running).map_err(|e| e.to_string())?,
     )?;
     let snapshot = stage_resume_file(&dir, bytes)?;
-    let original = stage_resume_file(
-        &dir,
-        &std::fs::read(&definition_path).map_err(|e| e.to_string())?,
-    )?;
+    let original = HashMap::from([
+        (
+            "definition",
+            std::fs::read(&definition_path).map_err(|e| e.to_string())?,
+        ),
+        (
+            "state",
+            std::fs::read(&state_path).map_err(|e| e.to_string())?,
+        ),
+    ]);
 
     state::resume_write_failure("snapshot").map_err(|e| e.to_string())?;
-    snapshot
-        .persist(&definition_path)
-        .map_err(|e| format!("failed to replace definition snapshot: {e}"))?;
+    let recovery_path = dir.join(".resume-model-recovery.json");
+    stage_resume_file(
+        &dir,
+        &serde_json::to_vec(&original).map_err(|e| e.to_string())?,
+    )?
+    .persist(&recovery_path)
+    .map_err(|e| format!("failed to preserve resume recovery journal: {e}"))?;
+    if let Err(e) = snapshot.persist(&definition_path) {
+        recover_resume_model(gremlin)?;
+        return Err(format!("failed to replace definition snapshot: {e}"));
+    }
     // Running metadata is the publication point; no worker can escape on failure.
     let publication = state::resume_write_failure("metadata").and_then(|()| {
         metadata
@@ -388,12 +402,12 @@ fn persist_resume_model(
             .map_err(std::io::Error::other)
     });
     if let Err(e) = publication {
-        original.persist(&definition_path).map_err(|rollback| {
+        recover_resume_model(gremlin).map_err(|rollback| {
             format!("failed to publish resume state: {e}; snapshot rollback failed: {rollback}")
         })?;
         return Err(format!("failed to publish resume state: {e}"));
     }
-    Ok(())
+    std::fs::remove_file(recovery_path).map_err(|e| e.to_string())
 }
 
 fn stage_resume_file(
@@ -407,7 +421,7 @@ fn stage_resume_file(
     Ok(staged)
 }
 
-// Recover journals left by older supervisors under the per-ID lock.
+// The journal survives failed rollback; all resume paths recover under the per-ID lock.
 fn recover_resume_model(gremlin: &Gremlin) -> Result<(), String> {
     use std::io::Write;
     let dir = gremlin.state.state_dir();
@@ -429,6 +443,7 @@ fn recover_resume_model(gremlin: &Gremlin) -> Result<(), String> {
         if filename == "definition.json" {
             state::resume_write_failure("snapshot").map_err(|e| e.to_string())?;
         }
+        state::resume_write_failure("rollback").map_err(|e| e.to_string())?;
         let mut staged = tempfile::NamedTempFile::new_in(&dir).map_err(|e| e.to_string())?;
         staged.write_all(bytes).map_err(|e| e.to_string())?;
         staged.as_file().sync_all().map_err(|e| e.to_string())?;

@@ -630,13 +630,20 @@ async fn resume_fork_definition_write_failure_never_publishes_or_launches() {
 }
 
 #[tokio::test(flavor = "current_thread")]
-async fn resume_recovers_original_pair_when_immediate_rollback_is_unavailable() {
+async fn resume_double_failure_blocks_retries_until_original_snapshot_is_recovered() {
     let sandbox = Sandbox::new();
     let dir = seed(&sandbox);
+    // The snapshot, not a persisted override, must select the recovered model.
+    let mut data = read_json(dir.join("state.json"));
+    data.as_object_mut().unwrap().remove("model_override");
+    state::write_state(&dir, data.as_object().unwrap()).unwrap();
     let original_state = fs::read(dir.join("state.json")).unwrap();
     let original_definition = fs::read(dir.join("definition.json")).unwrap();
+    let journal = dir.join(".resume-model-recovery.json");
     let (registry, _shutdown) = spawn_test_actor().await;
-    state::set_resume_write_failure(Some("snapshot-and-rollback"));
+
+    // Publication succeeds, but both metadata commit and immediate rollback fail.
+    state::set_resume_write_failure(Some("metadata-and-rollback"));
     let response = handle_resume(
         &json!({"id": ID, "model": "cmd/echo replacement"}),
         &registry,
@@ -646,37 +653,74 @@ async fn resume_recovers_original_pair_when_immediate_rollback_is_unavailable() 
     assert_eq!(response["type"], "error", "{response}");
     assert!(!registry.contains_run(ID).await);
     assert_eq!(fs::read(dir.join("state.json")).unwrap(), original_state);
-    assert_eq!(
-        fs::read(dir.join("definition.json")).unwrap(),
-        original_definition
-    );
-    assert!(!dir.join(".resume-model-recovery.json").exists());
+    let replacement_definition = fs::read(dir.join("definition.json")).unwrap();
+    assert_ne!(replacement_definition, original_definition);
+    let mut expected: Value = serde_json::from_slice(&original_definition).unwrap();
+    expected["default_model"] = json!("cmd/echo replacement");
+    assert_eq!(read_json(dir.join("definition.json")), expected);
+    let retained_journal =
+        fs::read(&journal).expect("failed rollback must retain recovery journal");
     assert_eq!(entries(&sandbox), vec![dir.clone()]);
     assert_eq!(
         fs::read_to_string(dir.join("finished")).unwrap(),
         "original"
     );
 
-    // Snapshot publication fails before metadata is committed, so even an
-    // unavailable rollback must leave the original attempt immediately usable.
-    let response = handle_resume(&json!({"id": ID, "stage": "unknown"}), &registry).await;
-    assert_eq!(response["type"], "error", "{response}");
-    assert!(response.to_string().contains("unknown top-level stage"));
-    assert!(!registry.contains_run(ID).await);
-    assert_eq!(fs::read(dir.join("state.json")).unwrap(), original_state);
+    // Neither ordinary resumes nor stage forks may use the mismatched pair.
+    // Snapshot restrictions must apply to recovery as well as publication.
+    for failure in ["snapshot", "metadata-and-rollback"] {
+        for request in [
+            json!({"id": ID}),
+            json!({"id": ID, "model": "cmd/echo retry"}),
+            json!({"id": ID, "stage": "run"}),
+            json!({"id": ID, "stage": "run", "model": "cmd/echo retry"}),
+        ] {
+            state::set_resume_write_failure(Some(failure));
+            let response = handle_resume(&request, &registry).await;
+            state::set_resume_write_failure(None);
+            assert_eq!(
+                response["type"], "error",
+                "{failure}: {request}: {response}"
+            );
+            assert!(
+                !registry.contains_run(ID).await,
+                "failed recovery launched a worker"
+            );
+            assert_eq!(fs::read(dir.join("state.json")).unwrap(), original_state);
+            assert_eq!(
+                fs::read(dir.join("definition.json")).unwrap(),
+                replacement_definition
+            );
+            assert_eq!(fs::read(&journal).unwrap(), retained_journal);
+            assert_eq!(
+                entries(&sandbox),
+                vec![dir.clone()],
+                "failed recovery published a fork"
+            );
+            assert_eq!(
+                fs::read_to_string(dir.join("finished")).unwrap(),
+                "original"
+            );
+        }
+    }
+
+    let response = handle_resume(&json!({"id": ID}), &registry).await;
+    assert_eq!(response["type"], "ok", "{response}");
+    drained(&registry).await;
+    assert!(!journal.exists());
     assert_eq!(
         fs::read(dir.join("definition.json")).unwrap(),
         original_definition
     );
-    assert!(!dir.join(".resume-model-recovery.json").exists());
+    assert_eq!(entries(&sandbox), vec![dir.clone()]);
+    assert_eq!(read_json(dir.join("state.json"))["model"], "cmd/true");
     let mut reopened = Gremlin::from(ID).unwrap();
-    assert_eq!(reopened.state.read_str("status"), "stopped");
-    assert_eq!(reopened.model_override.as_deref(), Some("cmd/true"));
+    assert_eq!(reopened.state.state_dir(), dir);
+    assert_eq!(reopened.state.read_str("status"), "done");
+    assert!(reopened.model_override.is_none());
     reopened.init_runtime(None).await.unwrap();
     assert_eq!(reopened.definition.default_model().to_string(), "cmd/true");
-    let response = handle_resume(&json!({"id": ID}), &registry).await;
-    assert_eq!(response["type"], "ok", "{response}");
-    drained(&registry).await;
+    assert_unpinned_resolves(&mut reopened, "cmd/true").await;
 }
 
 #[tokio::test]

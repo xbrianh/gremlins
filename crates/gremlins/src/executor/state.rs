@@ -2546,8 +2546,8 @@ pub(crate) fn resume_write_failure(point: &str) -> std::io::Result<()> {
     #[cfg(test)]
     if RESUME_WRITE_FAILURE.with(|failure| {
         failure.get() == Some(point)
-            || (failure.get() == Some("snapshot-and-rollback")
-                && matches!(point, "snapshot" | "rollback"))
+            || (failure.get() == Some("metadata-and-rollback")
+                && matches!(point, "metadata" | "rollback"))
     }) {
         return Err(std::io::Error::other(format!(
             "injected resume {point} write failure"
