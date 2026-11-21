@@ -1581,6 +1581,7 @@ impl StateStore for FileSystemStateStore {
         if let Some(bytes) = definition {
             use std::io::Write;
             let mut dst = child_store.open("definition.json", BlobMode::Write)?;
+            resume_write_failure("fork-definition")?;
             dst.write_all(bytes)?;
         } else if self.exists("definition.json") {
             let mut src = self.open("definition.json", BlobMode::Read)?;
@@ -2431,13 +2432,16 @@ pub fn list_state_dirs() -> Vec<(String, PathBuf)> {
         if !path.is_dir() {
             continue;
         }
+        let Ok(name) = entry.file_name().into_string() else {
+            continue;
+        };
+        if name.starts_with(".fork-to-stage-") {
+            continue;
+        }
         let state_json_path = path.join("state.json");
         if !state_json_path.is_file() {
             continue;
         }
-        let Ok(name) = entry.file_name().into_string() else {
-            continue;
-        };
 
         // Prefer the recorded gremlin id from state.json; otherwise use the
         // directory name with any attempt suffix stripped and safe encoding
@@ -3786,6 +3790,90 @@ mod tests {
                     .read_to_end(&mut bytes)
                     .unwrap();
                 assert_eq!(bytes, replacement);
+            });
+        });
+    }
+
+    #[test]
+    fn fork_to_stage_discovery_ignores_populated_staging_metadata() {
+        with_sandbox(None, |_| {
+            let id = "-demo";
+            let mut initial = Map::new();
+            initial.insert("id".into(), Value::String(id.into()));
+            let store = FileSystemStateStore::create(id, &initial, false).unwrap();
+            let staging = tempfile::Builder::new()
+                .prefix(".fork-to-stage-")
+                .tempdir_in(store.root_dir().parent().unwrap())
+                .unwrap();
+            let staged_store = FileSystemStateStore::from_path(staging.path().to_path_buf());
+            staged_store.write_state(&initial).unwrap();
+            // The staging name sorts after the parent's safe-encoded name.
+            assert!(staging.path().file_name() > store.root_dir().file_name());
+            assert_eq!(list_state_dirs(), vec![(id.into(), store.state_file())]);
+            assert_eq!(
+                FileSystemStateStore::open(id).unwrap().root_dir(),
+                store.root_dir()
+            );
+            assert_eq!(resolve_state_file(Some(id)), Some(store.state_file()));
+        });
+    }
+
+    #[test]
+    fn fork_to_stage_definition_write_failure_preserves_loadable_parent() {
+        with_sandbox(None, |_| {
+            tokio::runtime::Runtime::new().unwrap().block_on(async {
+                let id = "gr-definition-failure";
+                let mut initial = Map::new();
+                initial.insert("id".into(), Value::String(id.into()));
+                initial.insert("stage".into(), Value::String("build".into()));
+                initial.insert("status".into(), Value::String("stopped".into()));
+                let store = FileSystemStateStore::create(id, &initial, false).unwrap();
+                let original = b"{\"name\":\"parent\"}";
+                std::fs::write(store.root_dir().join("definition.json"), original).unwrap();
+                let uri = Uri::new("artifact".into(), "kept".into());
+                store.write_into_registry(&uri, "preserved").await.unwrap();
+                let state_before = std::fs::read(store.state_file()).unwrap();
+                let registry_before = std::fs::read(store.registry_path()).unwrap();
+                let entries = || {
+                    let mut paths: Vec<_> = std::fs::read_dir(store.root_dir().parent().unwrap())
+                        .unwrap()
+                        .map(|entry| entry.unwrap().path())
+                        .collect();
+                    paths.sort();
+                    paths
+                };
+                let before = entries();
+                let mut rewind = initial.clone();
+                rewind.insert("stage".into(), Value::String("review".into()));
+                set_resume_write_failure(Some("fork-definition"));
+                let result = store
+                    .fork_to_stage_with_definition(
+                        &["artifact://kept".to_string()],
+                        &rewind,
+                        Some(b"replacement"),
+                    )
+                    .await;
+                set_resume_write_failure(None);
+                assert!(result.unwrap_err().to_string().contains("fork-definition"));
+                assert!(!attempt_dir_path(id, 2).exists());
+                assert_eq!(entries(), before);
+                assert_eq!(list_state_dirs(), vec![(id.into(), store.state_file())]);
+                let reopened = FileSystemStateStore::open(id).unwrap();
+                assert_eq!(reopened.root_dir(), store.root_dir());
+                assert_eq!(std::fs::read(reopened.state_file()).unwrap(), state_before);
+                assert_eq!(
+                    std::fs::read(reopened.registry_path()).unwrap(),
+                    registry_before
+                );
+                assert_eq!(
+                    std::fs::read(reopened.root_dir().join("definition.json")).unwrap(),
+                    original
+                );
+                assert_eq!(read_state_json(Some(&reopened.state_file())), initial);
+                assert_eq!(
+                    reopened.content("artifact://kept", None).await.unwrap(),
+                    "preserved"
+                );
             });
         });
     }

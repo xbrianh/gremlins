@@ -542,6 +542,55 @@ async fn resume_snapshot_publication_failure_preserves_original_loadable_attempt
 }
 
 #[tokio::test(flavor = "current_thread")]
+async fn resume_persistent_snapshot_replacement_failure_allows_flagless_retry() {
+    let sandbox = Sandbox::new();
+    let dir = seed(&sandbox);
+    let original_state = fs::read(dir.join("state.json")).unwrap();
+    let original_definition = fs::read(dir.join("definition.json")).unwrap();
+    let (registry, _shutdown) = spawn_test_actor().await;
+    // This restriction applies to publication and recovery, and stays in force
+    // through the flagless retry. Metadata writes remain available.
+    state::set_resume_write_failure(Some("snapshot"));
+    let response = handle_resume(
+        &json!({"id": ID, "model": "cmd/echo replacement"}),
+        &registry,
+    )
+    .await;
+    assert_eq!(response["type"], "error", "{response}");
+    assert!(!registry.contains_run(ID).await);
+    assert_eq!(fs::read(dir.join("state.json")).unwrap(), original_state);
+    assert_eq!(
+        fs::read(dir.join("definition.json")).unwrap(),
+        original_definition
+    );
+    assert!(!dir.join(".resume-model-recovery.json").exists());
+    let response = handle_resume(&json!({"id": ID}), &registry).await;
+    assert_eq!(response["type"], "ok", "{response}");
+    drained(&registry).await;
+    state::set_resume_write_failure(None);
+    assert_eq!(
+        fs::read(dir.join("definition.json")).unwrap(),
+        original_definition
+    );
+    let mut worker = Gremlin::from(ID).unwrap();
+    worker.init_runtime(None).await.unwrap();
+    assert_eq!(worker.definition.default_model().to_string(), "cmd/true");
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn resume_fork_definition_write_failure_never_publishes_or_launches() {
+    let sandbox = Sandbox::new();
+    let dir = seed(&sandbox);
+    assert_rejected_with_failure(
+        &sandbox,
+        &dir,
+        json!({"id": ID, "stage": "run", "model": "cmd/echo replacement"}),
+        Some("fork-definition"),
+    )
+    .await;
+}
+
+#[tokio::test(flavor = "current_thread")]
 async fn resume_recovers_original_pair_when_immediate_rollback_is_unavailable() {
     let sandbox = Sandbox::new();
     let dir = seed(&sandbox);

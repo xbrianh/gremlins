@@ -344,8 +344,6 @@ fn prepare_resume_model(gremlin: &Gremlin, spec: &str) -> Result<(String, Vec<u8
     let mut bytes = Vec::new();
     use std::io::Read;
     blob.read_to_end(&mut bytes).map_err(|e| e.to_string())?;
-    StaticDefinition::from_expanded_bytes(&bytes, gremlin.model_override.as_deref(), None)
-        .map_err(|e| e.to_string())?;
     let mut snapshot = crate::definition::r#static::yaml::parse_expanded_json(&bytes)
         .map_err(|e| e.to_string())?;
     let root = snapshot
@@ -419,6 +417,12 @@ fn recover_resume_model(gremlin: &Gremlin) -> Result<(), String> {
         let bytes = original
             .get(key)
             .ok_or("incomplete resume recovery journal")?;
+        if std::fs::read(dir.join(filename)).ok().as_ref() == Some(bytes) {
+            continue;
+        }
+        if filename == "definition.json" {
+            state::resume_write_failure("snapshot").map_err(|e| e.to_string())?;
+        }
         let mut staged = tempfile::NamedTempFile::new_in(&dir).map_err(|e| e.to_string())?;
         staged.write_all(bytes).map_err(|e| e.to_string())?;
         staged.as_file().sync_all().map_err(|e| e.to_string())?;
@@ -484,18 +488,8 @@ pub(crate) async fn handle_resume(request: &Value, registry: &Arc<RunRegistry>) 
     }
 
     let replacement = if let Some(spec) = request.get("model") {
-        // Validate eligibility and the resume point before touching config or disk.
-        if let Some(target) = requested_stage.as_deref() {
-            let definition = match load_definition_snapshot(&gremlin) {
-                Ok(d) => d,
-                Err(resp) => return resp,
-            };
-            if !definition.has_top_level_stage(target) {
-                return error_response(&format!(
-                    "gremlin {id}: unknown top-level stage {target:?}"
-                ));
-            }
-        } else {
+        // Eligibility and target validation must precede publication.
+        if requested_stage.is_none() {
             let stage = gremlin.state.read_str("stage");
             if stage.is_empty() || stage == "starting" {
                 return error_response(&format!(
@@ -529,9 +523,15 @@ pub(crate) async fn handle_resume(request: &Value, registry: &Arc<RunRegistry>) 
     }
 
     let resume_stage = if let Some(target) = requested_stage {
-        let definition = match load_definition_snapshot(&gremlin) {
-            Ok(d) => d,
-            Err(resp) => return resp,
+        let definition = match &replacement {
+            Some((_, bytes)) => match StaticDefinition::from_expanded_bytes(bytes, None, None) {
+                Ok(d) => d,
+                Err(e) => return error_response(&format!("gremlin {id}: {e}")),
+            },
+            None => match load_definition_snapshot(&gremlin) {
+                Ok(d) => d,
+                Err(resp) => return resp,
+            },
         };
         if !definition.has_top_level_stage(&target) {
             return error_response(&format!("gremlin {id}: unknown top-level stage {target:?}"));
