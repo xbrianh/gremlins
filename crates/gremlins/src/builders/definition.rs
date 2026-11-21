@@ -411,6 +411,7 @@ pub struct DefinitionBuilder {
     pub(crate) land: Option<StageSpec>,
     pub(crate) clean_cmds: Vec<String>,
     pub(crate) default_task_models: Option<IndexMap<String, String>>,
+    pub(crate) inherited_artifact_inputs: Vec<String>,
 }
 
 impl DefinitionBuilder {
@@ -427,6 +428,7 @@ impl DefinitionBuilder {
             land: None,
             clean_cmds: Vec::new(),
             default_task_models: None,
+            inherited_artifact_inputs: Vec::new(),
         }
     }
 
@@ -518,10 +520,11 @@ impl DefinitionBuilder {
         }
 
         loader::check_duplicate_producers(&nodes, &self.bootstrap.cli_out)?;
-        loader::check_unresolved_consumers(
+        loader::check_unresolved_consumers_with_inputs(
             &nodes,
             &self.bootstrap.launch_cmds,
             &self.bootstrap.cli_out,
+            &self.inherited_artifact_inputs,
         )?;
 
         let path = self.prompt_dir.unwrap_or_else(|| PathBuf::from("."));
@@ -537,6 +540,8 @@ impl DefinitionBuilder {
             serde_json::Value::Null,
             self.default_task_models,
         );
+
+        definition.inherited_artifact_inputs = self.inherited_artifact_inputs;
 
         // Populate expanded_json from the typed tree.
         let expanded_json = definition.to_expanded_json();

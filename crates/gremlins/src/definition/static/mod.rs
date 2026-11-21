@@ -65,6 +65,8 @@ pub struct StaticDefinition {
     /// profiles at load time. Included in serialized output so child
     /// processes do not depend on the current config.
     pub(crate) default_task_models: Option<IndexMap<String, String>>,
+    /// Actual registry inputs copied into a persistent branch snapshot.
+    pub(crate) inherited_artifact_inputs: Vec<String>,
     cursor: usize,
 }
 
@@ -94,6 +96,7 @@ impl StaticDefinition {
             clean_cmds,
             expanded_json,
             default_task_models,
+            inherited_artifact_inputs: Vec::new(),
             cursor: 0,
         }
     }
@@ -115,6 +118,7 @@ impl StaticDefinition {
             clean_cmds: Vec::new(),
             expanded_json: Value::Null,
             default_task_models: None,
+            inherited_artifact_inputs: Vec::new(),
             cursor: 0,
         }
     }
@@ -145,6 +149,7 @@ impl StaticDefinition {
             clean_cmds,
             expanded_json: Value::Null,
             default_task_models: None,
+            inherited_artifact_inputs: Vec::new(),
             cursor: 0,
         }
     }
@@ -168,7 +173,6 @@ impl StaticDefinition {
             stage_names,
             cursor: 0,
             land: None,
-            clean_cmds: Vec::new(),
             ..self.clone()
         }
     }
@@ -270,6 +274,13 @@ impl StaticDefinition {
                 }
                 root.insert("default_task_models".to_string(), Value::Object(dtc_map));
             }
+        }
+
+        if !self.inherited_artifact_inputs.is_empty() {
+            root.insert(
+                "inherited_artifact_inputs".into(),
+                serde_json::json!(self.inherited_artifact_inputs),
+            );
         }
 
         // bootstrap — omit entirely if all fields are default/empty.
@@ -649,6 +660,7 @@ mod tests {
             clean_cmds: vec![],
             expanded_json: serde_json::Value::Null,
             default_task_models: None,
+            inherited_artifact_inputs: Vec::new(),
             cursor: 0,
         };
         let land = def.land().expect("land is populated");
@@ -669,6 +681,7 @@ mod tests {
             clean_cmds: vec![],
             expanded_json: serde_json::Value::Null,
             default_task_models: None,
+            inherited_artifact_inputs: Vec::new(),
             cursor: 0,
         };
         let boxed: Box<dyn GremlinDefinition> = Box::new(def);
@@ -700,6 +713,7 @@ mod tests {
             clean_cmds: vec![],
             expanded_json: serde_json::Value::Null,
             default_task_models: None,
+            inherited_artifact_inputs: Vec::new(),
             cursor: 0,
         };
         assert_eq!(def.name(), "test-gremlin");
@@ -908,6 +922,7 @@ mod tests {
             clean_cmds: vec![],
             expanded_json: serde_json::Value::Null,
             default_task_models: None,
+            inherited_artifact_inputs: Vec::new(),
             cursor: 0,
         }
     }

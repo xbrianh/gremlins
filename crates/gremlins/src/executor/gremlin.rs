@@ -1050,6 +1050,14 @@ impl Gremlin {
             let snapshot = child_provider.serialize().map_err(|e| {
                 RunError::Message(format!("failed to serialize child definition: {e}"))
             })?;
+            let mut expanded: Value =
+                serde_json::from_slice(&snapshot).map_err(|e| RunError::Message(e.to_string()))?;
+            let mut inherited_inputs = child_state.keys().await;
+            inherited_inputs.sort();
+            expanded["inherited_artifact_inputs"] = serde_json::to_value(inherited_inputs)
+                .map_err(|e| RunError::Message(e.to_string()))?;
+            let snapshot =
+                serde_json::to_vec(&expanded).map_err(|e| RunError::Message(e.to_string()))?;
             child_state
                 .open_blob("definition.json", BlobMode::Write)
                 .map_err(|e| RunError::Message(e.to_string()))?
@@ -2142,6 +2150,56 @@ mod tests {
         // definition must have been loaded by the time `run` returns.
         assert_eq!(handle.run(None).await.unwrap(), 0);
         assert_eq!(handle.definition.name(), "demo");
+    }
+
+    #[tokio::test]
+    async fn reopened_child_keeps_cleanup_without_parent_land_actions() {
+        let fx = GitSandbox::with_definition(
+            r#"{
+                default_model: "cmd/true",
+                stages: [],
+                land: {
+                    land_cmds: ["touch parent-land-ran"],
+                    clean_cmds: ["touch \"$GREMLINS_PROJECT_ROOT/child-clean-ran\""]
+                }
+            }"#,
+        );
+        if fx.is_skipped() {
+            return;
+        }
+        let definition =
+            StaticDefinition::from_json5_file(fx.definition_path(), None, None).unwrap();
+        let parent = Gremlin::init(
+            "gr-clean-parent",
+            fx.definition_path(),
+            &definition,
+            &HashMap::new(),
+            None,
+            &GremlinConfig::default(),
+        )
+        .unwrap();
+        let branch = definition.clone_with_stages(Vec::new());
+        assert!(branch.land.is_none());
+        let child = parent
+            .fork("gr-clean-child", "", "", "", None, Box::new(branch), None)
+            .await
+            .unwrap();
+        let snapshot: Value = serde_json::from_reader(
+            child
+                .state
+                .open_blob("definition.json", BlobMode::Read)
+                .unwrap(),
+        )
+        .unwrap();
+        assert!(snapshot["land"].get("land_cmds").is_none());
+        assert_eq!(snapshot["land"]["clean_cmds"].as_array().unwrap().len(), 1);
+        drop(child);
+
+        let mut reopened = Gremlin::from("gr-clean-child").unwrap();
+        reopened.attach_clean_cmds().unwrap();
+        reopened.clean(true).await;
+        assert!(fx.repo_path().join("child-clean-ran").exists());
+        assert!(!fx.repo_path().join("parent-land-ran").exists());
     }
 
     #[tokio::test]

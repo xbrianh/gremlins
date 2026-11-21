@@ -336,7 +336,7 @@ fn prepare_resume_model(gremlin: &Gremlin, spec: &str) -> Result<(String, Vec<u8
     let concrete = config::resolve_model_reference(spec, &cfg)?
         .trim()
         .to_owned();
-    crate::model_uri::ModelURI::parse(&concrete)?;
+    crate::clients::client::Client::parse(&concrete)?;
     let mut blob = gremlin
         .state
         .open_blob("definition.json", state::BlobMode::Read)

@@ -267,6 +267,7 @@ fn from_expanded_value(
         land,
         clean_cmds,
         default_task_models,
+        inherited_artifact_inputs: json_string_list(root, "inherited_artifact_inputs")?,
     };
 
     builder.build()

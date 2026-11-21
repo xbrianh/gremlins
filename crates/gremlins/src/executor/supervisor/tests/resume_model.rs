@@ -487,6 +487,22 @@ async fn resume_invalid_models_and_unknown_stages_are_side_effect_free() {
 }
 
 #[tokio::test]
+async fn resume_unknown_provider_is_rejected_before_mutation() {
+    let sandbox = Sandbox::new();
+    let dir = seed(&sandbox);
+    for model in ["bogus/model", "model://bogus/model"] {
+        assert!(crate::model_uri::ModelURI::parse(model).is_ok());
+        for stage in [None, Some("run")] {
+            let mut request = json!({"id": ID, "model": model});
+            if let Some(stage) = stage {
+                request["stage"] = json!(stage);
+            }
+            assert_rejected_unchanged(&sandbox, &dir, request).await;
+        }
+    }
+}
+
+#[tokio::test]
 async fn resume_ineligible_states_do_not_change_model_or_publish_attempt() {
     let sandbox = Sandbox::new();
     let dir = seed(&sandbox);
@@ -811,5 +827,141 @@ async fn resume_bailed_run_can_replace_default_model() {
     assert_eq!(
         read_json(dir.join("definition.json"))["default_model"],
         "cmd/echo recovered"
+    );
+}
+
+#[tokio::test]
+async fn resume_parallel_branch_preserves_actual_inherited_artifact_inputs() {
+    use crate::executor::supervisor::handle_launch;
+
+    let sandbox = Sandbox::new();
+    let path = sandbox.join("project/.gremlins/inherited.json5");
+    fs::create_dir_all(path.parent().unwrap()).unwrap();
+    fs::write(
+        &path,
+        serde_json::to_vec(&json!({
+            "default_model": "cmd/true",
+            "stages": [
+                {"name": "produce", "type": "exec",
+                 "interpolation": {"outputs": {"diff": "artifact://diff.txt"}},
+                 "options": {"cmds": ["printf 'prior diff' > {diff}"]}},
+                {"name": "fanout", "type": "parallel", "body": [
+                    {"name": "branch", "type": "exec",
+                     "interpolation": {"inputs": {"diff": "content(\"artifact://diff.txt\")"}},
+                     "options": {"cmds": ["test \"{diff}\" = 'prior diff' && false"]}}
+                ]}
+            ]
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+    let (registry, _shutdown) = spawn_test_actor().await;
+    let response = handle_launch(
+        &json!({"definition": path, "project_root": sandbox.join("project")}),
+        &registry,
+    )
+    .await;
+    assert_eq!(response["type"], "ok", "{response}");
+    let parent_id = response["id"].as_str().unwrap();
+    tokio::time::timeout(Duration::from_secs(10), async {
+        while registry.contains_run(parent_id).await {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("parent did not finish");
+
+    let child_id = format!("{parent_id}:branch");
+    let mut child = Gremlin::from(&child_id).unwrap();
+    let dir = child.state.state_dir();
+    let snapshot = read_json(dir.join("definition.json"));
+    assert_eq!(snapshot["stages"].as_array().unwrap().len(), 1);
+    assert_eq!(snapshot["stages"][0]["name"], "branch");
+    assert!(snapshot["inherited_artifact_inputs"]
+        .as_array()
+        .expect("child snapshot must declare its actual inherited inputs")
+        .contains(&json!("artifact://diff.txt")));
+    assert_eq!(
+        child
+            .state
+            .content("artifact://diff.txt", None)
+            .await
+            .unwrap(),
+        "prior diff"
+    );
+    child
+        .init_runtime(None)
+        .await
+        .expect("branch snapshot must reopen without the producer stage");
+
+    let mut missing_inputs = snapshot.clone();
+    missing_inputs
+        .as_object_mut()
+        .unwrap()
+        .remove("inherited_artifact_inputs");
+    let error = StaticDefinition::from_expanded_bytes(
+        &serde_json::to_vec(&missing_inputs).unwrap(),
+        None,
+        None,
+    )
+    .unwrap_err();
+    assert!(error.to_string().contains("diff.txt"), "{error}");
+
+    // The explicit input list must not weaken validation of unrelated consumers.
+    let mut unknown = snapshot.clone();
+    unknown["stages"][0]["interpolation"]["inputs"]["diff"] =
+        json!("content(\"artifact://never-produced.txt\")");
+    let error =
+        StaticDefinition::from_expanded_bytes(&serde_json::to_vec(&unknown).unwrap(), None, None)
+            .unwrap_err();
+    assert!(error.to_string().contains("never-produced.txt"), "{error}");
+
+    // Repair only the deliberate failure, leaving the inherited consumer intact.
+    let mut repaired = snapshot;
+    repaired["stages"][0]["options"]["cmds"] = json!(["test \"{diff}\" = 'prior diff'"]);
+    fs::write(
+        dir.join("definition.json"),
+        serde_json::to_vec(&repaired).unwrap(),
+    )
+    .unwrap();
+    let mut data = read_json(dir.join("state.json"));
+    data["status"] = json!("stopped");
+    // The completed parent's teardown removes its non-git branch workspace.
+    fs::create_dir_all(data["workdir"].as_str().unwrap()).unwrap();
+    state::write_state(&dir, data.as_object().unwrap()).unwrap();
+    let response = handle_resume(
+        &json!({"id": child_id, "model": "cmd/echo replacement"}),
+        &registry,
+    )
+    .await;
+    assert_eq!(response["type"], "ok", "{response}");
+    tokio::time::timeout(Duration::from_secs(10), async {
+        while registry.contains_run(&child_id).await {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("resumed branch did not finish");
+    let mut reopened = Gremlin::from(&child_id).unwrap();
+    assert_eq!(reopened.state.state_dir(), dir);
+    assert_eq!(
+        reopened.state.read_str("status"),
+        "done",
+        "state: {:?}; log: {:?}",
+        read_json(dir.join("state.json")),
+        fs::read_to_string(dir.join("log"))
+    );
+    reopened.init_runtime(None).await.unwrap();
+    assert_eq!(
+        reopened.definition.default_model().to_string(),
+        "cmd/echo replacement"
+    );
+    assert_eq!(
+        reopened
+            .state
+            .content("artifact://diff.txt", None)
+            .await
+            .unwrap(),
+        "prior diff"
     );
 }
