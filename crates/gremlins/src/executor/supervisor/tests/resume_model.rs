@@ -514,6 +514,13 @@ async fn resume_model_state_write_failure_does_not_replace_snapshot_or_start_wor
         }
         assert_rejected_with_failure(&sandbox, &dir, request, Some("metadata")).await;
     }
+    assert_rejected_with_failure(
+        &sandbox,
+        &dir,
+        json!({"id": ID, "model": "cmd/echo new"}),
+        Some("journal-removal"),
+    )
+    .await;
 }
 
 #[tokio::test]
@@ -537,6 +544,21 @@ async fn resume_model_missing_or_corrupt_snapshot_never_launches_or_forks() {
             assert_rejected_unchanged(&sandbox, &dir, request).await;
         }
     }
+}
+
+#[tokio::test]
+async fn flagless_stage_resume_keeps_defaultless_snapshot_validation() {
+    let sandbox = Sandbox::new();
+    let dir = seed(&sandbox);
+    let mut snapshot = read_json(dir.join("definition.json"));
+    snapshot.as_object_mut().unwrap().remove("default_model");
+    fs::write(
+        dir.join("definition.json"),
+        serde_json::to_vec(&snapshot).unwrap(),
+    )
+    .unwrap();
+    // A persisted override must not change the legacy stage-validation path.
+    assert_rejected_unchanged(&sandbox, &dir, json!({"id": ID, "stage": "run"})).await;
 }
 
 #[tokio::test]

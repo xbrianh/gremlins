@@ -1021,6 +1021,8 @@ impl Gremlin {
         child.insert("pid".to_string(), Value::Null);
         child.insert("exit_code".to_string(), Value::Null);
 
+        // ID-based resume must retain the child's enclosing selection context:
+        // replacing its fallback must not erase composite/task-model precedence.
         child.insert(
             "model_selection_profile".into(),
             parent
@@ -1041,6 +1043,9 @@ impl Gremlin {
         );
 
         let child_state = StateData::from_store(Some(child_id.to_string()), forked_store);
+        // A resumable child needs its branch-local program, not the parent's
+        // snapshot: otherwise --model could reload stages outside this branch.
+        // Ephemeral/native children retain their live provider instead.
         if matches!(&child_workdir, WorkDir::Persistent(_)) {
             let snapshot = child_provider.serialize().map_err(|e| {
                 RunError::Message(format!("failed to serialize child definition: {e}"))

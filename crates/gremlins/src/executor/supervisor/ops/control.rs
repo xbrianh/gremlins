@@ -254,14 +254,12 @@ fn load_definition_snapshot(gremlin: &Gremlin) -> Result<StaticDefinition, Value
             gremlin.id.as_str()
         ))
     })?;
-    StaticDefinition::from_expanded_bytes(&bytes, gremlin.model_override.as_deref(), None).map_err(
-        |e| {
-            error_response(&format!(
-                "gremlin {}: invalid definition snapshot: {e}",
-                gremlin.id.as_str()
-            ))
-        },
-    )
+    StaticDefinition::from_expanded_bytes(&bytes, None, None).map_err(|e| {
+        error_response(&format!(
+            "gremlin {}: invalid definition snapshot: {e}",
+            gremlin.id.as_str()
+        ))
+    })
 }
 
 #[derive(Debug, Default)]
@@ -357,109 +355,13 @@ fn prepare_resume_model(gremlin: &Gremlin, spec: &str) -> Result<(String, Vec<u8
     Ok((concrete, bytes))
 }
 
-fn persist_resume_model(
-    gremlin: &Gremlin,
-    running: &serde_json::Map<String, Value>,
-    bytes: &[u8],
-) -> Result<(), String> {
-    let dir = gremlin.state.state_dir();
-    let state_path = dir.join("state.json");
-    let definition_path = dir.join("definition.json");
-    let _lock = state::acquire_lock(&state_path).map_err(|e| e.to_string())?;
-    let metadata = stage_resume_file(
-        &dir,
-        &serde_json::to_vec(running).map_err(|e| e.to_string())?,
-    )?;
-    let snapshot = stage_resume_file(&dir, bytes)?;
-    let original = HashMap::from([
-        (
-            "definition",
-            std::fs::read(&definition_path).map_err(|e| e.to_string())?,
-        ),
-        (
-            "state",
-            std::fs::read(&state_path).map_err(|e| e.to_string())?,
-        ),
-    ]);
-
-    state::resume_write_failure("snapshot").map_err(|e| e.to_string())?;
-    let recovery_path = dir.join(".resume-model-recovery.json");
-    stage_resume_file(
-        &dir,
-        &serde_json::to_vec(&original).map_err(|e| e.to_string())?,
-    )?
-    .persist(&recovery_path)
-    .map_err(|e| format!("failed to preserve resume recovery journal: {e}"))?;
-    if let Err(e) = snapshot.persist(&definition_path) {
-        recover_resume_model(gremlin)?;
-        return Err(format!("failed to replace definition snapshot: {e}"));
-    }
-    // Running metadata is the publication point; no worker can escape on failure.
-    let publication = state::resume_write_failure("metadata").and_then(|()| {
-        metadata
-            .persist(&state_path)
-            .map(|_| ())
-            .map_err(std::io::Error::other)
-    });
-    if let Err(e) = publication {
-        recover_resume_model(gremlin).map_err(|rollback| {
-            format!("failed to publish resume state: {e}; snapshot rollback failed: {rollback}")
-        })?;
-        return Err(format!("failed to publish resume state: {e}"));
-    }
-    std::fs::remove_file(recovery_path).map_err(|e| e.to_string())
-}
-
-fn stage_resume_file(
-    dir: &std::path::Path,
-    bytes: &[u8],
-) -> Result<tempfile::NamedTempFile, String> {
-    use std::io::Write;
-    let mut staged = tempfile::NamedTempFile::new_in(dir).map_err(|e| e.to_string())?;
-    staged.write_all(bytes).map_err(|e| e.to_string())?;
-    staged.as_file().sync_all().map_err(|e| e.to_string())?;
-    Ok(staged)
-}
-
-// The journal survives failed rollback; all resume paths recover under the per-ID lock.
-fn recover_resume_model(gremlin: &Gremlin) -> Result<(), String> {
-    use std::io::Write;
-    let dir = gremlin.state.state_dir();
-    let path = dir.join(".resume-model-recovery.json");
-    let bytes = match std::fs::read(&path) {
-        Ok(bytes) => bytes,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
-        Err(e) => return Err(e.to_string()),
-    };
-    let original: std::collections::HashMap<String, Vec<u8>> =
-        serde_json::from_slice(&bytes).map_err(|e| e.to_string())?;
-    for (key, filename) in [("definition", "definition.json"), ("state", "state.json")] {
-        let bytes = original
-            .get(key)
-            .ok_or("incomplete resume recovery journal")?;
-        if std::fs::read(dir.join(filename)).ok().as_ref() == Some(bytes) {
-            continue;
-        }
-        if filename == "definition.json" {
-            state::resume_write_failure("snapshot").map_err(|e| e.to_string())?;
-        }
-        state::resume_write_failure("rollback").map_err(|e| e.to_string())?;
-        let mut staged = tempfile::NamedTempFile::new_in(&dir).map_err(|e| e.to_string())?;
-        staged.write_all(bytes).map_err(|e| e.to_string())?;
-        staged.as_file().sync_all().map_err(|e| e.to_string())?;
-        staged
-            .persist(dir.join(filename))
-            .map_err(|e| e.to_string())?;
-    }
-    std::fs::remove_file(path).map_err(|e| e.to_string())
-}
-
 pub(crate) async fn handle_resume(request: &Value, registry: &Arc<RunRegistry>) -> Value {
     let id = match valid_id(request) {
         Ok(id) => id,
         Err(resp) => return resp,
     };
 
+    // Keep the ID lock through recovery, publication, and worker launch.
     let _guard = registry.acquire_id_lock(id).await;
 
     if registry.contains_run(id).await {
@@ -471,19 +373,15 @@ pub(crate) async fn handle_resume(request: &Value, registry: &Arc<RunRegistry>) 
         Err(e) => return error_response(&format!("gremlin {id}: {e}")),
     };
 
-    if gremlin
-        .state
-        .state_dir()
-        .join(".resume-model-recovery.json")
-        .exists()
-    {
-        if let Err(e) = recover_resume_model(&gremlin) {
-            return error_response(&format!("gremlin {id}: failed to recover resume: {e}"));
+    match gremlin.state.store_ref().recover_resume() {
+        Ok(true) => {
+            gremlin = match Gremlin::from(id) {
+                Ok(g) => g,
+                Err(e) => return error_response(&format!("gremlin {id}: {e}")),
+            };
         }
-        gremlin = match Gremlin::from(id) {
-            Ok(g) => g,
-            Err(e) => return error_response(&format!("gremlin {id}: {e}")),
-        };
+        Ok(false) => {}
+        Err(e) => return error_response(&format!("gremlin {id}: failed to recover resume: {e}")),
     }
 
     let status = gremlin.state.read_str("status");
@@ -508,16 +406,16 @@ pub(crate) async fn handle_resume(request: &Value, registry: &Arc<RunRegistry>) 
         ));
     }
 
-    let replacement = if let Some(spec) = request.get("model") {
-        // Eligibility and target validation must precede publication.
-        if requested_stage.is_none() {
-            let stage = gremlin.state.read_str("stage");
-            if stage.is_empty() || stage == "starting" {
-                return error_response(&format!(
-                    "gremlin {id} has no recorded stage to resume from"
-                ));
-            }
+    if !resume_with_stage {
+        let stage = gremlin.state.read_str("stage");
+        if stage.is_empty() || stage == "starting" {
+            return error_response(&format!(
+                "gremlin {id} has no recorded stage to resume from"
+            ));
         }
+    }
+
+    let replacement = if let Some(spec) = request.get("model") {
         let Some(spec) = spec.as_str() else {
             return error_response("model must be a string");
         };
@@ -529,16 +427,20 @@ pub(crate) async fn handle_resume(request: &Value, registry: &Arc<RunRegistry>) 
         None
     };
 
-    let mut running = gremlin.state.state_tree();
+    let mut running = serde_json::Map::new();
     let current_attempt = gremlin.state.read_str("attempt");
     running.extend(serde_json::json!({
         "status": "running", "ended_at": null, "exit_code": null,
         "attempt": format!("{}-resume-{}", if current_attempt.is_empty() { "1" } else { &current_attempt }, state::token_hex(2)),
     }).as_object().unwrap().clone());
     if let Some((model, _)) = &replacement {
-        running
-            .entry("model_selection_profile")
-            .or_insert_with(|| Value::String(gremlin.model_override.clone().unwrap_or_default()));
+        let profile = gremlin
+            .state
+            .state_tree()
+            .get("model_selection_profile")
+            .cloned()
+            .unwrap_or_else(|| Value::String(gremlin.model_override.clone().unwrap_or_default()));
+        running.insert("model_selection_profile".into(), profile);
         running.insert("model_override".into(), Value::String(model.clone()));
         running.insert("model".into(), Value::String(model.clone()));
     }
@@ -578,7 +480,8 @@ pub(crate) async fn handle_resume(request: &Value, registry: &Arc<RunRegistry>) 
         let mut keys: Vec<String> = preserve.into_iter().collect();
         keys.sort();
 
-        let mut rewind_state = running.clone();
+        let mut rewind_state = gremlin.state.state_tree();
+        rewind_state.extend(running.clone());
         rewind_state.insert("stage".into(), Value::String(target.clone()));
 
         rewind_state.insert("pid".into(), Value::Null);
@@ -609,21 +512,13 @@ pub(crate) async fn handle_resume(request: &Value, registry: &Arc<RunRegistry>) 
         target
     } else {
         let stage = gremlin.state.read_str("stage");
-        if stage.is_empty() || stage == "starting" {
+        if let Err(e) = gremlin.state.store_ref().publish_resume(
+            &running,
+            replacement.as_ref().map(|(_, bytes)| bytes.as_slice()),
+        ) {
             return error_response(&format!(
-                "gremlin {id} has no recorded stage to resume from"
+                "gremlin {id}: failed to publish resume state: {e}"
             ));
-        }
-
-        if let Some((_, bytes)) = &replacement {
-            if let Err(e) = persist_resume_model(&gremlin, &running, bytes) {
-                return error_response(&format!("gremlin {id}: {e}"));
-            }
-        }
-        if replacement.is_none() {
-            if let Err(e) = gremlin.state.write_state(&running) {
-                return error_response(&format!("gremlin {id}: failed to write resume state: {e}"));
-            }
         }
         let state_dir = gremlin.state.state_dir();
         let finished = state_dir.join("finished");

@@ -22,6 +22,8 @@ use serde_json::{Map, Value};
 use crate::artifacts::uri::Uri;
 use crate::config;
 
+mod resume;
+
 // ---------------------------------------------------------------------------
 // Error types
 // ---------------------------------------------------------------------------
@@ -159,6 +161,21 @@ pub trait StateStore: Send + Sync + Debug {
 
     /// Write `data` as `state.json` into the store's directory.
     fn write_state(&self, data: &Map<String, Value>) -> Result<(), StateError>;
+
+    /// Merge resume fields under the state lock, optionally replacing the definition.
+    /// Backends must explicitly opt in to transactional resume publication.
+    fn publish_resume(
+        &self,
+        _fields: &Map<String, Value>,
+        _definition: Option<&[u8]>,
+    ) -> Result<(), String> {
+        Err("resume publication is unsupported by this state store".into())
+    }
+
+    /// Restore an interrupted resume. Returns whether a recovery journal existed.
+    fn recover_resume(&self) -> Result<bool, String> {
+        Err("resume recovery is unsupported by this state store".into())
+    }
 
     /// Open a named blob in the state directory. Creates parent directories
     /// as needed. The returned handle supports Read + Write + Seek.
@@ -1166,6 +1183,18 @@ impl StateStore for FileSystemStateStore {
         write_state(self.root.path(), data)
     }
 
+    fn publish_resume(
+        &self,
+        fields: &Map<String, Value>,
+        definition: Option<&[u8]>,
+    ) -> Result<(), String> {
+        resume::publish(self.root.path(), fields, definition)
+    }
+
+    fn recover_resume(&self) -> Result<bool, String> {
+        resume::recover(self.root.path())
+    }
+
     fn open(&self, name: &str, mode: BlobMode) -> Result<Box<dyn StateBlob>, StateError> {
         // Reject traversal and absolute paths.
         if name.contains("..") || name.starts_with('/') || name.contains('\0') {
@@ -1546,6 +1575,10 @@ impl StateStore for FileSystemStateStore {
             })?;
             (gremlin_id, current)
         };
+        // Attempt discovery and strip_attempt_suffix require exactly four digits,
+        // and latest_attempt_dir orders those names lexicographically. Publishing
+        // 10000 would create an invisible attempt, not extend the usable range.
+        // Keep this guard until the naming/discovery contract is migrated together.
         let next = current
             .checked_add(1)
             .filter(|next| *next <= 9999)
@@ -1617,6 +1650,7 @@ impl StateStore for FileSystemStateStore {
             dst.write_all(&bytes)?;
         }
 
+        resume_write_failure("metadata")?;
         child_store.write_state(rewind_state)?;
 
         // Rewrite registry paths before publication. No fallible preparation
@@ -1849,6 +1883,8 @@ impl StateStore for ScopedFileSystemStateStore {
 
     delegate!(inner, fn state_tree(&self) -> Map<String, Value>);
     delegate!(inner, fn write_state(&self, data: &Map<String, Value>) -> Result<(), StateError>);
+    delegate!(inner, fn publish_resume(&self, fields: &Map<String, Value>, definition: Option<&[u8]>) -> Result<(), String>);
+    delegate!(inner, fn recover_resume(&self) -> Result<bool, String>);
     delegate!(inner, fn open(&self, name: &str, mode: BlobMode) -> Result<Box<dyn StateBlob>, StateError>);
     delegate!(inner, fn exists(&self, name: &str) -> bool);
     delegate!(inner, fn clear_stage_error(&self, attempt: &str));
@@ -2484,9 +2520,6 @@ pub fn read_state_json(sf: Option<&Path>) -> Map<String, Value> {
 }
 
 pub fn write_state(state_dir: &Path, data: &Map<String, Value>) -> Result<(), StateError> {
-    if data.get("status").and_then(Value::as_str) == Some("running") {
-        resume_write_failure("metadata")?;
-    }
     let sf = state_dir.join("state.json");
     let _lock = acquire_lock(&sf)?;
     let tmp = state_dir.join(format!(
@@ -2548,6 +2581,8 @@ pub(crate) fn resume_write_failure(point: &str) -> std::io::Result<()> {
         failure.get() == Some(point)
             || (failure.get() == Some("metadata-and-rollback")
                 && matches!(point, "metadata" | "rollback"))
+            || (failure.get() == Some("journal-removal-and-rollback")
+                && matches!(point, "journal-removal" | "rollback"))
     }) {
         return Err(std::io::Error::other(format!(
             "injected resume {point} write failure"
@@ -2558,9 +2593,6 @@ pub(crate) fn resume_write_failure(point: &str) -> std::io::Result<()> {
 }
 
 pub fn atomic_write_json(sf: &Path, data: &Map<String, Value>) -> Result<(), StateError> {
-    if data.get("status").and_then(Value::as_str) == Some("running") {
-        resume_write_failure("metadata")?;
-    }
     let name = sf
         .file_name()
         .and_then(|s| s.to_str())
@@ -2911,11 +2943,12 @@ mod tests {
             let d = StateData::open("gr-test").unwrap();
             d.record_stage_error("other", "no attempt yet");
             let state_dir = sf.parent().unwrap();
-            assert!(std::fs::read_dir(state_dir).unwrap().all(|e| !e
-                .unwrap()
-                .file_name()
-                .to_string_lossy()
-                .starts_with("bail_")));
+            assert!(std::fs::read_dir(state_dir).unwrap().all(|e| {
+                !e.unwrap()
+                    .file_name()
+                    .to_string_lossy()
+                    .starts_with("bail_")
+            }));
 
             let mut fields = Map::new();
             fields.insert("attempt".into(), Value::String("a1".into()));
