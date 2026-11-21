@@ -331,8 +331,9 @@ model-profiles:
   recovery:
     model: model://openai/gpt-4o
     model-by-stage:
-      review: model://anthropic/claude-sonnet-4
+      "review*": model://anthropic/claude-sonnet-4
       review/security: model://openai/o3
+      "review/security*": model://openai/o3
     task-models:
       Scout: model://openai/gpt-4o-mini
 ```
@@ -343,8 +344,9 @@ gremlins resume <id> --stage review --model model://openai/gpt-4o
 ```
 
 With `profile/recovery`, `review/security` matches exactly; descendants of
-`review/security` use that longest prefix rather than `review`. Other review
-stages use the `review` prefix, and unmatched stages use the profile's `model`.
+`review/security` match `review/security*`, the longest prefix, rather than
+`review*`. Prefix rules require a trailing `*`; keys without it match exactly.
+Other review stages match `review*`, and unmatched stages use the profile's `model`.
 New Scout tasks use the profile's task mapping; unmapped task kinds use the
 effective model of their stage, not an old task-model pin.
 

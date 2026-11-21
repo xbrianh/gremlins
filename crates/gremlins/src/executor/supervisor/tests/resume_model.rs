@@ -96,6 +96,9 @@ async fn assert_rejected_with_failure(
 ) {
     let before_state = fs::read(dir.join("state.json")).unwrap();
     let before_definition = fs::read(dir.join("definition.json")).ok();
+    let before_inode = fs::metadata(dir.join("definition.json"))
+        .ok()
+        .map(|m| m.ino());
     let before_entries = entries(sandbox);
     let (registry, _shutdown) = spawn_test_actor().await;
     state::set_resume_write_failure(failure);
@@ -111,6 +114,15 @@ async fn assert_rejected_with_failure(
         fs::read(dir.join("definition.json")).ok(),
         before_definition
     );
+    if failure == Some("metadata") {
+        assert_eq!(
+            fs::metadata(dir.join("definition.json"))
+                .ok()
+                .map(|m| m.ino()),
+            before_inode,
+            "precommit metadata failure must leave the alias inode intact"
+        );
+    }
     assert_eq!(
         entries(sandbox),
         before_entries,
@@ -170,6 +182,7 @@ async fn resume_again_unchanged(
 ) {
     let snapshot = fs::read(dir.join("definition.json")).unwrap();
     let inode = fs::metadata(dir.join("definition.json")).unwrap().ino();
+    let recovery_pending = dir.join(".resume-model-recovery.json").exists();
     let mut data = read_json(dir.join("state.json"));
     data["status"] = json!("stopped");
     state::write_state(dir, data.as_object().unwrap()).unwrap();
@@ -177,10 +190,16 @@ async fn resume_again_unchanged(
     assert_eq!(response["type"], "ok", "{response}");
     drained(registry).await;
     assert_eq!(fs::read(dir.join("definition.json")).unwrap(), snapshot);
-    assert_eq!(
-        fs::metadata(dir.join("definition.json")).unwrap().ino(),
-        inode
-    );
+    let resumed_inode = fs::metadata(dir.join("definition.json")).unwrap().ino();
+    if recovery_pending {
+        assert_ne!(resumed_inode, inode, "committed recovery repairs the alias");
+    } else {
+        assert_eq!(
+            resumed_inode, inode,
+            "flagless resume must preserve the alias"
+        );
+    }
+    assert!(!dir.join(".resume-model-recovery.json").exists());
     assert_eq!(
         read_json(dir.join("state.json"))["model_override"],
         concrete
@@ -741,25 +760,33 @@ async fn resume_double_failure_blocks_retries_until_original_snapshot_is_recover
     let journal = dir.join(".resume-model-recovery.json");
     let (registry, _shutdown) = spawn_test_actor().await;
 
-    // Publication succeeds, but both metadata commit and immediate rollback fail.
-    state::set_resume_write_failure(Some("metadata-and-rollback"));
-    let response = handle_resume(
-        &json!({"id": ID, "model": "cmd/echo replacement"}),
-        &registry,
-    )
-    .await;
-    state::set_resume_write_failure(None);
-    assert_eq!(response["type"], "error", "{response}");
-    assert!(!registry.contains_run(ID).await);
-    assert_eq!(fs::read(dir.join("state.json")).unwrap(), original_state);
-    let replacement_definition = fs::read(dir.join("definition.json")).unwrap();
-    assert_ne!(replacement_definition, original_definition);
+    // Legacy publication replaced the alias before committing metadata. Simulate
+    // interruption there: current publication commits state first and cannot
+    // produce this inconsistent pair on a precommit metadata failure.
     let mut expected: Value = serde_json::from_slice(&original_definition).unwrap();
     replace_selection(
         &mut expected,
         "cmd/echo replacement",
         "cmd/echo replacement",
     );
+    let replacement_definition = serde_json::to_vec(&expected).unwrap();
+    fs::write(dir.join("definition.json"), &replacement_definition).unwrap();
+    fs::write(
+        &journal,
+        serde_json::to_vec(&json!({
+            "state": original_state,
+            "definition": original_definition
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+
+    state::set_resume_write_failure(Some("metadata-and-rollback"));
+    let response = handle_resume(&json!({"id": ID}), &registry).await;
+    state::set_resume_write_failure(None);
+    assert_eq!(response["type"], "error", "{response}");
+    assert!(!registry.contains_run(ID).await);
+    assert_eq!(fs::read(dir.join("state.json")).unwrap(), original_state);
     assert_eq!(read_json(dir.join("definition.json")), expected);
     let retained_journal =
         fs::read(&journal).expect("failed rollback must retain recovery journal");

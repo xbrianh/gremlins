@@ -1,4 +1,7 @@
 use super::*;
+
+#[path = "publication_boundary_tests.rs"]
+mod boundary;
 use std::io::{Cursor, Read};
 use std::sync::{Barrier, Mutex};
 
@@ -260,6 +263,116 @@ fn publication_contract_for_filesystem_and_memory() {
         assert!(!restarted.store_handle().recover_resume().unwrap());
         assert_eq!(restarted.state_tree(), committed);
     }
+}
+
+#[test]
+fn ordinary_and_rewind_publications_conflict_in_both_orders() {
+    crate::test_support::with_sandbox(None, |_| {
+        tokio::runtime::Runtime::new().unwrap().block_on(async {
+            for rewind_first in [false, true] {
+                let id = format!("publication-order-{rewind_first}");
+                let initial = serde_json::json!({"id": id, "attempt": 1});
+                let store =
+                    FileSystemStateStore::create(&id, initial.as_object().unwrap(), false).unwrap();
+                store.initialize_definition(b"A").unwrap();
+                let expected = store.state_tree();
+                let mut child_fields = expected.clone();
+                child_fields.insert("attempt".into(), Value::from(2));
+                if rewind_first {
+                    let child = store
+                        .fork_to_stage_conditional(&expected, &[], &child_fields, Some(b"B"))
+                        .await
+                        .unwrap();
+                    assert_eq!(store.state_tree(), expected);
+                    let result = store.publish_resume_conditional(
+                        &expected,
+                        &Map::new(),
+                        Some(b"C"),
+                        &Map::new(),
+                    );
+                    assert!(result.unwrap_err().contains("newer attempt"));
+                    assert_eq!(store.state_tree(), expected);
+                    let child_state = child.state_tree();
+                    assert_eq!(
+                        child_state["definition_history"].as_array().unwrap().len(),
+                        2
+                    );
+                    assert_eq!(
+                        child_state["definition_history"][1]["predecessor"],
+                        expected["definition_revision"]
+                    );
+                    assert_eq!(
+                        child
+                            .read_definition_revision(
+                                expected["definition_revision"].as_str().unwrap()
+                            )
+                            .unwrap(),
+                        b"A"
+                    );
+                } else {
+                    store
+                        .publish_resume_conditional(&expected, &Map::new(), Some(b"C"), &Map::new())
+                        .unwrap();
+                    let committed = store.state_tree();
+                    let result = store
+                        .fork_to_stage_conditional(&expected, &[], &child_fields, Some(b"B"))
+                        .await;
+                    assert!(result.unwrap_err().to_string().contains("conflict"));
+                    assert_eq!(store.state_tree(), committed);
+                    assert!(!attempt_dir_path(&id, 2).exists());
+                }
+            }
+        });
+    });
+}
+
+#[test]
+fn first_legacy_rewind_archives_parent_provenance_without_mutation() {
+    crate::test_support::with_sandbox(None, |_| {
+        tokio::runtime::Runtime::new().unwrap().block_on(async {
+            let id = "publication-legacy-provenance";
+            let initial =
+                serde_json::json!({"id": id, "attempt": 1, "model_override": "profile/parent"});
+            let store =
+                FileSystemStateStore::create(id, initial.as_object().unwrap(), false).unwrap();
+            let parent_definition = br#"{"default_model":"cmd/parent"}"#;
+            std::fs::write(store.root.path().join("definition.json"), parent_definition).unwrap();
+            let expected = store.state_tree();
+            let mut fields = expected.clone();
+            fields.insert("attempt".into(), Value::from(2));
+            fields.insert("model_override".into(), Value::from("profile/child"));
+            let child = store
+                .fork_to_stage_conditional(
+                    &expected,
+                    &[],
+                    &fields,
+                    Some(br#"{"default_model":"cmd/child"}"#),
+                )
+                .await
+                .unwrap();
+            assert_eq!(store.state_tree(), expected);
+            assert_eq!(
+                std::fs::read(store.root.path().join("definition.json")).unwrap(),
+                parent_definition
+            );
+            assert!(!store.root.path().join("definition-revisions").exists());
+            let state = child.state_tree();
+            let history = state["definition_history"].as_array().unwrap();
+            assert_eq!(history.len(), 2);
+            assert_eq!(history[0]["attempt"], 1);
+            assert_eq!(history[0]["requested_selection"], "profile/parent");
+            assert_eq!(history[0]["predecessor"], Value::Null);
+            assert_eq!(history[1]["attempt"], 2);
+            assert_eq!(history[1]["requested_selection"], "profile/child");
+            assert_eq!(history[1]["predecessor"], history[0]["id"]);
+            assert_eq!(
+                child
+                    .read_definition_revision(history[0]["id"].as_str().unwrap())
+                    .unwrap(),
+                parent_definition
+            );
+        });
+    });
 }
 
 #[test]

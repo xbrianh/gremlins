@@ -63,8 +63,38 @@ async fn run(id: &str, selection: Option<&str>, stage: Option<&str>) {
     drained(&registry, id).await;
 }
 
+fn assert_history(dir: &Path, snapshots: &[&[u8]]) {
+    let data = read_json(dir.join("state.json"));
+    let history = data["definition_history"].as_array().unwrap();
+    assert_eq!(history.len(), snapshots.len());
+    let state = Gremlin::from(data["id"].as_str().unwrap()).unwrap().state;
+    for (index, (entry, expected)) in history.iter().zip(snapshots).enumerate() {
+        assert_eq!(
+            state
+                .read_definition_revision(entry["id"].as_str().unwrap())
+                .unwrap(),
+            *expected
+        );
+        if index == 0 {
+            assert!(entry["predecessor"].is_null());
+        } else {
+            assert_eq!(entry["predecessor"], history[index - 1]["id"]);
+        }
+    }
+    assert_eq!(data["definition_revision"], history.last().unwrap()["id"]);
+}
+
 #[tokio::test]
-async fn resume_dispatch_profile_history_survives_edits_removal_and_concrete_replacement() {
+async fn ordinary_resume_dispatch_preserves_revision_chain() {
+    profile_history(false).await;
+}
+
+#[tokio::test]
+async fn rewind_resume_dispatch_preserves_revision_chain_and_parent() {
+    profile_history(true).await;
+}
+
+async fn profile_history(fork_c: bool) {
     let sandbox = Sandbox::new();
     let log = sandbox.join("dispatch.log");
     let gate = sandbox.join("ready");
@@ -85,9 +115,25 @@ async fn resume_dispatch_profile_history_survives_edits_removal_and_concrete_rep
     let id = launch(&registry, &path, Some("profile/A")).await;
     drop(shutdown);
     let dir = Gremlin::from(&id).unwrap().state.state_dir();
+    // Model a pre-revision run, including noncanonical snapshot whitespace.
+    let mut legacy = read_json(dir.join("state.json"));
+    legacy
+        .as_object_mut()
+        .unwrap()
+        .remove("definition_revision");
+    legacy.as_object_mut().unwrap().remove("definition_history");
+    state::write_state(&dir, legacy.as_object().unwrap()).unwrap();
+    fs::remove_dir_all(dir.join("definition-revisions")).unwrap();
+    let a = format!(
+        "{}\n\n",
+        serde_json::to_string_pretty(&read_json(dir.join("definition.json"))).unwrap()
+    )
+    .into_bytes();
+    fs::write(dir.join("definition.json"), &a).unwrap();
     fs::write(&gate, "ready").unwrap();
     run(&id, Some("profile/B"), None).await;
     let b = fs::read(dir.join("definition.json")).unwrap();
+    assert_history(&dir, &[&a, &b]);
     let history = dir.join("artifacts/acceptance-history");
     fs::write(&history, b"historical bytes\n\0").unwrap();
     let expected = "B-exact\nB-long\nB-short\nB\n";
@@ -107,18 +153,44 @@ async fn resume_dispatch_profile_history_survives_edits_removal_and_concrete_rep
     settings(&sandbox, &log, false);
     rewind(&dir);
     let parent_state = fs::read(dir.join("state.json")).unwrap();
-    run(&id, Some("profile/C"), Some("gate")).await;
+    run(&id, Some("profile/C"), fork_c.then_some("gate")).await;
     let fork = Gremlin::from(&id).unwrap().state.state_dir();
-    assert_ne!(fork, dir);
-    assert_eq!(fs::read(dir.join("state.json")).unwrap(), parent_state);
-    assert_eq!(fs::read(dir.join("definition.json")).unwrap(), b);
+    if fork_c {
+        assert_ne!(fork, dir);
+        assert_eq!(fs::read(dir.join("state.json")).unwrap(), parent_state);
+        assert_eq!(fs::read(dir.join("definition.json")).unwrap(), b);
+        assert_history(&dir, &[&a, &b]);
+    } else {
+        assert_eq!(fork, dir);
+    }
     assert_eq!(fs::read(&history).unwrap(), b"historical bytes\n\0");
-    let c: Value = read_json(fork.join("definition.json"));
-    assert_eq!(c["resolved_model_selection"]["requested"], "profile/C");
+    let c = fs::read(fork.join("definition.json")).unwrap();
+    let selected: Value = serde_json::from_slice(&c).unwrap();
+    assert_eq!(
+        selected["resolved_model_selection"]["requested"],
+        "profile/C"
+    );
+    assert_history(&fork, &[&a, &b, &c]);
     assert_eq!(
         fs::read_to_string(&log).unwrap(),
         format!("{}{}", expected.repeat(3), "C\n".repeat(4))
     );
+
+    fs::write(sandbox.join("config/settings.yaml"), "{}\n").unwrap();
+    config::init_global().unwrap();
+    rewind(&fork);
+    run(&id, None, None).await;
+    assert_eq!(fs::read(fork.join("definition.json")).unwrap(), c);
+    assert_history(&fork, &[&a, &b, &c]);
+    assert_eq!(
+        fs::read_to_string(&log).unwrap(),
+        format!("{}{}", expected.repeat(3), "C\n".repeat(8))
+    );
+    assert_eq!(fs::read(&history).unwrap(), b"historical bytes\n\0");
+    if fork_c {
+        assert_eq!(fs::read(dir.join("state.json")).unwrap(), parent_state);
+        assert_eq!(fs::read(dir.join("definition.json")).unwrap(), b);
+    }
 
     rewind(&fork);
     let concrete = model(&log, "concrete");

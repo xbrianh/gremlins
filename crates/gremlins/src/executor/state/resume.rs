@@ -80,9 +80,11 @@ fn append_revision(
     let id = archive(dir, bytes)?;
     let mut entry = metadata.clone();
     let snapshot = crate::definition::r#static::yaml::parse_expanded_json(bytes).ok();
-    let selection = snapshot
-        .as_ref()
-        .and_then(|value| value.get("resolved_model_selection"));
+    let selection = snapshot.as_ref().and_then(|value| {
+        value
+            .get("resolved_model_selection")
+            .or_else(|| value.get("launch_model_selection"))
+    });
     entry.entry("requested_selection").or_insert_with(|| {
         selection
             .and_then(|value| value.get("requested"))
@@ -138,6 +140,9 @@ pub(super) fn publish(
 ) -> Result<(), String> {
     let _lock = acquire_lock(&dir.join("state.json")).map_err(|e| e.to_string())?;
     recover_unlocked(dir)?;
+    if expected.is_some() {
+        super::validate_resume_attempt(dir)?;
+    }
     // Never use a caller's stale full-state snapshot as the base of the merge.
     let original_state = fs::read_to_string(dir.join("state.json")).map_err(|e| e.to_string())?;
     let mut state: Map<String, Value> =
@@ -180,11 +185,8 @@ pub(super) fn publish(
     let publication = (|| {
         // The undo record must be durable before either target is replaced.
         sync_dir(dir)?;
-        if let Some(snapshot) = snapshot {
-            snapshot
-                .persist(dir.join("definition.json"))
-                .map_err(|e| e.to_string())?;
-        }
+        #[cfg(test)]
+        publication_boundary(dir, "before-commit");
         resume_write_failure("metadata").map_err(|e| e.to_string())?;
         metadata
             .persist(dir.join("state.json"))
@@ -208,6 +210,17 @@ pub(super) fn publish(
     journal.committed = true;
     let cleanup = (|| {
         sync_dir(dir)?;
+        #[cfg(test)]
+        publication_boundary(dir, "after-commit");
+        // Legacy readers keep the old alias until commit; revision-backed
+        // readers use the durable archive even while this alias is still old.
+        if let Some(snapshot) = snapshot {
+            resume_write_failure("alias").map_err(|e| e.to_string())?;
+            snapshot
+                .persist(dir.join("definition.json"))
+                .map_err(|e| e.to_string())?;
+            sync_dir(dir)?;
+        }
         replace(
             dir,
             JOURNAL,
@@ -239,11 +252,44 @@ fn journal_is_committed(dir: &Path, journal: &Journal) -> bool {
     if let Some(target) = &journal.committed_state {
         return current == target.bytes();
     }
-    // Legacy publishers also replaced state.json last. A valid changed state is
-    // evidence that publication reached its commit point; do not undo it merely
-    // because the process died before unlinking the old-format journal.
-    current != journal.state.bytes()
-        && serde_json::from_slice::<Map<String, Value>>(&current).is_ok()
+    // A generic writer may have changed state during an interrupted legacy
+    // publication. Without an explicit target, only the backup pair is known.
+    false
+}
+
+fn restore_committed_alias(dir: &Path, journal: &Journal) -> Result<(), String> {
+    let Some(target) = &journal.committed_state else {
+        return Ok(());
+    };
+    let state: Map<String, Value> =
+        serde_json::from_slice(target.bytes()).map_err(|e| e.to_string())?;
+    if let Some(Value::String(id)) = state.get("definition_revision") {
+        if id.len() != 32 || !id.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+            return Err("invalid definition revision in recovery journal".into());
+        }
+        let bytes = fs::read(dir.join("definition-revisions").join(format!("{id}.json")))
+            .map_err(|e| e.to_string())?;
+        replace(dir, "definition.json", &bytes)?;
+        sync_dir(dir)?;
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+type PublicationBoundary = fn(&Path, &str);
+
+#[cfg(test)]
+thread_local! {
+    static PUBLICATION_BOUNDARY: std::cell::RefCell<Option<PublicationBoundary>> = const { std::cell::RefCell::new(None) };
+}
+
+#[cfg(test)]
+fn publication_boundary(dir: &Path, boundary: &str) {
+    PUBLICATION_BOUNDARY.with(|hook| {
+        if let Some(hook) = *hook.borrow() {
+            hook(dir, boundary);
+        }
+    });
 }
 
 // Caller owns state.json.lock, including when invoked during publication rollback.
@@ -255,6 +301,7 @@ pub(super) fn recover_unlocked(dir: &Path) -> Result<bool, String> {
     };
     let journal: Journal = serde_json::from_slice(&bytes).map_err(|e| e.to_string())?;
     if journal_is_committed(dir, &journal) {
+        restore_committed_alias(dir, &journal)?;
         fs::remove_file(dir.join(JOURNAL)).map_err(|e| e.to_string())?;
         sync_dir(dir)?;
         return Ok(true);
@@ -345,6 +392,42 @@ mod tests {
                 .unwrap(),
             b"new snapshot"
         );
+        let second = store.state_tree();
+        store
+            .publish_resume_conditional(
+                &second,
+                &Map::new(),
+                Some(b"third snapshot\n"),
+                metadata.as_object().unwrap(),
+            )
+            .unwrap();
+        let state = store.state_tree();
+        let history = state["definition_history"].as_array().unwrap();
+        assert_eq!(history.len(), 3);
+        assert!(history[0]["predecessor"].is_null());
+        for (index, bytes) in [legacy.as_slice(), b"new snapshot", b"third snapshot\n"]
+            .into_iter()
+            .enumerate()
+        {
+            assert_eq!(
+                store
+                    .read_definition_revision(history[index]["id"].as_str().unwrap())
+                    .unwrap(),
+                bytes
+            );
+            if index > 0 {
+                assert_eq!(history[index]["predecessor"], history[index - 1]["id"]);
+                assert_eq!(
+                    history[index]["requested_selection"],
+                    metadata["requested_selection"]
+                );
+                assert_eq!(
+                    history[index]["resolved_selection"],
+                    metadata["resolved_selection"]
+                );
+            }
+        }
+        assert_eq!(state["definition_revision"], history[2]["id"]);
         let before = fs::read(dir.path().join("state.json")).unwrap();
         assert!(store
             .publish_resume_conditional(&expected, &Map::new(), Some(b"stale"), &Map::new())
@@ -371,6 +454,75 @@ mod tests {
         store.clear_finished().unwrap();
         assert!(!store.exists("finished"));
         assert!(store.read_definition_revision("../bad").is_err());
+    }
+
+    #[test]
+    fn readers_see_matching_definition_at_publication_boundaries() {
+        use crate::executor::state::{BlobMode, StateData};
+        use std::io::Read;
+
+        let dir = tempfile::tempdir().unwrap();
+        let store = seed(dir.path());
+        PUBLICATION_BOUNDARY.with(|hook| {
+            *hook.borrow_mut() = Some(|dir, boundary| {
+                let store = FileSystemStateStore::from_path(dir.to_path_buf());
+                let state = store.state_tree();
+                let data = StateData::from_store(None, Box::new(store));
+                let mut bytes = Vec::new();
+                data.open_blob("definition.json", BlobMode::Read)
+                    .unwrap()
+                    .read_to_end(&mut bytes)
+                    .unwrap();
+                // The alias is still old on both sides of the state commit.
+                assert_eq!(
+                    fs::read(dir.join("definition.json")).unwrap(),
+                    br#"{"model":"old"}"#
+                );
+                if boundary == "before-commit" {
+                    assert_eq!(state["status"], "paused");
+                    assert!(state.get("definition_revision").is_none());
+                    assert_eq!(bytes, br#"{"model":"old"}"#);
+                } else {
+                    assert_eq!(state["status"], "running");
+                    assert!(state["definition_revision"].is_string());
+                    assert_eq!(bytes, b"new snapshot");
+                }
+            });
+        });
+        let result = store.publish_resume(
+            json!({"status":"running"}).as_object().unwrap(),
+            Some(b"new snapshot"),
+        );
+        PUBLICATION_BOUNDARY.with(|hook| *hook.borrow_mut() = None);
+        result.unwrap();
+        assert_eq!(
+            fs::read(dir.path().join("definition.json")).unwrap(),
+            b"new snapshot"
+        );
+    }
+
+    #[test]
+    fn alias_failure_is_committed_and_repaired_on_recovery() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = seed(dir.path());
+        set_resume_write_failure(Some("alias"));
+        let result = store.publish_resume(
+            json!({"status":"running"}).as_object().unwrap(),
+            Some(b"new snapshot"),
+        );
+        set_resume_write_failure(None);
+        result.unwrap();
+        assert_eq!(store.state_tree()["status"], "running");
+        assert_eq!(
+            fs::read(dir.path().join("definition.json")).unwrap(),
+            br#"{"model":"old"}"#
+        );
+        assert!(store.recover_resume().unwrap());
+        assert_eq!(
+            fs::read(dir.path().join("definition.json")).unwrap(),
+            b"new snapshot"
+        );
+        assert!(!store.recover_resume().unwrap());
     }
 
     #[test]
@@ -432,13 +584,20 @@ mod tests {
             let dir = tempfile::tempdir().unwrap();
             let store = seed(dir.path());
             let original = fs::read(dir.path().join("state.json")).unwrap();
+            let journal = json!({
+                "state": String::from_utf8(original.clone()).unwrap(),
+                "definition": "{\"model\":\"old\"}"
+            });
+            fs::write(
+                dir.path().join(JOURNAL),
+                serde_json::to_vec(&journal).unwrap(),
+            )
+            .unwrap();
+            fs::write(dir.path().join("definition.json"), b"interrupted snapshot").unwrap();
             set_resume_write_failure(Some(fault));
-            let result = store.publish_resume(
-                json!({"status":"running"}).as_object().unwrap(),
-                Some(br#"{"model":"new"}"#),
-            );
+            let result = store.recover_resume();
             set_resume_write_failure(None);
-            assert!(result.unwrap_err().contains("rollback failed"));
+            assert!(result.unwrap_err().to_string().contains("rollback"));
             let journal: Value =
                 serde_json::from_slice(&fs::read(dir.path().join(JOURNAL)).unwrap()).unwrap();
             assert!(journal["state"].is_string());
@@ -476,7 +635,7 @@ mod tests {
     }
 
     #[test]
-    fn recovery_recognizes_commit_before_journal_mark_and_legacy_commit() {
+    fn recovery_requires_explicit_commit_evidence() {
         for legacy in [false, true] {
             let dir = tempfile::tempdir().unwrap();
             let store = seed(dir.path());
@@ -500,11 +659,22 @@ mod tests {
             )
             .unwrap();
             assert!(store.recover_resume().unwrap());
-            assert_ne!(
-                fs::read_to_string(dir.path().join("state.json")).unwrap(),
-                original
-            );
-            assert_eq!(store.state_tree()["status"], "running");
+            if legacy {
+                assert_eq!(
+                    fs::read_to_string(dir.path().join("state.json")).unwrap(),
+                    original
+                );
+                assert_eq!(
+                    fs::read(dir.path().join("definition.json")).unwrap(),
+                    br#"{"model":"old"}"#
+                );
+            } else {
+                assert_ne!(
+                    fs::read_to_string(dir.path().join("state.json")).unwrap(),
+                    original
+                );
+                assert_eq!(store.state_tree()["status"], "running");
+            }
         }
     }
 
@@ -520,6 +690,12 @@ mod tests {
         )
         .unwrap();
         fs::write(dir.path().join("definition.json"), b"uncommitted snapshot").unwrap();
+        // Valid JSON from an unrelated writer is not proof of a legacy commit.
+        fs::write(
+            dir.path().join("state.json"),
+            br#"{"status":"paused","cost":99}"#,
+        )
+        .unwrap();
         assert!(store.recover_resume().unwrap());
         assert_eq!(
             fs::read(dir.path().join("definition.json")).unwrap(),

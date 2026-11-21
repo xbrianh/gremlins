@@ -1765,9 +1765,16 @@ impl StateStore for FileSystemStateStore {
                 &tmp_dir.join("definition-revisions"),
             )?;
         }
+        // Import a legacy snapshot against parent provenance before merging any
+        // child attempt/model fields. Only the unpublished child is mutated.
+        child_store.write_state(expected)?;
+        if !expected.contains_key("definition_revision") && child_store.exists("definition.json") {
+            child_store.publish_resume(&Map::new(), None)?;
+        }
+        let inherited = child_store.state_tree();
         let mut child_state = rewind_state.clone();
         for field in ["definition_revision", "definition_history"] {
-            if let Some(value) = self.state_tree().get(field) {
+            if let Some(value) = inherited.get(field) {
                 child_state.insert(field.into(), value.clone());
             }
         }
@@ -2714,6 +2721,25 @@ pub fn write_state(state_dir: &Path, data: &Map<String, Value>) -> Result<(), St
     ));
     std::fs::write(&tmp, serde_json::to_string(data)?)?;
     std::fs::rename(&tmp, &sf)?;
+    Ok(())
+}
+
+pub(super) fn validate_resume_attempt(dir: &Path) -> Result<(), String> {
+    let Some(name) = dir.file_name().and_then(|name| name.to_str()) else {
+        return Ok(());
+    };
+    let Some(base) = strip_attempt_suffix(name) else {
+        return Ok(());
+    };
+    let id = reverse_state_safe_id(&base);
+    let state = read_state_json(Some(&dir.join("state.json")));
+    // Arbitrary backend paths are not part of persisted attempt discovery.
+    if state.get("id").and_then(Value::as_str) != Some(id.as_str()) {
+        return Ok(());
+    }
+    if latest_attempt_dir(&id).map_err(|error| error.to_string())? != dir {
+        return Err("resume conflict: a newer attempt exists".into());
+    }
     Ok(())
 }
 

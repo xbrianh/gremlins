@@ -177,11 +177,58 @@ pub(crate) struct RuntimeConfig {
 }
 
 impl RuntimeConfig {
-    /// Snapshot the current global config and process environment.
-    ///
-    /// When `model_override` is a `profile/<name>` reference, the profile's
-    /// `model-by-stage` entries are merged into `profile_stage_models_exact` /
-    /// `profile_stage_models_prefix`, winning over the global default profile.
+    /// Metadata only; never installed as a replacement dispatch selection.
+    fn launch_model_selection(
+        &self,
+        definition: &StaticDefinition,
+        model_override: Option<&str>,
+    ) -> Value {
+        let cfg = config::get_global();
+        let fallback = definition.default_model.to_string();
+        let requested = model_override
+            .filter(|value| !value.is_empty())
+            .or(self.default_model.as_deref())
+            .unwrap_or(&fallback);
+        let profile = cfg.as_ref().and_then(|cfg| {
+            config::profile_name(requested).and_then(|name| cfg.model_profiles().get(name))
+        });
+        let mut exact = self.stage_models_exact.clone();
+        exact.extend(self.profile_stage_models_exact.clone());
+        let mut prefix = self.stage_models_prefix.clone();
+        prefix.extend(self.profile_stage_models_prefix.clone());
+        let tasks = config::merge_task_models_runtime(
+            definition.default_task_models.as_ref(),
+            None,
+            profile.and_then(|profile| profile.task_models.as_ref()),
+        )
+        .map(|models| {
+            models
+                .into_iter()
+                .map(|(key, model)| {
+                    let resolved = cfg
+                        .as_ref()
+                        .and_then(|cfg| config::resolve_model_reference(&model, cfg).ok())
+                        .unwrap_or(model);
+                    (key, resolved)
+                })
+                .collect::<IndexMap<_, _>>()
+        });
+        serde_json::json!({
+            "requested": requested,
+            "default_model": definition.default_model.to_string(),
+            "stage_models_exact": exact,
+            "stage_models_prefix": prefix,
+            "task_models": tasks,
+            // Keep layer boundaries: a profile prefix beats a global exact.
+            "profile_stage_models_exact": self.profile_stage_models_exact,
+            "profile_stage_models_prefix": self.profile_stage_models_prefix,
+            "global_stage_models_exact": self.stage_models_exact,
+            "global_stage_models_prefix": self.stage_models_prefix,
+        })
+    }
+
+    /// Snapshot config and environment, merging CLI profile stage mappings
+    /// over the global default profile without changing dispatch precedence.
     pub(crate) fn snapshot(model_override: Option<&str>) -> Self {
         let cfg = config::get_global();
         let (stage_exact, stage_prefix) = cfg
@@ -453,12 +500,18 @@ impl Gremlin {
             }
         };
 
+        let runtime_config = RuntimeConfig::snapshot(model_override);
+
         // Write the hermetic definition.json snapshot now, before we
         // return the handle, so the spawned child always sees the
         // definition as it was at launch time — no TOCTTOU window.
         if native_stage.is_none() {
-            let yaml_bytes = _definition
-                .serialize()
+            let mut snapshot = _definition.to_expanded_json();
+            // Audit only: resolved_model_selection would activate resume's
+            // replacement dispatch and override explicit stage/call-site pins.
+            snapshot["launch_model_selection"] =
+                runtime_config.launch_model_selection(_definition, model_override);
+            let yaml_bytes = serde_json::to_vec(&snapshot)
                 .map_err(|e| RunError::Message(format!("failed to serialize definition: {e}")))?;
             state.initialize_definition(&yaml_bytes).map_err(|e| {
                 RunError::Message(format!("failed to write hermetic definition: {e}"))
@@ -471,9 +524,6 @@ impl Gremlin {
         let mut stub = StaticDefinition::stub();
         stub.path = definition_path.clone();
         let stub: Box<dyn GremlinDefinition> = Box::new(stub);
-
-        // Snapshot the runtime config before gremlin_id is moved.
-        let runtime_config = RuntimeConfig::snapshot(model_override);
 
         let gremlin = Gremlin {
             id: gremlin_id,
@@ -3268,6 +3318,97 @@ mod tests {
         // clean() on an ephemeral gremlin is harmless — TempDir destructor
         // handles actual cleanup.
         gremlin.clean(true).await;
+    }
+
+    #[tokio::test]
+    async fn launch_profile_audit_does_not_activate_replacement_dispatch() {
+        let sandbox = Sandbox::with_config(Some(
+            r#"
+ default-model: profile/base
+ default-model-by-stage:
+   fallback: cmd/global
+ default-task-models:
+   Scout: profile/task
+ model-profiles:
+   task:
+     model: openrouter/test-task
+   base:
+     model: cmd/base
+     model-by-stage:
+       inherited: cmd/inherited
+   launch:
+     model: cmd/launch
+     model-by-stage:
+       plan: cmd/profile-plan
+       review*: cmd/profile-review
+     task-models:
+       Implement: profile/task
+ "#,
+        ));
+        config::init_global().unwrap();
+        std::fs::write(sandbox.join("test"), "test prompt").unwrap();
+        let path = sandbox.join("demo.json5");
+        std::fs::write(
+            &path,
+            r#"{
+            name: 'demo',
+            stages: [{type: 'agent', name: 'plan', model: 'cmd/pinned', prompt: 'test'}]
+        }"#,
+        )
+        .unwrap();
+        let definition =
+            StaticDefinition::from_json5_file(&path, Some("profile/launch"), Some("profile/base"))
+                .unwrap();
+        let mut gremlin = Gremlin::init(
+            "audit",
+            &path,
+            &definition,
+            &HashMap::new(),
+            Some("profile/launch"),
+            &GremlinConfig::default(),
+        )
+        .unwrap();
+        let state = gremlin.state.state_tree();
+        let audit = &state["definition_history"][0];
+        assert_eq!(audit["requested_selection"], "profile/launch");
+        let selection = &audit["resolved_selection"];
+        assert_eq!(
+            selection["default_model"],
+            definition.default_model.to_string()
+        );
+        assert_eq!(selection["stage_models_exact"]["plan"], "cmd/profile-plan");
+        assert_eq!(
+            selection["stage_models_exact"]["inherited"],
+            "cmd/inherited"
+        );
+        assert_eq!(selection["stage_models_exact"]["fallback"], "cmd/global");
+        assert_eq!(
+            selection["stage_models_prefix"]["review"],
+            "cmd/profile-review"
+        );
+        assert_eq!(selection["task_models"]["Scout"], "openrouter/test-task");
+        assert_eq!(
+            selection["task_models"]["Implement"],
+            "openrouter/test-task"
+        );
+        let snapshot = read_state(&gremlin.state.state_dir().join("definition.json"));
+        assert!(snapshot.get("resolved_model_selection").is_none());
+        gremlin.init_runtime(None).await.unwrap();
+        assert!(gremlin.runtime_config.resolved_model_selection.is_none());
+        let stage = gremlin.definition.next_stage().await.unwrap();
+        let client = crate::executor::run::resolve_client(&stage, &gremlin, None).unwrap();
+        assert_eq!(client.model(), "pinned");
+        let mut unpinned = stage;
+        if let crate::definition::ExecutorStage::Agent { model, .. } = &mut unpinned {
+            *model = None;
+        }
+        let enclosing = ModelURI::parse("cmd/enclosing").unwrap();
+        let client =
+            crate::executor::run::resolve_client(&unpinned, &gremlin, Some(&enclosing)).unwrap();
+        assert_eq!(client.model(), "enclosing");
+        let client = crate::executor::run::resolve_client(&unpinned, &gremlin, None).unwrap();
+        assert_eq!(client.model(), "profile-plan");
+        config::clear_global();
     }
 
     // --- RuntimeConfig::snapshot model-override merge ---
