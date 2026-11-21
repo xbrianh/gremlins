@@ -227,6 +227,39 @@ async fn resume_model_persists_and_normal_worker_load_ignores_changed_source() {
     resume_again_unchanged(&sandbox, &dir, &registry, "cmd/echo replacement").await;
 }
 
+#[tokio::test]
+async fn resume_padded_raw_model_persists_trimmed_without_losing_internal_spaces() {
+    let sandbox = Sandbox::new();
+    let dir = seed(&sandbox);
+    let (registry, _shutdown) = spawn_test_actor().await;
+    let response = handle_resume(
+        &json!({"id": ID, "model": " \tcmd/echo replacement \n"}),
+        &registry,
+    )
+    .await;
+    assert_eq!(response["type"], "ok", "{response}");
+    drained(&registry).await;
+    let persisted = read_json(dir.join("state.json"));
+    assert_eq!(persisted["model"], "cmd/echo replacement");
+    assert_eq!(persisted["model_override"], "cmd/echo replacement");
+    assert_eq!(
+        read_json(dir.join("definition.json"))["default_model"],
+        "cmd/echo replacement"
+    );
+    let mut worker = Gremlin::from(ID).unwrap();
+    assert_eq!(
+        worker.model_override.as_deref(),
+        Some("cmd/echo replacement")
+    );
+    worker.init_runtime(None).await.unwrap();
+    assert_eq!(
+        worker.definition.default_model().to_string(),
+        "cmd/echo replacement"
+    );
+    assert_unpinned_resolves(&mut worker, "cmd/echo replacement").await;
+    resume_again_unchanged(&sandbox, &dir, &registry, "cmd/echo replacement").await;
+}
+
 async fn assert_json5_resume_before_runtime_failure(stage: Option<&str>) {
     let sandbox = Sandbox::new();
     let parent = seed(&sandbox);
@@ -317,7 +350,7 @@ async fn resume_profile_pins_options_without_importing_profile_task_or_stage_map
         r#"
 model-profiles:
   replacement:
-    model: 'openai/replacement?temperature=0.2,reasoning_effort=high'
+    model: '  openai/replacement?temperature=0.2,reasoning_effort=high  '
     task-models:
       Scout: openai/unwanted-scout
     model-by-stage:
@@ -338,6 +371,12 @@ model-profiles:
     drained(&registry).await;
     expected["default_model"] = json!(concrete);
     assert_eq!(read_json(dir.join("definition.json")), expected);
+    assert_eq!(
+        read_json(dir.join("state.json"))["model"],
+        crate::model_uri::ModelURI::parse(concrete)
+            .unwrap()
+            .to_string()
+    );
     assert_eq!(
         read_json(dir.join("state.json"))["model_override"],
         concrete
@@ -606,11 +645,20 @@ async fn resume_recovers_original_pair_when_immediate_rollback_is_unavailable() 
     state::set_resume_write_failure(None);
     assert_eq!(response["type"], "error", "{response}");
     assert!(!registry.contains_run(ID).await);
-    assert_eq!(read_json(dir.join("state.json"))["status"], "running");
-    assert!(dir.join(".resume-model-recovery.json").exists());
+    assert_eq!(fs::read(dir.join("state.json")).unwrap(), original_state);
+    assert_eq!(
+        fs::read(dir.join("definition.json")).unwrap(),
+        original_definition
+    );
+    assert!(!dir.join(".resume-model-recovery.json").exists());
+    assert_eq!(entries(&sandbox), vec![dir.clone()]);
+    assert_eq!(
+        fs::read_to_string(dir.join("finished")).unwrap(),
+        "original"
+    );
 
-    // A new request must recover before checking eligibility. Rejecting an
-    // unknown stage lets us inspect the recovered pair without starting a worker.
+    // Snapshot publication fails before metadata is committed, so even an
+    // unavailable rollback must leave the original attempt immediately usable.
     let response = handle_resume(&json!({"id": ID, "stage": "unknown"}), &registry).await;
     assert_eq!(response["type"], "error", "{response}");
     assert!(response.to_string().contains("unknown top-level stage"));
