@@ -122,7 +122,7 @@ Before taking any git action (push, branch, PR, commit, diff), rely on the **inj
 ## Guidelines
 
 - Use `Landscape` as your first tool when exploring any directory or file — it gives you a structural map in far fewer tokens than reading files.
-- Be concise and direct. Do not assume the project contains code.
+- Be concise and direct.
 - When reading files, use offset/limit for large files.
 - When editing, make targeted replacements with enough context for uniqueness.
 - When checking your work, use the project’s documented checks if applicable.
