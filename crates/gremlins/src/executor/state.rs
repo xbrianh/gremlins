@@ -295,6 +295,24 @@ pub trait StateStore: Send + Sync + Debug {
         )))
     }
 
+    /// Fork into a new attempt, optionally replacing its definition snapshot.
+    /// Existing backends retain their flagless behavior; replacement requires
+    /// explicit backend support.
+    async fn fork_to_stage_with_definition(
+        &self,
+        keys: &[String],
+        rewind_state: &Map<String, Value>,
+        definition: Option<&[u8]>,
+    ) -> Result<Box<dyn StateStore + Send + Sync>, Box<dyn std::error::Error>> {
+        if definition.is_some() {
+            return Err(Box::new(std::io::Error::new(
+                std::io::ErrorKind::Unsupported,
+                "definition replacement not supported for this store type",
+            )));
+        }
+        self.fork_to_stage(keys, rewind_state).await
+    }
+
     /// Produce a localized (filesystem-scoped) store containing only the
     /// given subset of keys. The returned store lives in a separate
     /// directory so that unscoped artifacts cannot be discovered by
@@ -1463,6 +1481,16 @@ impl StateStore for FileSystemStateStore {
         keys: &[String],
         rewind_state: &Map<String, Value>,
     ) -> Result<Box<dyn StateStore + Send + Sync>, Box<dyn std::error::Error>> {
+        self.fork_to_stage_with_definition(keys, rewind_state, None)
+            .await
+    }
+
+    async fn fork_to_stage_with_definition(
+        &self,
+        keys: &[String],
+        rewind_state: &Map<String, Value>,
+        definition: Option<&[u8]>,
+    ) -> Result<Box<dyn StateStore + Send + Sync>, Box<dyn std::error::Error>> {
         if self.root.is_temp() {
             return Err(Box::new(std::io::Error::new(
                 std::io::ErrorKind::Unsupported,
@@ -1524,15 +1552,14 @@ impl StateStore for FileSystemStateStore {
 
         let child_dir = attempt_dir_path(&gremlin_id, next);
 
-        // Seed into a temporary directory so that a partial (failed) fork
-        // is never visible to [`latest_attempt_dir`].  Only after state.json
-        // is written do we rename into place.
-        let tmp_dir = child_dir.with_file_name(format!(
-            ".{}-{next:04}.tmp.{}",
-            state_safe_id(&gremlin_id),
-            rand_hex(4),
-        ));
-        tokio::fs::create_dir_all(&tmp_dir).await?;
+        // Prepare everything out of view, with automatic cleanup on error or
+        // cancellation. Keep it on the same filesystem for atomic publication.
+        let tmp_guard = tempfile::Builder::new()
+            .prefix(".fork-to-stage-")
+            .tempdir_in(child_dir.parent().ok_or_else(|| {
+                std::io::Error::new(std::io::ErrorKind::InvalidInput, "attempt has no parent")
+            })?)?;
+        let tmp_dir = tmp_guard.path().to_path_buf();
         let child_ad = tmp_dir.join("artifacts");
         tokio::fs::create_dir_all(&child_ad).await?;
         let child_store = FileSystemStateStore {
@@ -1545,7 +1572,11 @@ impl StateStore for FileSystemStateStore {
         // Carry the hermetic definition snapshot into the new attempt so
         // `init_runtime`, `land`, and teardown can keep reading it through
         // the store even when the original source file has since moved.
-        if self.exists("definition.json") {
+        if let Some(bytes) = definition {
+            use std::io::Write;
+            let mut dst = child_store.open("definition.json", BlobMode::Write)?;
+            dst.write_all(bytes)?;
+        } else if self.exists("definition.json") {
             let mut src = self.open("definition.json", BlobMode::Read)?;
             let mut bytes = Vec::new();
             use std::io::Read;
@@ -1581,20 +1612,13 @@ impl StateStore for FileSystemStateStore {
 
         child_store.write_state(rewind_state)?;
 
-        // Atomically publish the completed attempt.
-        tokio::fs::rename(&tmp_dir, &child_dir).await?;
-
-        // After rename, rewrite any registry paths that still reference the
-        // temporary directory so that all artifact bindings point into the
-        // final attempt directory.
+        // Rewrite registry paths before publication. No fallible preparation
+        // may remain after the rename exposes the new attempt.
         let child_ad_final = child_dir.join("artifacts");
         let tmp_ad_str = child_ad.to_string_lossy().to_string();
         let child_ad_final_str = child_ad_final.to_string_lossy().to_string();
         if tmp_ad_str != child_ad_final_str {
-            let child_store_final = FileSystemStateStore {
-                root: StateRoot::Path(child_dir.clone()),
-            };
-            child_store_final
+            child_store
                 .locked_write(|data| {
                     for path in data.values_mut() {
                         if path.starts_with(&tmp_ad_str) {
@@ -1607,6 +1631,9 @@ impl StateStore for FileSystemStateStore {
                 })
                 .await?;
         }
+
+        // Atomically publish the fully prepared attempt.
+        tokio::fs::rename(&tmp_dir, &child_dir).await?;
 
         Ok(Box::new(FileSystemStateStore {
             root: StateRoot::Path(child_dir),
@@ -1906,6 +1933,16 @@ impl StateStore for ScopedFileSystemStateStore {
         rewind_state: &Map<String, Value>,
     ) -> Result<Box<dyn StateStore + Send + Sync>, Box<dyn std::error::Error>> {
         self.inner.fork_to_stage(keys, rewind_state).await
+    }
+    async fn fork_to_stage_with_definition(
+        &self,
+        keys: &[String],
+        rewind_state: &Map<String, Value>,
+        definition: Option<&[u8]>,
+    ) -> Result<Box<dyn StateStore + Send + Sync>, Box<dyn std::error::Error>> {
+        self.inner
+            .fork_to_stage_with_definition(keys, rewind_state, definition)
+            .await
     }
     delegate!(inner, fn clean(&self));
     delegate!(inner, fn state_uri_display(&self) -> String);
@@ -3657,6 +3694,95 @@ mod tests {
                 assert!(!fs.is_registered("artifact://b").await);
 
                 let _ = sandbox;
+            });
+        });
+    }
+
+    #[test]
+    fn fork_to_stage_replaces_definition_without_changing_parent() {
+        with_sandbox(None, |_| {
+            tokio::runtime::Runtime::new().unwrap().block_on(async {
+                let mut initial = Map::new();
+                initial.insert("id".into(), Value::String("gr-definition".into()));
+                let store = FileSystemStateStore::create("gr-definition", &initial, false).unwrap();
+                let original = b"{\"name\":\"parent\"}";
+                let replacement = b"{\"name\":\"replacement\"}";
+                std::fs::write(store.root_dir().join("definition.json"), original).unwrap();
+                let uri = Uri::new("artifact".into(), "kept".into());
+                store.write_into_registry(&uri, "preserved").await.unwrap();
+
+                let forked = store
+                    .fork_to_stage_with_definition(
+                        &["artifact://kept".to_string()],
+                        &initial,
+                        Some(replacement),
+                    )
+                    .await
+                    .unwrap();
+                let mut bytes = Vec::new();
+                forked
+                    .open("definition.json", BlobMode::Read)
+                    .unwrap()
+                    .read_to_end(&mut bytes)
+                    .unwrap();
+                assert_eq!(bytes, replacement);
+                assert_eq!(
+                    std::fs::read(store.root_dir().join("definition.json")).unwrap(),
+                    original
+                );
+                assert_eq!(
+                    forked.content("artifact://kept", None).await.unwrap(),
+                    "preserved"
+                );
+                assert_eq!(
+                    store.content("artifact://kept", None).await.unwrap(),
+                    "preserved"
+                );
+                assert_eq!(read_state_json(Some(&store.state_file())), initial);
+
+                // The legacy entry point still copies the parent's snapshot.
+                let copied = forked.fork_to_stage(&[], &initial).await.unwrap();
+                let mut bytes = Vec::new();
+                copied
+                    .open("definition.json", BlobMode::Read)
+                    .unwrap()
+                    .read_to_end(&mut bytes)
+                    .unwrap();
+                assert_eq!(bytes, replacement);
+            });
+        });
+    }
+
+    #[test]
+    fn fork_to_stage_failure_leaves_no_visible_attempt_or_temporary_directory() {
+        with_sandbox(None, |_| {
+            tokio::runtime::Runtime::new().unwrap().block_on(async {
+                let mut initial = Map::new();
+                initial.insert("id".into(), Value::String("gr-failure".into()));
+                let store = FileSystemStateStore::create("gr-failure", &initial, false).unwrap();
+                // Fail while carrying the log, after the replacement was written.
+                std::fs::create_dir(store.root_dir().join("log")).unwrap();
+                let parent = store.root_dir().parent().unwrap();
+                let entries = || {
+                    let mut paths: Vec<_> = std::fs::read_dir(parent)
+                        .unwrap()
+                        .map(|entry| entry.unwrap().path())
+                        .collect();
+                    paths.sort();
+                    paths
+                };
+                let before = entries();
+                assert!(store
+                    .fork_to_stage_with_definition(&[], &initial, Some(b"replacement"))
+                    .await
+                    .is_err());
+                assert!(!attempt_dir_path("gr-failure", 2).exists());
+                assert_eq!(entries(), before);
+                assert!(!store.root_dir().join("definition.json").exists());
+                assert_eq!(
+                    FileSystemStateStore::open("gr-failure").unwrap().root_dir(),
+                    store.root_dir()
+                );
             });
         });
     }

@@ -2,6 +2,7 @@
 
 mod attachment;
 mod paused_chat;
+mod resume_model;
 
 use super::chat::{add_usage_stats, usage_stats_from_state};
 use super::{

@@ -96,6 +96,9 @@ enum Cmds {
         /// Rewind to this top-level stage and re-execute from it onward.
         #[arg(long)]
         stage: Option<String>,
+        /// Set the default model for the new resume attempt.
+        #[arg(long)]
+        model: Option<String>,
     },
     /// Re-snapshot a gremlin's definition from its source .json5 file.
     Snapshot {
@@ -294,7 +297,9 @@ async fn run_cli(cli: Cli, scope: Option<std::ffi::OsString>) {
         Some(Cmds::Ls { here }) => ls(here).await,
         Some(Cmds::Info { id }) => info(&id).await,
         Some(Cmds::Stop { id }) => stop(&id).await,
-        Some(Cmds::Resume { id, stage }) => resume(&id, stage.as_deref()).await,
+        Some(Cmds::Resume { id, stage, model }) => {
+            resume(&id, stage.as_deref(), model.as_deref()).await
+        }
         Some(Cmds::Snapshot { id }) => snapshot(&id).await,
         Some(Cmds::Artifact { id, exists, .. }) if !exists.is_empty() => {
             exists_cmd(&id, &exists, scope).await
@@ -1034,22 +1039,25 @@ async fn stop(id: &str) -> Result<(), String> {
 // resume
 // ---------------------------------------------------------------------------
 
-async fn resume(id: &str, stage: Option<&str>) -> Result<(), String> {
+fn resume_request(id: &str, stage: Option<&str>, model: Option<&str>) -> Value {
+    let mut request = serde_json::json!({"op": "resume", "id": id});
+    if let Some(stage) = stage {
+        request["stage"] = Value::String(stage.to_string());
+    }
+    if let Some(model) = model {
+        request["model"] = Value::String(model.to_string());
+    }
+    request
+}
+
+async fn resume(id: &str, stage: Option<&str>, model: Option<&str>) -> Result<(), String> {
     config::init_global().map_err(|e| e.to_string())?;
 
     validate_gremlin_id(id).map_err(|_| {
         format!("invalid gremlin id {id:?} — ids may contain only letters, numbers, '-', and '_'")
     })?;
 
-    let mut request = serde_json::json!({"op": "resume", "id": id});
-    if let Some(stage) = stage {
-        request
-            .as_object_mut()
-            .unwrap()
-            .insert("stage".to_string(), Value::String(stage.to_string()));
-    }
-
-    let response = executor_request(request).await?;
+    let response = executor_request(resume_request(id, stage, model)).await?;
     check_error(&response)?;
 
     println!("{id}");
@@ -2817,6 +2825,37 @@ mod tests {
     use super::*;
     use gremlins::schemas::bootstrap::{InputSource, InputSources};
     use std::fs;
+
+    #[test]
+    fn resume_parser_and_request_forwarding() {
+        for (args, expected) in [
+            (
+                vec!["gremlins", "resume", "demo"],
+                serde_json::json!({"op": "resume", "id": "demo"}),
+            ),
+            (
+                vec!["gremlins", "resume", "demo", "--model", "cmd/true"],
+                serde_json::json!({"op": "resume", "id": "demo", "model": "cmd/true"}),
+            ),
+            (
+                vec![
+                    "gremlins", "resume", "demo", "--stage", "review", "--model", "cmd/true",
+                ],
+                serde_json::json!({
+                    "op": "resume", "id": "demo", "stage": "review", "model": "cmd/true"
+                }),
+            ),
+        ] {
+            let cli = Cli::try_parse_from(args).expect("resume args must parse");
+            let Some(Cmds::Resume { id, stage, model }) = cli.command else {
+                panic!("expected resume command");
+            };
+            assert_eq!(
+                resume_request(&id, stage.as_deref(), model.as_deref()),
+                expected
+            );
+        }
+    }
 
     #[test]
     fn launch_parser_reserves_model_after_bootstrap_inputs() {

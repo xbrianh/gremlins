@@ -331,6 +331,53 @@ fn collect_parallel_runtime_keys(stage: &StageSpec, rerun: bool, keys: &mut Para
     }
 }
 
+fn prepare_resume_model(gremlin: &Gremlin, spec: &str) -> Result<(String, Vec<u8>), String> {
+    let cfg = config::global_config().map_err(|e| format!("config init: {e}"))?;
+    let concrete = config::resolve_model_reference(spec, &cfg)?;
+    crate::model_uri::ModelURI::parse(&concrete)?;
+    let mut blob = gremlin
+        .state
+        .open_blob("definition.json", state::BlobMode::Read)
+        .map_err(|e| format!("failed to read definition snapshot: {e}"))?;
+    let mut bytes = Vec::new();
+    use std::io::Read;
+    blob.read_to_end(&mut bytes).map_err(|e| e.to_string())?;
+    StaticDefinition::from_expanded_bytes(&bytes, None, None).map_err(|e| e.to_string())?;
+    let mut snapshot: Value = serde_json::from_slice(&bytes).map_err(|e| e.to_string())?;
+    let root = snapshot
+        .as_object_mut()
+        .ok_or("invalid definition snapshot: expected object")?;
+    root.insert("default_model".into(), Value::String(concrete.clone()));
+    let bytes = serde_json::to_vec(&snapshot).map_err(|e| e.to_string())?;
+    StaticDefinition::from_expanded_bytes(&bytes, None, None).map_err(|e| e.to_string())?;
+    Ok((concrete, bytes))
+}
+
+fn persist_resume_model(gremlin: &Gremlin, model: &str, bytes: &[u8]) -> Result<(), String> {
+    use std::io::Write;
+    let dir = gremlin.state.state_dir();
+    let mut staged = tempfile::NamedTempFile::new_in(&dir).map_err(|e| e.to_string())?;
+    staged.write_all(bytes).map_err(|e| e.to_string())?;
+    staged.as_file().sync_all().map_err(|e| e.to_string())?;
+    let original = gremlin.state.state_tree();
+    let mut stopped = original.clone();
+    stopped.insert("status".into(), Value::String("stopped".into()));
+    stopped.insert("model_override".into(), Value::String(model.into()));
+    gremlin
+        .state
+        .write_state(&stopped)
+        .map_err(|e| e.to_string())?;
+    if let Err(e) = staged.persist(dir.join("definition.json")) {
+        return match gremlin.state.write_state(&original) {
+            Ok(()) => Err(format!("failed to replace definition snapshot: {e}")),
+            Err(rollback) => Err(format!(
+                "failed to replace definition snapshot: {e}; metadata rollback failed: {rollback}"
+            )),
+        };
+    }
+    Ok(())
+}
+
 pub(crate) async fn handle_resume(request: &Value, registry: &Arc<RunRegistry>) -> Value {
     let id = match valid_id(request) {
         Ok(id) => id,
@@ -370,6 +417,37 @@ pub(crate) async fn handle_resume(request: &Value, registry: &Arc<RunRegistry>) 
         ));
     }
 
+    let replacement = if let Some(spec) = request.get("model") {
+        // Validate eligibility and the resume point before touching config or disk.
+        if let Some(target) = requested_stage.as_deref() {
+            let definition = match load_definition_snapshot(&gremlin) {
+                Ok(d) => d,
+                Err(resp) => return resp,
+            };
+            if !definition.has_top_level_stage(target) {
+                return error_response(&format!(
+                    "gremlin {id}: unknown top-level stage {target:?}"
+                ));
+            }
+        } else {
+            let stage = gremlin.state.read_str("stage");
+            if stage.is_empty() || stage == "starting" {
+                return error_response(&format!(
+                    "gremlin {id} has no recorded stage to resume from"
+                ));
+            }
+        }
+        let Some(spec) = spec.as_str() else {
+            return error_response("model must be a string");
+        };
+        match prepare_resume_model(&gremlin, spec) {
+            Ok(prepared) => Some(prepared),
+            Err(e) => return error_response(&format!("gremlin {id}: {e}")),
+        }
+    } else {
+        None
+    };
+
     let resume_stage = if let Some(target) = requested_stage {
         let definition = match load_definition_snapshot(&gremlin) {
             Ok(d) => d,
@@ -408,12 +486,24 @@ pub(crate) async fn handle_resume(request: &Value, registry: &Arc<RunRegistry>) 
         rewind_state.insert("subprocess_cost_usd".into(), Value::Null);
         rewind_state.remove("parallel_attempts");
 
-        let forked = match gremlin
-            .state
-            .store_ref()
-            .fork_to_stage(&keys, &rewind_state)
-            .await
-        {
+        if let Some((model, _)) = &replacement {
+            rewind_state.insert("model_override".into(), Value::String(model.clone()));
+            rewind_state.insert("status".into(), Value::String("stopped".into()));
+        }
+        let fork_result = if let Some((_, bytes)) = &replacement {
+            gremlin
+                .state
+                .store_ref()
+                .fork_to_stage_with_definition(&keys, &rewind_state, Some(bytes))
+                .await
+        } else {
+            gremlin
+                .state
+                .store_ref()
+                .fork_to_stage(&keys, &rewind_state)
+                .await
+        };
+        let forked = match fork_result {
             Ok(forked) => forked,
             Err(e) => return error_response(&format!("gremlin {id}: failed to fork state: {e}")),
         };
@@ -428,6 +518,11 @@ pub(crate) async fn handle_resume(request: &Value, registry: &Arc<RunRegistry>) 
             ));
         }
 
+        if let Some((model, bytes)) = &replacement {
+            if let Err(e) = persist_resume_model(&gremlin, model, bytes) {
+                return error_response(&format!("gremlin {id}: {e}"));
+            }
+        }
         let state_dir = gremlin.state.state_dir();
         let finished = state_dir.join("finished");
         let _ = std::fs::remove_file(&finished);
@@ -449,7 +544,16 @@ pub(crate) async fn handle_resume(request: &Value, registry: &Arc<RunRegistry>) 
         "exit_code": null,
         "attempt": new_attempt,
     });
-    gremlin.state.patch(&[], fields.as_object().unwrap());
+    if let Some((model, _)) = replacement {
+        let mut running = gremlin.state.state_tree();
+        running.extend(fields.as_object().unwrap().clone());
+        if let Err(e) = gremlin.state.write_state(&running) {
+            return error_response(&format!("gremlin {id}: failed to write resume state: {e}"));
+        }
+        gremlin.model_override = Some(model);
+    } else {
+        gremlin.state.patch(&[], fields.as_object().unwrap());
+    }
 
     let definition_name = gremlin.state.read_str("kind");
 
@@ -615,4 +719,50 @@ pub(crate) fn validate_launch_inputs(
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod resume_model_publication_tests {
+    use super::*;
+    use crate::test_support::Sandbox;
+
+    #[test]
+    fn resume_model_snapshot_publication_failure_rolls_back_metadata() {
+        let sandbox = Sandbox::new();
+        let dir = sandbox.join("state/gr-publication-0001");
+        std::fs::create_dir_all(&dir).unwrap();
+        let definition = br#"{"default_model":"cmd/true","stages":[]}"#;
+        std::fs::write(dir.join("definition.json"), definition).unwrap();
+        let original = serde_json::json!({
+            "id": "gr-publication", "kind": "demo", "status": "stopped",
+            "stage": "run", "attempt": "original", "model_override": "cmd/true"
+        });
+        state::write_state(&dir, original.as_object().unwrap()).unwrap();
+        std::fs::write(dir.join("finished"), "original").unwrap();
+        let gremlin = Gremlin::from("gr-publication").unwrap();
+        let (model, replacement) = prepare_resume_model(&gremlin, "cmd/false").unwrap();
+        // Obstruct rename only after preparation, preserving the original snapshot.
+        std::fs::rename(dir.join("definition.json"), dir.join("original.json")).unwrap();
+        std::fs::create_dir(dir.join("definition.json")).unwrap();
+        let before = std::fs::read(dir.join("state.json")).unwrap();
+        let entries = std::fs::read_dir(&dir).unwrap().count();
+        let error = persist_resume_model(&gremlin, &model, &replacement).unwrap_err();
+        assert!(
+            error.contains("failed to replace definition snapshot"),
+            "{error}"
+        );
+        assert!(!error.contains("metadata rollback failed"), "{error}");
+        assert_eq!(std::fs::read(dir.join("state.json")).unwrap(), before);
+        assert_eq!(
+            std::fs::read(dir.join("original.json")).unwrap(),
+            definition
+        );
+        assert!(dir.join("definition.json").is_dir());
+        assert_eq!(
+            std::fs::read_to_string(dir.join("finished")).unwrap(),
+            "original"
+        );
+        assert_eq!(std::fs::read_dir(&dir).unwrap().count(), entries);
+        assert_eq!(std::fs::read_dir(sandbox.join("state")).unwrap().count(), 1);
+    }
 }
