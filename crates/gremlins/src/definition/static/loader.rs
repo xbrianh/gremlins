@@ -181,12 +181,22 @@ fn extract_artifact_uris(raw: &str) -> Vec<(String, bool)> {
 /// Bootstrap-produced URIs come from `launch_cmds` (parsed gremlins:bind_artifact
 /// calls) and `cli_out` values.  `artifact://base_sha` and `artifact://base_ref`
 /// are always available.
+#[cfg(test)]
 pub(crate) fn check_unresolved_consumers(
     stages: &[StageNode],
     launch_cmds: &[String],
     cli_out: &HashMap<String, String>,
 ) -> Result<(), SchemaError> {
-    let mut produced: HashSet<String> = HashSet::new();
+    check_unresolved_consumers_with_inputs(stages, launch_cmds, cli_out, &[])
+}
+
+pub(crate) fn check_unresolved_consumers_with_inputs(
+    stages: &[StageNode],
+    launch_cmds: &[String],
+    cli_out: &HashMap<String, String>,
+    inherited_inputs: &[String],
+) -> Result<(), SchemaError> {
+    let mut produced: HashSet<String> = inherited_inputs.iter().cloned().collect();
 
     // Parse launch_cmds for gremlins:bind_artifact(...) — any argument
     // position, quoted or unquoted (2-arg and legacy 3-arg forms).

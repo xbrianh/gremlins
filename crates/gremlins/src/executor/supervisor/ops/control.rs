@@ -331,12 +331,37 @@ fn collect_parallel_runtime_keys(stage: &StageSpec, rerun: bool, keys: &mut Para
     }
 }
 
+fn prepare_resume_model(gremlin: &Gremlin, spec: &str) -> Result<(String, Vec<u8>), String> {
+    let cfg = config::Config::load().map_err(|e| format!("config init: {e}"))?;
+    let concrete = config::resolve_model_reference(spec, &cfg)?
+        .trim()
+        .to_owned();
+    crate::clients::client::Client::parse(&concrete)?;
+    let mut blob = gremlin
+        .state
+        .open_blob("definition.json", state::BlobMode::Read)
+        .map_err(|e| format!("failed to read definition snapshot: {e}"))?;
+    let mut bytes = Vec::new();
+    use std::io::Read;
+    blob.read_to_end(&mut bytes).map_err(|e| e.to_string())?;
+    let mut snapshot = crate::definition::r#static::yaml::parse_expanded_json(&bytes)
+        .map_err(|e| e.to_string())?;
+    let root = snapshot
+        .as_object_mut()
+        .ok_or("invalid definition snapshot: expected object")?;
+    root.insert("default_model".into(), Value::String(concrete.clone()));
+    let bytes = serde_json::to_vec(&snapshot).map_err(|e| e.to_string())?;
+    StaticDefinition::from_expanded_bytes(&bytes, None, None).map_err(|e| e.to_string())?;
+    Ok((concrete, bytes))
+}
+
 pub(crate) async fn handle_resume(request: &Value, registry: &Arc<RunRegistry>) -> Value {
     let id = match valid_id(request) {
         Ok(id) => id,
         Err(resp) => return resp,
     };
 
+    // Keep the ID lock through recovery, publication, and worker launch.
     let _guard = registry.acquire_id_lock(id).await;
 
     if registry.contains_run(id).await {
@@ -347,6 +372,17 @@ pub(crate) async fn handle_resume(request: &Value, registry: &Arc<RunRegistry>) 
         Ok(g) => g,
         Err(e) => return error_response(&format!("gremlin {id}: {e}")),
     };
+
+    match gremlin.state.store_ref().recover_resume() {
+        Ok(true) => {
+            gremlin = match Gremlin::from(id) {
+                Ok(g) => g,
+                Err(e) => return error_response(&format!("gremlin {id}: {e}")),
+            };
+        }
+        Ok(false) => {}
+        Err(e) => return error_response(&format!("gremlin {id}: failed to recover resume: {e}")),
+    }
 
     let status = gremlin.state.read_str("status");
     if status == "running" {
@@ -370,10 +406,55 @@ pub(crate) async fn handle_resume(request: &Value, registry: &Arc<RunRegistry>) 
         ));
     }
 
+    if !resume_with_stage {
+        let stage = gremlin.state.read_str("stage");
+        if stage.is_empty() || stage == "starting" {
+            return error_response(&format!(
+                "gremlin {id} has no recorded stage to resume from"
+            ));
+        }
+    }
+
+    let replacement = if let Some(spec) = request.get("model") {
+        let Some(spec) = spec.as_str() else {
+            return error_response("model must be a string");
+        };
+        match prepare_resume_model(&gremlin, spec) {
+            Ok(prepared) => Some(prepared),
+            Err(e) => return error_response(&format!("gremlin {id}: {e}")),
+        }
+    } else {
+        None
+    };
+
+    let mut running = serde_json::Map::new();
+    let current_attempt = gremlin.state.read_str("attempt");
+    running.extend(serde_json::json!({
+        "status": "running", "ended_at": null, "exit_code": null,
+        "attempt": format!("{}-resume-{}", if current_attempt.is_empty() { "1" } else { &current_attempt }, state::token_hex(2)),
+    }).as_object().unwrap().clone());
+    if let Some((model, _)) = &replacement {
+        let profile = gremlin
+            .state
+            .state_tree()
+            .get("model_selection_profile")
+            .cloned()
+            .unwrap_or_else(|| Value::String(gremlin.model_override.clone().unwrap_or_default()));
+        running.insert("model_selection_profile".into(), profile);
+        running.insert("model_override".into(), Value::String(model.clone()));
+        running.insert("model".into(), Value::String(model.clone()));
+    }
+
     let resume_stage = if let Some(target) = requested_stage {
-        let definition = match load_definition_snapshot(&gremlin) {
-            Ok(d) => d,
-            Err(resp) => return resp,
+        let definition = match &replacement {
+            Some((_, bytes)) => match StaticDefinition::from_expanded_bytes(bytes, None, None) {
+                Ok(d) => d,
+                Err(e) => return error_response(&format!("gremlin {id}: {e}")),
+            },
+            None => match load_definition_snapshot(&gremlin) {
+                Ok(d) => d,
+                Err(resp) => return resp,
+            },
         };
         if !definition.has_top_level_stage(&target) {
             return error_response(&format!("gremlin {id}: unknown top-level stage {target:?}"));
@@ -400,20 +481,29 @@ pub(crate) async fn handle_resume(request: &Value, registry: &Arc<RunRegistry>) 
         keys.sort();
 
         let mut rewind_state = gremlin.state.state_tree();
+        rewind_state.extend(running.clone());
         rewind_state.insert("stage".into(), Value::String(target.clone()));
-        rewind_state.insert("status".into(), Value::Null);
+
         rewind_state.insert("pid".into(), Value::Null);
         rewind_state.insert("exit_code".into(), Value::Null);
         rewind_state.insert("ended_at".into(), Value::Null);
         rewind_state.insert("subprocess_cost_usd".into(), Value::Null);
         rewind_state.remove("parallel_attempts");
 
-        let forked = match gremlin
-            .state
-            .store_ref()
-            .fork_to_stage(&keys, &rewind_state)
-            .await
-        {
+        let fork_result = if let Some((_, bytes)) = &replacement {
+            gremlin
+                .state
+                .store_ref()
+                .fork_to_stage_with_definition(&keys, &rewind_state, Some(bytes))
+                .await
+        } else {
+            gremlin
+                .state
+                .store_ref()
+                .fork_to_stage(&keys, &rewind_state)
+                .await
+        };
+        let forked = match fork_result {
             Ok(forked) => forked,
             Err(e) => return error_response(&format!("gremlin {id}: failed to fork state: {e}")),
         };
@@ -422,34 +512,23 @@ pub(crate) async fn handle_resume(request: &Value, registry: &Arc<RunRegistry>) 
         target
     } else {
         let stage = gremlin.state.read_str("stage");
-        if stage.is_empty() || stage == "starting" {
+        if let Err(e) = gremlin.state.store_ref().publish_resume(
+            &running,
+            replacement.as_ref().map(|(_, bytes)| bytes.as_slice()),
+        ) {
             return error_response(&format!(
-                "gremlin {id} has no recorded stage to resume from"
+                "gremlin {id}: failed to publish resume state: {e}"
             ));
         }
-
         let state_dir = gremlin.state.state_dir();
         let finished = state_dir.join("finished");
         let _ = std::fs::remove_file(&finished);
         stage
     };
 
-    let current_attempt = {
-        let a = gremlin.state.read_str("attempt");
-        if a.is_empty() {
-            "1".to_string()
-        } else {
-            a
-        }
-    };
-    let new_attempt = format!("{current_attempt}-resume-{}", state::token_hex(2));
-    let fields = serde_json::json!({
-        "status": "running",
-        "ended_at": null,
-        "exit_code": null,
-        "attempt": new_attempt,
-    });
-    gremlin.state.patch(&[], fields.as_object().unwrap());
+    if let Some((model, _)) = replacement {
+        gremlin.model_override = Some(model);
+    }
 
     let definition_name = gremlin.state.read_str("kind");
 

@@ -22,6 +22,8 @@ use serde_json::{Map, Value};
 use crate::artifacts::uri::Uri;
 use crate::config;
 
+mod resume;
+
 // ---------------------------------------------------------------------------
 // Error types
 // ---------------------------------------------------------------------------
@@ -160,6 +162,21 @@ pub trait StateStore: Send + Sync + Debug {
     /// Write `data` as `state.json` into the store's directory.
     fn write_state(&self, data: &Map<String, Value>) -> Result<(), StateError>;
 
+    /// Merge resume fields under the state lock, optionally replacing the definition.
+    /// Backends must explicitly opt in to transactional resume publication.
+    fn publish_resume(
+        &self,
+        _fields: &Map<String, Value>,
+        _definition: Option<&[u8]>,
+    ) -> Result<(), String> {
+        Err("resume publication is unsupported by this state store".into())
+    }
+
+    /// Restore an interrupted resume. Returns whether a recovery journal existed.
+    fn recover_resume(&self) -> Result<bool, String> {
+        Err("resume recovery is unsupported by this state store".into())
+    }
+
     /// Open a named blob in the state directory. Creates parent directories
     /// as needed. The returned handle supports Read + Write + Seek.
     fn open(&self, name: &str, mode: BlobMode) -> Result<Box<dyn StateBlob>, StateError>;
@@ -293,6 +310,24 @@ pub trait StateStore: Send + Sync + Debug {
             std::io::ErrorKind::Unsupported,
             "fork_to_stage not supported for this store type",
         )))
+    }
+
+    /// Fork into a new attempt, optionally replacing its definition snapshot.
+    /// Existing backends retain their flagless behavior; replacement requires
+    /// explicit backend support.
+    async fn fork_to_stage_with_definition(
+        &self,
+        keys: &[String],
+        rewind_state: &Map<String, Value>,
+        definition: Option<&[u8]>,
+    ) -> Result<Box<dyn StateStore + Send + Sync>, Box<dyn std::error::Error>> {
+        if definition.is_some() {
+            return Err(Box::new(std::io::Error::new(
+                std::io::ErrorKind::Unsupported,
+                "definition replacement not supported for this store type",
+            )));
+        }
+        self.fork_to_stage(keys, rewind_state).await
     }
 
     /// Produce a localized (filesystem-scoped) store containing only the
@@ -1148,6 +1183,18 @@ impl StateStore for FileSystemStateStore {
         write_state(self.root.path(), data)
     }
 
+    fn publish_resume(
+        &self,
+        fields: &Map<String, Value>,
+        definition: Option<&[u8]>,
+    ) -> Result<(), String> {
+        resume::publish(self.root.path(), fields, definition)
+    }
+
+    fn recover_resume(&self) -> Result<bool, String> {
+        resume::recover(self.root.path())
+    }
+
     fn open(&self, name: &str, mode: BlobMode) -> Result<Box<dyn StateBlob>, StateError> {
         // Reject traversal and absolute paths.
         if name.contains("..") || name.starts_with('/') || name.contains('\0') {
@@ -1463,6 +1510,16 @@ impl StateStore for FileSystemStateStore {
         keys: &[String],
         rewind_state: &Map<String, Value>,
     ) -> Result<Box<dyn StateStore + Send + Sync>, Box<dyn std::error::Error>> {
+        self.fork_to_stage_with_definition(keys, rewind_state, None)
+            .await
+    }
+
+    async fn fork_to_stage_with_definition(
+        &self,
+        keys: &[String],
+        rewind_state: &Map<String, Value>,
+        definition: Option<&[u8]>,
+    ) -> Result<Box<dyn StateStore + Send + Sync>, Box<dyn std::error::Error>> {
         if self.root.is_temp() {
             return Err(Box::new(std::io::Error::new(
                 std::io::ErrorKind::Unsupported,
@@ -1518,21 +1575,30 @@ impl StateStore for FileSystemStateStore {
             })?;
             (gremlin_id, current)
         };
-        let next = current.checked_add(1).ok_or_else(|| {
-            std::io::Error::new(std::io::ErrorKind::InvalidInput, "attempt number overflow")
-        })?;
+        // Attempt discovery and strip_attempt_suffix require exactly four digits,
+        // and latest_attempt_dir orders those names lexicographically. Publishing
+        // 10000 would create an invisible attempt, not extend the usable range.
+        // Keep this guard until the naming/discovery contract is migrated together.
+        let next = current
+            .checked_add(1)
+            .filter(|next| *next <= 9999)
+            .ok_or_else(|| {
+                std::io::Error::new(
+                    std::io::ErrorKind::InvalidInput,
+                    "stage fork attempt numbering exhausted at 9999",
+                )
+            })?;
 
         let child_dir = attempt_dir_path(&gremlin_id, next);
 
-        // Seed into a temporary directory so that a partial (failed) fork
-        // is never visible to [`latest_attempt_dir`].  Only after state.json
-        // is written do we rename into place.
-        let tmp_dir = child_dir.with_file_name(format!(
-            ".{}-{next:04}.tmp.{}",
-            state_safe_id(&gremlin_id),
-            rand_hex(4),
-        ));
-        tokio::fs::create_dir_all(&tmp_dir).await?;
+        // Prepare everything out of view, with automatic cleanup on error or
+        // cancellation. Keep it on the same filesystem for atomic publication.
+        let tmp_guard = tempfile::Builder::new()
+            .prefix(".fork-to-stage-")
+            .tempdir_in(child_dir.parent().ok_or_else(|| {
+                std::io::Error::new(std::io::ErrorKind::InvalidInput, "attempt has no parent")
+            })?)?;
+        let tmp_dir = tmp_guard.path().to_path_buf();
         let child_ad = tmp_dir.join("artifacts");
         tokio::fs::create_dir_all(&child_ad).await?;
         let child_store = FileSystemStateStore {
@@ -1545,7 +1611,12 @@ impl StateStore for FileSystemStateStore {
         // Carry the hermetic definition snapshot into the new attempt so
         // `init_runtime`, `land`, and teardown can keep reading it through
         // the store even when the original source file has since moved.
-        if self.exists("definition.json") {
+        if let Some(bytes) = definition {
+            use std::io::Write;
+            let mut dst = child_store.open("definition.json", BlobMode::Write)?;
+            resume_write_failure("fork-definition")?;
+            dst.write_all(bytes)?;
+        } else if self.exists("definition.json") {
             let mut src = self.open("definition.json", BlobMode::Read)?;
             let mut bytes = Vec::new();
             use std::io::Read;
@@ -1579,22 +1650,16 @@ impl StateStore for FileSystemStateStore {
             dst.write_all(&bytes)?;
         }
 
+        resume_write_failure("metadata")?;
         child_store.write_state(rewind_state)?;
 
-        // Atomically publish the completed attempt.
-        tokio::fs::rename(&tmp_dir, &child_dir).await?;
-
-        // After rename, rewrite any registry paths that still reference the
-        // temporary directory so that all artifact bindings point into the
-        // final attempt directory.
+        // Rewrite registry paths before publication. No fallible preparation
+        // may remain after the rename exposes the new attempt.
         let child_ad_final = child_dir.join("artifacts");
         let tmp_ad_str = child_ad.to_string_lossy().to_string();
         let child_ad_final_str = child_ad_final.to_string_lossy().to_string();
         if tmp_ad_str != child_ad_final_str {
-            let child_store_final = FileSystemStateStore {
-                root: StateRoot::Path(child_dir.clone()),
-            };
-            child_store_final
+            child_store
                 .locked_write(|data| {
                     for path in data.values_mut() {
                         if path.starts_with(&tmp_ad_str) {
@@ -1607,6 +1672,9 @@ impl StateStore for FileSystemStateStore {
                 })
                 .await?;
         }
+
+        // Atomically publish the fully prepared attempt.
+        tokio::fs::rename(&tmp_dir, &child_dir).await?;
 
         Ok(Box::new(FileSystemStateStore {
             root: StateRoot::Path(child_dir),
@@ -1815,6 +1883,8 @@ impl StateStore for ScopedFileSystemStateStore {
 
     delegate!(inner, fn state_tree(&self) -> Map<String, Value>);
     delegate!(inner, fn write_state(&self, data: &Map<String, Value>) -> Result<(), StateError>);
+    delegate!(inner, fn publish_resume(&self, fields: &Map<String, Value>, definition: Option<&[u8]>) -> Result<(), String>);
+    delegate!(inner, fn recover_resume(&self) -> Result<bool, String>);
     delegate!(inner, fn open(&self, name: &str, mode: BlobMode) -> Result<Box<dyn StateBlob>, StateError>);
     delegate!(inner, fn exists(&self, name: &str) -> bool);
     delegate!(inner, fn clear_stage_error(&self, attempt: &str));
@@ -1906,6 +1976,16 @@ impl StateStore for ScopedFileSystemStateStore {
         rewind_state: &Map<String, Value>,
     ) -> Result<Box<dyn StateStore + Send + Sync>, Box<dyn std::error::Error>> {
         self.inner.fork_to_stage(keys, rewind_state).await
+    }
+    async fn fork_to_stage_with_definition(
+        &self,
+        keys: &[String],
+        rewind_state: &Map<String, Value>,
+        definition: Option<&[u8]>,
+    ) -> Result<Box<dyn StateStore + Send + Sync>, Box<dyn std::error::Error>> {
+        self.inner
+            .fork_to_stage_with_definition(keys, rewind_state, definition)
+            .await
     }
     delegate!(inner, fn clean(&self));
     delegate!(inner, fn state_uri_display(&self) -> String);
@@ -2388,13 +2468,16 @@ pub fn list_state_dirs() -> Vec<(String, PathBuf)> {
         if !path.is_dir() {
             continue;
         }
+        let Ok(name) = entry.file_name().into_string() else {
+            continue;
+        };
+        if name.starts_with(".fork-to-stage-") {
+            continue;
+        }
         let state_json_path = path.join("state.json");
         if !state_json_path.is_file() {
             continue;
         }
-        let Ok(name) = entry.file_name().into_string() else {
-            continue;
-        };
 
         // Prefer the recorded gremlin id from state.json; otherwise use the
         // directory name with any attempt suffix stripped and safe encoding
@@ -2480,6 +2563,33 @@ pub async fn acquire_lock_async(sf: &Path) -> Result<File, StateError> {
 
 pub fn read_json_map(sf: &Path) -> Result<Map<String, Value>, StateError> {
     Ok(serde_json::from_str(&std::fs::read_to_string(sf)?)?)
+}
+
+#[cfg(test)]
+thread_local! {
+    static RESUME_WRITE_FAILURE: std::cell::Cell<Option<&'static str>> = const { std::cell::Cell::new(None) };
+}
+
+#[cfg(test)]
+pub(crate) fn set_resume_write_failure(point: Option<&'static str>) {
+    RESUME_WRITE_FAILURE.with(|failure| failure.set(point));
+}
+
+pub(crate) fn resume_write_failure(point: &str) -> std::io::Result<()> {
+    #[cfg(test)]
+    if RESUME_WRITE_FAILURE.with(|failure| {
+        failure.get() == Some(point)
+            || (failure.get() == Some("metadata-and-rollback")
+                && matches!(point, "metadata" | "rollback"))
+            || (failure.get() == Some("journal-removal-and-rollback")
+                && matches!(point, "journal-removal" | "rollback"))
+    }) {
+        return Err(std::io::Error::other(format!(
+            "injected resume {point} write failure"
+        )));
+    }
+    let _ = point;
+    Ok(())
 }
 
 pub fn atomic_write_json(sf: &Path, data: &Map<String, Value>) -> Result<(), StateError> {
@@ -2833,11 +2943,12 @@ mod tests {
             let d = StateData::open("gr-test").unwrap();
             d.record_stage_error("other", "no attempt yet");
             let state_dir = sf.parent().unwrap();
-            assert!(std::fs::read_dir(state_dir).unwrap().all(|e| !e
-                .unwrap()
-                .file_name()
-                .to_string_lossy()
-                .starts_with("bail_")));
+            assert!(std::fs::read_dir(state_dir).unwrap().all(|e| {
+                !e.unwrap()
+                    .file_name()
+                    .to_string_lossy()
+                    .starts_with("bail_")
+            }));
 
             let mut fields = Map::new();
             fields.insert("attempt".into(), Value::String("a1".into()));
@@ -3657,6 +3768,245 @@ mod tests {
                 assert!(!fs.is_registered("artifact://b").await);
 
                 let _ = sandbox;
+            });
+        });
+    }
+
+    #[test]
+    fn fork_to_stage_replaces_definition_without_changing_parent() {
+        with_sandbox(None, |_| {
+            tokio::runtime::Runtime::new().unwrap().block_on(async {
+                let mut initial = Map::new();
+                initial.insert("id".into(), Value::String("gr-definition".into()));
+                let store = FileSystemStateStore::create("gr-definition", &initial, false).unwrap();
+                let original = b"{\"name\":\"parent\"}";
+                let replacement = b"{\"name\":\"replacement\"}";
+                std::fs::write(store.root_dir().join("definition.json"), original).unwrap();
+                let uri = Uri::new("artifact".into(), "kept".into());
+                store.write_into_registry(&uri, "preserved").await.unwrap();
+
+                let forked = store
+                    .fork_to_stage_with_definition(
+                        &["artifact://kept".to_string()],
+                        &initial,
+                        Some(replacement),
+                    )
+                    .await
+                    .unwrap();
+                let mut bytes = Vec::new();
+                forked
+                    .open("definition.json", BlobMode::Read)
+                    .unwrap()
+                    .read_to_end(&mut bytes)
+                    .unwrap();
+                assert_eq!(bytes, replacement);
+                assert_eq!(
+                    std::fs::read(store.root_dir().join("definition.json")).unwrap(),
+                    original
+                );
+                assert_eq!(
+                    forked.content("artifact://kept", None).await.unwrap(),
+                    "preserved"
+                );
+                assert_eq!(
+                    store.content("artifact://kept", None).await.unwrap(),
+                    "preserved"
+                );
+                assert_eq!(read_state_json(Some(&store.state_file())), initial);
+
+                // The legacy entry point still copies the parent's snapshot.
+                let copied = forked.fork_to_stage(&[], &initial).await.unwrap();
+                let mut bytes = Vec::new();
+                copied
+                    .open("definition.json", BlobMode::Read)
+                    .unwrap()
+                    .read_to_end(&mut bytes)
+                    .unwrap();
+                assert_eq!(bytes, replacement);
+            });
+        });
+    }
+
+    #[test]
+    fn fork_to_stage_discovery_ignores_populated_staging_metadata() {
+        with_sandbox(None, |_| {
+            let id = "-demo";
+            let mut initial = Map::new();
+            initial.insert("id".into(), Value::String(id.into()));
+            let store = FileSystemStateStore::create(id, &initial, false).unwrap();
+            let staging = tempfile::Builder::new()
+                .prefix(".fork-to-stage-")
+                .tempdir_in(store.root_dir().parent().unwrap())
+                .unwrap();
+            let staged_store = FileSystemStateStore::from_path(staging.path().to_path_buf());
+            staged_store.write_state(&initial).unwrap();
+            // The staging name sorts after the parent's safe-encoded name.
+            assert!(staging.path().file_name() > store.root_dir().file_name());
+            assert_eq!(list_state_dirs(), vec![(id.into(), store.state_file())]);
+            assert_eq!(
+                FileSystemStateStore::open(id).unwrap().root_dir(),
+                store.root_dir()
+            );
+            assert_eq!(resolve_state_file(Some(id)), Some(store.state_file()));
+        });
+    }
+
+    #[test]
+    fn fork_to_stage_definition_write_failure_preserves_loadable_parent() {
+        with_sandbox(None, |_| {
+            tokio::runtime::Runtime::new().unwrap().block_on(async {
+                let id = "gr-definition-failure";
+                let mut initial = Map::new();
+                initial.insert("id".into(), Value::String(id.into()));
+                initial.insert("stage".into(), Value::String("build".into()));
+                initial.insert("status".into(), Value::String("stopped".into()));
+                let store = FileSystemStateStore::create(id, &initial, false).unwrap();
+                let original = b"{\"name\":\"parent\"}";
+                std::fs::write(store.root_dir().join("definition.json"), original).unwrap();
+                let uri = Uri::new("artifact".into(), "kept".into());
+                store.write_into_registry(&uri, "preserved").await.unwrap();
+                let state_before = std::fs::read(store.state_file()).unwrap();
+                let registry_before = std::fs::read(store.registry_path()).unwrap();
+                let entries = || {
+                    let mut paths: Vec<_> = std::fs::read_dir(store.root_dir().parent().unwrap())
+                        .unwrap()
+                        .map(|entry| entry.unwrap().path())
+                        .collect();
+                    paths.sort();
+                    paths
+                };
+                let before = entries();
+                let mut rewind = initial.clone();
+                rewind.insert("stage".into(), Value::String("review".into()));
+                set_resume_write_failure(Some("fork-definition"));
+                let result = store
+                    .fork_to_stage_with_definition(
+                        &["artifact://kept".to_string()],
+                        &rewind,
+                        Some(b"replacement"),
+                    )
+                    .await;
+                set_resume_write_failure(None);
+                assert!(result.unwrap_err().to_string().contains("fork-definition"));
+                assert!(!attempt_dir_path(id, 2).exists());
+                assert_eq!(entries(), before);
+                assert_eq!(list_state_dirs(), vec![(id.into(), store.state_file())]);
+                let reopened = FileSystemStateStore::open(id).unwrap();
+                assert_eq!(reopened.root_dir(), store.root_dir());
+                assert_eq!(std::fs::read(reopened.state_file()).unwrap(), state_before);
+                assert_eq!(
+                    std::fs::read(reopened.registry_path()).unwrap(),
+                    registry_before
+                );
+                assert_eq!(
+                    std::fs::read(reopened.root_dir().join("definition.json")).unwrap(),
+                    original
+                );
+                assert_eq!(read_state_json(Some(&reopened.state_file())), initial);
+                assert_eq!(
+                    reopened.content("artifact://kept", None).await.unwrap(),
+                    "preserved"
+                );
+            });
+        });
+    }
+
+    #[test]
+    fn fork_to_stage_failure_leaves_no_visible_attempt_or_temporary_directory() {
+        with_sandbox(None, |_| {
+            tokio::runtime::Runtime::new().unwrap().block_on(async {
+                let mut initial = Map::new();
+                initial.insert("id".into(), Value::String("gr-failure".into()));
+                let store = FileSystemStateStore::create("gr-failure", &initial, false).unwrap();
+                // Fail while carrying the log, after the replacement was written.
+                std::fs::create_dir(store.root_dir().join("log")).unwrap();
+                let parent = store.root_dir().parent().unwrap();
+                let entries = || {
+                    let mut paths: Vec<_> = std::fs::read_dir(parent)
+                        .unwrap()
+                        .map(|entry| entry.unwrap().path())
+                        .collect();
+                    paths.sort();
+                    paths
+                };
+                let before = entries();
+                assert!(store
+                    .fork_to_stage_with_definition(&[], &initial, Some(b"replacement"))
+                    .await
+                    .is_err());
+                assert!(!attempt_dir_path("gr-failure", 2).exists());
+                assert_eq!(entries(), before);
+                assert!(!store.root_dir().join("definition.json").exists());
+                assert_eq!(
+                    FileSystemStateStore::open("gr-failure").unwrap().root_dir(),
+                    store.root_dir()
+                );
+            });
+        });
+    }
+
+    #[test]
+    fn fork_to_stage_rejects_exhausted_attempts_without_changing_parent() {
+        with_sandbox(None, |_| {
+            tokio::runtime::Runtime::new().unwrap().block_on(async {
+                let id = "gr-exhausted";
+                let mut initial = Map::new();
+                initial.insert("id".into(), Value::String(id.into()));
+                initial.insert("stage".into(), Value::String("build".into()));
+                let parent_dir = attempt_dir_path(id, 9999);
+                std::fs::create_dir_all(&parent_dir).unwrap();
+                let store = FileSystemStateStore::from_path(parent_dir.clone());
+                store.write_state(&initial).unwrap();
+                std::fs::write(parent_dir.join("definition.json"), b"original").unwrap();
+                let uri = Uri::new("artifact".into(), "kept".into());
+                store.write_into_registry(&uri, "preserved").await.unwrap();
+                let state_before = std::fs::read(store.state_file()).unwrap();
+                let registry_before = std::fs::read(store.registry_path()).unwrap();
+                let entries = || {
+                    let mut paths: Vec<_> = std::fs::read_dir(parent_dir.parent().unwrap())
+                        .unwrap()
+                        .map(|entry| entry.unwrap().path())
+                        .collect();
+                    paths.sort();
+                    paths
+                };
+                let before = entries();
+                let mut rewind = initial.clone();
+                rewind.insert("stage".into(), Value::String("review".into()));
+                let keys = ["artifact://kept".to_string()];
+
+                for definition in [None, Some(b"replacement".as_slice())] {
+                    let result = if definition.is_none() {
+                        store.fork_to_stage(&keys, &rewind).await
+                    } else {
+                        store
+                            .fork_to_stage_with_definition(&keys, &rewind, definition)
+                            .await
+                    };
+                    let error = result.unwrap_err();
+                    let error = error.downcast_ref::<std::io::Error>().unwrap();
+                    assert_eq!(error.kind(), std::io::ErrorKind::InvalidInput);
+                    assert!(error.to_string().contains("exhausted at 9999"));
+                    assert!(!attempt_dir_path(id, 10000).exists());
+                    assert_eq!(entries(), before);
+                    assert_eq!(std::fs::read(store.state_file()).unwrap(), state_before);
+                    assert_eq!(
+                        std::fs::read(store.registry_path()).unwrap(),
+                        registry_before
+                    );
+                    assert_eq!(
+                        std::fs::read(parent_dir.join("definition.json")).unwrap(),
+                        b"original"
+                    );
+                    assert_eq!(
+                        store.content("artifact://kept", None).await.unwrap(),
+                        "preserved"
+                    );
+                    assert_eq!(
+                        FileSystemStateStore::open(id).unwrap().root_dir(),
+                        parent_dir
+                    );
+                }
             });
         });
     }
