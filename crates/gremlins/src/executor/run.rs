@@ -154,6 +154,10 @@ fn resolve_model_spec(
     gremlin: &Gremlin,
     enclosing_model: Option<&ModelURI>,
 ) -> Result<ModelURI, RunError> {
+    if let Some(selection) = &gremlin.runtime_config.resolved_model_selection {
+        return ModelURI::parse(selection.model_for_stage(stage.name()))
+            .map_err(|error| stage_failed(stage.name(), error));
+    }
     if let Some(spec) = stage.model() {
         return Ok(spec.clone());
     }
@@ -1097,6 +1101,46 @@ mod tests {
         let stage = take_first_stage(&mut gremlin).await;
         let resolved = resolve_model_spec(&stage, &gremlin, enclosing).unwrap();
         assert_eq!(resolved.to_string(), expected);
+    }
+
+    #[tokio::test]
+    async fn resolved_replacement_overrides_all_old_pins() {
+        let enclosing = model("cmd/old-enclosing");
+        for (name, expected) in [
+            ("review-exact", "cmd/new-exact"),
+            ("review-long-leaf", "cmd/new-long"),
+            ("review-leaf", "cmd/new-prefix"),
+            ("other", "cmd/new-default"),
+        ] {
+            assert_resolved(
+                name,
+                Some("cmd/old-stage"),
+                Some(&enclosing),
+                |g| {
+                    g.runtime_config
+                        .stage_models_exact
+                        .insert(name.into(), "cmd/old-global".into());
+                    g.runtime_config
+                        .profile_stage_models_exact
+                        .insert(name.into(), "cmd/old-profile".into());
+                    g.runtime_config.resolved_model_selection =
+                        Some(crate::definition::ResolvedModelSelection {
+                            requested: "profile/replacement".into(),
+                            default_model: "cmd/new-default".into(),
+                            stage_models_exact: [("review-exact".into(), "cmd/new-exact".into())]
+                                .into(),
+                            stage_models_prefix: [
+                                ("review-".into(), "cmd/new-prefix".into()),
+                                ("review-long-".into(), "cmd/new-long".into()),
+                            ]
+                            .into(),
+                            task_models: None,
+                        });
+                },
+                expected,
+            )
+            .await;
+        }
     }
 
     #[tokio::test]

@@ -90,13 +90,22 @@ enum Cmds {
         id: String,
     },
     /// Resume a stopped or bailed gremlin from its last recorded stage.
+    ///
+    /// Without --model, reuse the frozen model selection. History is immutable;
+    /// ordinary resume keeps artifacts, while --stage forks and preserves the parent.
     Resume {
         /// Gremlin id to resume.
         id: String,
-        /// Rewind to this top-level stage and re-execute from it onward.
+        /// Fork from this top-level stage and rerun onward, preserving the parent.
         #[arg(long)]
         stage: Option<String>,
-        /// Set the default model for the new resume attempt.
+        /// Replace all model-selection pins for remaining or rerun work.
+        ///
+        /// Accepts model://provider/model, provider/model, or profile/<name>.
+        /// Replaces definition, stage, composite, and task-model selections.
+        /// Profiles select exact stage, then longest prefix, then profile default.
+        /// Installs new task mappings; unmapped tasks use the effective stage model.
+        /// Completed history is unchanged.
         #[arg(long)]
         model: Option<String>,
     },
@@ -2825,6 +2834,27 @@ mod tests {
     use super::*;
     use gremlins::schemas::bootstrap::{InputSource, InputSources};
     use std::fs;
+
+    #[test]
+    fn resume_help_explains_replacement_and_preservation() {
+        let help = Cli::try_parse_from(["gremlins", "resume", "--help"])
+            .err()
+            .expect("help should exit parsing")
+            .to_string();
+        let help = help.split_whitespace().collect::<Vec<_>>().join(" ");
+        for text in [
+            "frozen model selection",
+            "keeps artifacts",
+            "preserves the parent",
+            "Replace all model-selection pins",
+            "model://provider/model",
+            "longest prefix",
+            "unmapped tasks use the effective stage model",
+            "Completed history is unchanged",
+        ] {
+            assert!(help.contains(text), "missing {text:?} in {help}");
+        }
+    }
 
     #[test]
     fn resume_parser_and_request_forwarding() {

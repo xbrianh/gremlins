@@ -41,7 +41,7 @@ use crate::clients::interactive::{InteractiveSession, InteractiveSessionFactory}
 use crate::config;
 use crate::core::proc::{run_logged_commands, sanitize_log_filename};
 use crate::core::{discovery, env_file};
-use crate::definition::{GremlinDefinition, StaticDefinition};
+use crate::definition::{GremlinDefinition, ResolvedModelSelection, StaticDefinition};
 use crate::executor::state::{self, BlobMode, StateData, StateStore};
 use crate::executor::str_field;
 use crate::executor::vars;
@@ -152,6 +152,8 @@ pub fn validate_gremlin_id(id: &str) -> Result<GremlinId, String> {
 /// invocations can coexist in one process without reading global state.
 #[derive(Clone, Default)]
 pub(crate) struct RuntimeConfig {
+    /// Explicit resume replacement, already resolved and independent of config.
+    pub resolved_model_selection: Option<ResolvedModelSelection>,
     /// Exact-match stage→client mappings from config.
     pub stage_models_exact: HashMap<String, String>,
     /// Prefix-match stage→client mappings from config.
@@ -215,6 +217,7 @@ impl RuntimeConfig {
         let default_task_models = cfg.as_ref().and_then(|c| c.default_task_models().cloned());
         let base_process_env: HashMap<String, String> = std::env::vars().collect();
         Self {
+            resolved_model_selection: None,
             stage_models_exact: stage_exact,
             stage_models_prefix: stage_prefix,
             profile_stage_models_exact: profile_stage_exact,
@@ -457,12 +460,7 @@ impl Gremlin {
             let yaml_bytes = _definition
                 .serialize()
                 .map_err(|e| RunError::Message(format!("failed to serialize definition: {e}")))?;
-            let mut blob = state
-                .open_blob("definition.json", state::BlobMode::Write)
-                .map_err(|e| {
-                    RunError::Message(format!("failed to write hermetic definition: {e}"))
-                })?;
-            blob.write_all(&yaml_bytes).map_err(|e| {
+            state.initialize_definition(&yaml_bytes).map_err(|e| {
                 RunError::Message(format!("failed to write hermetic definition: {e}"))
             })?;
         }
@@ -525,21 +523,11 @@ impl Gremlin {
     pub fn from(id: &str) -> Result<Gremlin, RunError> {
         let gremlin_id = validate_gremlin_id(id).map_err(RunError::Message)?;
         let state_data = StateData::open(gremlin_id.as_str())?;
-        let state_dir = state_data.state_dir();
-        let state_file = state_dir.join("state.json");
-
-        // `read_state_json` is permissive by design ({} for missing or
-        // unparseable); `from` needs the real reason, so an empty result is
-        // re-parsed here to say which it was.
         let raw = state_data.state_tree();
         if raw.is_empty() {
-            let text = std::fs::read_to_string(&state_file)?;
-            let detail = match serde_json::from_str::<Value>(&text) {
-                Err(error) => format!("could not parse state.json: {error}"),
-                Ok(Value::Object(_)) => "state.json must be a non-empty JSON object".to_string(),
-                Ok(_) => "state.json must be a JSON object".to_string(),
-            };
-            return Err(RunError::Message(detail));
+            return Err(RunError::Message(
+                "run state must be a non-empty JSON object".to_string(),
+            ));
         }
 
         let kind = str_field(&raw, "kind");
@@ -675,6 +663,14 @@ impl Gremlin {
         }
 
         if !self.definition.is_stub() {
+            if let Some(definition) = self
+                .definition
+                .as_any_mut()
+                .and_then(|value| value.downcast_mut::<StaticDefinition>())
+            {
+                self.runtime_config.resolved_model_selection =
+                    definition.resolved_model_selection.clone();
+            }
             return Ok(());
         }
         let Some(definition_path) = self.definition_path.clone() else {
@@ -691,7 +687,9 @@ impl Gremlin {
                 self.runtime_config.default_model.as_deref(),
             )
             .map_err(|error| RunError::Message(error.to_string()))?
-        } else if self.state.exists("definition.json") {
+        } else if self.state.read_field("definition_revision").is_some()
+            || self.state.exists("definition.json")
+        {
             // Read the hermetic snapshot through the store's name-validated
             // blob path, then parse the already-expanded bytes directly.
             let bytes = {
@@ -724,10 +722,13 @@ impl Gremlin {
         // names the definition this run used, even when it was loaded from the
         // hermetic snapshot blob.
         definition.path = definition_path.clone();
+        self.runtime_config.resolved_model_selection = definition.resolved_model_selection.clone();
 
-        // Write the hermetic definition.json snapshot so every entry point
-        // that calls run() gets one — resume, fork, and fresh launch alike.
-        if native.is_none() && !self.state.exists("definition.json") {
+        // Preserve legacy snapshot fallback without publishing a new revision.
+        if native.is_none()
+            && self.state.read_field("definition_revision").is_none()
+            && !self.state.exists("definition.json")
+        {
             let yaml_bytes = definition
                 .serialize()
                 .map_err(|e| RunError::Message(format!("failed to serialize definition: {e}")))?;
@@ -819,7 +820,9 @@ impl Gremlin {
     /// keeps the handle's previous (stub) definition and decides whether to
     /// continue teardown without clean commands.
     pub fn attach_clean_cmds(&mut self) -> Result<(), RunError> {
-        if !self.state.exists("definition.json") {
+        if self.state.read_field("definition_revision").is_none()
+            && !self.state.exists("definition.json")
+        {
             return Err(RunError::Message(format!(
                 "gremlin {}: definition snapshot not found",
                 self.id
@@ -931,6 +934,20 @@ impl Gremlin {
         // Allow effective_model mutation via with_model.
         let mut child_provider = child_provider;
 
+        let effective_model = if let Some(selection) = &self.runtime_config.resolved_model_selection
+        {
+            if let Some(definition) = child_provider
+                .as_any_mut()
+                .and_then(|value| value.downcast_mut::<StaticDefinition>())
+            {
+                definition
+                    .apply_resolved_model_selection(selection.clone())
+                    .map_err(|error| RunError::Message(error.to_string()))?;
+            }
+            None
+        } else {
+            effective_model
+        };
         let client = if let Some(model_spec) = effective_model {
             let client = Client::from_uri(model_spec.clone()).map_err(|e| {
                 RunError::Message(format!("invalid model spec '{model_spec}': {e}"))
@@ -1043,6 +1060,9 @@ impl Gremlin {
         );
 
         let child_state = StateData::from_store(Some(child_id.to_string()), forked_store);
+        child_state
+            .write_state(&child)
+            .map_err(|e| RunError::Message(format!("failed to write child state: {e}")))?;
         // A resumable child needs its branch-local program, not the parent's
         // snapshot: otherwise --model could reload stages outside this branch.
         // Ephemeral/native children retain their live provider instead.
@@ -1059,14 +1079,9 @@ impl Gremlin {
             let snapshot =
                 serde_json::to_vec(&expanded).map_err(|e| RunError::Message(e.to_string()))?;
             child_state
-                .open_blob("definition.json", BlobMode::Write)
-                .map_err(|e| RunError::Message(e.to_string()))?
-                .write_all(&snapshot)
-                .map_err(|e| RunError::Message(e.to_string()))?;
+                .initialize_definition(&snapshot)
+                .map_err(RunError::Message)?;
         }
-        child_state
-            .write_state(&child)
-            .map_err(|e| RunError::Message(format!("failed to write child state: {e}")))?;
         child_state
             .open_blob("log", state::BlobMode::Write)
             .map_err(|e| RunError::Message(format!("failed to create child log: {e}")))?;
@@ -2141,6 +2156,10 @@ mod tests {
         )
         .unwrap();
         let id = launched.id.to_string();
+        let revision = launched.state.read_field("definition_revision").unwrap();
+        // The compatibility blob and source are not authoritative after commit.
+        std::fs::remove_file(launched.state.state_dir().join("definition.json")).unwrap();
+        std::fs::write(fx.definition_path(), "invalid source").unwrap();
         drop(launched);
 
         let mut handle = Gremlin::from(&id).unwrap();
@@ -2150,6 +2169,20 @@ mod tests {
         // definition must have been loaded by the time `run` returns.
         assert_eq!(handle.run(None).await.unwrap(), 0);
         assert_eq!(handle.definition.name(), "demo");
+        assert_eq!(
+            handle.state.read_field("definition_revision"),
+            Some(revision)
+        );
+        assert_eq!(
+            handle
+                .state
+                .read_field("definition_history")
+                .unwrap()
+                .as_array()
+                .unwrap()
+                .len(),
+            1
+        );
     }
 
     #[tokio::test]

@@ -22,7 +22,20 @@ use serde_json::{Map, Value};
 use crate::artifacts::uri::Uri;
 use crate::config;
 
+#[cfg(test)]
+mod publication_tests;
 mod resume;
+
+type BackendResolver =
+    dyn Fn(&str) -> Option<Result<Box<dyn StateStore + Send + Sync>, StateError>> + Send + Sync;
+
+fn backend_resolvers(
+) -> &'static std::sync::RwLock<std::collections::BTreeMap<String, Arc<BackendResolver>>> {
+    static RESOLVERS: std::sync::OnceLock<
+        std::sync::RwLock<std::collections::BTreeMap<String, Arc<BackendResolver>>>,
+    > = std::sync::OnceLock::new();
+    RESOLVERS.get_or_init(Default::default)
+}
 
 // ---------------------------------------------------------------------------
 // Error types
@@ -170,6 +183,41 @@ pub trait StateStore: Send + Sync + Debug {
         _definition: Option<&[u8]>,
     ) -> Result<(), String> {
         Err("resume publication is unsupported by this state store".into())
+    }
+
+    /// Compare the entire planned state under the publication lock before writing.
+    /// Backends must not implement this as a separate read followed by a write.
+    fn publish_resume_conditional(
+        &self,
+        _expected: &Map<String, Value>,
+        _fields: &Map<String, Value>,
+        _definition: Option<&[u8]>,
+        _metadata: &Map<String, Value>,
+    ) -> Result<(), String> {
+        Err("conditional resume publication is unsupported by this state store".into())
+    }
+
+    /// Publish the launch snapshot and its initial immutable revision.
+    fn initialize_definition(&self, _definition: &[u8]) -> Result<(), String> {
+        Err("definition initialization is unsupported by this state store".into())
+    }
+
+    /// Read an immutable definition snapshot without consulting source files.
+    fn read_definition_revision(&self, id: &str) -> Result<Vec<u8>, String> {
+        if id.is_empty() || !id.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-') {
+            return Err("invalid definition revision ID".into());
+        }
+        let mut blob = self
+            .open(&format!("definition-revisions/{id}.json"), BlobMode::Read)
+            .map_err(|e| e.to_string())?;
+        let mut bytes = Vec::new();
+        std::io::Read::read_to_end(&mut blob, &mut bytes).map_err(|e| e.to_string())?;
+        Ok(bytes)
+    }
+
+    /// Remove the terminal marker through the selected backend.
+    fn clear_finished(&self) -> Result<(), String> {
+        Err("terminal marker cleanup is unsupported by this state store".into())
     }
 
     /// Restore an interrupted resume. Returns whether a recovery journal existed.
@@ -328,6 +376,17 @@ pub trait StateStore: Send + Sync + Debug {
             )));
         }
         self.fork_to_stage(keys, rewind_state).await
+    }
+
+    /// Atomically reject stale source state before publishing a new attempt.
+    async fn fork_to_stage_conditional(
+        &self,
+        _expected: &Map<String, Value>,
+        _keys: &[String],
+        _rewind_state: &Map<String, Value>,
+        _definition: Option<&[u8]>,
+    ) -> Result<Box<dyn StateStore + Send + Sync>, Box<dyn std::error::Error>> {
+        Err("conditional stage fork is unsupported by this state store".into())
     }
 
     /// Produce a localized (filesystem-scoped) store containing only the
@@ -1188,7 +1247,35 @@ impl StateStore for FileSystemStateStore {
         fields: &Map<String, Value>,
         definition: Option<&[u8]>,
     ) -> Result<(), String> {
-        resume::publish(self.root.path(), fields, definition)
+        resume::publish(self.root.path(), fields, definition, None, &Map::new())
+    }
+
+    fn publish_resume_conditional(
+        &self,
+        expected: &Map<String, Value>,
+        fields: &Map<String, Value>,
+        definition: Option<&[u8]>,
+        metadata: &Map<String, Value>,
+    ) -> Result<(), String> {
+        resume::publish(
+            self.root.path(),
+            fields,
+            definition,
+            Some(expected),
+            metadata,
+        )
+    }
+
+    fn initialize_definition(&self, definition: &[u8]) -> Result<(), String> {
+        resume::initialize(self.root.path(), definition)
+    }
+
+    fn clear_finished(&self) -> Result<(), String> {
+        match std::fs::remove_file(self.root.path().join("finished")) {
+            Ok(()) => Ok(()),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+            Err(e) => Err(e.to_string()),
+        }
     }
 
     fn recover_resume(&self) -> Result<bool, String> {
@@ -1520,6 +1607,22 @@ impl StateStore for FileSystemStateStore {
         rewind_state: &Map<String, Value>,
         definition: Option<&[u8]>,
     ) -> Result<Box<dyn StateStore + Send + Sync>, Box<dyn std::error::Error>> {
+        self.fork_to_stage_conditional(&self.state_tree(), keys, rewind_state, definition)
+            .await
+    }
+
+    async fn fork_to_stage_conditional(
+        &self,
+        expected: &Map<String, Value>,
+        keys: &[String],
+        rewind_state: &Map<String, Value>,
+        definition: Option<&[u8]>,
+    ) -> Result<Box<dyn StateStore + Send + Sync>, Box<dyn std::error::Error>> {
+        let _lock = acquire_lock_async(&self.state_file()).await?;
+        resume::recover_unlocked(self.root.path())?;
+        if &self.state_tree() != expected {
+            return Err("resume conflict: state changed since planning".into());
+        }
         if self.root.is_temp() {
             return Err(Box::new(std::io::Error::new(
                 std::io::ErrorKind::Unsupported,
@@ -1590,6 +1693,9 @@ impl StateStore for FileSystemStateStore {
             })?;
 
         let child_dir = attempt_dir_path(&gremlin_id, next);
+        if latest_attempt_dir(&gremlin_id)?.as_path() != self.root.path() {
+            return Err("resume conflict: a newer attempt exists".into());
+        }
 
         // Prepare everything out of view, with automatic cleanup on error or
         // cancellation. Keep it on the same filesystem for atomic publication.
@@ -1611,16 +1717,19 @@ impl StateStore for FileSystemStateStore {
         // Carry the hermetic definition snapshot into the new attempt so
         // `init_runtime`, `land`, and teardown can keep reading it through
         // the store even when the original source file has since moved.
-        if let Some(bytes) = definition {
-            use std::io::Write;
-            let mut dst = child_store.open("definition.json", BlobMode::Write)?;
+        if definition.is_some() {
             resume_write_failure("fork-definition")?;
-            dst.write_all(bytes)?;
-        } else if self.exists("definition.json") {
-            let mut src = self.open("definition.json", BlobMode::Read)?;
-            let mut bytes = Vec::new();
-            use std::io::Read;
-            src.read_to_end(&mut bytes)?;
+        }
+        if self.exists("definition.json") || self.read_field("definition_revision").is_some() {
+            let bytes = if let Some(Value::String(id)) = self.read_field("definition_revision") {
+                self.read_definition_revision(&id)?
+            } else {
+                let mut src = self.open("definition.json", BlobMode::Read)?;
+                let mut bytes = Vec::new();
+                use std::io::Read;
+                src.read_to_end(&mut bytes)?;
+                bytes
+            };
             let mut dst = child_store.open("definition.json", BlobMode::Write)?;
             use std::io::Write;
             dst.write_all(&bytes)?;
@@ -1650,8 +1759,27 @@ impl StateStore for FileSystemStateStore {
             dst.write_all(&bytes)?;
         }
 
+        if self.root.path().join("definition-revisions").exists() {
+            copy_dir_sync(
+                &self.root.path().join("definition-revisions"),
+                &tmp_dir.join("definition-revisions"),
+            )?;
+        }
+        let mut child_state = rewind_state.clone();
+        for field in ["definition_revision", "definition_history"] {
+            if let Some(value) = self.state_tree().get(field) {
+                child_state.insert(field.into(), value.clone());
+            }
+        }
         resume_write_failure("metadata")?;
-        child_store.write_state(rewind_state)?;
+        child_store.write_state(&child_state)?;
+        if let Some(bytes) = definition {
+            child_store.initialize_definition(bytes)?;
+        } else if !child_state.contains_key("definition_revision")
+            && child_store.exists("definition.json")
+        {
+            child_store.publish_resume(&Map::new(), None)?;
+        }
 
         // Rewrite registry paths before publication. No fallible preparation
         // may remain after the rename exposes the new attempt.
@@ -1884,6 +2012,9 @@ impl StateStore for ScopedFileSystemStateStore {
     delegate!(inner, fn state_tree(&self) -> Map<String, Value>);
     delegate!(inner, fn write_state(&self, data: &Map<String, Value>) -> Result<(), StateError>);
     delegate!(inner, fn publish_resume(&self, fields: &Map<String, Value>, definition: Option<&[u8]>) -> Result<(), String>);
+    delegate!(inner, fn publish_resume_conditional(&self, expected: &Map<String, Value>, fields: &Map<String, Value>, definition: Option<&[u8]>, metadata: &Map<String, Value>) -> Result<(), String>);
+    delegate!(inner, fn initialize_definition(&self, definition: &[u8]) -> Result<(), String>);
+    delegate!(inner, fn clear_finished(&self) -> Result<(), String>);
     delegate!(inner, fn recover_resume(&self) -> Result<bool, String>);
     delegate!(inner, fn open(&self, name: &str, mode: BlobMode) -> Result<Box<dyn StateBlob>, StateError>);
     delegate!(inner, fn exists(&self, name: &str) -> bool);
@@ -2017,11 +2148,50 @@ impl StateData {
 
     /// Open an existing state directory. Does NOT write anything.
     pub fn open(gremlin_id: &str) -> Result<Self, StateError> {
-        let store = Arc::new(FileSystemStateStore::open(gremlin_id)?);
-        Ok(Self {
-            gremlin_id: Some(gremlin_id.to_string()),
-            store,
+        let resolvers: Vec<_> = backend_resolvers()
+            .read()
+            .unwrap()
+            .values()
+            .cloned()
+            .collect();
+        for resolver in resolvers {
+            if let Some(store) = resolver(gremlin_id) {
+                return Ok(Self::from_store(Some(gremlin_id.to_string()), store?));
+            }
+        }
+        Self::open_with(gremlin_id, |id| {
+            Ok(Box::new(FileSystemStateStore::open(id)?))
         })
+    }
+
+    /// Register a process-wide opener. Return None for identities owned by another
+    /// backend; an owned identity's error is propagated without filesystem fallback.
+    pub fn register_backend_resolver(
+        name: &str,
+        resolver: impl Fn(&str) -> Option<Result<Box<dyn StateStore + Send + Sync>, StateError>>
+            + Send
+            + Sync
+            + 'static,
+    ) {
+        backend_resolvers()
+            .write()
+            .unwrap()
+            .insert(name.to_owned(), Arc::new(resolver));
+    }
+
+    pub fn unregister_backend_resolver(name: &str) {
+        backend_resolvers().write().unwrap().remove(name);
+    }
+
+    /// Open through a backend resolver rather than assuming filesystem storage.
+    pub fn open_with(
+        gremlin_id: &str,
+        opener: impl FnOnce(&str) -> Result<Box<dyn StateStore + Send + Sync>, StateError>,
+    ) -> Result<Self, StateError> {
+        Ok(Self::from_store(
+            Some(gremlin_id.to_string()),
+            opener(gremlin_id)?,
+        ))
     }
 
     pub fn from_store(
@@ -2089,12 +2259,26 @@ impl StateData {
         name: &str,
         mode: BlobMode,
     ) -> Result<Box<dyn StateBlob>, StateError> {
+        if name == "definition.json" && matches!(mode, BlobMode::Read) {
+            if let Some(Value::String(id)) = self.store.read_field("definition_revision") {
+                let bytes = self
+                    .store
+                    .read_definition_revision(&id)
+                    .map_err(|e| StateError::Io(std::io::Error::other(e)))?;
+                return Ok(Box::new(std::io::Cursor::new(bytes)));
+            }
+        }
         self.store.open(name, mode)
     }
     delegate!(pub(crate) store, fn exists(&self, name: &str) -> bool);
     delegate!(pub store, fn clear_stage_error(&self, attempt: &str));
     delegate!(pub store, fn add_subprocess_cost(&self, amount: f64));
     delegate!(pub store, fn patch_parallel_attempt(&self, child_key: &str, attempt: &str));
+
+    delegate!(pub store, fn publish_resume_conditional(&self, expected: &Map<String, Value>, fields: &Map<String, Value>, definition: Option<&[u8]>, metadata: &Map<String, Value>) -> Result<(), String>);
+    delegate!(pub store, fn initialize_definition(&self, definition: &[u8]) -> Result<(), String>);
+    delegate!(pub store, fn read_definition_revision(&self, id: &str) -> Result<Vec<u8>, String>);
+    delegate!(pub store, fn clear_finished(&self) -> Result<(), String>);
 
     // --- locality ---
 
@@ -2115,6 +2299,7 @@ impl StateData {
     delegate!(pub store, async fn join(&self, other: &(dyn StateStore + Sync), collision: Collision, key_prefix: Option<&str>) -> Result<usize, Box<dyn std::error::Error>>);
     delegate!(pub store, async fn fork(&self, child_gremlin_id: &str) -> Result<Box<dyn StateStore + Send + Sync>, Box<dyn std::error::Error>>);
     delegate!(pub store, async fn fork_to_stage(&self, keys: &[String], rewind_state: &Map<String, Value>) -> Result<Box<dyn StateStore + Send + Sync>, Box<dyn std::error::Error>>);
+    delegate!(pub store, async fn fork_to_stage_conditional(&self, expected: &Map<String, Value>, keys: &[String], rewind_state: &Map<String, Value>, definition: Option<&[u8]>) -> Result<Box<dyn StateStore + Send + Sync>, Box<dyn std::error::Error>>);
     delegate!(pub store, async fn checkout_registry(&self, keys: &[String]) -> Result<Checkout, Box<dyn std::error::Error>>);
 
     // --- methods with guards that stay on StateData ---
@@ -4170,6 +4355,15 @@ mod tests {
         }
 
         let store = StubStore;
+        assert!(store
+            .publish_resume_conditional(&Map::new(), &Map::new(), Some(b"snapshot"), &Map::new())
+            .unwrap_err()
+            .contains("unsupported"));
+        assert!(store.initialize_definition(b"snapshot").is_err());
+        assert!(store.clear_finished().is_err());
+        let opened = StateData::open_with("virtual-only", |_| Ok(Box::new(StubStore))).unwrap();
+        assert_eq!(opened.gremlin_id.as_deref(), Some("virtual-only"));
+        assert!(opened.store_handle().as_any().is_none());
         let result = store.checkout_registry(&["key".to_string()]).await;
         match result {
             Err(e) => assert!(e.to_string().contains("not supported")),

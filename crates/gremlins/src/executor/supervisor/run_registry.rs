@@ -337,9 +337,10 @@ impl RunRegistry {
         Some(handle.state_tx.clone())
     }
 
-    /// Stop a child run and run the full reap path: terminal state, disk write,
+    /// Stop a child run and run the full reap path: terminal state, store write,
     /// and backend resource cleanup. A no-op when the id was not live.
     pub(crate) async fn stop_and_reap(self: &Arc<Self>, id: &str) {
+        let store = self.get_run_store(id).await;
         if let Some(state_tx) = self.stop_run(id).await {
             let _ = state_tx.send(RunState {
                 id: id.to_string(),
@@ -347,8 +348,8 @@ impl RunRegistry {
                 stage: String::new(),
                 started_at: String::new(),
             });
-            if let Ok(sd) = crate::executor::state::StateData::open(id) {
-                sd.write_terminal_state(1);
+            if let Some(store) = store {
+                store.write_terminal_state(1);
             }
             reap_client_for(id);
         }

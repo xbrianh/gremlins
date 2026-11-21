@@ -349,7 +349,56 @@ fn prepare_resume_model(gremlin: &Gremlin, spec: &str) -> Result<(String, Vec<u8
     let root = snapshot
         .as_object_mut()
         .ok_or("invalid definition snapshot: expected object")?;
+    let mut selection = crate::definition::r#static::ResolvedModelSelection {
+        requested: spec.trim().to_owned(),
+        default_model: concrete.clone(),
+        stage_models_exact: Default::default(),
+        stage_models_prefix: Default::default(),
+        task_models: None,
+    };
+    if let Some(name) = config::profile_name(spec.trim()) {
+        let profile = cfg
+            .model_profiles()
+            .get(name)
+            .ok_or("unknown model profile")?;
+        if let Some(mappings) = &profile.model_by_stage {
+            for (stage, model) in mappings {
+                let model = config::resolve_model_reference(model, &cfg)?
+                    .trim()
+                    .to_owned();
+                crate::clients::client::Client::parse(&model)?;
+                if let Some(prefix) = stage.strip_suffix('*') {
+                    selection
+                        .stage_models_prefix
+                        .insert(prefix.to_owned(), model);
+                } else {
+                    selection.stage_models_exact.insert(stage.clone(), model);
+                }
+            }
+        }
+        selection.task_models = profile
+            .task_models
+            .as_ref()
+            .map(|models| {
+                models
+                    .iter()
+                    .map(|(task, model)| {
+                        let model = config::resolve_model_reference(model, &cfg)?
+                            .trim()
+                            .to_owned();
+                        crate::clients::client::Client::parse(&model)?;
+                        Ok((task.clone(), model))
+                    })
+                    .collect::<Result<_, String>>()
+            })
+            .transpose()?;
+    }
+    selection.validate()?;
     root.insert("default_model".into(), Value::String(concrete.clone()));
+    root.insert(
+        "resolved_model_selection".into(),
+        serde_json::to_value(selection).map_err(|e| e.to_string())?,
+    );
     let bytes = serde_json::to_vec(&snapshot).map_err(|e| e.to_string())?;
     StaticDefinition::from_expanded_bytes(&bytes, None, None).map_err(|e| e.to_string())?;
     Ok((concrete, bytes))
@@ -415,6 +464,7 @@ pub(crate) async fn handle_resume(request: &Value, registry: &Arc<RunRegistry>) 
         }
     }
 
+    let expected_state = gremlin.state.state_tree();
     let replacement = if let Some(spec) = request.get("model") {
         let Some(spec) = spec.as_str() else {
             return error_response("model must be a string");
@@ -434,12 +484,7 @@ pub(crate) async fn handle_resume(request: &Value, registry: &Arc<RunRegistry>) 
         "attempt": format!("{}-resume-{}", if current_attempt.is_empty() { "1" } else { &current_attempt }, state::token_hex(2)),
     }).as_object().unwrap().clone());
     if let Some((model, _)) = &replacement {
-        let profile = gremlin
-            .state
-            .state_tree()
-            .get("model_selection_profile")
-            .cloned()
-            .unwrap_or_else(|| Value::String(gremlin.model_override.clone().unwrap_or_default()));
+        let profile = Value::String(String::new());
         running.insert("model_selection_profile".into(), profile);
         running.insert("model_override".into(), Value::String(model.clone()));
         running.insert("model".into(), Value::String(model.clone()));
@@ -490,19 +535,16 @@ pub(crate) async fn handle_resume(request: &Value, registry: &Arc<RunRegistry>) 
         rewind_state.insert("subprocess_cost_usd".into(), Value::Null);
         rewind_state.remove("parallel_attempts");
 
-        let fork_result = if let Some((_, bytes)) = &replacement {
-            gremlin
-                .state
-                .store_ref()
-                .fork_to_stage_with_definition(&keys, &rewind_state, Some(bytes))
-                .await
-        } else {
-            gremlin
-                .state
-                .store_ref()
-                .fork_to_stage(&keys, &rewind_state)
-                .await
-        };
+        let fork_result = gremlin
+            .state
+            .store_ref()
+            .fork_to_stage_conditional(
+                &expected_state,
+                &keys,
+                &rewind_state,
+                replacement.as_ref().map(|(_, bytes)| bytes.as_slice()),
+            )
+            .await;
         let forked = match fork_result {
             Ok(forked) => forked,
             Err(e) => return error_response(&format!("gremlin {id}: failed to fork state: {e}")),
@@ -512,17 +554,30 @@ pub(crate) async fn handle_resume(request: &Value, registry: &Arc<RunRegistry>) 
         target
     } else {
         let stage = gremlin.state.read_str("stage");
-        if let Err(e) = gremlin.state.store_ref().publish_resume(
+        let metadata = replacement
+            .as_ref()
+            .map(|(_, bytes)| {
+                let snapshot: Value = serde_json::from_slice(bytes).expect("validated snapshot");
+                serde_json::json!({
+                    "requested_selection": request.get("model"),
+                    "resolved_selection": snapshot.get("resolved_model_selection"),
+                })
+                .as_object()
+                .unwrap()
+                .clone()
+            })
+            .unwrap_or_default();
+        if let Err(e) = gremlin.state.store_ref().publish_resume_conditional(
+            &expected_state,
             &running,
             replacement.as_ref().map(|(_, bytes)| bytes.as_slice()),
+            &metadata,
         ) {
             return error_response(&format!(
                 "gremlin {id}: failed to publish resume state: {e}"
             ));
         }
-        let state_dir = gremlin.state.state_dir();
-        let finished = state_dir.join("finished");
-        let _ = std::fs::remove_file(&finished);
+        let _ = gremlin.state.store_ref().clear_finished();
         stage
     };
 

@@ -86,12 +86,18 @@ pub(crate) async fn run_agent(
         stage_key(scope, &agent.name)
     };
 
-    let task_models_by_kind = resolve_task_models(
-        gremlin.runtime_config.default_task_models.as_ref(),
-        enclosing_task_models,
-        stage_task_models.as_ref(),
-    )
-    .map_err(|e| stage_failed(&agent.name, e))?;
+    let task_models_by_kind =
+        if let Some(selection) = &gremlin.runtime_config.resolved_model_selection {
+            // Replacement maps are complete, not another layer over old pins.
+            resolve_task_models(selection.task_models.as_ref(), None, None)
+        } else {
+            resolve_task_models(
+                gremlin.runtime_config.default_task_models.as_ref(),
+                enclosing_task_models,
+                stage_task_models.as_ref(),
+            )
+        }
+        .map_err(|e| stage_failed(&agent.name, e))?;
 
     let client = resolve_client(node, gremlin, enclosing_model)?;
     let framework_subs = gremlin.framework_subs(&agent.name);

@@ -54,6 +54,17 @@ fn read_json(path: impl AsRef<Path>) -> Value {
     serde_json::from_slice(&fs::read(path).unwrap()).unwrap()
 }
 
+fn replace_selection(snapshot: &mut Value, requested: &str, concrete: &str) {
+    snapshot["default_model"] = json!(concrete);
+    snapshot["resolved_model_selection"] = json!({
+        "requested": requested,
+        "default_model": concrete,
+        "stage_models_exact": {},
+        "stage_models_prefix": {},
+        "task_models": null
+    });
+}
+
 fn entries(sandbox: &Sandbox) -> Vec<PathBuf> {
     let mut paths: Vec<_> = fs::read_dir(sandbox.join("state"))
         .unwrap()
@@ -116,18 +127,27 @@ async fn assert_rejected_with_failure(
         assert_eq!(worker.model_override.as_deref(), Some("cmd/true"));
         worker.init_runtime(None).await.unwrap();
         assert_eq!(worker.definition.default_model().to_string(), "cmd/true");
-        assert_unpinned_resolves(&mut worker, "cmd/true").await;
+        assert_selection_resolves(&mut worker, "cmd/true").await;
     }
 }
 
-async fn assert_unpinned_resolves(worker: &mut Gremlin, concrete: &str) {
+async fn assert_selection_resolves(worker: &mut Gremlin, concrete: &str) {
     let pinned = worker.definition.next_stage().await.unwrap();
     assert_eq!(pinned.model().unwrap().to_string(), "cmd/true");
     assert_eq!(
         crate::executor::run::resolve_client(&pinned, worker, None)
             .unwrap()
             .to_string(),
-        "cmd/true"
+        crate::model_uri::ModelURI::parse(
+            worker
+                .runtime_config
+                .resolved_model_selection
+                .as_ref()
+                .map(|selection| selection.model_for_stage("pinned"))
+                .unwrap_or("cmd/true")
+        )
+        .unwrap()
+        .to_string()
     );
     let stage = worker.definition.next_stage().await.unwrap();
     assert_eq!(stage.name(), "run");
@@ -174,7 +194,7 @@ async fn resume_again_unchanged(
             .unwrap()
             .to_string()
     );
-    assert_unpinned_resolves(&mut worker, concrete).await;
+    assert_selection_resolves(&mut worker, concrete).await;
     assert_eq!(entries(sandbox).len(), 1, "flagless resume must not fork");
 }
 
@@ -197,7 +217,11 @@ async fn resume_model_persists_and_normal_worker_load_ignores_changed_source() {
     assert_eq!(response["type"], "ok", "{response}");
     drained(&registry).await;
     let mut expected = before;
-    expected["default_model"] = json!("cmd/echo replacement");
+    replace_selection(
+        &mut expected,
+        "cmd/echo replacement",
+        "cmd/echo replacement",
+    );
     assert_eq!(read_json(dir.join("definition.json")), expected);
     let mut worker = Gremlin::from(ID).unwrap();
     assert_eq!(
@@ -215,7 +239,7 @@ async fn resume_model_persists_and_normal_worker_load_ignores_changed_source() {
         "keep"
     );
     assert_eq!(entries(&sandbox).len(), 1, "ordinary resume must not fork");
-    assert_unpinned_resolves(&mut worker, "cmd/echo replacement").await;
+    assert_selection_resolves(&mut worker, "cmd/echo replacement").await;
 
     fs::create_dir_all(sandbox.join("config")).unwrap();
     fs::write(
@@ -256,7 +280,7 @@ async fn resume_padded_raw_model_persists_trimmed_without_losing_internal_spaces
         worker.definition.default_model().to_string(),
         "cmd/echo replacement"
     );
-    assert_unpinned_resolves(&mut worker, "cmd/echo replacement").await;
+    assert_selection_resolves(&mut worker, "cmd/echo replacement").await;
     resume_again_unchanged(&sandbox, &dir, &registry, "cmd/echo replacement").await;
 }
 
@@ -291,7 +315,11 @@ async fn assert_json5_resume_before_runtime_failure(stage: Option<&str>) {
     let parent_state = fs::read(parent.join("state.json")).unwrap();
     let parent_definition = fs::read(parent.join("definition.json")).unwrap();
     let mut expected: Value = json5::from_str(snapshot).unwrap();
-    expected["default_model"] = json!("cmd/echo replacement");
+    replace_selection(
+        &mut expected,
+        "cmd/echo replacement",
+        "cmd/echo replacement",
+    );
 
     let (registry, _shutdown) = spawn_test_actor().await;
     let mut request = json!({"id": ID, "model": "cmd/echo replacement"});
@@ -342,7 +370,7 @@ async fn resume_stage_json5_without_default_model_preserves_parent_before_runtim
 }
 
 #[tokio::test]
-async fn resume_profile_pins_options_without_importing_profile_task_or_stage_mappings() {
+async fn resume_profile_persists_options_and_full_task_and_stage_mappings() {
     let sandbox = Sandbox::with_config(Some("default-model: cmd/true\n"));
     config::init_global().unwrap();
     fs::write(
@@ -352,9 +380,10 @@ model-profiles:
   replacement:
     model: '  openai/replacement?temperature=0.2,reasoning_effort=high  '
     task-models:
-      Scout: openai/unwanted-scout
+      Scout: openai/replacement-scout
     model-by-stage:
-      pinned: openai/unwanted-stage
+      pinned: openai/replacement-stage
+      'pin*': openai/replacement-prefix
 "#,
     )
     .unwrap();
@@ -369,7 +398,13 @@ model-profiles:
     .await;
     assert_eq!(response["type"], "ok", "{response}");
     drained(&registry).await;
-    expected["default_model"] = json!(concrete);
+    replace_selection(&mut expected, "profile/replacement", concrete);
+    expected["resolved_model_selection"]["stage_models_exact"] =
+        json!({"pinned": "openai/replacement-stage"});
+    expected["resolved_model_selection"]["stage_models_prefix"] =
+        json!({"pin": "openai/replacement-prefix"});
+    expected["resolved_model_selection"]["task_models"] =
+        json!({"Scout": "openai/replacement-scout"});
     assert_eq!(read_json(dir.join("definition.json")), expected);
     assert_eq!(
         read_json(dir.join("state.json"))["model"],
@@ -403,7 +438,20 @@ model-profiles:
         crate::executor::run::resolve_client(&pinned, &worker, None)
             .unwrap()
             .to_string(),
-        "cmd/true"
+        crate::model_uri::ModelURI::parse("openai/replacement-stage")
+            .unwrap()
+            .to_string()
+    );
+    assert_eq!(
+        worker
+            .runtime_config
+            .resolved_model_selection
+            .as_ref()
+            .unwrap()
+            .task_models
+            .as_ref()
+            .unwrap()["Scout"],
+        "openai/replacement-scout"
     );
     assert_eq!(
         pinned.task_models().unwrap()["Implement"],
@@ -446,7 +494,7 @@ async fn resume_stage_model_changes_only_fork_and_preserves_parent_bytes() {
     assert_ne!(worker.state.state_dir(), parent);
     assert_eq!(worker.model_override.as_deref(), Some("cmd/echo fork"));
     let mut expected: Value = serde_json::from_slice(&parent_definition).unwrap();
-    expected["default_model"] = json!("cmd/echo fork");
+    replace_selection(&mut expected, "cmd/echo fork", "cmd/echo fork");
     assert_eq!(
         read_json(worker.state.state_dir().join("definition.json")),
         expected
@@ -530,13 +578,26 @@ async fn resume_model_state_write_failure_does_not_replace_snapshot_or_start_wor
         }
         assert_rejected_with_failure(&sandbox, &dir, request, Some("metadata")).await;
     }
-    assert_rejected_with_failure(
-        &sandbox,
-        &dir,
-        json!({"id": ID, "model": "cmd/echo new"}),
-        Some("journal-removal"),
-    )
-    .await;
+    // Journal cleanup happens after the conditional publication commit point.
+    let (registry, _shutdown) = spawn_test_actor().await;
+    state::set_resume_write_failure(Some("journal-removal"));
+    let response = handle_resume(&json!({"id": ID, "model": "cmd/echo new"}), &registry).await;
+    state::set_resume_write_failure(None);
+    assert_eq!(response["type"], "ok", "{response}");
+    drained(&registry).await;
+    let committed = fs::read(dir.join("definition.json")).unwrap();
+    assert_eq!(
+        read_json(dir.join("state.json"))["model_override"],
+        "cmd/echo new"
+    );
+    assert_eq!(
+        read_json(dir.join("definition.json"))["resolved_model_selection"]["requested"],
+        "cmd/echo new"
+    );
+    assert!(dir.join(".resume-model-recovery.json").exists());
+    resume_again_unchanged(&sandbox, &dir, &registry, "cmd/echo new").await;
+    assert!(!dir.join(".resume-model-recovery.json").exists());
+    assert_eq!(fs::read(dir.join("definition.json")).unwrap(), committed);
 }
 
 #[tokio::test]
@@ -694,7 +755,11 @@ async fn resume_double_failure_blocks_retries_until_original_snapshot_is_recover
     let replacement_definition = fs::read(dir.join("definition.json")).unwrap();
     assert_ne!(replacement_definition, original_definition);
     let mut expected: Value = serde_json::from_slice(&original_definition).unwrap();
-    expected["default_model"] = json!("cmd/echo replacement");
+    replace_selection(
+        &mut expected,
+        "cmd/echo replacement",
+        "cmd/echo replacement",
+    );
     assert_eq!(read_json(dir.join("definition.json")), expected);
     let retained_journal =
         fs::read(&journal).expect("failed rollback must retain recovery journal");
@@ -758,7 +823,7 @@ async fn resume_double_failure_blocks_retries_until_original_snapshot_is_recover
     assert!(reopened.model_override.is_none());
     reopened.init_runtime(None).await.unwrap();
     assert_eq!(reopened.definition.default_model().to_string(), "cmd/true");
-    assert_unpinned_resolves(&mut reopened, "cmd/true").await;
+    assert_selection_resolves(&mut reopened, "cmd/true").await;
 }
 
 #[tokio::test]
@@ -848,7 +913,7 @@ async fn resume_parallel_branch_preserves_actual_inherited_artifact_inputs() {
                 {"name": "fanout", "type": "parallel", "body": [
                     {"name": "branch", "type": "exec",
                      "interpolation": {"inputs": {"diff": "content(\"artifact://diff.txt\")"}},
-                     "options": {"cmds": ["test \"{diff}\" = 'prior diff' && false"]}}
+                     "options": {"cmds": ["test \"{diff}\" = 'prior diff' && test -f resume-ready"]}}
                 ]}
             ]
         }))
@@ -916,18 +981,14 @@ async fn resume_parallel_branch_preserves_actual_inherited_artifact_inputs() {
             .unwrap_err();
     assert!(error.to_string().contains("never-produced.txt"), "{error}");
 
-    // Repair only the deliberate failure, leaving the inherited consumer intact.
-    let mut repaired = snapshot;
-    repaired["stages"][0]["options"]["cmds"] = json!(["test \"{diff}\" = 'prior diff'"]);
-    fs::write(
-        dir.join("definition.json"),
-        serde_json::to_vec(&repaired).unwrap(),
-    )
-    .unwrap();
+    // Repair the runtime prerequisite, not the revision-backed definition.
+    // The inherited consumer must remain intact on reload.
     let mut data = read_json(dir.join("state.json"));
     data["status"] = json!("stopped");
     // The completed parent's teardown removes its non-git branch workspace.
-    fs::create_dir_all(data["workdir"].as_str().unwrap()).unwrap();
+    let workdir = Path::new(data["workdir"].as_str().unwrap());
+    fs::create_dir_all(workdir).unwrap();
+    fs::write(workdir.join("resume-ready"), "ready").unwrap();
     state::write_state(&dir, data.as_object().unwrap()).unwrap();
     let response = handle_resume(
         &json!({"id": child_id, "model": "cmd/echo replacement"}),

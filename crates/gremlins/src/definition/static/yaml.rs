@@ -26,7 +26,7 @@ use crate::stage_spec::node::StageSpec;
 use crate::stage_spec::parallel::ErrorPolicy;
 use crate::task_kind::TaskKind;
 
-use super::StaticDefinition;
+use super::{ResolvedModelSelection, StaticDefinition};
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -270,7 +270,19 @@ fn from_expanded_value(
         inherited_artifact_inputs: json_string_list(root, "inherited_artifact_inputs")?,
     };
 
-    builder.build()
+    let selection: Option<ResolvedModelSelection> = root
+        .get("resolved_model_selection")
+        .map(|value| serde_json::from_value(value.clone()))
+        .transpose()
+        .map_err(|e| SchemaError::Generic(format!("invalid resolved_model_selection: {e}")))?
+        .flatten();
+    let mut definition = builder.build()?;
+    if let Some(selection) = selection {
+        definition
+            .apply_resolved_model_selection(selection)
+            .map_err(|e| SchemaError::Generic(e.to_string()))?;
+    }
+    Ok(definition)
 }
 
 // ---------------------------------------------------------------------------

@@ -1,4 +1,4 @@
-//! Lock-scoped resume publication and durable undo journal.
+//! Lock-scoped resume publication with a durable commit-aware recovery journal.
 use std::fs;
 use std::io::Write;
 use std::path::Path;
@@ -31,6 +31,12 @@ struct Journal {
     state: Backup,
     #[serde(skip_serializing_if = "Option::is_none")]
     definition: Option<Backup>,
+    #[serde(default)]
+    remove_definition: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    committed_state: Option<Backup>,
+    #[serde(default)]
+    committed: bool,
 }
 
 fn stage(dir: &Path, bytes: &[u8]) -> Result<tempfile::NamedTempFile, String> {
@@ -53,10 +59,82 @@ fn sync_dir(dir: &Path) -> Result<(), String> {
         .map_err(|e| e.to_string())
 }
 
+fn archive(dir: &Path, bytes: &[u8]) -> Result<String, String> {
+    let id = super::secure_token_hex(16).map_err(|e| e.to_string())?;
+    let revisions = dir.join("definition-revisions");
+    fs::create_dir_all(&revisions).map_err(|e| e.to_string())?;
+    stage(&revisions, bytes)?
+        .persist_noclobber(revisions.join(format!("{id}.json")))
+        .map_err(|e| e.to_string())?;
+    sync_dir(&revisions)?;
+    sync_dir(dir)?;
+    Ok(id)
+}
+
+fn append_revision(
+    dir: &Path,
+    state: &mut Map<String, Value>,
+    bytes: &[u8],
+    metadata: &Map<String, Value>,
+) -> Result<(), String> {
+    let id = archive(dir, bytes)?;
+    let mut entry = metadata.clone();
+    let snapshot = crate::definition::r#static::yaml::parse_expanded_json(bytes).ok();
+    let selection = snapshot
+        .as_ref()
+        .and_then(|value| value.get("resolved_model_selection"));
+    entry.entry("requested_selection").or_insert_with(|| {
+        selection
+            .and_then(|value| value.get("requested"))
+            .cloned()
+            .or_else(|| state.get("model_override").cloned())
+            .unwrap_or(Value::Null)
+    });
+    entry.entry("resolved_selection").or_insert_with(|| {
+        selection
+            .cloned()
+            .or_else(|| {
+                snapshot
+                    .as_ref()
+                    .and_then(|value| value.get("default_model"))
+                    .cloned()
+            })
+            .unwrap_or(Value::Null)
+    });
+    entry.insert("id".into(), Value::String(id.clone()));
+    entry.insert(
+        "predecessor".into(),
+        state
+            .get("definition_revision")
+            .cloned()
+            .unwrap_or(Value::Null),
+    );
+    entry.insert(
+        "attempt".into(),
+        state.get("attempt").cloned().unwrap_or(Value::Null),
+    );
+    entry.insert("timestamp".into(), Value::String(super::now_iso()));
+    let history = state
+        .entry("definition_history")
+        .or_insert_with(|| Value::Array(Vec::new()));
+    history
+        .as_array_mut()
+        .ok_or("invalid definition history")?
+        .push(Value::Object(entry));
+    state.insert("definition_revision".into(), Value::String(id));
+    Ok(())
+}
+
+pub(super) fn initialize(dir: &Path, bytes: &[u8]) -> Result<(), String> {
+    publish(dir, &Map::new(), Some(bytes), None, &Map::new())
+}
+
 pub(super) fn publish(
     dir: &Path,
     fields: &Map<String, Value>,
     definition: Option<&[u8]>,
+    expected: Option<&Map<String, Value>>,
+    revision_metadata: &Map<String, Value>,
 ) -> Result<(), String> {
     let _lock = acquire_lock(&dir.join("state.json")).map_err(|e| e.to_string())?;
     recover_unlocked(dir)?;
@@ -64,18 +142,35 @@ pub(super) fn publish(
     let original_state = fs::read_to_string(dir.join("state.json")).map_err(|e| e.to_string())?;
     let mut state: Map<String, Value> =
         serde_json::from_str(&original_state).map_err(|e| e.to_string())?;
+    if expected.is_some_and(|expected| expected != &state) {
+        return Err("resume conflict: state changed since planning".into());
+    }
+    let old_definition = fs::read(dir.join("definition.json")).ok();
+    if state.get("definition_revision").is_none() {
+        if let Some(bytes) = old_definition.as_deref() {
+            append_revision(dir, &mut state, bytes, &Map::new())?;
+        }
+    }
     state.extend(fields.clone());
-    let metadata = stage(dir, &serde_json::to_vec(&state).map_err(|e| e.to_string())?)?;
+    if let Some(bytes) = definition {
+        append_revision(dir, &mut state, bytes, revision_metadata)?;
+    }
+    let target_state = serde_json::to_string(&state).map_err(|e| e.to_string())?;
+    let metadata = stage(dir, target_state.as_bytes())?;
     let snapshot = definition.map(|bytes| stage(dir, bytes)).transpose()?;
-    let journal = Journal {
+    let mut journal = Journal {
         state: Backup::Text(original_state),
         definition: if definition.is_some() {
-            Some(Backup::Text(
-                fs::read_to_string(dir.join("definition.json")).map_err(|e| e.to_string())?,
-            ))
+            old_definition.map(|bytes| match String::from_utf8(bytes) {
+                Ok(text) => Backup::Text(text),
+                Err(e) => Backup::Legacy(e.into_bytes()),
+            })
         } else {
             None
         },
+        remove_definition: definition.is_some() && !dir.join("definition.json").exists(),
+        committed_state: Some(Backup::Text(target_state)),
+        committed: false,
     };
     let journal_bytes = serde_json::to_vec(&journal).map_err(|e| e.to_string())?;
     if snapshot.is_some() {
@@ -94,14 +189,10 @@ pub(super) fn publish(
         metadata
             .persist(dir.join("state.json"))
             .map_err(|e| e.to_string())?;
-        sync_dir(dir)?;
-        resume_write_failure("journal-removal").map_err(|e| e.to_string())?;
-        fs::remove_file(dir.join(JOURNAL)).map_err(|e| e.to_string())?;
-        sync_dir(dir)
+        Ok::<(), String>(())
     })();
     if let Err(error) = publication {
-        // Even failure to sync a successful unlink must roll back. Reinstall the
-        // journal first so failed rollback still leaves durable recovery data.
+        // A failed precommit publication retains undo data until recovery succeeds.
         if !dir.join(JOURNAL).exists() {
             replace(dir, JOURNAL, &journal_bytes).and_then(|()| sync_dir(dir)).map_err(|e| {
                 format!("failed to publish resume state: {error}; preserving recovery journal failed: {e}")
@@ -112,6 +203,24 @@ pub(super) fn publish(
         })?;
         return Err(format!("failed to publish resume state: {error}"));
     }
+    // state.json is the commit point. Cleanup failure must not turn a committed
+    // publication into an error (and invite the caller to retry stale work).
+    journal.committed = true;
+    let cleanup = (|| {
+        sync_dir(dir)?;
+        replace(
+            dir,
+            JOURNAL,
+            &serde_json::to_vec(&journal).map_err(|e| e.to_string())?,
+        )?;
+        sync_dir(dir)?;
+        resume_write_failure("journal-removal").map_err(|e| e.to_string())?;
+        fs::remove_file(dir.join(JOURNAL)).map_err(|e| e.to_string())?;
+        sync_dir(dir)
+    })();
+    if let Err(error) = cleanup {
+        log::warn!("resume committed; recovery journal cleanup deferred: {error}");
+    }
     Ok(())
 }
 
@@ -120,14 +229,36 @@ pub(super) fn recover(dir: &Path) -> Result<bool, String> {
     recover_unlocked(dir)
 }
 
+fn journal_is_committed(dir: &Path, journal: &Journal) -> bool {
+    if journal.committed {
+        return true;
+    }
+    let Ok(current) = fs::read(dir.join("state.json")) else {
+        return false;
+    };
+    if let Some(target) = &journal.committed_state {
+        return current == target.bytes();
+    }
+    // Legacy publishers also replaced state.json last. A valid changed state is
+    // evidence that publication reached its commit point; do not undo it merely
+    // because the process died before unlinking the old-format journal.
+    current != journal.state.bytes()
+        && serde_json::from_slice::<Map<String, Value>>(&current).is_ok()
+}
+
 // Caller owns state.json.lock, including when invoked during publication rollback.
-fn recover_unlocked(dir: &Path) -> Result<bool, String> {
+pub(super) fn recover_unlocked(dir: &Path) -> Result<bool, String> {
     let bytes = match fs::read(dir.join(JOURNAL)) {
         Ok(bytes) => bytes,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(false),
         Err(e) => return Err(e.to_string()),
     };
     let journal: Journal = serde_json::from_slice(&bytes).map_err(|e| e.to_string())?;
+    if journal_is_committed(dir, &journal) {
+        fs::remove_file(dir.join(JOURNAL)).map_err(|e| e.to_string())?;
+        sync_dir(dir)?;
+        return Ok(true);
+    }
     for (name, backup) in [
         ("definition.json", journal.definition.as_ref()),
         ("state.json", Some(&journal.state)),
@@ -141,6 +272,13 @@ fn recover_unlocked(dir: &Path) -> Result<bool, String> {
         }
         resume_write_failure("rollback").map_err(|e| e.to_string())?;
         replace(dir, name, backup.bytes())?;
+    }
+    if journal.remove_definition {
+        match fs::remove_file(dir.join("definition.json")) {
+            Ok(()) => (),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => (),
+            Err(e) => return Err(e.to_string()),
+        }
     }
     sync_dir(dir)?;
     // Do not apply the publication-only removal fault to rollback cleanup.
@@ -172,6 +310,70 @@ mod tests {
     }
 
     #[test]
+    fn revisions_archive_exact_legacy_bytes_and_link_selection() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = seed(dir.path());
+        let legacy = b"{ \"model\" : \"old\" }\n";
+        fs::write(dir.path().join("definition.json"), legacy).unwrap();
+        let expected = store.state_tree();
+        let metadata = json!({"requested_selection":{"model":"new"},"resolved_selection":{"model":"provider/new"}});
+        store
+            .publish_resume_conditional(
+                &expected,
+                &Map::new(),
+                Some(b"new snapshot"),
+                metadata.as_object().unwrap(),
+            )
+            .unwrap();
+        let state = store.state_tree();
+        let history = state["definition_history"].as_array().unwrap();
+        assert_eq!(history.len(), 2);
+        assert_eq!(
+            store
+                .read_definition_revision(history[0]["id"].as_str().unwrap())
+                .unwrap(),
+            legacy
+        );
+        assert_eq!(history[1]["predecessor"], history[0]["id"]);
+        assert_eq!(
+            history[1]["requested_selection"],
+            metadata["requested_selection"]
+        );
+        assert_eq!(
+            store
+                .read_definition_revision(state["definition_revision"].as_str().unwrap())
+                .unwrap(),
+            b"new snapshot"
+        );
+        let before = fs::read(dir.path().join("state.json")).unwrap();
+        assert!(store
+            .publish_resume_conditional(&expected, &Map::new(), Some(b"stale"), &Map::new())
+            .unwrap_err()
+            .contains("conflict"));
+        assert_eq!(fs::read(dir.path().join("state.json")).unwrap(), before);
+    }
+
+    #[test]
+    fn launch_initial_revision_and_backend_cleanup() {
+        let dir = tempfile::tempdir().unwrap();
+        fs::write(dir.path().join("state.json"), "{}").unwrap();
+        let store = FileSystemStateStore::from_path(dir.path().to_path_buf());
+        store.initialize_definition(b"initial").unwrap();
+        assert_eq!(
+            store.state_tree()["definition_history"]
+                .as_array()
+                .unwrap()
+                .len(),
+            1
+        );
+        fs::write(dir.path().join("finished"), "").unwrap();
+        store.clear_finished().unwrap();
+        store.clear_finished().unwrap();
+        assert!(!store.exists("finished"));
+        assert!(store.read_definition_revision("../bad").is_err());
+    }
+
+    #[test]
     fn publication_merges_fields_with_and_without_snapshot() {
         for definition in [None, Some(br#"{"model":"new"}"#.as_slice())] {
             let dir = tempfile::tempdir().unwrap();
@@ -187,7 +389,7 @@ mod tests {
 
     #[test]
     fn publication_faults_restore_original_bytes() {
-        for fault in ["snapshot", "metadata", "journal-removal"] {
+        for fault in ["snapshot", "metadata"] {
             let dir = tempfile::tempdir().unwrap();
             let store = seed(dir.path());
             let state = fs::read(dir.path().join("state.json")).unwrap();
@@ -225,7 +427,8 @@ mod tests {
 
     #[test]
     fn failed_rollback_preserves_string_journal_for_recovery() {
-        for fault in ["metadata-and-rollback", "journal-removal-and-rollback"] {
+        {
+            let fault = "metadata-and-rollback";
             let dir = tempfile::tempdir().unwrap();
             let store = seed(dir.path());
             let original = fs::read(dir.path().join("state.json")).unwrap();
@@ -244,5 +447,87 @@ mod tests {
             assert_eq!(fs::read(dir.path().join("state.json")).unwrap(), original);
             assert!(!store.recover_resume().unwrap());
         }
+    }
+
+    #[test]
+    fn committed_publication_survives_restart_with_journal() {
+        for fault in ["journal-removal", "journal-removal-and-rollback"] {
+            let dir = tempfile::tempdir().unwrap();
+            let store = seed(dir.path());
+            set_resume_write_failure(Some(fault));
+            let result = store.publish_resume(
+                json!({"status":"running"}).as_object().unwrap(),
+                Some(b"new snapshot"),
+            );
+            set_resume_write_failure(None);
+            result.unwrap();
+            let committed = fs::read(dir.path().join("state.json")).unwrap();
+            assert!(dir.path().join(JOURNAL).exists());
+            drop(store);
+            let reopened = FileSystemStateStore::from_path(dir.path().to_path_buf());
+            reopened.recover_resume().unwrap();
+            assert_eq!(fs::read(dir.path().join("state.json")).unwrap(), committed);
+            assert_eq!(
+                fs::read(dir.path().join("definition.json")).unwrap(),
+                b"new snapshot"
+            );
+            assert!(!reopened.recover_resume().unwrap());
+        }
+    }
+
+    #[test]
+    fn recovery_recognizes_commit_before_journal_mark_and_legacy_commit() {
+        for legacy in [false, true] {
+            let dir = tempfile::tempdir().unwrap();
+            let store = seed(dir.path());
+            let original = fs::read_to_string(dir.path().join("state.json")).unwrap();
+            set_resume_write_failure(Some("journal-removal"));
+            let result = store.publish_resume(
+                json!({"status":"running"}).as_object().unwrap(),
+                Some(b"new snapshot"),
+            );
+            set_resume_write_failure(None);
+            result.unwrap();
+            let mut journal: Value =
+                serde_json::from_slice(&fs::read(dir.path().join(JOURNAL)).unwrap()).unwrap();
+            journal.as_object_mut().unwrap().remove("committed");
+            if legacy {
+                journal.as_object_mut().unwrap().remove("committed_state");
+            }
+            fs::write(
+                dir.path().join(JOURNAL),
+                serde_json::to_vec(&journal).unwrap(),
+            )
+            .unwrap();
+            assert!(store.recover_resume().unwrap());
+            assert_ne!(
+                fs::read_to_string(dir.path().join("state.json")).unwrap(),
+                original
+            );
+            assert_eq!(store.state_tree()["status"], "running");
+        }
+    }
+
+    #[test]
+    fn legacy_precommit_journal_restores_definition() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = seed(dir.path());
+        let original = fs::read_to_string(dir.path().join("state.json")).unwrap();
+        let journal = json!({"state":original,"definition":b"old snapshot".to_vec()});
+        fs::write(
+            dir.path().join(JOURNAL),
+            serde_json::to_vec(&journal).unwrap(),
+        )
+        .unwrap();
+        fs::write(dir.path().join("definition.json"), b"uncommitted snapshot").unwrap();
+        assert!(store.recover_resume().unwrap());
+        assert_eq!(
+            fs::read(dir.path().join("definition.json")).unwrap(),
+            b"old snapshot"
+        );
+        assert_eq!(
+            fs::read_to_string(dir.path().join("state.json")).unwrap(),
+            original
+        );
     }
 }

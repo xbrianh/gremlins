@@ -26,7 +26,7 @@ pub(crate) mod chat;
 pub use chat::ChatDefinition;
 pub mod r#static;
 pub use r#static::bundle::bundle_definition;
-pub use r#static::StaticDefinition;
+pub use r#static::{ResolvedModelSelection, StaticDefinition};
 
 // ---------------------------------------------------------------------------
 // Constants

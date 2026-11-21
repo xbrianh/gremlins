@@ -3,6 +3,8 @@
 mod attachment;
 mod paused_chat;
 mod resume_context;
+mod resume_dispatch;
+mod resume_history;
 mod resume_model;
 mod resume_runtime_default;
 

@@ -12,18 +12,18 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-fn read_json(path: impl AsRef<Path>) -> Value {
+pub(super) fn read_json(path: impl AsRef<Path>) -> Value {
     serde_json::from_slice(&fs::read(path).unwrap()).unwrap()
 }
 
-fn source(sandbox: &Sandbox, program: Value) -> PathBuf {
+pub(super) fn source(sandbox: &Sandbox, program: Value) -> PathBuf {
     let path = sandbox.join("project/.gremlins/context.json5");
     fs::create_dir_all(path.parent().unwrap()).unwrap();
     fs::write(&path, serde_json::to_vec(&program).unwrap()).unwrap();
     path
 }
 
-async fn drained(registry: &TestRegistry, id: &str) {
+pub(super) async fn drained(registry: &TestRegistry, id: &str) {
     tokio::time::timeout(Duration::from_secs(10), async {
         while registry.contains_run(id).await {
             tokio::time::sleep(Duration::from_millis(10)).await;
@@ -33,7 +33,7 @@ async fn drained(registry: &TestRegistry, id: &str) {
     .expect("worker did not finish");
 }
 
-async fn launch(registry: &TestRegistry, path: &Path, model: Option<&str>) -> String {
+pub(super) async fn launch(registry: &TestRegistry, path: &Path, model: Option<&str>) -> String {
     let mut request =
         json!({"definition": path, "project_root": path.parent().unwrap().parent().unwrap()});
     if let Some(model) = model {
@@ -56,7 +56,7 @@ async fn resume(registry: &TestRegistry, id: &str, model: Option<&str>) {
     drained(registry, id).await;
 }
 
-fn stopped(dir: &Path) {
+pub(super) fn stopped(dir: &Path) {
     let mut data = read_json(dir.join("state.json"));
     data["status"] = json!("stopped");
     state::write_state(dir, data.as_object().unwrap()).unwrap();
@@ -120,6 +120,10 @@ async fn child_context(explicit: bool) {
     resume(&registry, &child_id, Some("cmd/echo replacement")).await;
     let mut expected = before;
     expected["default_model"] = json!("cmd/echo replacement");
+    expected["resolved_model_selection"] = json!({
+        "requested": "cmd/echo replacement", "default_model": "cmd/echo replacement",
+        "stage_models_exact": {}, "stage_models_prefix": {}, "task_models": null
+    });
     assert_eq!(read_json(child_dir.join("definition.json")), expected);
     let snapshot = fs::read(child_dir.join("definition.json")).unwrap();
     stopped(&child_dir);
@@ -162,14 +166,7 @@ async fn child_context(explicit: bool) {
     let selected =
         crate::executor::run::resolve_client(&branch, &worker, worker.enclosing_model.as_ref())
             .unwrap();
-    assert_eq!(
-        selected.to_string(),
-        if explicit {
-            "cmd/echo enclosing"
-        } else {
-            "cmd/echo replacement"
-        }
-    );
+    assert_eq!(selected.to_string(), "cmd/echo replacement");
     assert!(matches!(
         worker.definition.next_stage().await.unwrap(),
         ExecutorStage::Done
@@ -189,7 +186,7 @@ async fn resume_parallel_child_replaces_fallback_without_expanding_branch_scope(
 }
 
 #[tokio::test]
-async fn resume_model_preserves_launch_profile_stage_rules_on_flagless_reload() {
+async fn resume_model_replaces_launch_profile_stage_rules_on_flagless_reload() {
     let sandbox = Sandbox::with_config(Some(
         r#"
 model-profiles:
@@ -242,15 +239,15 @@ model-profiles:
     resume(&registry, &id, Some("profile/replacement")).await;
     assert_eq!(
         read_json(dir.join("state.json"))["model_selection_profile"],
-        "profile/launch"
+        ""
     );
     let mut flagged = Gremlin::from(&id).unwrap();
     flagged.init_runtime(None).await.unwrap();
     for expected in [
-        "cmd/echo launch-mapped",
-        "cmd/echo launch-prefix",
+        "cmd/echo unwanted",
         "cmd/echo replacement",
-        "cmd/echo explicit",
+        "cmd/echo replacement",
+        "cmd/echo replacement",
     ] {
         let stage = flagged.definition.next_stage().await.unwrap();
         assert_eq!(
@@ -271,10 +268,10 @@ model-profiles:
     );
     worker.init_runtime(None).await.unwrap();
     for expected in [
-        "cmd/echo launch-mapped",
-        "cmd/echo launch-prefix",
+        "cmd/echo unwanted",
         "cmd/echo replacement",
-        "cmd/echo explicit",
+        "cmd/echo replacement",
+        "cmd/echo replacement",
     ] {
         let stage = worker.definition.next_stage().await.unwrap();
         assert_eq!(
