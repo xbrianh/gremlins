@@ -212,6 +212,13 @@ pub(super) fn publish(
         sync_dir(dir)?;
         #[cfg(test)]
         publication_boundary(dir, "after-commit");
+        // Preserve commit evidence before fallible alias repair can defer cleanup.
+        replace(
+            dir,
+            JOURNAL,
+            &serde_json::to_vec(&journal).map_err(|e| e.to_string())?,
+        )?;
+        sync_dir(dir)?;
         // Legacy readers keep the old alias until commit; revision-backed
         // readers use the durable archive even while this alias is still old.
         if let Some(snapshot) = snapshot {
@@ -221,12 +228,6 @@ pub(super) fn publish(
                 .map_err(|e| e.to_string())?;
             sync_dir(dir)?;
         }
-        replace(
-            dir,
-            JOURNAL,
-            &serde_json::to_vec(&journal).map_err(|e| e.to_string())?,
-        )?;
-        sync_dir(dir)?;
         resume_write_failure("journal-removal").map_err(|e| e.to_string())?;
         fs::remove_file(dir.join(JOURNAL)).map_err(|e| e.to_string())?;
         sync_dir(dir)
@@ -523,6 +524,59 @@ mod tests {
             b"new snapshot"
         );
         assert!(!store.recover_resume().unwrap());
+    }
+
+    #[test]
+    fn alias_failure_preserves_committed_history_and_later_update_on_restart() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = seed(dir.path());
+        store.initialize_definition(b"revision A").unwrap();
+        let predecessor = store.state_tree()["definition_revision"].clone();
+
+        set_resume_write_failure(Some("alias"));
+        let result = store.publish_resume(
+            json!({"status":"running"}).as_object().unwrap(),
+            Some(b"revision B"),
+        );
+        set_resume_write_failure(None);
+        result.unwrap();
+        let committed = store.state_tree();
+        assert_ne!(committed["definition_revision"], predecessor);
+        assert!(dir.path().join(JOURNAL).exists());
+        assert_eq!(
+            fs::read(dir.path().join("definition.json")).unwrap(),
+            b"revision A"
+        );
+
+        super::super::locked_update(&dir.path().join("state.json"), |state| {
+            state.insert("cost".into(), json!(99));
+            state.insert("stage".into(), json!("worker-progress"));
+        })
+        .unwrap();
+        let updated = fs::read(dir.path().join("state.json")).unwrap();
+        drop(store);
+
+        let reopened = FileSystemStateStore::from_path(dir.path().to_path_buf());
+        assert!(reopened.recover_resume().unwrap());
+        assert_eq!(fs::read(dir.path().join("state.json")).unwrap(), updated);
+        let recovered = reopened.state_tree();
+        assert_eq!(
+            recovered["definition_revision"],
+            committed["definition_revision"]
+        );
+        assert_eq!(
+            recovered["definition_history"],
+            committed["definition_history"]
+        );
+        let history = recovered["definition_history"].as_array().unwrap();
+        assert_eq!(history.last().unwrap()["predecessor"], predecessor);
+        assert_eq!(recovered["cost"], 99);
+        assert_eq!(recovered["stage"], "worker-progress");
+        assert_eq!(
+            fs::read(dir.path().join("definition.json")).unwrap(),
+            b"revision B"
+        );
+        assert!(!reopened.recover_resume().unwrap());
     }
 
     #[test]
