@@ -40,6 +40,7 @@
           interpolation: {
             inputs: {
               plan: 'content("artifact://{{options.artifact_ns | default(\"\")}}plan.md")',
+              previous_verdict: 'content("artifact://{prev_loop_iter}/implementation-verdict.md")?',
             },
             outputs: { verdict: "artifact://{loop_iter}/implementation-verdict.md" },
           },
