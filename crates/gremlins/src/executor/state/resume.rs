@@ -9,6 +9,7 @@ use serde_json::{Map, Value};
 use super::{acquire_lock, resume_write_failure};
 
 const JOURNAL: &str = ".resume-model-recovery.json";
+const PUBLICATION_ID: &str = "resume_publication_id";
 
 // Read legacy byte-array journals, but always write UTF-8 strings.
 #[derive(Serialize, Deserialize)]
@@ -160,6 +161,12 @@ pub(super) fn publish(
     if let Some(bytes) = definition {
         append_revision(dir, &mut state, bytes, revision_metadata)?;
     }
+    // Commit evidence travels atomically with state and survives worker patches,
+    // even if writing the journal's committed flag fails after publication.
+    state.insert(
+        PUBLICATION_ID.into(),
+        Value::String(super::secure_token_hex(16).map_err(|e| e.to_string())?),
+    );
     let target_state = serde_json::to_string(&state).map_err(|e| e.to_string())?;
     let metadata = stage(dir, target_state.as_bytes())?;
     let snapshot = definition.map(|bytes| stage(dir, bytes)).transpose()?;
@@ -212,7 +219,8 @@ pub(super) fn publish(
         sync_dir(dir)?;
         #[cfg(test)]
         publication_boundary(dir, "after-commit");
-        // Preserve commit evidence before fallible alias repair can defer cleanup.
+        // The flag also supports recovery of journals written by older versions.
+        resume_write_failure("journal-commit").map_err(|e| e.to_string())?;
         replace(
             dir,
             JOURNAL,
@@ -251,7 +259,19 @@ fn journal_is_committed(dir: &Path, journal: &Journal) -> bool {
         return false;
     };
     if let Some(target) = &journal.committed_state {
-        return current == target.bytes();
+        if current == target.bytes() {
+            return true;
+        }
+        let publication_id = |bytes: &[u8]| {
+            serde_json::from_slice::<Map<String, Value>>(bytes)
+                .ok()?
+                .get(PUBLICATION_ID)?
+                .as_str()
+                .map(str::to_owned)
+        };
+        if let Some(id) = publication_id(target.bytes()) {
+            return publication_id(&current).as_ref() == Some(&id);
+        }
     }
     // A generic writer may have changed state during an interrupted legacy
     // publication. Without an explicit target, only the backup pair is known.
@@ -528,12 +548,21 @@ mod tests {
 
     #[test]
     fn alias_failure_preserves_committed_history_and_later_update_on_restart() {
+        committed_history_and_later_update_survive_restart("alias");
+    }
+
+    #[test]
+    fn journal_commit_failure_preserves_committed_history_and_later_update_on_restart() {
+        committed_history_and_later_update_survive_restart("journal-commit");
+    }
+
+    fn committed_history_and_later_update_survive_restart(fault: &'static str) {
         let dir = tempfile::tempdir().unwrap();
         let store = seed(dir.path());
         store.initialize_definition(b"revision A").unwrap();
         let predecessor = store.state_tree()["definition_revision"].clone();
 
-        set_resume_write_failure(Some("alias"));
+        set_resume_write_failure(Some(fault));
         let result = store.publish_resume(
             json!({"status":"running"}).as_object().unwrap(),
             Some(b"revision B"),
@@ -542,7 +571,9 @@ mod tests {
         result.unwrap();
         let committed = store.state_tree();
         assert_ne!(committed["definition_revision"], predecessor);
-        assert!(dir.path().join(JOURNAL).exists());
+        let journal: Value =
+            serde_json::from_slice(&fs::read(dir.path().join(JOURNAL)).unwrap()).unwrap();
+        assert_eq!(journal["committed"], fault != "journal-commit");
         assert_eq!(
             fs::read(dir.path().join("definition.json")).unwrap(),
             b"revision A"
@@ -577,6 +608,37 @@ mod tests {
             b"revision B"
         );
         assert!(!reopened.recover_resume().unwrap());
+    }
+
+    #[test]
+    fn uncommitted_publication_id_does_not_match_worker_update() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = seed(dir.path());
+        store.initialize_definition(b"revision A").unwrap();
+        let original = fs::read_to_string(dir.path().join("state.json")).unwrap();
+        let mut target: Value = serde_json::from_str(&original).unwrap();
+        target[PUBLICATION_ID] = json!("uncommitted-publication");
+        fs::write(
+            dir.path().join(JOURNAL),
+            serde_json::to_vec(&json!({
+                "state": original,
+                "committed_state": target.to_string(),
+                "committed": false
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+        super::super::locked_update(&dir.path().join("state.json"), |state| {
+            state.insert("cost".into(), json!(99));
+        })
+        .unwrap();
+
+        assert!(store.recover_resume().unwrap());
+        assert_eq!(
+            fs::read_to_string(dir.path().join("state.json")).unwrap(),
+            original
+        );
+        assert!(!store.recover_resume().unwrap());
     }
 
     #[test]
