@@ -673,9 +673,10 @@ When a gremlin bails and halts, you have three recovery options:
 **`gremlins resume <id>`** — Re-spawn the bailed gremlin from the stage where it
 bailed. Use this when the cause has been fixed externally (e.g., a code review
 fix has been merged, or a merge conflict has been resolved). The gremlin will
-restart from the bailed stage with the current worktree state. Without
-`--model`, resume reuses the frozen model selection, not current settings or
-changed profile definitions.
+restart from the bailed stage with the current worktree state. After an explicit
+`resume --model` replacement, resume without `--model` reuses that frozen model
+selection, not current settings or changed profile definitions. Runs without an
+explicit replacement retain existing launch-time resolution behavior.
 
 **`gremlins resume <id> --model <selection>`** replaces all model-selection pins
 for remaining or rerun work: the definition default, explicit stage and enclosing

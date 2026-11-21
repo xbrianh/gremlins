@@ -241,6 +241,25 @@ mod snapshot_tests {
     use super::*;
     use state::StateStore;
 
+    #[test]
+    fn snapshot_bail_lookup_distinguishes_missing_corrupt_and_unreadable() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = state::FileSystemStateStore::from_path(dir.path().to_path_buf());
+        let snapshot = serde_json::json!({"attempt": 1})
+            .as_object()
+            .unwrap()
+            .clone();
+        store.write_state(&snapshot).unwrap();
+        let data = state::StateData::from_store(None, Box::new(store));
+        assert!(!snapshot_has_bail(&data, &snapshot).unwrap());
+        let path = dir.path().join("bail_1.json");
+        std::fs::write(&path, b"broken json").unwrap();
+        assert!(snapshot_has_bail(&data, &snapshot).is_err());
+        std::fs::remove_file(&path).unwrap();
+        std::fs::create_dir(&path).unwrap();
+        assert!(snapshot_has_bail(&data, &snapshot).is_err());
+    }
+
     #[tokio::test]
     async fn stale_resume_snapshot_is_rejected_at_publication_boundary() {
         let dir = tempfile::tempdir().unwrap();
@@ -258,7 +277,7 @@ mod snapshot_tests {
         assert_eq!(snapshot_str(&expected, "stage"), "review");
 
         data.record_stage_error("other", "old attempt");
-        assert!(snapshot_has_bail(&data, &expected));
+        assert!(snapshot_has_bail(&data, &expected).unwrap());
         let changed = serde_json::json!({
             "status": "running", "stage": "implement", "attempt": 2, "kind": "changed"
         })
@@ -268,7 +287,7 @@ mod snapshot_tests {
         data.write_state(&changed).unwrap();
 
         // Bail lookup and all planning fields remain tied to the original attempt.
-        assert!(snapshot_has_bail(&data, &expected));
+        assert!(snapshot_has_bail(&data, &expected).unwrap());
         assert!(data.stage_error().is_none());
         assert_eq!(snapshot_str(&expected, "attempt"), "1");
         assert_eq!(snapshot_str(&expected, "kind"), "pipeline");
@@ -298,15 +317,17 @@ fn snapshot_str(snapshot: &serde_json::Map<String, Value>, field: &str) -> Strin
     }
 }
 
-fn snapshot_has_bail(state: &state::StateData, snapshot: &serde_json::Map<String, Value>) -> bool {
+fn snapshot_has_bail(
+    state: &state::StateData,
+    snapshot: &serde_json::Map<String, Value>,
+) -> Result<bool, String> {
     let attempt = snapshot_str(snapshot, "attempt");
     if attempt.is_empty() {
-        return false;
+        return Ok(false);
     }
-    let Ok(blob) = state.open_blob(&format!("bail_{attempt}.json"), state::BlobMode::Read) else {
-        return false;
-    };
-    serde_json::from_reader::<_, serde_json::Map<String, Value>>(blob).is_ok()
+    state
+        .stage_error_for_attempt(&attempt)
+        .map(|error| error.is_some())
 }
 
 fn resume_definition_bytes(
@@ -531,7 +552,10 @@ pub(crate) async fn handle_resume(request: &Value, registry: &Arc<RunRegistry>) 
         return error_response(&format!("gremlin {id} is already done"));
     }
 
-    let has_bail = snapshot_has_bail(&gremlin.state, &expected_state);
+    let has_bail = match snapshot_has_bail(&gremlin.state, &expected_state) {
+        Ok(has_bail) => has_bail,
+        Err(e) => return error_response(&format!("gremlin {id}: failed to read bail record: {e}")),
+    };
     if status != "stopped" && !has_bail && !(status == "done" && resume_with_stage) {
         return error_response(&format!(
             "gremlin {id} cannot be resumed — status is {status:?}"
@@ -566,8 +590,7 @@ pub(crate) async fn handle_resume(request: &Value, registry: &Arc<RunRegistry>) 
         "attempt": format!("{}-resume-{}", if current_attempt.is_empty() { "1" } else { &current_attempt }, state::token_hex(2)),
     }).as_object().unwrap().clone());
     if let Some((model, _)) = &replacement {
-        let profile = Value::String(String::new());
-        running.insert("model_selection_profile".into(), profile);
+        running.insert("model_selection_profile".into(), Value::Null);
         running.insert("model_override".into(), Value::String(model.clone()));
         running.insert("model".into(), Value::String(model.clone()));
     }
@@ -659,7 +682,6 @@ pub(crate) async fn handle_resume(request: &Value, registry: &Arc<RunRegistry>) 
                 "gremlin {id}: failed to publish resume state: {e}"
             ));
         }
-        let _ = gremlin.state.store_ref().clear_finished();
         stage
     };
 

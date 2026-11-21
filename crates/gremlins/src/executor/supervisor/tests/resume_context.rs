@@ -239,7 +239,7 @@ model-profiles:
     resume(&registry, &id, Some("profile/replacement")).await;
     assert_eq!(
         read_json(dir.join("state.json"))["model_selection_profile"],
-        ""
+        Value::Null
     );
     let mut flagged = Gremlin::from(&id).unwrap();
     flagged.init_runtime(None).await.unwrap();

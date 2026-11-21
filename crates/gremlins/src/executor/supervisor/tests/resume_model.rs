@@ -897,6 +897,24 @@ async fn resume_model_configuration_failure_is_side_effect_free() {
 }
 
 #[tokio::test]
+async fn resume_corrupt_bail_record_does_not_publish_or_dispatch() {
+    let sandbox = Sandbox::new();
+    let dir = seed(&sandbox);
+    let before = read_json(dir.join("state.json"));
+    let attempt = before["attempt"]
+        .as_str()
+        .map(str::to_owned)
+        .unwrap_or_else(|| before["attempt"].to_string());
+    std::fs::write(dir.join(format!("bail_{attempt}.json")), b"corrupt").unwrap();
+    let (registry, _shutdown) = spawn_test_actor().await;
+    let response = handle_resume(&json!({"id": ID}), &registry).await;
+    assert_eq!(response["type"], "error", "{response}");
+    assert!(response.to_string().contains("failed to read bail record"));
+    assert_eq!(read_json(dir.join("state.json")), before);
+    assert!(!registry.contains_run(ID).await);
+}
+
+#[tokio::test]
 async fn resume_bailed_run_can_replace_default_model() {
     let sandbox = Sandbox::new();
     let dir = seed(&sandbox);

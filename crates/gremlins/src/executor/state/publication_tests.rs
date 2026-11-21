@@ -14,6 +14,52 @@ struct MemoryData {
 #[derive(Debug, Clone, Default)]
 struct MemoryStore(Arc<Mutex<MemoryData>>);
 
+impl MemoryStore {
+    fn publish(
+        &self,
+        expected: &Map<String, Value>,
+        fields: &Map<String, Value>,
+        definition: Option<&[u8]>,
+        metadata: &Map<String, Value>,
+        invalidate_finished: bool,
+    ) -> Result<(), String> {
+        let mut data = self.0.lock().unwrap();
+        if &data.state != expected {
+            return Err("resume conflict: state changed since planning".into());
+        }
+        let mut next = data.state.clone();
+        // Import the legacy snapshot against parent provenance before applying
+        // the successor's attempt/model fields. Bytes remain entirely opaque.
+        if !next.contains_key("definition_revision") {
+            if let Some(bytes) = data.blobs.get("definition.json").cloned() {
+                let metadata = revision::prepare(&next, &bytes, &Map::new());
+                let id = secure_token_hex(16).map_err(|e| e.to_string())?;
+                data.blobs
+                    .insert(format!("definition-revisions/{id}.json"), bytes);
+                revision::append(&mut next, id, &metadata)?;
+            }
+        }
+        next.extend(fields.clone());
+        if let Some(bytes) = definition {
+            resume_write_failure("snapshot").map_err(|e| e.to_string())?;
+            let id = secure_token_hex(16).map_err(|e| e.to_string())?;
+            data.blobs
+                .insert(format!("definition-revisions/{id}.json"), bytes.to_vec());
+            let metadata = revision::prepare(&next, bytes, metadata);
+            revision::append(&mut next, id, &metadata)?;
+        }
+        resume_write_failure("metadata").map_err(|e| e.to_string())?;
+        if invalidate_finished {
+            resume_write_failure("terminal-marker").map_err(|e| e.to_string())?;
+        }
+        data.state = next;
+        if invalidate_finished {
+            data.blobs.remove("finished");
+        }
+        Ok(())
+    }
+}
+
 #[async_trait::async_trait]
 impl StateStore for MemoryStore {
     fn state_tree(&self) -> Map<String, Value> {
@@ -30,38 +76,16 @@ impl StateStore for MemoryStore {
         definition: Option<&[u8]>,
         metadata: &Map<String, Value>,
     ) -> Result<(), String> {
-        let mut data = self.0.lock().unwrap();
-        if &data.state != expected {
-            return Err("resume conflict: state changed since planning".into());
-        }
-        let mut next = data.state.clone();
-        next.extend(fields.clone());
-        if let Some(bytes) = definition {
-            resume_write_failure("snapshot").map_err(|e| e.to_string())?;
-            let id = secure_token_hex(16).map_err(|e| e.to_string())?;
-            data.blobs
-                .insert(format!("definition-revisions/{id}.json"), bytes.to_vec());
-            let mut entry = metadata.clone();
-            entry.insert("id".into(), Value::String(id.clone()));
-            entry.insert(
-                "predecessor".into(),
-                next.get("definition_revision")
-                    .cloned()
-                    .unwrap_or(Value::Null),
-            );
-            next.entry("definition_history")
-                .or_insert_with(|| Value::Array(Vec::new()))
-                .as_array_mut()
-                .ok_or("invalid history")?
-                .push(Value::Object(entry));
-            next.insert("definition_revision".into(), Value::String(id));
-        }
-        resume_write_failure("metadata").map_err(|e| e.to_string())?;
-        data.state = next;
-        Ok(())
+        self.publish(expected, fields, definition, metadata, true)
     }
     fn initialize_definition(&self, bytes: &[u8]) -> Result<(), String> {
-        self.publish_resume_conditional(&self.state_tree(), &Map::new(), Some(bytes), &Map::new())
+        self.publish(
+            &self.state_tree(),
+            &Map::new(),
+            Some(bytes),
+            &Map::new(),
+            false,
+        )
     }
     fn recover_resume(&self) -> Result<bool, String> {
         Ok(false)
@@ -174,6 +198,32 @@ impl Drop for Registration {
 }
 
 #[test]
+fn memory_marker_invalidation_is_atomic_with_conditional_commit() {
+    for definition in [None, Some(b"successor".as_slice())] {
+        let memory = MemoryStore::default();
+        memory.initialize_definition(b"initial").unwrap();
+        memory
+            .0
+            .lock()
+            .unwrap()
+            .blobs
+            .insert("finished".into(), b"original".to_vec());
+        let expected = memory.state_tree();
+        set_resume_write_failure(Some("terminal-marker"));
+        let result =
+            memory.publish_resume_conditional(&expected, &Map::new(), definition, &Map::new());
+        set_resume_write_failure(None);
+        assert!(result.unwrap_err().contains("terminal-marker"));
+        assert_eq!(memory.state_tree(), expected);
+        assert!(memory.exists("finished"));
+        memory
+            .publish_resume_conditional(&expected, &Map::new(), definition, &Map::new())
+            .unwrap();
+        assert!(!memory.exists("finished"));
+    }
+}
+
+#[test]
 fn publication_contract_for_filesystem_and_memory() {
     for filesystem in [false, true] {
         let dir = tempfile::tempdir().unwrap();
@@ -198,7 +248,21 @@ fn publication_contract_for_filesystem_and_memory() {
         }
         let _registration = Registration(id.clone());
         let state = StateData::open(&id).unwrap();
+        if filesystem {
+            std::fs::write(dir.path().join("finished"), b"original").unwrap();
+        } else {
+            memory
+                .0
+                .lock()
+                .unwrap()
+                .blobs
+                .insert("finished".into(), b"original".to_vec());
+        }
         state.initialize_definition(b"initial snapshot").unwrap();
+        assert!(
+            state.exists("finished"),
+            "initialization must retain marker"
+        );
         let initial = state.state_tree();
         for fault in ["snapshot", "metadata"] {
             set_resume_write_failure(Some(fault));
@@ -214,6 +278,7 @@ fn publication_contract_for_filesystem_and_memory() {
             let restarted = StateData::open(&id).unwrap();
             assert_eq!(restarted.state_tree(), initial);
             assert_eq!(read_definition(&restarted), b"initial snapshot");
+            assert!(restarted.exists("finished"));
         }
         let barrier = Arc::new(Barrier::new(3));
         let writers: Vec<_> = (0..2)
@@ -242,6 +307,10 @@ fn publication_contract_for_filesystem_and_memory() {
                 .sum::<usize>(),
             1
         );
+        assert!(
+            !state.exists("finished"),
+            "successful resume retained marker"
+        );
         let committed = state.state_tree();
         let revision = committed["definition_revision"].as_str().unwrap();
         let bytes = state.read_definition_revision(revision).unwrap();
@@ -263,6 +332,110 @@ fn publication_contract_for_filesystem_and_memory() {
         assert!(!restarted.store_handle().recover_resume().unwrap());
         assert_eq!(restarted.state_tree(), committed);
     }
+}
+
+#[test]
+fn legacy_import_and_snapshot_metadata_contract_for_filesystem_and_memory() {
+    let legacy = b" \n{\"default_model\":\"cmd/parent\"} \n";
+    let selection = serde_json::json!({
+        "requested": "profile/snapshot", "model": "cmd/resolved"
+    });
+    let valid = serde_json::to_vec(&serde_json::json!({
+        "default_model": "cmd/resolved", "resolved_model_selection": selection
+    }))
+    .unwrap();
+    let mut valid_entries = Vec::new();
+    for filesystem in [false, true] {
+        let dir = tempfile::tempdir().unwrap();
+        let initial = serde_json::json!({
+            "attempt": 1, "model_override": "profile/parent"
+        })
+        .as_object()
+        .unwrap()
+        .clone();
+        let memory = MemoryStore::default();
+        let store: Box<dyn StateStore + Send + Sync> = if filesystem {
+            std::fs::write(
+                dir.path().join("state.json"),
+                serde_json::to_vec(&initial).unwrap(),
+            )
+            .unwrap();
+            std::fs::write(dir.path().join("definition.json"), legacy).unwrap();
+            Box::new(FileSystemStateStore::from_path(dir.path().to_path_buf()))
+        } else {
+            memory.write_state(&initial).unwrap();
+            memory
+                .0
+                .lock()
+                .unwrap()
+                .blobs
+                .insert("definition.json".into(), legacy.to_vec());
+            Box::new(memory)
+        };
+        let fields = serde_json::json!({
+            "attempt": 2, "model_override": "profile/child"
+        })
+        .as_object()
+        .unwrap()
+        .clone();
+        let malformed = b"\xff{not a snapshot\n";
+        store
+            .publish_resume_conditional(&initial, &fields, Some(malformed), &Map::new())
+            .unwrap();
+        let imported = store.state_tree();
+        let history = imported["definition_history"].as_array().unwrap();
+        assert_eq!(history.len(), 2);
+        assert_eq!(history[0]["attempt"], 1);
+        assert_eq!(history[0]["requested_selection"], "profile/parent");
+        assert_eq!(history[0]["resolved_selection"], "cmd/parent");
+        assert_eq!(history[0]["predecessor"], Value::Null);
+        assert_eq!(history[1]["attempt"], 2);
+        assert_eq!(history[1]["requested_selection"], "profile/child");
+        assert_eq!(history[1]["predecessor"], history[0]["id"]);
+        assert!(history[1].get("resolved_selection").is_none());
+        for (entry, bytes) in history
+            .iter()
+            .zip([legacy.as_slice(), malformed.as_slice()])
+        {
+            assert!(entry["timestamp"]
+                .as_str()
+                .is_some_and(|value| !value.is_empty()));
+            assert_eq!(
+                store
+                    .read_definition_revision(entry["id"].as_str().unwrap())
+                    .unwrap(),
+                bytes
+            );
+        }
+        let metadata = serde_json::json!({"reason": "contract"})
+            .as_object()
+            .unwrap()
+            .clone();
+        store
+            .publish_resume_conditional(&imported, &Map::new(), Some(&valid), &metadata)
+            .unwrap();
+        let committed = store.state_tree();
+        let mut entry = committed["definition_history"][2]
+            .as_object()
+            .unwrap()
+            .clone();
+        assert_eq!(entry["requested_selection"], "profile/snapshot");
+        assert_eq!(entry["resolved_selection"], selection);
+        assert_eq!(entry["reason"], "contract");
+        assert_eq!(entry["attempt"], 2);
+        assert_eq!(entry["predecessor"], history[1]["id"]);
+        assert_eq!(
+            store
+                .read_definition_revision(entry["id"].as_str().unwrap())
+                .unwrap(),
+            valid
+        );
+        for generated in ["id", "predecessor", "timestamp"] {
+            entry.remove(generated);
+        }
+        valid_entries.push(entry);
+    }
+    assert_eq!(valid_entries[0], valid_entries[1]);
 }
 
 #[test]

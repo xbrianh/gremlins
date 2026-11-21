@@ -87,6 +87,11 @@ fn handle_resume_memory_invalid_profile_and_publication_failure_do_not_dispatch(
                         Some("metadata"),
                         "failed to publish resume state",
                     ),
+                    (
+                        "cmd/true",
+                        Some("terminal-marker"),
+                        "failed to publish resume state",
+                    ),
                 ] {
                     set_resume_write_failure(fault);
                     let reset = ResetFailure;
@@ -109,6 +114,77 @@ fn handle_resume_memory_invalid_profile_and_publication_failure_do_not_dispatch(
                         definition
                     );
                     assert_eq!(memory.0.lock().unwrap().blobs["finished"], b"original");
+                }
+            });
+    });
+}
+
+#[test]
+fn handle_resume_filesystem_postcommit_failures_do_not_dispatch() {
+    crate::test_support::with_sandbox(None, |_| {
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap()
+            .block_on(async {
+                for fault in ["commit-sync", "terminal-marker", "terminal-marker-sync"] {
+                    let id = format!("gr-commit-sync-{}", secure_token_hex(8).unwrap());
+                    let initial = json!({
+                        "id": id, "kind": "boundary", "status": "stopped",
+                        "stage": "work", "attempt": 1, "stage_inputs": {},
+                        "ended_at": "original-end", "exit_code": 17,
+                        "model": "cmd/true", "model_override": "cmd/true",
+                        "model_selection_profile": ""
+                    });
+                    let store =
+                        FileSystemStateStore::create(&id, initial.as_object().unwrap(), false)
+                            .unwrap();
+                    store.initialize_definition(&serde_json::to_vec(&json!({
+                    "__gremlins_expanded__": true,
+                    "default_model": "cmd/true",
+                    "stages": [{"name": "work", "type": "agent", "prompt": ["Do not dispatch."]}]
+                })).unwrap()).unwrap();
+                    std::fs::write(store.root_dir().join("finished"), b"original").unwrap();
+                    let original = store.state_tree();
+                    let (shutdown, _receiver) = tokio::sync::watch::channel(false);
+                    let registry = Arc::new(RunRegistry::new(shutdown));
+                    set_resume_write_failure(Some(fault));
+                    let reset = ResetFailure;
+                    let response =
+                        handle_resume(&json!({"id": id, "model": "cmd/true"}), &registry).await;
+                    drop(reset);
+                    assert_eq!(response["type"], "error", "{response}");
+                    let message = if fault == "commit-sync" {
+                        "indeterminate"
+                    } else {
+                        "committed"
+                    };
+                    assert!(response.to_string().contains(message), "{response}");
+                    assert!(store
+                        .root_dir()
+                        .join(".resume-model-recovery.json")
+                        .exists());
+                    assert!(
+                        !registry.contains_run(&id).await,
+                        "failed publication dispatched a worker"
+                    );
+                    tokio::task::yield_now().await;
+                    assert!(!registry.contains_run(&id).await);
+                    // Recovery preserves the selected revision without dispatching work.
+                    let reopened = StateData::open(&id).unwrap();
+                    assert!(reopened.store_handle().recover_resume().unwrap());
+                    let committed = reopened.state_tree();
+                    assert_ne!(
+                        committed["definition_revision"],
+                        original["definition_revision"]
+                    );
+                    let revision = committed["definition_revision"].as_str().unwrap();
+                    assert_eq!(
+                        read_definition(&reopened),
+                        reopened.read_definition_revision(revision).unwrap()
+                    );
+                    assert!(!reopened.exists("finished"));
+                    assert!(!registry.contains_run(&id).await);
                 }
             });
     });

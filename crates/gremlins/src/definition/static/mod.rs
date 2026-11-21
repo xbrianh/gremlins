@@ -8,7 +8,7 @@ use indexmap::IndexMap;
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashSet;
 
 use crate::clients::client::ModelURI;
 use crate::schemas::bootstrap::Bootstrap;
@@ -42,9 +42,9 @@ pub struct ResolvedModelSelection {
     pub requested: String,
     pub default_model: String,
     #[serde(default)]
-    pub stage_models_exact: HashMap<String, String>,
+    pub stage_models_exact: IndexMap<String, String>,
     #[serde(default)]
-    pub stage_models_prefix: HashMap<String, String>,
+    pub stage_models_prefix: IndexMap<String, String>,
     #[serde(default)]
     pub task_models: Option<IndexMap<String, String>>,
 }
@@ -704,7 +704,7 @@ mod tests {
     #[test]
     fn resolved_selection_precedence() {
         let mut selection = selection();
-        selection.stage_models_prefix = HashMap::from([
+        selection.stage_models_prefix = IndexMap::from([
             ("review".into(), "openai/short".into()),
             ("review.deep".into(), "openai/long".into()),
         ]);
@@ -722,6 +722,38 @@ mod tests {
         assert_eq!(selection.model_for_stage("review.other"), "openai/short");
         assert_eq!(selection.model_for_stage("implement"), "openai/default");
         selection.validate().unwrap();
+    }
+
+    #[test]
+    fn resolved_selection_preserves_stage_map_order() {
+        let mut selection = selection();
+        for name in ["z", "a", "m"] {
+            selection
+                .stage_models_exact
+                .insert(name.into(), "openai/exact".into());
+            selection
+                .stage_models_prefix
+                .insert(name.into(), "openai/prefix".into());
+        }
+        let bytes = serde_json::to_vec(&selection).unwrap();
+        let loaded: ResolvedModelSelection = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(
+            loaded
+                .stage_models_exact
+                .keys()
+                .map(String::as_str)
+                .collect::<Vec<_>>(),
+            ["z", "a", "m"]
+        );
+        assert_eq!(
+            loaded
+                .stage_models_prefix
+                .keys()
+                .map(String::as_str)
+                .collect::<Vec<_>>(),
+            ["z", "a", "m"]
+        );
+        assert_eq!(serde_json::to_vec(&loaded).unwrap(), bytes);
     }
 
     #[test]

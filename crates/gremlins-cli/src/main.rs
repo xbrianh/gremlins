@@ -91,8 +91,10 @@ enum Cmds {
     },
     /// Resume a stopped or bailed gremlin from its last recorded stage.
     ///
-    /// Without --model, reuse the frozen model selection. History is immutable;
-    /// ordinary resume keeps artifacts, while --stage forks and preserves the parent.
+    /// After an explicit resume --model replacement, omitting --model reuses that
+    /// frozen model selection. Otherwise launch-time resolution is unchanged.
+    /// History is immutable; ordinary resume keeps artifacts, while --stage forks
+    /// and preserves the parent.
     Resume {
         /// Gremlin id to resume.
         id: String,
@@ -2843,7 +2845,9 @@ mod tests {
             .to_string();
         let help = help.split_whitespace().collect::<Vec<_>>().join(" ");
         for text in [
+            "After an explicit resume --model replacement",
             "frozen model selection",
+            "Otherwise launch-time resolution is unchanged",
             "keeps artifacts",
             "preserves the parent",
             "Replace all model-selection pins",

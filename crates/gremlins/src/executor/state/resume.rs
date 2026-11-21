@@ -38,6 +38,8 @@ struct Journal {
     committed_state: Option<Backup>,
     #[serde(default)]
     committed: bool,
+    #[serde(default)]
+    invalidate_finished: bool,
 }
 
 fn stage(dir: &Path, bytes: &[u8]) -> Result<tempfile::NamedTempFile, String> {
@@ -60,6 +62,17 @@ fn sync_dir(dir: &Path) -> Result<(), String> {
         .map_err(|e| e.to_string())
 }
 
+fn invalidate_finished(dir: &Path) -> Result<(), String> {
+    resume_write_failure("terminal-marker").map_err(|e| e.to_string())?;
+    match fs::remove_file(dir.join("finished")) {
+        Ok(()) => (),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => (),
+        Err(error) => return Err(error.to_string()),
+    }
+    resume_write_failure("terminal-marker-sync").map_err(|e| e.to_string())?;
+    sync_dir(dir)
+}
+
 fn archive(dir: &Path, bytes: &[u8]) -> Result<String, String> {
     let id = super::secure_token_hex(16).map_err(|e| e.to_string())?;
     let revisions = dir.join("definition-revisions");
@@ -78,54 +91,9 @@ fn append_revision(
     bytes: &[u8],
     metadata: &Map<String, Value>,
 ) -> Result<(), String> {
+    let prepared = super::revision::prepare(state, bytes, metadata);
     let id = archive(dir, bytes)?;
-    let mut entry = metadata.clone();
-    let snapshot = crate::definition::r#static::yaml::parse_expanded_json(bytes).ok();
-    let selection = snapshot.as_ref().and_then(|value| {
-        value
-            .get("resolved_model_selection")
-            .or_else(|| value.get("launch_model_selection"))
-    });
-    entry.entry("requested_selection").or_insert_with(|| {
-        selection
-            .and_then(|value| value.get("requested"))
-            .cloned()
-            .or_else(|| state.get("model_override").cloned())
-            .unwrap_or(Value::Null)
-    });
-    entry.entry("resolved_selection").or_insert_with(|| {
-        selection
-            .cloned()
-            .or_else(|| {
-                snapshot
-                    .as_ref()
-                    .and_then(|value| value.get("default_model"))
-                    .cloned()
-            })
-            .unwrap_or(Value::Null)
-    });
-    entry.insert("id".into(), Value::String(id.clone()));
-    entry.insert(
-        "predecessor".into(),
-        state
-            .get("definition_revision")
-            .cloned()
-            .unwrap_or(Value::Null),
-    );
-    entry.insert(
-        "attempt".into(),
-        state.get("attempt").cloned().unwrap_or(Value::Null),
-    );
-    entry.insert("timestamp".into(), Value::String(super::now_iso()));
-    let history = state
-        .entry("definition_history")
-        .or_insert_with(|| Value::Array(Vec::new()));
-    history
-        .as_array_mut()
-        .ok_or("invalid definition history")?
-        .push(Value::Object(entry));
-    state.insert("definition_revision".into(), Value::String(id));
-    Ok(())
+    super::revision::append(state, id, &prepared)
 }
 
 pub(super) fn initialize(dir: &Path, bytes: &[u8]) -> Result<(), String> {
@@ -151,7 +119,11 @@ pub(super) fn publish(
     if expected.is_some_and(|expected| expected != &state) {
         return Err("resume conflict: state changed since planning".into());
     }
-    let old_definition = fs::read(dir.join("definition.json")).ok();
+    let old_definition = match fs::read(dir.join("definition.json")) {
+        Ok(bytes) => Some(bytes),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+        Err(error) => return Err(format!("failed to read predecessor definition: {error}")),
+    };
     if state.get("definition_revision").is_none() {
         if let Some(bytes) = old_definition.as_deref() {
             append_revision(dir, &mut state, bytes, &Map::new())?;
@@ -183,6 +155,7 @@ pub(super) fn publish(
         remove_definition: definition.is_some() && !dir.join("definition.json").exists(),
         committed_state: Some(Backup::Text(target_state)),
         committed: false,
+        invalidate_finished: expected.is_some(),
     };
     let journal_bytes = serde_json::to_vec(&journal).map_err(|e| e.to_string())?;
     if snapshot.is_some() {
@@ -212,11 +185,19 @@ pub(super) fn publish(
         })?;
         return Err(format!("failed to publish resume state: {error}"));
     }
-    // state.json is the commit point. Cleanup failure must not turn a committed
-    // publication into an error (and invite the caller to retry stale work).
+    // Rename makes the commit visible; directory sync makes it durable. On
+    // uncertainty retain the journal and forbid dispatch or a blind retry.
+    resume_write_failure("commit-sync")
+        .map_err(|e| e.to_string())
+        .and_then(|()| sync_dir(dir))
+        .map_err(|error| format!("resume publication indeterminate after state rename: {error}; recover before retrying"))?;
     journal.committed = true;
+    if journal.invalidate_finished {
+        invalidate_finished(dir).map_err(|error| {
+            format!("resume publication committed; terminal marker invalidation failed: {error}; recover before retrying")
+        })?;
+    }
     let cleanup = (|| {
-        sync_dir(dir)?;
         #[cfg(test)]
         publication_boundary(dir, "after-commit");
         // The flag also supports recovery of journals written by older versions.
@@ -322,7 +303,19 @@ pub(super) fn recover_unlocked(dir: &Path) -> Result<bool, String> {
     };
     let journal: Journal = serde_json::from_slice(&bytes).map_err(|e| e.to_string())?;
     if journal_is_committed(dir, &journal) {
+        if journal.invalidate_finished {
+            invalidate_finished(dir).map_err(|error| {
+                format!("resume publication committed; terminal marker invalidation failed: {error}; recover before retrying")
+            })?;
+        }
         restore_committed_alias(dir, &journal)?;
+        fs::remove_file(dir.join(JOURNAL)).map_err(|e| e.to_string())?;
+        sync_dir(dir)?;
+        return Ok(true);
+    }
+    // New-format publication never changes either backup before the state
+    // commit. An unmatched target must not overwrite unrelated worker progress.
+    if journal.committed_state.is_some() {
         fs::remove_file(dir.join(JOURNAL)).map_err(|e| e.to_string())?;
         sync_dir(dir)?;
         return Ok(true);
@@ -455,6 +448,171 @@ mod tests {
             .unwrap_err()
             .contains("conflict"));
         assert_eq!(fs::read(dir.path().join("state.json")).unwrap(), before);
+    }
+
+    #[test]
+    fn conditional_success_invalidates_marker_with_or_without_definition() {
+        for definition in [None, Some(b"successor".as_slice())] {
+            let dir = tempfile::tempdir().unwrap();
+            let store = seed(dir.path());
+            fs::write(dir.path().join("finished"), b"original").unwrap();
+            store
+                .publish_resume_conditional(
+                    &store.state_tree(),
+                    &Map::new(),
+                    definition,
+                    &Map::new(),
+                )
+                .unwrap();
+            assert!(!store.exists("finished"));
+            store
+                .publish_resume_conditional(&store.state_tree(), &Map::new(), None, &Map::new())
+                .unwrap();
+            assert!(!store.exists("finished"));
+            assert!(!store.recover_resume().unwrap());
+        }
+    }
+
+    #[test]
+    fn conditional_marker_failure_is_committed_and_recovery_retries_invalidation() {
+        for fault in ["terminal-marker", "terminal-marker-sync"] {
+            for definition in [None, Some(b"successor".as_slice())] {
+                let dir = tempfile::tempdir().unwrap();
+                let store = seed(dir.path());
+                fs::write(dir.path().join("finished"), b"original").unwrap();
+                let expected = store.state_tree();
+                set_resume_write_failure(Some(fault));
+                let result = store.publish_resume_conditional(
+                    &expected,
+                    json!({"status":"running"}).as_object().unwrap(),
+                    definition,
+                    &Map::new(),
+                );
+                set_resume_write_failure(None);
+                let error = result.unwrap_err();
+                assert!(error.contains("committed"), "{error}");
+                assert!(error.contains("terminal marker"), "{error}");
+                assert!(dir.path().join(JOURNAL).exists());
+                assert_eq!(store.state_tree()["status"], "running");
+                assert_eq!(store.exists("finished"), fault == "terminal-marker");
+                // Worker patches do not invalidate the journal's commit evidence.
+                super::super::locked_update(&dir.path().join("state.json"), |state| {
+                    state.insert("cost".into(), json!(99));
+                })
+                .unwrap();
+                let committed = store.state_tree();
+                set_resume_write_failure(Some("terminal-marker"));
+                let recovery = store.recover_resume();
+                set_resume_write_failure(None);
+                assert!(recovery.unwrap_err().contains("committed"));
+                assert!(dir.path().join(JOURNAL).exists());
+                drop(store);
+                let reopened = FileSystemStateStore::from_path(dir.path().to_path_buf());
+                assert!(reopened.recover_resume().unwrap());
+                assert!(!reopened.exists("finished"));
+                assert_eq!(reopened.state_tree(), committed);
+                assert!(!reopened.recover_resume().unwrap());
+            }
+        }
+    }
+
+    #[test]
+    fn recovery_only_invalidates_markers_for_conditional_publications() {
+        for conditional in [false, true] {
+            let dir = tempfile::tempdir().unwrap();
+            let store = seed(dir.path());
+            fs::write(dir.path().join("finished"), b"original").unwrap();
+            let expected = store.state_tree();
+            set_resume_write_failure(Some("commit-sync"));
+            let result = publish(
+                dir.path(),
+                &Map::new(),
+                Some(b"successor"),
+                conditional.then_some(&expected),
+                &Map::new(),
+            );
+            set_resume_write_failure(None);
+            assert!(result.unwrap_err().contains("indeterminate"));
+            assert!(store.exists("finished"));
+            assert!(store.recover_resume().unwrap());
+            assert_eq!(store.exists("finished"), !conditional);
+        }
+    }
+
+    #[test]
+    fn marker_removal_io_error_retains_committed_recovery_journal() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = seed(dir.path());
+        fs::create_dir(dir.path().join("finished")).unwrap();
+        let error = store
+            .publish_resume_conditional(&store.state_tree(), &Map::new(), None, &Map::new())
+            .unwrap_err();
+        assert!(error.contains("committed"));
+        assert!(dir.path().join(JOURNAL).exists());
+        fs::remove_dir(dir.path().join("finished")).unwrap();
+        assert!(store.recover_resume().unwrap());
+        assert!(!store.exists("finished"));
+    }
+
+    #[test]
+    fn predecessor_read_error_aborts_without_publication() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = seed(dir.path());
+        let original = fs::read(dir.path().join("state.json")).unwrap();
+        fs::remove_file(dir.path().join("definition.json")).unwrap();
+        fs::create_dir(dir.path().join("definition.json")).unwrap();
+        let error = store
+            .publish_resume(&Map::new(), Some(b"successor"))
+            .unwrap_err();
+        assert!(error.contains("predecessor definition"));
+        assert_eq!(fs::read(dir.path().join("state.json")).unwrap(), original);
+        assert!(!dir.path().join(JOURNAL).exists());
+        assert!(!dir.path().join("definition-revisions").exists());
+    }
+
+    #[test]
+    fn indeterminate_commit_retains_evidence_and_recovers_visible_revision() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = seed(dir.path());
+        set_resume_write_failure(Some("commit-sync"));
+        let result = store.publish_resume(
+            json!({"status":"running"}).as_object().unwrap(),
+            Some(b"successor"),
+        );
+        set_resume_write_failure(None);
+        assert!(result.unwrap_err().contains("indeterminate"));
+        assert!(dir.path().join(JOURNAL).exists());
+        let committed = store.state_tree();
+        assert_eq!(committed["status"], "running");
+        assert!(store.recover_resume().unwrap());
+        assert_eq!(store.state_tree(), committed);
+        assert_eq!(
+            fs::read(dir.path().join("definition.json")).unwrap(),
+            b"successor"
+        );
+    }
+
+    #[test]
+    fn uncommitted_new_journal_preserves_unrelated_definition_and_state() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = seed(dir.path());
+        let current = fs::read(dir.path().join("state.json")).unwrap();
+        fs::write(dir.path().join("definition.json"), b"unrelated snapshot").unwrap();
+        fs::write(
+            dir.path().join(JOURNAL),
+            serde_json::to_vec(&json!({
+                "state": "{}", "definition": "backup", "remove_definition": true,
+                "committed_state": "{\"resume_publication_id\":\"unpublished\"}"
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+        assert!(store.recover_resume().unwrap());
+        assert_eq!(fs::read(dir.path().join("state.json")).unwrap(), current);
+        assert_eq!(
+            fs::read(dir.path().join("definition.json")).unwrap(),
+            b"unrelated snapshot"
+        );
     }
 
     #[test]
@@ -634,9 +792,10 @@ mod tests {
         .unwrap();
 
         assert!(store.recover_resume().unwrap());
+        assert_eq!(store.state_tree()["cost"], 99);
         assert_eq!(
-            fs::read_to_string(dir.path().join("state.json")).unwrap(),
-            original
+            store.state_tree()[PUBLICATION_ID],
+            serde_json::from_str::<Value>(&original).unwrap()[PUBLICATION_ID]
         );
         assert!(!store.recover_resume().unwrap());
     }

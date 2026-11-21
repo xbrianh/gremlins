@@ -25,6 +25,7 @@ use crate::config;
 #[cfg(test)]
 mod publication_tests;
 mod resume;
+mod revision;
 
 type BackendResolver =
     dyn Fn(&str) -> Option<Result<Box<dyn StateStore + Send + Sync>, StateError>> + Send + Sync;
@@ -187,6 +188,8 @@ pub trait StateStore: Send + Sync + Debug {
 
     /// Compare the entire planned state under the publication lock before writing.
     /// Backends must not implement this as a separate read followed by a write.
+    /// Success includes durable terminal-marker invalidation before dispatch.
+    /// Errors after commit must identify that publication committed and requires recovery.
     fn publish_resume_conditional(
         &self,
         _expected: &Map<String, Value>,
@@ -248,6 +251,19 @@ pub trait StateStore: Send + Sync + Debug {
 
     /// The bail record for the current attempt, if any.
     fn stage_error(&self) -> Option<Map<String, Value>>;
+
+    /// Read a specific attempt's structured bail record without hiding read errors.
+    /// Backends without history support may only answer for the current attempt.
+    fn stage_error_for_attempt(&self, attempt: &str) -> Result<Option<Map<String, Value>>, String> {
+        if attempt_of(&self.state_tree()) != attempt {
+            return Err("historical bail lookup is unsupported by this state store".into());
+        }
+        let error = self.stage_error();
+        if attempt_of(&self.state_tree()) != attempt {
+            return Err("bail lookup conflict: attempt changed during lookup".into());
+        }
+        Ok(error)
+    }
 
     // --- writes ---
 
@@ -1417,6 +1433,19 @@ impl StateStore for FileSystemStateStore {
         });
     }
 
+    fn stage_error_for_attempt(&self, attempt: &str) -> Result<Option<Map<String, Value>>, String> {
+        let blob = match self.open(&format!("bail_{attempt}.json"), BlobMode::Read) {
+            Ok(blob) => blob,
+            Err(StateError::Io(error)) if error.kind() == std::io::ErrorKind::NotFound => {
+                return Ok(None)
+            }
+            Err(error) => return Err(error.to_string()),
+        };
+        serde_json::from_reader(blob)
+            .map(Some)
+            .map_err(|error| error.to_string())
+    }
+
     fn stage_error(&self) -> Option<Map<String, Value>> {
         let sf = self.state_file();
         if !sf.exists() {
@@ -2030,6 +2059,7 @@ impl StateStore for ScopedFileSystemStateStore {
     delegate!(inner, fn read_field(&self, field: &str) -> Option<Value>);
     delegate!(inner, fn get_field(&self, field: &str) -> Option<Value>);
     delegate!(inner, fn stage_error(&self) -> Option<Map<String, Value>>);
+    delegate!(inner, fn stage_error_for_attempt(&self, attempt: &str) -> Result<Option<Map<String, Value>>, String>);
     delegate!(inner, fn patch(&self, delete: &[String], fields: &Map<String, Value>));
     delegate!(inner, fn record_stage_error(&self, class: &str, detail: &str));
     delegate!(inner, fn accumulate_token_usage(&self, usage: &HashMap<String, i64>));
@@ -2253,6 +2283,7 @@ impl StateData {
     delegate!(pub store, fn read_field(&self, field: &str) -> Option<Value>);
     delegate!(pub store, fn read_str(&self, field: &str) -> String);
     delegate!(pub store, fn stage_error(&self) -> Option<Map<String, Value>>);
+    delegate!(pub store, fn stage_error_for_attempt(&self, attempt: &str) -> Result<Option<Map<String, Value>>, String>);
 
     // --- delegating writes ---
 
@@ -2261,6 +2292,8 @@ impl StateData {
     delegate!(pub store, fn accumulate_token_usage(&self, usage: &HashMap<String, i64>));
     delegate!(pub store, fn state_tree(&self) -> Map<String, Value>);
     delegate!(pub store, fn write_state(&self, data: &Map<String, Value>) -> Result<(), StateError>);
+    /// Definition reads resolve the committed immutable revision; writes target
+    /// only the compatibility alias, never mutate revisions or publish a selection.
     pub(crate) fn open_blob(
         &self,
         name: &str,
@@ -4292,7 +4325,10 @@ mod tests {
         #[async_trait::async_trait]
         impl StateStore for StubStore {
             fn state_tree(&self) -> Map<String, Value> {
-                unimplemented!()
+                serde_json::json!({"attempt": "current"})
+                    .as_object()
+                    .unwrap()
+                    .clone()
             }
             fn write_state(&self, _data: &Map<String, Value>) -> Result<(), StateError> {
                 unimplemented!()
@@ -4316,7 +4352,12 @@ mod tests {
                 unimplemented!()
             }
             fn stage_error(&self) -> Option<Map<String, Value>> {
-                unimplemented!()
+                Some(
+                    serde_json::json!({"class": "other", "detail": "structured bail"})
+                        .as_object()
+                        .unwrap()
+                        .clone(),
+                )
             }
             fn patch(&self, _delete: &[String], _fields: &Map<String, Value>) {
                 unimplemented!()
@@ -4381,6 +4422,14 @@ mod tests {
         }
 
         let store = StubStore;
+        assert_eq!(
+            store.stage_error_for_attempt("current").unwrap().unwrap()["detail"],
+            "structured bail"
+        );
+        assert!(store
+            .stage_error_for_attempt("historical")
+            .unwrap_err()
+            .contains("unsupported"));
         assert!(store
             .publish_resume_conditional(&Map::new(), &Map::new(), Some(b"snapshot"), &Map::new())
             .unwrap_err()

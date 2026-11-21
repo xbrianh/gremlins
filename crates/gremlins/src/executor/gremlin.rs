@@ -575,9 +575,21 @@ impl Gremlin {
         let state_data = StateData::open(gremlin_id.as_str())?;
         let raw = state_data.state_tree();
         if raw.is_empty() {
-            return Err(RunError::Message(
-                "run state must be a non-empty JSON object".to_string(),
-            ));
+            let blob = state_data
+                .store_ref()
+                .open("state.json", state::BlobMode::Read)
+                .map_err(|error| {
+                    RunError::Message(format!("failed to read run state for {id:?}: {error}"))
+                })?;
+            let value: Value = serde_json::from_reader(blob).map_err(|error| {
+                RunError::Message(format!("invalid run state JSON for {id:?}: {error}"))
+            })?;
+            let detail = if value.is_object() {
+                "run state must be a non-empty JSON object"
+            } else {
+                "run state must be a JSON object"
+            };
+            return Err(RunError::Message(format!("{detail} for {id:?}")));
         }
 
         let kind = str_field(&raw, "kind");
@@ -986,14 +998,17 @@ impl Gremlin {
 
         let effective_model = if let Some(selection) = &self.runtime_config.resolved_model_selection
         {
-            if let Some(definition) = child_provider
+            let definition = child_provider
                 .as_any_mut()
                 .and_then(|value| value.downcast_mut::<StaticDefinition>())
-            {
-                definition
-                    .apply_resolved_model_selection(selection.clone())
-                    .map_err(|error| RunError::Message(error.to_string()))?;
-            }
+                .ok_or_else(|| {
+                    RunError::Message(
+                        "cannot apply resolved model selection to unsupported child definition; expected StaticDefinition".into(),
+                    )
+                })?;
+            definition
+                .apply_resolved_model_selection(selection.clone())
+                .map_err(|error| RunError::Message(error.to_string()))?;
             None
         } else {
             effective_model
@@ -1734,6 +1749,46 @@ mod tests {
 
     use crate::executor::state::FileSystemStateStore;
     use crate::test_support::{EnvGuard, GitSandbox, Sandbox};
+
+    #[test]
+    fn from_reports_invalid_state_details() {
+        let _sandbox = Sandbox::new();
+        let state_dir = config::state_root().join("gr-invalid-state-0001");
+        std::fs::create_dir_all(&state_dir).unwrap();
+
+        // Attempt discovery requires valid JSON with a matching id; bypass it
+        // so malformed blobs reach Gremlin::from's state validation.
+        struct ResolverGuard;
+        impl Drop for ResolverGuard {
+            fn drop(&mut self) {
+                StateData::unregister_backend_resolver("from_reports_invalid_state_details");
+            }
+        }
+        let _resolver = ResolverGuard;
+        let backend_dir = state_dir.clone();
+        StateData::register_backend_resolver("from_reports_invalid_state_details", move |id| {
+            (id == "gr-invalid-state").then(|| {
+                Ok(
+                    Box::new(FileSystemStateStore::from_path(backend_dir.clone()))
+                        as Box<dyn state::StateStore + Send + Sync>,
+                )
+            })
+        });
+
+        for (contents, expected) in [
+            ("{broken", "invalid run state JSON"),
+            ("[]", "run state must be a JSON object"),
+            ("{}", "run state must be a non-empty JSON object"),
+        ] {
+            std::fs::write(state_dir.join("state.json"), contents).unwrap();
+            let error = match Gremlin::from("gr-invalid-state") {
+                Ok(_) => panic!("invalid state was accepted"),
+                Err(error) => error.to_string(),
+            };
+            assert!(error.contains(expected), "{error}");
+            assert!(error.contains("gr-invalid-state"), "{error}");
+        }
+    }
 
     #[test]
     fn gremlin_is_send_sync() {
