@@ -2474,6 +2474,9 @@ pub fn read_state_json(sf: Option<&Path>) -> Map<String, Value> {
 }
 
 pub fn write_state(state_dir: &Path, data: &Map<String, Value>) -> Result<(), StateError> {
+    if data.get("status").and_then(Value::as_str) == Some("running") {
+        resume_write_failure("metadata")?;
+    }
     let sf = state_dir.join("state.json");
     let _lock = acquire_lock(&sf)?;
     let tmp = state_dir.join(format!(
@@ -2519,7 +2522,31 @@ pub fn read_json_map(sf: &Path) -> Result<Map<String, Value>, StateError> {
     Ok(serde_json::from_str(&std::fs::read_to_string(sf)?)?)
 }
 
+#[cfg(test)]
+thread_local! {
+    static RESUME_WRITE_FAILURE: std::cell::Cell<Option<&'static str>> = const { std::cell::Cell::new(None) };
+}
+
+#[cfg(test)]
+pub(crate) fn set_resume_write_failure(point: Option<&'static str>) {
+    RESUME_WRITE_FAILURE.with(|failure| failure.set(point));
+}
+
+pub(crate) fn resume_write_failure(point: &str) -> std::io::Result<()> {
+    #[cfg(test)]
+    if RESUME_WRITE_FAILURE.with(|failure| failure.get() == Some(point)) {
+        return Err(std::io::Error::other(format!(
+            "injected resume {point} write failure"
+        )));
+    }
+    let _ = point;
+    Ok(())
+}
+
 pub fn atomic_write_json(sf: &Path, data: &Map<String, Value>) -> Result<(), StateError> {
+    if data.get("status").and_then(Value::as_str) == Some("running") {
+        resume_write_failure("metadata")?;
+    }
     let name = sf
         .file_name()
         .and_then(|s| s.to_str())

@@ -417,6 +417,10 @@ impl Gremlin {
             Value::String(model_override.unwrap_or("").to_string()),
         );
         initial.insert(
+            "model_selection_profile".to_string(),
+            Value::String(model_override.unwrap_or("").to_string()),
+        );
+        initial.insert(
             "definition_path".to_string(),
             Value::String(definition_path_str.clone()),
         );
@@ -605,7 +609,24 @@ impl Gremlin {
         };
 
         // Snapshot the runtime config before gremlin_id is moved.
-        let runtime_config = RuntimeConfig::snapshot(model_override.as_deref());
+        let selection_profile = raw
+            .get("model_selection_profile")
+            .map(|value| value.as_str().unwrap_or(""))
+            .unwrap_or_else(|| model_override.as_deref().unwrap_or(""));
+        let runtime_config = RuntimeConfig::snapshot(Some(selection_profile));
+        let enclosing_model = raw
+            .get("enclosing_model")
+            .and_then(Value::as_str)
+            .filter(|value| !value.is_empty())
+            .map(ModelURI::parse)
+            .transpose()
+            .map_err(RunError::Message)?;
+        let enclosing_task_models = raw
+            .get("enclosing_task_models")
+            .filter(|value| !value.is_null())
+            .map(|value| serde_json::from_value(value.clone()))
+            .transpose()
+            .map_err(|e| RunError::Message(format!("invalid enclosing task models: {e}")))?;
 
         Ok(Gremlin {
             id: gremlin_id,
@@ -623,8 +644,8 @@ impl Gremlin {
             cancel_token: None,
             interactive_sessions: None,
             clean_cmds: Vec::new(),
-            enclosing_task_models: None,
-            enclosing_model: None,
+            enclosing_task_models,
+            enclosing_model,
             discovered_skills: None,
             extra_sandbox_roots: Vec::new(),
             native_definition: None,
@@ -858,6 +879,31 @@ impl Gremlin {
         child_provider: Box<dyn GremlinDefinition>,
         effective_model: Option<&ModelURI>,
     ) -> Result<Gremlin, RunError> {
+        self.fork_with_context(
+            child_id,
+            parent_id,
+            group_name,
+            child_key,
+            child_definition_path,
+            child_provider,
+            effective_model,
+            self.enclosing_task_models.as_ref(),
+        )
+        .await
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) async fn fork_with_context(
+        &self,
+        child_id: &str,
+        parent_id: &str,
+        group_name: &str,
+        child_key: &str,
+        child_definition_path: Option<&Path>,
+        child_provider: Box<dyn GremlinDefinition>,
+        effective_model: Option<&ModelURI>,
+        enclosing_task_models: Option<&IndexMap<String, String>>,
+    ) -> Result<Gremlin, RunError> {
         log::debug!(
             "fork: child_id={child_id}, parent_id={parent_id}, group_name={group_name}, child_key={child_key}"
         );
@@ -975,7 +1021,34 @@ impl Gremlin {
         child.insert("pid".to_string(), Value::Null);
         child.insert("exit_code".to_string(), Value::Null);
 
+        child.insert(
+            "model_selection_profile".into(),
+            parent
+                .get("model_selection_profile")
+                .cloned()
+                .unwrap_or_else(|| Value::String(str_field(&parent, "model_override"))),
+        );
+        child.insert(
+            "enclosing_model".into(),
+            effective_model
+                .map(|model| Value::String(model.to_string()))
+                .unwrap_or(Value::Null),
+        );
+        child.insert(
+            "enclosing_task_models".into(),
+            serde_json::to_value(enclosing_task_models)
+                .map_err(|e| RunError::Message(e.to_string()))?,
+        );
+
         let child_state = StateData::from_store(Some(child_id.to_string()), forked_store);
+        let snapshot = child_provider
+            .serialize()
+            .map_err(|e| RunError::Message(format!("failed to serialize child definition: {e}")))?;
+        child_state
+            .open_blob("definition.json", BlobMode::Write)
+            .map_err(|e| RunError::Message(e.to_string()))?
+            .write_all(&snapshot)
+            .map_err(|e| RunError::Message(e.to_string()))?;
         child_state
             .write_state(&child)
             .map_err(|e| RunError::Message(format!("failed to write child state: {e}")))?;
@@ -1009,7 +1082,7 @@ impl Gremlin {
             cancel_token: self.cancel_token.clone(),
             interactive_sessions: None,
             clean_cmds: self.clean_cmds.clone(),
-            enclosing_task_models: self.enclosing_task_models.clone(),
+            enclosing_task_models: enclosing_task_models.cloned(),
             enclosing_model: effective_model.cloned(),
             discovered_skills: None,
             extra_sandbox_roots: self.extra_sandbox_roots.clone(),

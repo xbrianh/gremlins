@@ -224,8 +224,8 @@ pub(crate) async fn run_parallel(
         );
 
         // Fork the child gremlin.
-        let mut child_gremlin = gremlin
-            .fork(
+        let child_gremlin = gremlin
+            .fork_with_context(
                 &child_id,
                 &parent_id,
                 &group_name_owned,
@@ -233,12 +233,9 @@ pub(crate) async fn run_parallel(
                 None,
                 child.clone_box(),
                 effective_model,
+                enclosing_task_models,
             )
             .await?;
-
-        // Thread task-model overrides from the enclosing composite stage
-        // into the child so run_stage_scoped can merge them at runtime.
-        child_gremlin.enclosing_task_models = enclosing_task_models.cloned();
 
         // Populate the child workspace (fork commands run after fork()
         // completes). On failure the child state has already been

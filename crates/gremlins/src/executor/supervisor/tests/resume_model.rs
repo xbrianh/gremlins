@@ -10,6 +10,7 @@ use crate::executor::supervisor::handle_resume;
 use crate::test_support::Sandbox;
 use serde_json::{json, Value};
 use std::fs;
+use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
@@ -73,11 +74,22 @@ async fn drained(registry: &TestRegistry) {
 }
 
 async fn assert_rejected_unchanged(sandbox: &Sandbox, dir: &Path, request: Value) {
+    assert_rejected_with_failure(sandbox, dir, request, None).await;
+}
+
+async fn assert_rejected_with_failure(
+    sandbox: &Sandbox,
+    dir: &Path,
+    request: Value,
+    failure: Option<&'static str>,
+) {
     let before_state = fs::read(dir.join("state.json")).unwrap();
     let before_definition = fs::read(dir.join("definition.json")).ok();
     let before_entries = entries(sandbox);
     let (registry, _shutdown) = spawn_test_actor().await;
+    state::set_resume_write_failure(failure);
     let response = handle_resume(&request, &registry).await;
+    state::set_resume_write_failure(None);
     assert_eq!(response["type"], "error", "{response}");
     assert!(
         !registry.contains_run(ID).await,
@@ -93,15 +105,30 @@ async fn assert_rejected_unchanged(sandbox: &Sandbox, dir: &Path, request: Value
         before_entries,
         "failed resume published a fork"
     );
-    assert!(
-        dir.join("finished").exists(),
-        "failed resume removed terminal marker"
+    assert_eq!(
+        fs::read_to_string(dir.join("finished")).unwrap(),
+        "original"
     );
+    if failure.is_some() {
+        let mut worker = Gremlin::from(ID).unwrap();
+        assert_eq!(worker.state.state_dir(), dir, "original must remain latest");
+        assert_eq!(worker.state.read_str("status"), "stopped");
+        assert_eq!(worker.model_override.as_deref(), Some("cmd/true"));
+        worker.init_runtime(None).await.unwrap();
+        assert_eq!(worker.definition.default_model().to_string(), "cmd/true");
+        assert_unpinned_resolves(&mut worker, "cmd/true").await;
+    }
 }
 
 async fn assert_unpinned_resolves(worker: &mut Gremlin, concrete: &str) {
     let pinned = worker.definition.next_stage().await.unwrap();
-    assert!(pinned.model().is_some());
+    assert_eq!(pinned.model().unwrap().to_string(), "cmd/true");
+    assert_eq!(
+        crate::executor::run::resolve_client(&pinned, worker, None)
+            .unwrap()
+            .to_string(),
+        "cmd/true"
+    );
     let stage = worker.definition.next_stage().await.unwrap();
     assert_eq!(stage.name(), "run");
     assert!(stage.model().is_none());
@@ -122,6 +149,7 @@ async fn resume_again_unchanged(
     concrete: &str,
 ) {
     let snapshot = fs::read(dir.join("definition.json")).unwrap();
+    let inode = fs::metadata(dir.join("definition.json")).unwrap().ino();
     let mut data = read_json(dir.join("state.json"));
     data["status"] = json!("stopped");
     state::write_state(dir, data.as_object().unwrap()).unwrap();
@@ -129,6 +157,10 @@ async fn resume_again_unchanged(
     assert_eq!(response["type"], "ok", "{response}");
     drained(registry).await;
     assert_eq!(fs::read(dir.join("definition.json")).unwrap(), snapshot);
+    assert_eq!(
+        fs::metadata(dir.join("definition.json")).unwrap().ino(),
+        inode
+    );
     assert_eq!(
         read_json(dir.join("state.json"))["model_override"],
         concrete
@@ -197,7 +229,10 @@ async fn resume_model_persists_and_normal_worker_load_ignores_changed_source() {
 
 #[tokio::test]
 async fn resume_profile_pins_options_without_importing_profile_task_or_stage_mappings() {
-    let sandbox = Sandbox::with_config(Some(
+    let sandbox = Sandbox::with_config(Some("default-model: cmd/true\n"));
+    config::init_global().unwrap();
+    fs::write(
+        sandbox.join("config/settings.yaml"),
         r#"
 model-profiles:
   replacement:
@@ -207,7 +242,8 @@ model-profiles:
     model-by-stage:
       pinned: openai/unwanted-stage
 "#,
-    ));
+    )
+    .unwrap();
     let dir = seed(&sandbox);
     let mut expected = read_json(dir.join("definition.json"));
     let concrete = "openai/replacement?temperature=0.2,reasoning_effort=high";
@@ -243,6 +279,12 @@ model-profiles:
     );
     let pinned = worker.definition.next_stage().await.unwrap();
     assert_eq!(pinned.model().unwrap().to_string(), "cmd/true");
+    assert_eq!(
+        crate::executor::run::resolve_client(&pinned, &worker, None)
+            .unwrap()
+            .to_string(),
+        "cmd/true"
+    );
     assert_eq!(
         pinned.task_models().unwrap()["Implement"],
         "openai/original-implement"
@@ -341,14 +383,17 @@ async fn resume_ineligible_states_do_not_change_model_or_publish_attempt() {
     assert_rejected_unchanged(&sandbox, &dir, json!({"id": ID, "model": "cmd/echo new"})).await;
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "current_thread")]
 async fn resume_model_state_write_failure_does_not_replace_snapshot_or_start_worker() {
     let sandbox = Sandbox::new();
     let dir = seed(&sandbox);
-    // A directory at the lock path reliably fails even when tests run as root.
-    fs::remove_file(dir.join("state.json.lock")).unwrap();
-    fs::create_dir(dir.join("state.json.lock")).unwrap();
-    assert_rejected_unchanged(&sandbox, &dir, json!({"id": ID, "model": "cmd/echo new"})).await;
+    for stage in [None, Some("run")] {
+        let mut request = json!({"id": ID, "model": "cmd/echo new"});
+        if let Some(stage) = stage {
+            request["stage"] = json!(stage);
+        }
+        assert_rejected_with_failure(&sandbox, &dir, request, Some("metadata")).await;
+    }
 }
 
 #[tokio::test]
@@ -375,6 +420,7 @@ async fn resume_without_model_does_not_read_broken_settings_or_change_snapshot()
     let sandbox = Sandbox::new();
     let dir = seed(&sandbox);
     let before = fs::read(dir.join("definition.json")).unwrap();
+    let inode = fs::metadata(dir.join("definition.json")).unwrap().ino();
     fs::create_dir_all(sandbox.join("config")).unwrap();
     fs::write(
         sandbox.join("config/settings.yaml"),
@@ -388,30 +434,26 @@ async fn resume_without_model_does_not_read_broken_settings_or_change_snapshot()
     drained(&registry).await;
     assert_eq!(fs::read(dir.join("definition.json")).unwrap(), before);
     assert_eq!(
+        fs::metadata(dir.join("definition.json")).unwrap().ino(),
+        inode
+    );
+    assert_eq!(
         Gremlin::from(ID).unwrap().model_override.as_deref(),
         Some("cmd/true")
     );
 }
 
-#[tokio::test]
-async fn resume_stage_publication_failure_leaves_no_partial_fork_or_model_change() {
+#[tokio::test(flavor = "current_thread")]
+async fn resume_snapshot_publication_failure_preserves_original_loadable_attempt() {
     let sandbox = Sandbox::new();
     let dir = seed(&sandbox);
-    // An occupied destination fails atomic publication after preparation, not validation.
-    let occupied = sandbox.join(format!("state/{ID}-0002"));
-    fs::create_dir_all(&occupied).unwrap();
-    fs::write(occupied.join("occupied"), "keep").unwrap();
-    assert_rejected_unchanged(
+    assert_rejected_with_failure(
         &sandbox,
         &dir,
-        json!({"id": ID, "stage": "run", "model": "cmd/echo new"}),
+        json!({"id": ID, "model": "cmd/echo new"}),
+        Some("snapshot"),
     )
     .await;
-    assert_eq!(
-        fs::read_to_string(occupied.join("occupied")).unwrap(),
-        "keep"
-    );
-    assert!(!occupied.join("state.json").exists());
 }
 
 #[tokio::test]
