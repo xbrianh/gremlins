@@ -1041,14 +1041,16 @@ impl Gremlin {
         );
 
         let child_state = StateData::from_store(Some(child_id.to_string()), forked_store);
-        let snapshot = child_provider
-            .serialize()
-            .map_err(|e| RunError::Message(format!("failed to serialize child definition: {e}")))?;
-        child_state
-            .open_blob("definition.json", BlobMode::Write)
-            .map_err(|e| RunError::Message(e.to_string()))?
-            .write_all(&snapshot)
-            .map_err(|e| RunError::Message(e.to_string()))?;
+        if matches!(&child_workdir, WorkDir::Persistent(_)) {
+            let snapshot = child_provider.serialize().map_err(|e| {
+                RunError::Message(format!("failed to serialize child definition: {e}"))
+            })?;
+            child_state
+                .open_blob("definition.json", BlobMode::Write)
+                .map_err(|e| RunError::Message(e.to_string()))?
+                .write_all(&snapshot)
+                .map_err(|e| RunError::Message(e.to_string()))?;
+        }
         child_state
             .write_state(&child)
             .map_err(|e| RunError::Message(format!("failed to write child state: {e}")))?;
@@ -2167,10 +2169,24 @@ mod tests {
         let child_def =
             StaticDefinition::from_json5_file(fx.definition_path(), None, None).unwrap();
         let child_provider: Box<dyn GremlinDefinition> = Box::new(child_def);
+        let model = ModelURI::parse("cmd/true").unwrap();
+        let task_models = IndexMap::from([("review".to_string(), "cmd/true".to_string())]);
         let child = parent
-            .fork("gr-child", "", "", "", None, child_provider, None)
+            .fork_with_context(
+                "gr-child",
+                "",
+                "",
+                "",
+                None,
+                child_provider,
+                Some(&model),
+                Some(&task_models),
+            )
             .await
             .unwrap();
+        assert!(child.state.exists("definition.json"));
+        assert_eq!(child.enclosing_model.as_ref(), Some(&model));
+        assert_eq!(child.enclosing_task_models.as_ref(), Some(&task_models));
 
         assert_ne!(
             child.state.artifact_uri_display(),
@@ -2189,6 +2205,8 @@ mod tests {
         let raw = child.state.state_tree();
         assert_eq!(raw["id"], "gr-child");
         assert_eq!(raw["status"], "running");
+        assert_eq!(raw["enclosing_model"], "cmd/true");
+        assert_eq!(raw["enclosing_task_models"]["review"], "cmd/true");
         assert!(raw["pid"].is_null());
         assert!(raw.get("token_usage").is_none());
 
@@ -3007,6 +3025,63 @@ mod tests {
         let reloaded = StaticDefinition::deserialize_owned(&bytes).unwrap();
         assert_eq!(reloaded.native_check_stage(), None);
         assert_eq!(reloaded.stage_names(), plain.stage_names());
+    }
+
+    #[tokio::test]
+    async fn ephemeral_fork_executes_native_check() {
+        use crate::builders::{DoneContext, DoneVerdict};
+        use crate::definition::ExecutorStage;
+
+        let fx = GitSandbox::new();
+        if fx.is_skipped() {
+            return;
+        }
+        let mut parent = Gremlin::init(
+            "gr-native-parent",
+            fx.definition_path(),
+            &nested_definition(true),
+            &HashMap::new(),
+            None,
+            &GremlinConfig {
+                ephemeral: true,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        parent.init_runtime(None).await.unwrap();
+        let mut child = parent
+            .fork_with_context(
+                "gr-native-child",
+                "gr-native-parent",
+                "group",
+                "key",
+                None,
+                Box::new(nested_definition(true)),
+                None,
+                None,
+            )
+            .await
+            .unwrap();
+        assert!(!child.state.exists("definition.json"));
+        child.init_runtime(None).await.unwrap();
+        let ExecutorStage::Sequence(seq) = child.definition.next_stage().await.unwrap() else {
+            panic!("expected sequence");
+        };
+        let ExecutorStage::Agent { stage, .. } = &seq.stages[0] else {
+            panic!("expected agent");
+        };
+        let verdict = stage
+            .done_check
+            .as_ref()
+            .expect("fork must retain the live callable")
+            .call(DoneContext {
+                summary: "done".to_string(),
+                cwd: child.workdir.as_ref().unwrap().path().to_path_buf(),
+                outputs: Vec::new(),
+                cancel: CancelToken::new(),
+            })
+            .await;
+        assert_eq!(verdict, DoneVerdict::Accept);
     }
 
     #[tokio::test]

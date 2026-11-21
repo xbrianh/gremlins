@@ -254,12 +254,14 @@ fn load_definition_snapshot(gremlin: &Gremlin) -> Result<StaticDefinition, Value
             gremlin.id.as_str()
         ))
     })?;
-    StaticDefinition::from_expanded_bytes(&bytes, None, None).map_err(|e| {
-        error_response(&format!(
-            "gremlin {}: invalid definition snapshot: {e}",
-            gremlin.id.as_str()
-        ))
-    })
+    StaticDefinition::from_expanded_bytes(&bytes, gremlin.model_override.as_deref(), None).map_err(
+        |e| {
+            error_response(&format!(
+                "gremlin {}: invalid definition snapshot: {e}",
+                gremlin.id.as_str()
+            ))
+        },
+    )
 }
 
 #[derive(Debug, Default)]
@@ -342,8 +344,10 @@ fn prepare_resume_model(gremlin: &Gremlin, spec: &str) -> Result<(String, Vec<u8
     let mut bytes = Vec::new();
     use std::io::Read;
     blob.read_to_end(&mut bytes).map_err(|e| e.to_string())?;
-    StaticDefinition::from_expanded_bytes(&bytes, None, None).map_err(|e| e.to_string())?;
-    let mut snapshot: Value = serde_json::from_slice(&bytes).map_err(|e| e.to_string())?;
+    StaticDefinition::from_expanded_bytes(&bytes, gremlin.model_override.as_deref(), None)
+        .map_err(|e| e.to_string())?;
+    let mut snapshot = crate::definition::r#static::yaml::parse_expanded_json(&bytes)
+        .map_err(|e| e.to_string())?;
     let root = snapshot
         .as_object_mut()
         .ok_or("invalid definition snapshot: expected object")?;
@@ -363,13 +367,20 @@ fn persist_resume_model(
     let mut staged = tempfile::NamedTempFile::new_in(&dir).map_err(|e| e.to_string())?;
     staged.write_all(bytes).map_err(|e| e.to_string())?;
     staged.as_file().sync_all().map_err(|e| e.to_string())?;
-    let original = std::fs::read(dir.join("state.json")).map_err(|e| e.to_string())?;
-    let mut rollback = tempfile::NamedTempFile::new_in(&dir).map_err(|e| e.to_string())?;
-    rollback.write_all(&original).map_err(|e| e.to_string())?;
-    gremlin
-        .state
-        .write_state(running)
+    let original = serde_json::json!({
+        "state": std::fs::read(dir.join("state.json")).map_err(|e| e.to_string())?,
+        "definition": std::fs::read(dir.join("definition.json")).map_err(|e| e.to_string())?,
+    });
+    let mut journal = tempfile::NamedTempFile::new_in(&dir).map_err(|e| e.to_string())?;
+    serde_json::to_writer(&mut journal, &original).map_err(|e| e.to_string())?;
+    journal.as_file().sync_all().map_err(|e| e.to_string())?;
+    journal
+        .persist(dir.join(".resume-model-recovery.json"))
         .map_err(|e| e.to_string())?;
+    if let Err(e) = gremlin.state.write_state(running) {
+        recover_resume_model(gremlin)?;
+        return Err(e.to_string());
+    }
     let publication = state::resume_write_failure("snapshot").and_then(|()| {
         staged
             .persist(dir.join("definition.json"))
@@ -377,14 +388,45 @@ fn persist_resume_model(
             .map_err(std::io::Error::other)
     });
     if let Err(e) = publication {
-        return match rollback.persist(dir.join("state.json")) {
-            Ok(_) => Err(format!("failed to replace definition snapshot: {e}")),
+        return match state::resume_write_failure("rollback")
+            .map_err(|e| e.to_string())
+            .and_then(|()| recover_resume_model(gremlin))
+        {
+            Ok(()) => Err(format!("failed to replace definition snapshot: {e}")),
             Err(rollback) => Err(format!(
                 "failed to replace definition snapshot: {e}; metadata rollback failed: {rollback}"
             )),
         };
     }
+    std::fs::remove_file(dir.join(".resume-model-recovery.json")).map_err(|e| e.to_string())?;
     Ok(())
+}
+
+// The journal is the publication point: until removed, both old files win.
+// Recovery runs under the per-ID lock and is safe to repeat after partial recovery.
+fn recover_resume_model(gremlin: &Gremlin) -> Result<(), String> {
+    use std::io::Write;
+    let dir = gremlin.state.state_dir();
+    let path = dir.join(".resume-model-recovery.json");
+    let bytes = match std::fs::read(&path) {
+        Ok(bytes) => bytes,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(e) => return Err(e.to_string()),
+    };
+    let original: std::collections::HashMap<String, Vec<u8>> =
+        serde_json::from_slice(&bytes).map_err(|e| e.to_string())?;
+    for (key, filename) in [("definition", "definition.json"), ("state", "state.json")] {
+        let bytes = original
+            .get(key)
+            .ok_or("incomplete resume recovery journal")?;
+        let mut staged = tempfile::NamedTempFile::new_in(&dir).map_err(|e| e.to_string())?;
+        staged.write_all(bytes).map_err(|e| e.to_string())?;
+        staged.as_file().sync_all().map_err(|e| e.to_string())?;
+        staged
+            .persist(dir.join(filename))
+            .map_err(|e| e.to_string())?;
+    }
+    std::fs::remove_file(path).map_err(|e| e.to_string())
 }
 
 pub(crate) async fn handle_resume(request: &Value, registry: &Arc<RunRegistry>) -> Value {
@@ -403,6 +445,21 @@ pub(crate) async fn handle_resume(request: &Value, registry: &Arc<RunRegistry>) 
         Ok(g) => g,
         Err(e) => return error_response(&format!("gremlin {id}: {e}")),
     };
+
+    if gremlin
+        .state
+        .state_dir()
+        .join(".resume-model-recovery.json")
+        .exists()
+    {
+        if let Err(e) = recover_resume_model(&gremlin) {
+            return error_response(&format!("gremlin {id}: failed to recover resume: {e}"));
+        }
+        gremlin = match Gremlin::from(id) {
+            Ok(g) => g,
+            Err(e) => return error_response(&format!("gremlin {id}: {e}")),
+        };
+    }
 
     let status = gremlin.state.read_str("status");
     if status == "running" {
@@ -468,6 +525,7 @@ pub(crate) async fn handle_resume(request: &Value, registry: &Arc<RunRegistry>) 
             .entry("model_selection_profile")
             .or_insert_with(|| Value::String(gremlin.model_override.clone().unwrap_or_default()));
         running.insert("model_override".into(), Value::String(model.clone()));
+        running.insert("model".into(), Value::String(model.clone()));
     }
 
     let resume_stage = if let Some(target) = requested_stage {

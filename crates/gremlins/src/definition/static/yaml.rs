@@ -95,7 +95,10 @@ impl StaticDefinition {
         model_override: Option<&str>,
         config_default_model: Option<&str>,
     ) -> Result<Self, SchemaError> {
-        let expanded = parse_expanded_json(data)?;
+        let mut expanded = parse_expanded_json(data)?;
+        if let Some(object) = expanded.as_object_mut() {
+            object.remove("__gremlins_expanded__");
+        }
         from_expanded_value(
             expanded,
             Path::new("definition.json5"),
@@ -110,13 +113,13 @@ impl StaticDefinition {
 // Private: parse_expanded_json
 // ---------------------------------------------------------------------------
 
-/// Parse already-expanded JSON bytes and strip the `__gremlins_expanded__` sentinel.
+/// Parse already-expanded JSON bytes without changing the persisted object.
 ///
 /// The hermetic snapshot is written as plain JSON, but its readers honor the
 /// JSON5-on-read contract: comments, unquoted keys, single-quoted strings, and
 /// trailing commas are all accepted here. The same non-representable numeric
 /// literal validation used by the file reader is applied.
-fn parse_expanded_json(data: &[u8]) -> Result<Value, SchemaError> {
+pub(crate) fn parse_expanded_json(data: &[u8]) -> Result<Value, SchemaError> {
     let label = Path::new("definition.json");
     let text = std::str::from_utf8(data).map_err(|e| {
         SchemaError::Generic(format!(
@@ -124,13 +127,10 @@ fn parse_expanded_json(data: &[u8]) -> Result<Value, SchemaError> {
         ))
     })?;
     expand::reject_json5_numeric_literals(text, label)?;
-    let mut expanded: Value = json5::from_str(text).map_err(|e| SchemaError::YamlParse {
+    let expanded: Value = json5::from_str(text).map_err(|e| SchemaError::YamlParse {
         label: label.display().to_string(),
         msg: e.to_string(),
     })?;
-    if let Some(object) = expanded.as_object_mut() {
-        object.remove("__gremlins_expanded__");
-    }
     Ok(expanded)
 }
 

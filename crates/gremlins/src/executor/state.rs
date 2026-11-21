@@ -1546,9 +1546,15 @@ impl StateStore for FileSystemStateStore {
             })?;
             (gremlin_id, current)
         };
-        let next = current.checked_add(1).ok_or_else(|| {
-            std::io::Error::new(std::io::ErrorKind::InvalidInput, "attempt number overflow")
-        })?;
+        let next = current
+            .checked_add(1)
+            .filter(|next| *next <= 9999)
+            .ok_or_else(|| {
+                std::io::Error::new(
+                    std::io::ErrorKind::InvalidInput,
+                    "stage fork attempt numbering exhausted at 9999",
+                )
+            })?;
 
         let child_dir = attempt_dir_path(&gremlin_id, next);
 
@@ -2534,7 +2540,11 @@ pub(crate) fn set_resume_write_failure(point: Option<&'static str>) {
 
 pub(crate) fn resume_write_failure(point: &str) -> std::io::Result<()> {
     #[cfg(test)]
-    if RESUME_WRITE_FAILURE.with(|failure| failure.get() == Some(point)) {
+    if RESUME_WRITE_FAILURE.with(|failure| {
+        failure.get() == Some(point)
+            || (failure.get() == Some("snapshot-and-rollback")
+                && matches!(point, "snapshot" | "rollback"))
+    }) {
         return Err(std::io::Error::other(format!(
             "injected resume {point} write failure"
         )));
@@ -3810,6 +3820,72 @@ mod tests {
                     FileSystemStateStore::open("gr-failure").unwrap().root_dir(),
                     store.root_dir()
                 );
+            });
+        });
+    }
+
+    #[test]
+    fn fork_to_stage_rejects_exhausted_attempts_without_changing_parent() {
+        with_sandbox(None, |_| {
+            tokio::runtime::Runtime::new().unwrap().block_on(async {
+                let id = "gr-exhausted";
+                let mut initial = Map::new();
+                initial.insert("id".into(), Value::String(id.into()));
+                initial.insert("stage".into(), Value::String("build".into()));
+                let parent_dir = attempt_dir_path(id, 9999);
+                std::fs::create_dir_all(&parent_dir).unwrap();
+                let store = FileSystemStateStore::from_path(parent_dir.clone());
+                store.write_state(&initial).unwrap();
+                std::fs::write(parent_dir.join("definition.json"), b"original").unwrap();
+                let uri = Uri::new("artifact".into(), "kept".into());
+                store.write_into_registry(&uri, "preserved").await.unwrap();
+                let state_before = std::fs::read(store.state_file()).unwrap();
+                let registry_before = std::fs::read(store.registry_path()).unwrap();
+                let entries = || {
+                    let mut paths: Vec<_> = std::fs::read_dir(parent_dir.parent().unwrap())
+                        .unwrap()
+                        .map(|entry| entry.unwrap().path())
+                        .collect();
+                    paths.sort();
+                    paths
+                };
+                let before = entries();
+                let mut rewind = initial.clone();
+                rewind.insert("stage".into(), Value::String("review".into()));
+                let keys = ["artifact://kept".to_string()];
+
+                for definition in [None, Some(b"replacement".as_slice())] {
+                    let result = if definition.is_none() {
+                        store.fork_to_stage(&keys, &rewind).await
+                    } else {
+                        store
+                            .fork_to_stage_with_definition(&keys, &rewind, definition)
+                            .await
+                    };
+                    let error = result.unwrap_err();
+                    let error = error.downcast_ref::<std::io::Error>().unwrap();
+                    assert_eq!(error.kind(), std::io::ErrorKind::InvalidInput);
+                    assert!(error.to_string().contains("exhausted at 9999"));
+                    assert!(!attempt_dir_path(id, 10000).exists());
+                    assert_eq!(entries(), before);
+                    assert_eq!(std::fs::read(store.state_file()).unwrap(), state_before);
+                    assert_eq!(
+                        std::fs::read(store.registry_path()).unwrap(),
+                        registry_before
+                    );
+                    assert_eq!(
+                        std::fs::read(parent_dir.join("definition.json")).unwrap(),
+                        b"original"
+                    );
+                    assert_eq!(
+                        store.content("artifact://kept", None).await.unwrap(),
+                        "preserved"
+                    );
+                    assert_eq!(
+                        FileSystemStateStore::open(id).unwrap().root_dir(),
+                        parent_dir
+                    );
+                }
             });
         });
     }

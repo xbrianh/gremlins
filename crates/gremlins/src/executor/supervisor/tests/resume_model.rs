@@ -227,6 +227,87 @@ async fn resume_model_persists_and_normal_worker_load_ignores_changed_source() {
     resume_again_unchanged(&sandbox, &dir, &registry, "cmd/echo replacement").await;
 }
 
+async fn assert_json5_resume_before_runtime_failure(stage: Option<&str>) {
+    let sandbox = Sandbox::new();
+    let parent = seed(&sandbox);
+    let snapshot = r#"{
+      // Baked JSON5 deliberately has no default_model.
+      __gremlins_expanded__: true,
+      extra: { sentinel: ['keep', 42, null], },
+      bootstrap: { env: 'exit 37', },
+      default_task_models: { Scout: 'openai/original-scout', },
+      stages: [
+        { name: 'pinned', type: 'exec', model: 'cmd/true',
+          options: { cmds: ['true'], extra: 'keep pinned options', },
+          'task-models': { Implement: 'openai/original-implement', }, },
+        { name: 'run', type: 'exec', options: { cmds: ['true'], }, },
+      ],
+    }"#;
+    assert!(serde_json::from_str::<Value>(snapshot).is_err());
+    StaticDefinition::from_expanded_bytes(snapshot.as_bytes(), Some("cmd/true"), None)
+        .expect("old override must make the default-less baked snapshot valid");
+    fs::write(parent.join("definition.json"), snapshot).unwrap();
+    let mut data = read_json(parent.join("state.json"));
+    data["model"] = json!("cmd/true");
+    state::write_state(&parent, data.as_object().unwrap()).unwrap();
+    fs::write(
+        sandbox.join("project/.gremlins/demo.json5"),
+        "not a definition",
+    )
+    .unwrap();
+    let parent_state = fs::read(parent.join("state.json")).unwrap();
+    let parent_definition = fs::read(parent.join("definition.json")).unwrap();
+    let mut expected: Value = json5::from_str(snapshot).unwrap();
+    expected["default_model"] = json!("cmd/echo replacement");
+
+    let (registry, _shutdown) = spawn_test_actor().await;
+    let mut request = json!({"id": ID, "model": "cmd/echo replacement"});
+    if let Some(stage) = stage {
+        request["stage"] = json!(stage);
+    }
+    let response = handle_resume(&request, &registry).await;
+    assert_eq!(response["type"], "ok", "{response}");
+    drained(&registry).await;
+
+    let mut worker = Gremlin::from(ID).unwrap();
+    let resumed = worker.state.state_dir();
+    let persisted = read_json(resumed.join("state.json"));
+    assert_eq!(persisted["model"], "cmd/echo replacement");
+    assert_eq!(persisted["model_override"], "cmd/echo replacement");
+    assert_eq!(persisted["metadata"]["acceptance"], "keep");
+    assert_eq!(read_json(resumed.join("definition.json")), expected);
+    assert!(
+        worker.init_runtime(None).await.is_err(),
+        "bootstrap.env must prevent successful runtime initialization"
+    );
+    if stage.is_some() {
+        assert_ne!(resumed, parent);
+        assert_eq!(entries(&sandbox).len(), 2);
+        assert_eq!(fs::read(parent.join("state.json")).unwrap(), parent_state);
+        assert_eq!(
+            fs::read(parent.join("definition.json")).unwrap(),
+            parent_definition
+        );
+        assert_eq!(
+            fs::read_to_string(parent.join("finished")).unwrap(),
+            "original"
+        );
+    } else {
+        assert_eq!(resumed, parent);
+        assert_eq!(entries(&sandbox).len(), 1);
+    }
+}
+
+#[tokio::test]
+async fn resume_json5_without_default_model_persists_both_models_before_runtime_failure() {
+    assert_json5_resume_before_runtime_failure(None).await;
+}
+
+#[tokio::test]
+async fn resume_stage_json5_without_default_model_preserves_parent_before_runtime_failure() {
+    assert_json5_resume_before_runtime_failure(Some("run")).await;
+}
+
 #[tokio::test]
 async fn resume_profile_pins_options_without_importing_profile_task_or_stage_mappings() {
     let sandbox = Sandbox::with_config(Some("default-model: cmd/true\n"));
@@ -400,7 +481,11 @@ async fn resume_model_state_write_failure_does_not_replace_snapshot_or_start_wor
 async fn resume_model_missing_or_corrupt_snapshot_never_launches_or_forks() {
     let sandbox = Sandbox::new();
     let dir = seed(&sandbox);
-    for bytes in [None, Some(b"not json".as_slice()), Some(b"{}".as_slice())] {
+    for bytes in [
+        None,
+        Some(b"not json".as_slice()),
+        Some(b"{stages: false}".as_slice()),
+    ] {
         match bytes {
             Some(bytes) => fs::write(dir.join("definition.json"), bytes).unwrap(),
             None => fs::remove_file(dir.join("definition.json")).unwrap(),
@@ -454,6 +539,47 @@ async fn resume_snapshot_publication_failure_preserves_original_loadable_attempt
         Some("snapshot"),
     )
     .await;
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn resume_recovers_original_pair_when_immediate_rollback_is_unavailable() {
+    let sandbox = Sandbox::new();
+    let dir = seed(&sandbox);
+    let original_state = fs::read(dir.join("state.json")).unwrap();
+    let original_definition = fs::read(dir.join("definition.json")).unwrap();
+    let (registry, _shutdown) = spawn_test_actor().await;
+    state::set_resume_write_failure(Some("snapshot-and-rollback"));
+    let response = handle_resume(
+        &json!({"id": ID, "model": "cmd/echo replacement"}),
+        &registry,
+    )
+    .await;
+    state::set_resume_write_failure(None);
+    assert_eq!(response["type"], "error", "{response}");
+    assert!(!registry.contains_run(ID).await);
+    assert_eq!(read_json(dir.join("state.json"))["status"], "running");
+    assert!(dir.join(".resume-model-recovery.json").exists());
+
+    // A new request must recover before checking eligibility. Rejecting an
+    // unknown stage lets us inspect the recovered pair without starting a worker.
+    let response = handle_resume(&json!({"id": ID, "stage": "unknown"}), &registry).await;
+    assert_eq!(response["type"], "error", "{response}");
+    assert!(response.to_string().contains("unknown top-level stage"));
+    assert!(!registry.contains_run(ID).await);
+    assert_eq!(fs::read(dir.join("state.json")).unwrap(), original_state);
+    assert_eq!(
+        fs::read(dir.join("definition.json")).unwrap(),
+        original_definition
+    );
+    assert!(!dir.join(".resume-model-recovery.json").exists());
+    let mut reopened = Gremlin::from(ID).unwrap();
+    assert_eq!(reopened.state.read_str("status"), "stopped");
+    assert_eq!(reopened.model_override.as_deref(), Some("cmd/true"));
+    reopened.init_runtime(None).await.unwrap();
+    assert_eq!(reopened.definition.default_model().to_string(), "cmd/true");
+    let response = handle_resume(&json!({"id": ID}), &registry).await;
+    assert_eq!(response["type"], "ok", "{response}");
+    drained(&registry).await;
 }
 
 #[tokio::test]
