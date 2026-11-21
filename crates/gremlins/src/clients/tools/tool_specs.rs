@@ -70,7 +70,7 @@ pub(super) static TOOL_SPECS: &[ToolSpec] = &[
     },
     ToolSpec {
         name: "Landscape",
-        description: "This is your primary discovery tool — use it FIRST whenever you need to understand codebase layout, find where functions/types/tests live, or explore an unfamiliar directory. Show the structural outline of a file or directory. For a file, returns space-separated `line|kind|name` items on a single line. Kinds include fn, struct, impl, trait, enum, mod, class, method, heading, and key. Test functions inside `#[cfg(test)]` modules are shown individually. Unknown file extensions yield the file path. For a directory, returns a tree-formatted outline using the same `line|kind|name` item format: directory headers end with `/` and file headers end with `:` followed by space-separated items. The `depth` argument limits how many nested directory levels to descend (default: all levels). The optional `token_budget` argument applies skeletonization and depth back-off when the tree is too large; when omitted, the configured default budget applies (if any). Paths outside the sandbox are rejected.",
+        description: "This is your primary discovery tool — use it FIRST whenever you need to understand project layout, locate a section or definition, or explore an unfamiliar directory. Show the structural outline of a file or directory. For a file, returns space-separated `line|kind|name` items on a single line. Kinds depend on the file format. Unknown file extensions yield the file path. For a directory, returns a tree-formatted outline using the same `line|kind|name` item format: directory headers end with `/` and file headers end with `:` followed by space-separated items. The `depth` argument limits how many nested directory levels to descend (default: all levels). The optional `token_budget` argument applies skeletonization and depth back-off when the tree is too large; when omitted, the configured default budget applies (if any). Paths outside the sandbox are rejected.",
         fields: &[
             FieldSpec { name: "file_path", description: "Path to the file or directory to outline (relative or absolute)", ty: "string", required: true, validated: true },
             FieldSpec { name: "depth", description: "For directories, how many nested directory levels to descend (default: all levels)", ty: "integer", required: false, validated: true },
@@ -107,11 +107,11 @@ pub(super) static TOOL_SPECS: &[ToolSpec] = &[
     },
     ToolSpec {
         name: "Grep",
-        description: "Search file contents using a Rust regex pattern. Returns matches in `path:line_number:line_content` format. When `context_before`/`context_after` are nonzero, each match expands to include up to that many surrounding lines; context lines use a `-` separator instead of `:` (e.g. `path-12-context`), touching/overlapping windows merge into one block, and non-contiguous blocks are separated by a single `--` line. `max_matches` counts matches, not emitted lines. Binaries and dot-directories are skipped, as are common build dirs (node_modules, target, __pycache__). Results are truncated at max_matches (default 2000). The regex engine does NOT support lookahead or lookbehind.",
+        description: "Search file contents using a regular expression. Returns matches in `path:line_number:line_content` format. When `context_before`/`context_after` are nonzero, each match expands to include up to that many surrounding lines; context lines use a `-` separator instead of `:` (e.g. `path-12-context`), touching/overlapping windows merge into one block, and non-contiguous blocks are separated by a single `--` line. `max_matches` counts matches, not emitted lines. Binaries and dot-directories are skipped, as are common dependency, build, and cache directories. Results are truncated at max_matches (default 2000). The regex engine does NOT support lookahead or lookbehind.",
         fields: &[
-            FieldSpec { name: "pattern", description: "Regex pattern to search for (Rust regex syntax — no lookahead/lookbehind)", ty: "string", required: true, validated: true },
+            FieldSpec { name: "pattern", description: "Regex pattern to search for (no lookahead or lookbehind)", ty: "string", required: true, validated: true },
             FieldSpec { name: "path", description: "Directory or file to search (default: current directory)", ty: "string", required: false, validated: false },
-            FieldSpec { name: "glob", description: "Glob filter for file names (e.g. `*.rs`)", ty: "string", required: false, validated: false },
+            FieldSpec { name: "glob", description: "Glob filter for file names (e.g. `*.txt`)", ty: "string", required: false, validated: false },
             FieldSpec { name: "max_matches", description: "Maximum number of matches to return (optional, default 2000)", ty: "integer", required: false, validated: false },
             FieldSpec { name: "context_before", description: "Number of context lines to include before each match (optional, default 0)", ty: "integer", required: false, validated: true },
             FieldSpec { name: "context_after", description: "Number of context lines to include after each match (optional, default 0)", ty: "integer", required: false, validated: true },
@@ -122,7 +122,7 @@ pub(super) static TOOL_SPECS: &[ToolSpec] = &[
         name: "Glob",
         description: "Find files matching a glob pattern. Supports `**` for recursive matching. Returns sorted paths, one per line.",
         fields: &[
-            FieldSpec { name: "pattern", description: "Glob pattern (e.g. `**/*.rs`, `src/**/mod.rs`)", ty: "string", required: true, validated: true },
+            FieldSpec { name: "pattern", description: "Glob pattern (e.g. `**/*.txt`, `docs/**/index.md`)", ty: "string", required: true, validated: true },
             FieldSpec { name: "path", description: "Base directory to search in (default: current directory)", ty: "string", required: false, validated: false },
         ],
         skills_gated: false,
@@ -152,7 +152,7 @@ pub(super) static TOOL_SPECS: &[ToolSpec] = &[
     },
     ToolSpec {
         name: "Task",
-        description: "Delegate a self-contained task to a worker. Non-Fork kinds start with a clean conversation context; the Fork kind inherits the parent conversation history. Multiple Task calls in the same message run concurrently, up to {TASK_MAX_PER_TURN} per message (the harness supports up to {MAX_CONCURRENT_TOOLS} total concurrent tool calls). Parallel Tasks launched in the same message share one working directory — each worker can see the other workers' in-progress changes. Give each parallel Task disjoint files or read-only work to avoid edit conflicts. Returns the worker's final text output.",
+        description: "Delegate a self-contained task to a worker. Non-Fork kinds start with a clean conversation context; the Fork kind inherits the parent conversation history. Group independent tasks; if one needs another's result, call them in sequence. Multiple Task calls in the same message run concurrently, up to {TASK_MAX_PER_TURN} per message (the harness supports up to {MAX_CONCURRENT_TOOLS} total concurrent tool calls). Parallel Tasks launched in the same message share one working directory — each worker can see the other workers' in-progress changes. Give each parallel Task disjoint files or read-only work to avoid edit conflicts. Returns the worker's final text output.",
         fields: &[
             FieldSpec { name: "kind", description: "The kind of task to delegate.", ty: "string", required: true, validated: true },
             FieldSpec { name: "prompt", description: "Full task briefing for the worker. Non-Fork kinds start with a clean conversation context and see nothing from your conversation — include all relevant file contents, diffs, plans, and instructions the worker needs directly in this field. The Fork kind inherits the parent conversation history before this prompt.", ty: "string", required: true, validated: true },

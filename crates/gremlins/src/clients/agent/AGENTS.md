@@ -16,7 +16,6 @@ done_helpers.rs     Build the Done action-ledger + tool_result user message
 interactive.rs      Pause / interactive-session state machine
                     (interactive_loop, await_interactive_turn)
 system_prompts.rs   Agent/task/fork system prompts + chat preamble helpers.
-                    Also owns BATCHING_GUIDANCE.
 task.rs             Task runner factory: make_task_runner, task id chains
 task_models.rs      Per-TaskKind model overrides (task-models config)
 ```

@@ -3,9 +3,6 @@
 //! Moved out of `clients/agent/system_prompts.rs` since these are consumed by
 //! the supervisor's chat turn machinery.
 
-#[cfg(test)]
-use crate::clients::agent::system_prompts::BATCHING_GUIDANCE;
-
 // ---------------------------------------------------------------------------
 // chat system prompt helpers
 // ---------------------------------------------------------------------------
@@ -67,16 +64,6 @@ pub(crate) fn build_chat_preamble(context: &str, trusted_section: &str) -> Strin
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn test_chat_system_prompt_matches_batching_guidance() {
-        let chat_md = include_str!("../../../prompts/chat_system.md");
-        assert!(
-            chat_md.contains(BATCHING_GUIDANCE),
-            "chat_system.md must include the same batching guidance as BATCHING_GUIDANCE; \
-             edit both or neither to prevent desync"
-        );
-    }
 
     #[test]
     fn chat_system_prompt_requires_an_answer_before_done() {
