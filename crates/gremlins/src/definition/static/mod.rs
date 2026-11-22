@@ -538,6 +538,10 @@ impl GremlinDefinition for StaticDefinition {
         self.default_model = model.clone();
     }
 
+    fn as_any_mut(&mut self) -> Option<&mut dyn std::any::Any> {
+        Some(self)
+    }
+
     fn clone_box(&self) -> Box<dyn GremlinDefinition> {
         Box::new(self.clone())
     }
