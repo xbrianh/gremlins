@@ -200,6 +200,15 @@ pub trait StateStore: Send + Sync + Debug {
         Err("conditional resume publication is unsupported by this state store".into())
     }
 
+    /// Replace a terminal run's active definition conditionally, preserving terminal markers.
+    fn publish_snapshot_conditional(
+        &self,
+        _expected: &Map<String, Value>,
+        _definition: &[u8],
+    ) -> Result<(), String> {
+        Err("conditional snapshot publication is unsupported by this state store".into())
+    }
+
     /// Publish the launch snapshot and its initial immutable revision.
     fn initialize_definition(&self, _definition: &[u8]) -> Result<(), String> {
         Err("definition initialization is unsupported by this state store".into())
@@ -1282,6 +1291,21 @@ impl StateStore for FileSystemStateStore {
         )
     }
 
+    fn publish_snapshot_conditional(
+        &self,
+        expected: &Map<String, Value>,
+        definition: &[u8],
+    ) -> Result<(), String> {
+        resume::publish_definition(
+            self.root.path(),
+            &Map::new(),
+            Some(definition),
+            Some(expected),
+            &Map::new(),
+            false,
+        )
+    }
+
     fn initialize_definition(&self, definition: &[u8]) -> Result<(), String> {
         resume::initialize(self.root.path(), definition)
     }
@@ -2048,6 +2072,7 @@ impl StateStore for ScopedFileSystemStateStore {
     delegate!(inner, fn state_tree(&self) -> Map<String, Value>);
     delegate!(inner, fn write_state(&self, data: &Map<String, Value>) -> Result<(), StateError>);
     delegate!(inner, fn publish_resume(&self, fields: &Map<String, Value>, definition: Option<&[u8]>) -> Result<(), String>);
+    delegate!(inner, fn publish_snapshot_conditional(&self, expected: &Map<String, Value>, definition: &[u8]) -> Result<(), String>);
     delegate!(inner, fn publish_resume_conditional(&self, expected: &Map<String, Value>, fields: &Map<String, Value>, definition: Option<&[u8]>, metadata: &Map<String, Value>) -> Result<(), String>);
     delegate!(inner, fn initialize_definition(&self, definition: &[u8]) -> Result<(), String>);
     delegate!(inner, fn clear_finished(&self) -> Result<(), String>);
@@ -2315,6 +2340,7 @@ impl StateData {
     delegate!(pub store, fn add_subprocess_cost(&self, amount: f64));
     delegate!(pub store, fn patch_parallel_attempt(&self, child_key: &str, attempt: &str));
 
+    delegate!(pub store, fn publish_snapshot_conditional(&self, expected: &Map<String, Value>, definition: &[u8]) -> Result<(), String>);
     delegate!(pub store, fn publish_resume_conditional(&self, expected: &Map<String, Value>, fields: &Map<String, Value>, definition: Option<&[u8]>, metadata: &Map<String, Value>) -> Result<(), String>);
     delegate!(pub store, fn initialize_definition(&self, definition: &[u8]) -> Result<(), String>);
     delegate!(pub store, fn read_definition_revision(&self, id: &str) -> Result<Vec<u8>, String>);

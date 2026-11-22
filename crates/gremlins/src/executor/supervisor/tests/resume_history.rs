@@ -28,9 +28,9 @@ fn settings(sandbox: &Sandbox, log: &Path, edited: bool) {
             "model-profiles": {
                 "A": {"model": model(log, "A")},
                 "B": {"model": model(log, label), "model-by-stage": {
-                    "prefix-exact": model(log, &format!("{label}-exact")),
-                    "pre*": model(log, &format!("{label}-short")),
-                    "prefix*": model(log, &format!("{label}-long"))
+                    "enclosing/prefix-exact": model(log, &format!("{label}-exact")),
+                    "enclosing/pre*": model(log, &format!("{label}-short")),
+                    "enclosing/prefix*": model(log, &format!("{label}-long"))
                 }},
                 "C": {"model": model(log, "C")}
             }

@@ -237,6 +237,19 @@ pub(crate) async fn run_parallel(
             )
             .await?;
 
+        // Keep the original structural ancestry when the child runs its
+        // branch-local definition, including after ID-based resume.
+        let model_prefix = stage_key(&gremlin.state.read_str("model_stage_prefix"), &usage_scope);
+        child_gremlin.state.patch(
+            &[],
+            &[(
+                "model_stage_prefix".into(),
+                serde_json::Value::String(model_prefix),
+            )]
+            .into_iter()
+            .collect(),
+        );
+
         // Populate the child workspace (fork commands run after fork()
         // completes). On failure the child state has already been
         // persisted as `running` by fork(), so record a terminal failure

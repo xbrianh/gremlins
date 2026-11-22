@@ -87,6 +87,17 @@ async fn run_stage_scoped(
 
     let display_stage = sequences.first().copied();
     let stage_usage_path = sequences.join("/");
+    let saved_model_path = gremlin.state.read_str("model_stage_path");
+    let model_path = stage_key(
+        &gremlin.state.read_str("model_stage_prefix"),
+        &stage_key(&stage_usage_path, stage.name()),
+    );
+    gremlin.state.patch(
+        &[],
+        &[("model_stage_path".into(), Value::String(model_path))]
+            .into_iter()
+            .collect(),
+    );
 
     // Keep `state.stage` pointed at the enclosing composite so `ls`,
     // `info`, and `/watch` show the human-readable stage name (not an
@@ -140,6 +151,12 @@ async fn run_stage_scoped(
         }
         send_stage_boundary(gremlin.id.as_str(), "", "other");
     }
+    gremlin.state.patch(
+        &[],
+        &[("model_stage_path".into(), Value::String(saved_model_path))]
+            .into_iter()
+            .collect(),
+    );
     result
 }
 
@@ -155,7 +172,9 @@ fn resolve_model_spec(
     enclosing_model: Option<&ModelURI>,
 ) -> Result<ModelURI, RunError> {
     if let Some(selection) = &gremlin.runtime_config.resolved_model_selection {
-        return ModelURI::parse(selection.model_for_stage(stage.name()))
+        let path = gremlin.state.read_str("model_stage_path");
+        let path = if path.is_empty() { stage.name() } else { &path };
+        return ModelURI::parse(selection.model_for_stage(path))
             .map_err(|error| stage_failed(stage.name(), error));
     }
     if let Some(spec) = stage.model() {

@@ -1874,6 +1874,31 @@ async fn clean(id: &str, keep: bool) -> Result<(), String> {
 // land
 // ---------------------------------------------------------------------------
 
+fn read_land_definition(
+    store: &dyn StateStore,
+    id: &str,
+    default_model: Option<&str>,
+) -> Result<StaticDefinition, String> {
+    // The committed revision is authoritative; the alias may be stale or absent.
+    let bytes = match store.state_tree().get("definition_revision") {
+        Some(Value::String(revision)) => store
+            .read_definition_revision(revision)
+            .map_err(|e| format!("gremlin {id}: failed to read definition revision: {e}"))?,
+        Some(_) => return Err(format!("gremlin {id}: invalid definition_revision")),
+        None => {
+            let mut blob = store
+                .open("definition.json", BlobMode::Read)
+                .map_err(|e| format!("gremlin {id}: definition snapshot not found: {e}"))?;
+            let mut bytes = Vec::new();
+            std::io::Read::read_to_end(&mut blob, &mut bytes)
+                .map_err(|e| format!("gremlin {id}: failed to read definition snapshot: {e}"))?;
+            bytes
+        }
+    };
+    StaticDefinition::from_expanded_bytes(&bytes, None, default_model)
+        .map_err(|e| format!("gremlin {id}: failed to load definition: {e}"))
+}
+
 async fn land(id: &str) -> Result<(), String> {
     config::init_global().map_err(|e| e.to_string())?;
 
@@ -1889,18 +1914,7 @@ async fn land(id: &str) -> Result<(), String> {
         .ok()
         .and_then(|c| c.default_model().map(String::from));
 
-    // Load the hermetic definition through the store blob.
-    let definition = {
-        let mut blob = store
-            .open("definition.json", BlobMode::Read)
-            .map_err(|e| format!("gremlin {id}: definition snapshot not found: {e}"))?;
-        use std::io::Read;
-        let mut bytes = Vec::new();
-        blob.read_to_end(&mut bytes)
-            .map_err(|e| format!("gremlin {id}: failed to read definition snapshot: {e}"))?;
-        StaticDefinition::from_expanded_bytes(&bytes, None, default_model.as_deref())
-            .map_err(|e| format!("gremlin {id}: failed to load definition: {e}"))?
-    };
+    let definition = read_land_definition(&store, id, default_model.as_deref())?;
 
     let exec = match definition.land() {
         Some(ExecutorStage::Exec { stage, .. }) => stage,
@@ -2836,6 +2850,116 @@ mod tests {
     use super::*;
     use gremlins::schemas::bootstrap::{InputSource, InputSources};
     use std::fs;
+
+    fn land_definition_fixture(with_land: bool) -> Vec<u8> {
+        let mut definition = serde_json::json!({
+            "__gremlins_expanded__": true,
+            "name": "land-test",
+            "default_model": "openai/gpt-4",
+            "stages": []
+        });
+        if with_land {
+            definition["land"] = serde_json::json!({"land_cmds": ["echo committed"]});
+        }
+        serde_json::to_vec(&definition).unwrap()
+    }
+
+    #[test]
+    fn land_definition_uses_committed_revision_with_stale_or_missing_alias() {
+        for stale_alias in [true, false] {
+            let tmp = tempfile::tempdir().unwrap();
+            fs::write(
+                tmp.path().join("state.json"),
+                r#"{"definition_revision":"rev-1"}"#,
+            )
+            .unwrap();
+            fs::create_dir(tmp.path().join("definition-revisions")).unwrap();
+            fs::write(
+                tmp.path().join("definition-revisions/rev-1.json"),
+                land_definition_fixture(true),
+            )
+            .unwrap();
+            if stale_alias {
+                fs::write(
+                    tmp.path().join("definition.json"),
+                    land_definition_fixture(false),
+                )
+                .unwrap();
+            }
+            let store = FileSystemStateStore::from_path(tmp.path().to_path_buf());
+            let definition = read_land_definition(&store, "test", None).unwrap();
+            assert!(definition.land().is_some());
+        }
+    }
+
+    #[test]
+    fn land_definition_legacy_alias_without_revision() {
+        let tmp = tempfile::tempdir().unwrap();
+        fs::write(tmp.path().join("state.json"), "{}").unwrap();
+        fs::write(
+            tmp.path().join("definition.json"),
+            land_definition_fixture(true),
+        )
+        .unwrap();
+        let store = FileSystemStateStore::from_path(tmp.path().to_path_buf());
+        assert!(read_land_definition(&store, "test", None)
+            .unwrap()
+            .land()
+            .is_some());
+    }
+
+    #[test]
+    fn land_definition_missing_or_malformed_revision_never_falls_back() {
+        for revision in [
+            serde_json::json!("missing"),
+            serde_json::json!(""),
+            serde_json::json!("../definition"),
+            Value::Null,
+            serde_json::json!(42),
+            serde_json::json!({}),
+            serde_json::json!([]),
+        ] {
+            let tmp = tempfile::tempdir().unwrap();
+            fs::write(
+                tmp.path().join("state.json"),
+                serde_json::to_vec(&serde_json::json!({"definition_revision": revision})).unwrap(),
+            )
+            .unwrap();
+            fs::write(
+                tmp.path().join("definition.json"),
+                land_definition_fixture(true),
+            )
+            .unwrap();
+            let store = FileSystemStateStore::from_path(tmp.path().to_path_buf());
+            assert!(
+                read_land_definition(&store, "test", None).is_err(),
+                "{revision}"
+            );
+        }
+    }
+
+    #[test]
+    fn land_definition_malformed_revision_contents_never_fall_back() {
+        let tmp = tempfile::tempdir().unwrap();
+        fs::write(
+            tmp.path().join("state.json"),
+            r#"{"definition_revision":"rev-1"}"#,
+        )
+        .unwrap();
+        fs::create_dir(tmp.path().join("definition-revisions")).unwrap();
+        fs::write(
+            tmp.path().join("definition-revisions/rev-1.json"),
+            "not a definition",
+        )
+        .unwrap();
+        fs::write(
+            tmp.path().join("definition.json"),
+            land_definition_fixture(true),
+        )
+        .unwrap();
+        let store = FileSystemStateStore::from_path(tmp.path().to_path_buf());
+        assert!(read_land_definition(&store, "test", None).is_err());
+    }
 
     #[test]
     fn resume_help_explains_replacement_and_preservation() {

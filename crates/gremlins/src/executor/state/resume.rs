@@ -107,6 +107,24 @@ pub(super) fn publish(
     expected: Option<&Map<String, Value>>,
     revision_metadata: &Map<String, Value>,
 ) -> Result<(), String> {
+    publish_definition(
+        dir,
+        fields,
+        definition,
+        expected,
+        revision_metadata,
+        expected.is_some(),
+    )
+}
+
+pub(super) fn publish_definition(
+    dir: &Path,
+    fields: &Map<String, Value>,
+    definition: Option<&[u8]>,
+    expected: Option<&Map<String, Value>>,
+    revision_metadata: &Map<String, Value>,
+    invalidate_terminal: bool,
+) -> Result<(), String> {
     let _lock = acquire_lock(&dir.join("state.json")).map_err(|e| e.to_string())?;
     recover_unlocked(dir)?;
     if expected.is_some() {
@@ -155,7 +173,7 @@ pub(super) fn publish(
         remove_definition: definition.is_some() && !dir.join("definition.json").exists(),
         committed_state: Some(Backup::Text(target_state)),
         committed: false,
-        invalidate_finished: expected.is_some(),
+        invalidate_finished: invalidate_terminal,
     };
     let journal_bytes = serde_json::to_vec(&journal).map_err(|e| e.to_string())?;
     if snapshot.is_some() {

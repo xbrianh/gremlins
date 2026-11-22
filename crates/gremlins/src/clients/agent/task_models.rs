@@ -66,12 +66,15 @@ impl TaskModelOverrides {
 /// lookup maps and a factory that builds the model a matching entry names.
 ///
 /// `None` at a call site means no `task-models` is configured, so every task
-/// keeps the parent's model. Cloning a selector is O(1) — both halves sit behind
+/// keeps the parent's model. Selectors also inherit the parent for unmapped
+/// kinds unless a replacement explicitly pins its effective stage fallback.
+/// Cloning a selector is O(1) — its configuration and factory sit behind
 /// an `Arc` — which matters because a Task fan-out clones one per invocation.
 #[derive(Clone)]
 pub struct TaskModelSelector {
     overrides: Arc<TaskModelOverrides>,
     factory: TaskModelFactory,
+    fallback_spec: Option<Arc<str>>,
 }
 
 impl std::fmt::Debug for TaskModelSelector {
@@ -92,25 +95,50 @@ impl TaskModelSelector {
         if by_kind.is_empty() {
             return None;
         }
-        Some(Self {
+        Some(Self::from_overrides(by_kind, factory))
+    }
+
+    /// Assemble a selector even when the map is empty, so a replacement can
+    /// pin its effective stage model with [`Self::with_fallback_spec`].
+    pub(crate) fn from_overrides(
+        by_kind: HashMap<TaskKind, String>,
+        factory: TaskModelFactory,
+    ) -> Self {
+        Self {
             overrides: Arc::new(TaskModelOverrides { by_kind }),
             factory,
-        })
+            fallback_spec: None,
+        }
+    }
+
+    /// Pin the effective stage model for unmapped non-Fork tasks, including
+    /// recursive descendants. Only replacement selectors should opt in;
+    /// ordinary selectors retain immediate-parent inheritance.
+    ///
+    /// The factory resolves this spec lazily on each unmatched invocation.
+    /// Clones retain the pinned spec without rebuilding a backend.
+    pub fn with_fallback_spec(mut self, spec: impl Into<String>) -> Self {
+        self.fallback_spec = Some(Arc::from(spec.into()));
+        self
     }
 
     /// The [`TaskModel`] for a Task of `kind`, or a clone of `default` when no
-    /// entry matches.
+    /// entry matches and no fallback is pinned.
     ///
     /// Returns `(model, spec_string)` where `spec_string` is the matched
-    /// `task-models` entry (for logging), or `None` when no entry matched. A
-    /// matched entry that fails to build is an `Err` — it must surface as a
+    /// `task-models` entry or pinned fallback (for logging), or `None` when
+    /// inheriting the parent. A spec that fails to build is an `Err` — it must surface as a
     /// task result, not silently fall back to `default`.
     pub(crate) async fn model_for(
         &self,
         kind: TaskKind,
         default: &TaskModel,
     ) -> Result<(TaskModel, Option<String>), String> {
-        match self.overrides.spec_for(kind) {
+        match self
+            .overrides
+            .spec_for(kind)
+            .or(self.fallback_spec.as_deref())
+        {
             Some(spec) => match (self.factory)(spec).await {
                 Ok(m) => Ok((m, Some(spec.to_string()))),
                 Err(reason) => Err(reason),

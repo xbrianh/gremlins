@@ -149,6 +149,87 @@ async fn done(stream: TcpStream) {
     tool_response(stream, "Done", json!({"summary": "dispatch complete"})).await;
 }
 
+async fn nested_replacement_dispatch(container: &str) {
+    let provider = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let sandbox = sandbox(&provider);
+    // Leaf-only matching and first-prefix matching must not select these decoys.
+    fs::write(
+        sandbox.join("config/settings.yaml"),
+        json!({"model-profiles": {"replacement": {
+            "model": format!("openai/{}", model(&provider, "fallback")),
+            "model-by-stage": {
+                "leaf": format!("openai/{}", model(&provider, "bare-leaf")),
+                "enclosing/*": format!("openai/{}", model(&provider, "short-prefix")),
+                "enclosing/left/*": format!("openai/{}", model(&provider, "left-prefix")),
+                "enclosing/right/*": format!("openai/{}", model(&provider, "right-prefix")),
+                "enclosing/left/leaf": format!("openai/{}", model(&provider, "exact"))
+            }
+        }}})
+        .to_string(),
+    )
+    .unwrap();
+    crate::config::init_global().unwrap();
+    let mut exact = agent("leaf");
+    exact["prompt"] = json!(["NESTED_EXACT_MARKER"]);
+    let mut left_prefix = agent("other");
+    left_prefix["prompt"] = json!(["NESTED_LEFT_PREFIX_MARKER"]);
+    let mut right_prefix = agent("leaf");
+    right_prefix["prompt"] = json!(["NESTED_RIGHT_PREFIX_MARKER"]);
+    let dir = seed(
+        &sandbox,
+        json!({
+            "name": "enclosing", "type": container, "model": "openai/old-enclosing",
+            "body": [
+                {"name": "left", "type": "sequence", "body": [exact, left_prefix]},
+                {"name": "right", "type": "sequence", "body": [right_prefix]}
+            ]
+        }),
+    );
+    let (registry, _shutdown) = spawn_test_actor().await;
+    resume(&registry).await;
+
+    // In parallel, hold both branches' first requests to prove child dispatch.
+    let mut requests = vec![pending_request(&provider).await];
+    if container == "parallel" {
+        requests.push(pending_request(&provider).await);
+    }
+    let mut seen = Vec::new();
+    for _ in 0..3 {
+        let (request, stream) = if let Some(request) = requests.pop() {
+            request
+        } else {
+            pending_request(&provider).await
+        };
+        let body = request.to_string();
+        let expected = if body.contains("NESTED_EXACT_MARKER") {
+            "exact"
+        } else if body.contains("NESTED_LEFT_PREFIX_MARKER") {
+            "left-prefix"
+        } else if body.contains("NESTED_RIGHT_PREFIX_MARKER") {
+            "right-prefix"
+        } else {
+            panic!("unexpected nested dispatch: {request}");
+        };
+        assert_eq!(request["model"], model(&provider, expected), "{request}");
+        seen.push(expected);
+        done(stream).await;
+    }
+    seen.sort_unstable();
+    assert_eq!(seen, ["exact", "left-prefix", "right-prefix"]);
+    drained(&registry).await;
+    assert_eq!(read_json(dir.join("state.json"))["status"], "done");
+}
+
+#[tokio::test]
+async fn resume_nested_sequence_dispatches_exact_and_longest_prefix_structural_paths() {
+    nested_replacement_dispatch("sequence").await;
+}
+
+#[tokio::test]
+async fn resume_nested_parallel_workers_dispatch_exact_and_longest_prefix_structural_paths() {
+    nested_replacement_dispatch("parallel").await;
+}
+
 #[tokio::test]
 async fn resume_profile_dispatches_mapped_and_unmapped_tasks_ignoring_old_pins() {
     let provider = TcpListener::bind("127.0.0.1:0").await.unwrap();

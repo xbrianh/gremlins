@@ -1,5 +1,5 @@
 //! Query and state-inspection op handlers: ls, status, info.
-//! Also `snapshot` (rewrites definition.json) and `artifact` (reads + the
+//! Also `snapshot` (publishes an immutable definition revision) and `artifact` (reads + the
 //! `put` write path), which are query-like in that they inspect terminal
 //! gremlins rather than driving lifecycle transitions.
 
@@ -328,6 +328,10 @@ async fn handle_artifact_exists(id: &str, request: &Value, registry: &Arc<RunReg
     }
 }
 
+#[cfg(test)]
+#[path = "snapshot_tests.rs"]
+mod snapshot_tests;
+
 // ---------------------------------------------------------------------------
 // snapshot
 // ---------------------------------------------------------------------------
@@ -349,7 +353,8 @@ pub(crate) async fn handle_snapshot(request: &Value, registry: &Arc<RunRegistry>
         Err(e) => return error_response(&format!("gremlin {id}: {e}")),
     };
 
-    let status = gremlin.state.read_str("status");
+    let expected = gremlin.state.state_tree();
+    let status = expected.get("status").and_then(Value::as_str).unwrap_or("");
     if status != "done" && status != "stopped" {
         return error_response(&format!(
             "gremlin {id}: status is {status:?} — snapshot requires done or stopped"
@@ -392,15 +397,11 @@ pub(crate) async fn handle_snapshot(request: &Value, registry: &Arc<RunRegistry>
         }
     };
 
-    let state_dir = gremlin.state.state_dir();
-    let dst = state_dir.join("definition.json");
-    let tmp = state_dir.join(format!("definition.json.tmp.{}", state::token_hex(4)));
-    if let Err(e) = std::fs::write(&tmp, &bytes) {
-        return error_response(&format!("gremlin {id}: failed to write snapshot: {e}"));
-    }
-    if let Err(e) = std::fs::rename(&tmp, &dst) {
-        let _ = std::fs::remove_file(&tmp);
-        return error_response(&format!("gremlin {id}: failed to commit snapshot: {e}"));
+    if let Err(e) = gremlin
+        .state
+        .publish_snapshot_conditional(&expected, &bytes)
+    {
+        return error_response(&format!("gremlin {id}: failed to publish snapshot: {e}"));
     }
 
     ok_response(serde_json::json!({

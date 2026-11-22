@@ -438,16 +438,30 @@ async fn handle_read_definition(request: &Value, registry: &Arc<RunRegistry>) ->
         Err(resp) => return resp,
     };
 
-    // Read definition.json from the store
+    // The committed revision is authoritative; the alias is only for legacy runs.
     let store_for_read = store;
     let result = tokio::task::spawn_blocking(move || -> Result<Value, String> {
         use std::io::Read;
-        let mut blob = store_for_read
-            .open("definition.json", crate::executor::state::BlobMode::Read)
-            .map_err(|e| format!("failed to open definition: {e}"))?;
-        let mut bytes = Vec::new();
-        blob.read_to_end(&mut bytes)
-            .map_err(|e| format!("failed to read definition: {e}"))?;
+        let snapshot = store_for_read.state_tree();
+        let bytes = match snapshot.get("definition_revision") {
+            Some(revision) => {
+                let revision = revision
+                    .as_str()
+                    .ok_or_else(|| "invalid definition_revision: expected a string".to_string())?;
+                store_for_read
+                    .read_definition_revision(revision)
+                    .map_err(|e| format!("failed to read definition revision: {e}"))?
+            }
+            None => {
+                let mut blob = store_for_read
+                    .open("definition.json", crate::executor::state::BlobMode::Read)
+                    .map_err(|e| format!("failed to open definition: {e}"))?;
+                let mut bytes = Vec::new();
+                blob.read_to_end(&mut bytes)
+                    .map_err(|e| format!("failed to read definition: {e}"))?;
+                bytes
+            }
+        };
         let def = crate::definition::StaticDefinition::from_expanded_bytes(&bytes, None, None)
             .map_err(|e| format!("failed to parse definition: {e}"))?;
         Ok(def.to_expanded_json())
@@ -475,5 +489,112 @@ pub(crate) fn verify_session_id(request: &Value, expected: &str) -> Result<(), V
             )))
         }
         None => Err(error_response("missing 'session_id' field")),
+    }
+}
+
+#[cfg(test)]
+mod definition_tests {
+    use super::*;
+    use crate::executor::state::{BlobMode, FileSystemStateStore, StateStore};
+    use crate::test_support::Sandbox;
+    use serde_json::json;
+    use std::io::Write;
+
+    fn definition(name: &str) -> Vec<u8> {
+        serde_json::to_vec(&json!({"default_model": "cmd/true", "stages": [
+            {"name": name, "type": "exec", "options": {"cmds": ["true"]}}
+        ]}))
+        .unwrap()
+    }
+
+    fn fixture() -> (FileSystemStateStore, Arc<RunRegistry>) {
+        let initial = json!({"id": "gr-session-definition"});
+        let store = FileSystemStateStore::create(
+            "gr-session-definition",
+            initial.as_object().unwrap(),
+            false,
+        )
+        .unwrap();
+        let (shutdown, _) = watch::channel(false);
+        (store, Arc::new(RunRegistry::new(shutdown)))
+    }
+
+    fn write_blob(store: &dyn StateStore, path: &str, bytes: &[u8]) {
+        store
+            .open(path, BlobMode::Write)
+            .unwrap()
+            .write_all(bytes)
+            .unwrap();
+    }
+
+    async fn read(registry: &Arc<RunRegistry>) -> Value {
+        handle_read_definition(&json!({"id": "gr-session-definition"}), registry).await
+    }
+
+    #[tokio::test]
+    async fn committed_revision_ignores_stale_and_missing_alias() {
+        let _sandbox = Sandbox::new();
+        let (store, registry) = fixture();
+        store
+            .initialize_definition(&definition("committed"))
+            .unwrap();
+        write_blob(&store, "definition.json", &definition("stale"));
+        let expected = crate::definition::StaticDefinition::from_expanded_bytes(
+            &definition("committed"),
+            None,
+            None,
+        )
+        .unwrap()
+        .to_expanded_json();
+        assert_eq!(read(&registry).await, ok_response(expected.clone()));
+        std::fs::remove_file(store.root_dir().join("definition.json")).unwrap();
+        assert_eq!(read(&registry).await, ok_response(expected));
+    }
+
+    #[tokio::test]
+    async fn legacy_definition_alias_is_used_without_revision() {
+        let _sandbox = Sandbox::new();
+        let (store, registry) = fixture();
+        write_blob(&store, "definition.json", &definition("legacy"));
+        let expected = crate::definition::StaticDefinition::from_expanded_bytes(
+            &definition("legacy"),
+            None,
+            None,
+        )
+        .unwrap()
+        .to_expanded_json();
+        assert_eq!(read(&registry).await, ok_response(expected));
+    }
+
+    #[tokio::test]
+    async fn present_invalid_or_missing_revision_never_falls_back() {
+        let _sandbox = Sandbox::new();
+        let (store, registry) = fixture();
+        write_blob(&store, "definition.json", &definition("valid-alias"));
+        for revision in [
+            Value::Null,
+            json!(42),
+            json!({}),
+            json!(""),
+            json!("../bad"),
+            json!("missing"),
+        ] {
+            let mut state = store.state_tree();
+            state.insert("definition_revision".into(), revision.clone());
+            store.write_state(&state).unwrap();
+            let response = read(&registry).await;
+            assert_eq!(response["type"], "error", "revision {revision}: {response}");
+        }
+        // A readable but malformed committed snapshot must not use the valid alias either.
+        write_blob(&store, "definition-revisions/malformed.json", b"not json");
+        let mut state = store.state_tree();
+        state.insert("definition_revision".into(), json!("malformed"));
+        store.write_state(&state).unwrap();
+        let response = read(&registry).await;
+        assert_eq!(response["type"], "error", "{response}");
+        assert!(response["message"]
+            .as_str()
+            .unwrap()
+            .contains("parse definition"));
     }
 }
