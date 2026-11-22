@@ -179,6 +179,7 @@ async fn handle_connection(
 ) {
     let (read_half, write_half) = stream.into_split();
     let writer = SharedWriter::new(write_half);
+    let _read_guard = writer.read_lifetime_guard();
     let mut reader = BufReader::new(read_half);
     log::debug!("supervisor: handle_connection started, entering read loop");
 

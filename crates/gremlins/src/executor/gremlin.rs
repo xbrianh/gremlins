@@ -375,6 +375,16 @@ impl Gremlin {
         })
     }
 
+    /// Capture the execution prepared on this gremlin, even if its run ID is reused.
+    pub(crate) fn prepare_interactive_target_with_commands(
+        &mut self,
+        accepts_commands: bool,
+    ) -> Option<crate::clients::interactive::DebugTarget> {
+        self.interactive_sessions.as_mut().map(|sessions| {
+            sessions.prepare_target_with_commands(accepts_commands, self.cancel_token.as_deref())
+        })
+    }
+
     /// Drop an eagerly prepared interactive session when turn setup aborts
     /// before the stage runner consumes it. The session drop revokes the
     /// published execution identity and wakes any observers of that execution.

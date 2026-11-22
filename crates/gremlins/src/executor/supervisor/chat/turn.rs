@@ -138,6 +138,11 @@ async fn chat_gremlin_task(
             },
         };
 
+        #[cfg(test)]
+        tokio::select! {
+            _ = cancel.cancelled() => break,
+            _ = session_task.wait_turn_gate(prompt.turn.as_deref(), "start") => {}
+        }
         run_turn(&id, &cancel, &registry, &session_task, prompt).await;
 
         // A permanent cancel that landed while the turn ran ends the task now,
@@ -229,7 +234,10 @@ async fn run_turn(
         .map(|backend| backend.accepts_interactive_commands())
         .unwrap_or(false);
     gremlin.cancel_token = Some(turn_cancel.clone());
-    let execution_id = gremlin.prepare_interactive_session_with_commands(accepts_commands);
+    let starting_target = gremlin.prepare_interactive_target_with_commands(accepts_commands);
+    let execution_id = starting_target
+        .as_ref()
+        .and_then(|target| target.execution_id().map(str::to_owned));
 
     // Announce the in-flight turn so cancel / stop / compact can find it.
     session_task
@@ -260,10 +268,16 @@ async fn run_turn(
     // always carry an interactive factory; `None` (no factory) is a naked-run
     // case where there is nothing to target.
     if let Some(execution_id) = execution_id {
-        let event = serde_json::to_value(EventKind::TurnStarted {
+        let mut event = serde_json::to_value(EventKind::TurnStarted {
             execution_id: execution_id.clone(),
         })
         .expect("TurnStarted must serialize");
+        event["id"] = serde_json::json!(id);
+        event["turn"] = serde_json::json!(runner.turn);
+        event["nonce"] = serde_json::json!(starting_target
+            .as_ref()
+            .expect("starting target must exist when execution_id is known")
+            .nonce());
         runner.write(event).await;
     }
 
@@ -341,6 +355,12 @@ async fn run_turn(
             .await;
     }
 
+    #[cfg(test)]
+    tokio::select! {
+        _ = persistent.cancelled() => {},
+        _ = runner.turn_cancel.cancelled() => {},
+        _ = session_task.wait_turn_gate(runner.turn.as_deref(), "incorporation") => {}
+    }
     runner.run(stage, gremlin).await;
 }
 

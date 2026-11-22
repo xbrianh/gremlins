@@ -433,7 +433,6 @@ impl DebugTarget {
 
     /// Place a debugger pause request. The reservation crosses turn boundaries
     /// so a between-turn debugger's pause-on-entry is honoured.
-    #[cfg(test)]
     pub(crate) fn attach_debugger(&self) -> Result<DebugAttachment, AttachError> {
         self.attach_impl(true)
     }
@@ -595,6 +594,33 @@ impl Drop for DebugAttachment {
 }
 
 impl DebugAttachment {
+    /// Snapshot only the execution that accepted this acquisition, including
+    /// a between-turn reservation's explicit owner handoff.
+    pub(crate) fn bound_target(&self) -> Result<DebugTarget, AttachError> {
+        let owner = self.owner.lock().unwrap_or_else(|e| e.into_inner());
+        let slot = owner.upgrade().ok_or(AttachError::NoLongerActive)?;
+        let state = slot.state.lock().unwrap_or_else(|e| e.into_inner());
+        let nonce = match &*state {
+            PauseState::Accepted { nonce, acquisition } if *acquisition == self.acquisition => {
+                *nonce
+            }
+            _ => return Err(AttachError::Stale),
+        };
+        let end_signal = slot.current_end_signal();
+        if slot.nonce.load(Ordering::Acquire) != nonce || end_signal.is_ended() {
+            return Err(AttachError::Stale);
+        }
+        Ok(DebugTarget {
+            slot: Arc::downgrade(&slot),
+            nonce,
+            execution_id: slot.execution_id(),
+            end_signal,
+            readonly: false,
+            commands_supported: slot.commands_supported.load(Ordering::Acquire),
+            registration_only: false,
+        })
+    }
+
     fn owner_is_invalid(&self) -> bool {
         self.owner
             .lock()
@@ -760,6 +786,16 @@ impl InteractiveSessionFactory {
         let execution_id = session.slot.execution_id().unwrap_or_default();
         self.prepared = Some(session);
         execution_id
+    }
+
+    /// Prepare and capture an execution from this factory, never a registry lookup.
+    pub(crate) fn prepare_target_with_commands(
+        &mut self,
+        accepts_commands: bool,
+        cancel: Option<&CancelToken>,
+    ) -> DebugTarget {
+        self.prepare_next_with_commands(accepts_commands, cancel);
+        self.handle.target()
     }
 
     /// Mint a fresh execution: signal the previous one's end, bump the nonce,
@@ -1464,6 +1500,65 @@ mod tests {
         let successor_id = sessions.prepare_next_with_commands(false, None);
         assert_ne!(successor_id, announced_id);
         assert_eq!(handle.target().execution_id(), Some(successor_id.as_str()));
+    }
+
+    #[test]
+    fn prepared_snapshot_belongs_to_its_factory_after_registration_replacement() {
+        let (mut original, _) = InteractiveSessionFactory::for_chat();
+        let (mut replacement, replacement_handle) = InteractiveSessionFactory::for_chat();
+        let replacement_target = replacement.prepare_target_with_commands(true, None);
+        let original_target = original.prepare_target_with_commands(true, None);
+
+        assert_eq!(original_target.nonce(), replacement_target.nonce());
+        assert_ne!(
+            original_target.execution_id(),
+            replacement_target.execution_id()
+        );
+        assert_eq!(
+            replacement_handle.target().execution_id(),
+            replacement_target.execution_id()
+        );
+        assert!(!original_target.end_signal().is_ended());
+    }
+
+    #[tokio::test]
+    async fn bound_snapshot_follows_only_its_acquisition() {
+        let (mut sessions, handle) = InteractiveSessionFactory::for_chat();
+        let mut lease = handle.attach_next_turn_debugger(None).unwrap();
+        assert!(lease.bound_target().is_err());
+        let mut first = sessions.next_session();
+        assert!(first.accept_pause());
+        let waiting = first.next_command();
+        tokio::pin!(waiting);
+        assert!(futures::poll!(&mut waiting).is_pending());
+        (&mut lease.ready).await.unwrap();
+        let bound = lease.bound_target().unwrap();
+        assert_eq!(bound.execution_id(), handle.target().execution_id());
+        assert_eq!(bound.nonce(), handle.target().nonce());
+
+        let mut second = sessions.next_session();
+        let replacement = handle.target().attach_debugger().unwrap();
+        assert!(second.accept_pause());
+        assert!(lease.bound_target().is_err());
+        assert!(bound.end_signal().is_ended());
+        assert_ne!(bound.execution_id(), handle.target().execution_id());
+        assert!(replacement.bound_target().is_ok());
+    }
+
+    #[tokio::test]
+    async fn bound_snapshot_rejects_a_new_acquisition_on_the_same_execution() {
+        let (mut sessions, handle) = InteractiveSessionFactory::for_chat();
+        let mut session = sessions.next_session();
+        let old = handle.target().attach_debugger().unwrap();
+        assert!(session.accept_pause());
+        assert!(old.bound_target().is_ok());
+        session.finish_attachment(DebugOutcome::Ended {
+            reason: "released".into(),
+        });
+        let new = handle.target().attach_debugger().unwrap();
+        assert!(session.accept_pause());
+        assert!(old.bound_target().is_err());
+        assert!(new.bound_target().is_ok());
     }
 
     #[tokio::test]

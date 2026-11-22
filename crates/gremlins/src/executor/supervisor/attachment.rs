@@ -286,31 +286,25 @@ pub(crate) async fn handle_conversation_attach(
     };
 
     // 2. Snapshot target and nonce before any async work.
-    let target = handle.target();
+    let mut target = handle.target();
     let execution_nonce = target.nonce();
     let execution_id = target.execution_id().map(|s| s.to_string());
+    // This signal belongs to the snapshot, not a later debugger-bound target:
+    // a between-turn handoff may replace the execution while readiness awaits.
     // Capture the end signal for this execution so a passive observer can
     // stop when the execution ends even if no terminal event is emitted on
     // the bus (e.g. the run is cancelled before `Done`/`Ended`).
     let end_signal = target.end_signal();
 
-    // 3. Check if the caller wants passive observation only. Conversation
-    //    scope is interactive by default: a client that names no mode expects
-    //    the operator commands advertised in the `attached` ack.
-    //
-    //    NOTE: the default changed from "passive" to "control" as part of
-    //    the debug→attach cutover (the TUI and CLI debug clients both send
-    //    no explicit mode and expect to control). Any /watch-style observer
-    //    or third-party client that omits `mode` must now
-    //    send `"mode": "passive"` explicitly, or it will be rejected
-    //    when the target is not an agent leaf.
+    // Observation never owns a pause. Only explicit debugger intent may
+    // reserve entry into a future chat turn.
     let mode = request
         .get("mode")
         .and_then(|v| v.as_str())
         .unwrap_or("control");
 
     // Between-turn chat reservations have no live stage to validate yet.
-    if mode != "passive"
+    if mode == "debugger"
         && (!debugger_between_turn(&target) || store.state_tree()["kind"] != "chat")
     {
         let checked_store = store.clone();
@@ -356,29 +350,41 @@ pub(crate) async fn handle_conversation_attach(
 
     // Preserve pause-on-attach: existing debuggers wait for readiness before
     // sending their first command. Only chat registration gaps reserve entry.
-    let lease = if debugger_between_turn(&target) {
-        handle.attach_next_turn_debugger(execution_id.clone())
-    } else {
-        target.attach()
-    };
-    let mut attachment = match lease {
-        Ok(lease) => lease,
-        Err(error) => {
-            report_attach_error(writer, error).await;
-            return;
-        }
-    };
-    if !wait_for_ready(
-        &mut attachment,
-        &mut run_state,
-        &mut reader,
-        writer,
-        id,
-        execution_nonce,
-    )
-    .await
-    {
-        return;
+    let mut attachment = None;
+    if mode == "debugger" {
+        let lease = if debugger_between_turn(&target) {
+            handle.attach_next_turn_debugger(execution_id.clone())
+        } else {
+            target.attach_debugger()
+        };
+        let mut lease = match lease {
+            Ok(lease) => lease,
+            Err(error) => {
+                report_attach_error(writer, error).await;
+                return;
+            }
+        };
+        // TOCTOU: do not wait on a stale ended signal when reserving a future
+        // turn; the bound target is selected only after readiness completes.
+        let readiness_end = (!debugger_between_turn(&target)).then(|| target.end_signal());
+        let readiness = wait_for_ready(
+            &mut lease,
+            &mut run_state,
+            &mut reader,
+            writer,
+            id,
+            readiness_end.as_ref(),
+        )
+        .await;
+        target = match readiness {
+            Ok(target) => target,
+            Err(failure) => {
+                drop(lease);
+                report_readiness_failure(writer, failure, None).await;
+                return;
+            }
+        };
+        attachment = Some(lease);
     }
 
     loop {
@@ -389,9 +395,44 @@ pub(crate) async fn handle_conversation_attach(
                     Ok(Some(cmd)) => {
                         let op = cmd.get("op").and_then(Value::as_str).unwrap_or("");
                         let req_id = cmd.get("req_id").and_then(Value::as_str).map(|s| s.to_string());
-                        let should_break = dispatch_attach_command(
-                            &cmd, op, req_id, id, writer, &attachment,
-                        ).await;
+                        if op == "detach" {
+                            let _ = writer.write_json_line(&serde_json::json!({
+                                "type": "detached", "scope": "conversation", "id": id,
+                            })).await;
+                            break;
+                        }
+                        if !matches!(op, "message" | "talk" | "continue" | "bail" | "quit") {
+                            let _ = writer.write_json_line(&error_response("unknown attach op")).await;
+                            continue;
+                        }
+                        let temporary = attachment.is_none() && op == "message";
+                        if attachment.is_none() {
+                            let checked_store = store.clone();
+                            let checked = tokio::task::spawn_blocking(move || check_agent_stage(&checked_store))
+                                .await.map_err(|error| error.to_string()).and_then(|result| result);
+                            if let Err(error) = checked {
+                                let _ = writer.write_json_line(&error_response(&error)).await;
+                                continue;
+                            }
+                            let lease = if op == "message" { target.attach() } else { target.attach_debugger() };
+                            let mut lease = match lease {
+                                Ok(lease) => lease,
+                                Err(error) => { report_attach_error(writer, error).await; continue; }
+                            };
+                            if let Err(failure) = wait_for_ready(&mut lease, &mut run_state, &mut reader, writer, id, Some(&target.end_signal())).await {
+                                drop(lease);
+                                let dropped = (op == "message").then(|| message_outcome(false, id, target.nonce(), target.execution_id(), req_id.as_deref()));
+                                report_readiness_failure(writer, failure, dropped).await;
+                                break;
+                            }
+                            attachment = Some(lease);
+                        }
+                        let should_break = if op == "message" {
+                            deliver_message(&cmd, req_id, id, target.nonce(), target.execution_id(),
+                                writer, &mut reader, &mut run_state, &target.end_signal(), &mut attachment, temporary).await
+                        } else {
+                            dispatch_attach_command(&cmd, op, req_id, id, writer, attachment.as_ref().unwrap()).await
+                        };
                         if should_break {
                             break;
                         }
@@ -433,7 +474,12 @@ pub(crate) async fn handle_conversation_attach(
             // Report the classified terminal outcome when the execution ends
             // so the debugger sees the same outcome as the chat rather than
             // a bare socket EOF.
-            outcome = &mut attachment.ended => {
+            outcome = async {
+                match attachment.as_mut() {
+                    Some(lease) => (&mut lease.ended).await,
+                    None => std::future::pending().await,
+                }
+            } => {
                 let mut frame = match outcome {
                     Ok(outcome) => {
                         serde_json::to_value(&outcome).unwrap_or(serde_json::Value::Null)
@@ -450,11 +496,92 @@ pub(crate) async fn handle_conversation_attach(
                 let _ = writer.write_json_line(&frame).await;
                 break;
             }
+            _ = end_signal.wait(), if attachment.is_none() => break,
         }
     }
 }
 
 // ── Control-mode command dispatch ──────────────────────────────────────
+
+#[allow(clippy::too_many_arguments)]
+async fn deliver_message(
+    cmd: &Value,
+    req_id: Option<String>,
+    id: &str,
+    nonce: u64,
+    execution_id: Option<&str>,
+    writer: &SharedWriter,
+    reader: &mut BufReader<OwnedReadHalf>,
+    run_state: &mut watch::Receiver<RunState>,
+    end: &EndSignal,
+    attachment: &mut Option<DebugAttachment>,
+    temporary: bool,
+) -> bool {
+    let (tx, mut rx) = tokio::sync::oneshot::channel();
+    if let Err(error) = attachment
+        .as_ref()
+        .unwrap()
+        .try_send(InteractiveCommand::Message(
+            cmd["text"].as_str().unwrap_or("").into(),
+            req_id.clone(),
+            Some(tx),
+        ))
+    {
+        let reason = match error {
+            tokio::sync::mpsc::error::TrySendError::Full(_) => {
+                "command queue is full; message not delivered"
+            }
+            tokio::sync::mpsc::error::TrySendError::Closed(_) => {
+                "attachment is ending; message not delivered"
+            }
+        };
+        if temporary {
+            drop(attachment.take());
+        }
+        return writer
+            .write_json_line(&error_response(reason))
+            .await
+            .is_err();
+    }
+    let delivered = loop {
+        tokio::select! {
+            biased;
+            result = &mut rx => break result.is_ok(),
+            frame = socket::read_json_line(reader) => {
+                if !matches!(frame, Ok(Some(_))) {
+                    if temporary { drop(attachment.take()); }
+                    return true;
+                }
+                if writer.write_json_line(&error_response("busy delivering correction")).await.is_err() {
+                    if temporary { drop(attachment.take()); }
+                    return true;
+                }
+            }
+            _ = end.wait() => break false,
+            // Discard the watch Ref before select holds an output across socket I/O.
+            _ = futures::FutureExt::map(run_state.wait_for(|state| state.status != "running"), |_| ()) => break false,
+        }
+    };
+    if temporary {
+        drop(attachment.take());
+    }
+    let frame = message_outcome(delivered, id, nonce, execution_id, req_id.as_deref());
+    writer.write_json_line(&frame).await.is_err() || !delivered
+}
+
+fn message_outcome(
+    delivered: bool,
+    id: &str,
+    nonce: u64,
+    execution_id: Option<&str>,
+    req_id: Option<&str>,
+) -> Value {
+    serde_json::json!({
+        "type": if delivered { "delivered" } else { "correction_dropped" },
+        "scope": "conversation", "id": id, "nonce": nonce,
+        "execution_id": execution_id, "req_id": req_id,
+    })
+}
 
 async fn dispatch_attach_command(
     cmd: &Value,
@@ -465,11 +592,6 @@ async fn dispatch_attach_command(
     attachment: &DebugAttachment,
 ) -> bool {
     let command = match op {
-        "message" => InteractiveCommand::Message(
-            cmd["text"].as_str().unwrap_or("").into(),
-            req_id.clone(),
-            None,
-        ),
         "talk" => InteractiveCommand::Inject(cmd["text"].as_str().unwrap_or("").into()),
         "continue" => InteractiveCommand::RunTurn,
         "bail" => {
@@ -491,8 +613,7 @@ async fn dispatch_attach_command(
                 .is_err();
         }
     };
-    // Never wait for incorporation here: keep reading pipelined commands and
-    // disconnects, preserving the existing enqueue acknowledgement contract.
+    // Debugger commands acknowledge enqueue; messages use incorporation above.
     let response = match attachment.try_send(command) {
         Ok(()) => match req_id {
             Some(req_id) => {
@@ -532,41 +653,76 @@ fn debugger_between_turn(target: &crate::clients::interactive::DebugTarget) -> b
     target.is_registration_only() || target.end_signal().is_ended()
 }
 
+enum ReadinessFailure {
+    Closed,
+    Ended,
+    Error(Value),
+}
+
+async fn report_readiness_failure(
+    writer: &SharedWriter,
+    failure: ReadinessFailure,
+    dropped: Option<Value>,
+) {
+    let frame = match failure {
+        ReadinessFailure::Closed => return,
+        ReadinessFailure::Ended => {
+            dropped.unwrap_or_else(|| error_response("agent exited before accepting pause"))
+        }
+        ReadinessFailure::Error(frame) => frame,
+    };
+    let _ = writer.write_json_line(&frame).await;
+}
+
 /// Readiness owns its run-stop future; whichever branch loses is dropped.
+/// Failures are reported by the caller only after releasing the lease.
 async fn wait_for_ready(
     lease: &mut DebugAttachment,
     run_state: &mut watch::Receiver<RunState>,
     reader: &mut BufReader<OwnedReadHalf>,
     writer: &SharedWriter,
     id: &str,
-    nonce: u64,
-) -> bool {
+    end: Option<&EndSignal>,
+) -> Result<crate::clients::interactive::DebugTarget, ReadinessFailure> {
     send_debug_status(writer, "waiting_for_ready").await;
     let ready = tokio::select! {
         biased;
         frame = socket::read_json_line(reader) => {
             if matches!(frame, Ok(Some(_))) {
-                let _ = writer.write_json_line(&error_response(
+                return Err(ReadinessFailure::Error(error_response(
                     "command received before ready; attachment closed",
-                )).await;
+                )));
             }
-            return false;
+            return Err(ReadinessFailure::Closed);
         }
         _ = async { let _ = run_state.wait_for(|state| state.status != "running").await; } => false,
+        _ = async {
+            match end {
+                Some(end) => end.wait().await,
+                None => std::future::pending().await,
+            }
+        } => false,
         result = &mut lease.ready => result.is_ok(),
+        _ = &mut lease.ended => false,
     };
     if !ready {
-        let _ = writer
-            .write_json_line(&error_response("agent exited before accepting pause"))
-            .await;
-        return false;
+        return Err(ReadinessFailure::Ended);
     }
+    let target = match lease.bound_target() {
+        Ok(target) => target,
+        Err(error) => {
+            return Err(ReadinessFailure::Error(error_response(
+                report_attach_message(error),
+            )));
+        }
+    };
     writer
         .write_json_line(&serde_json::json!({
-            "type": "ready", "scope": "conversation", "id": id, "nonce": nonce,
+            "type": "ready", "scope": "conversation", "id": id, "nonce": target.nonce(),
         }))
         .await
-        .is_ok()
+        .map_err(|_| ReadinessFailure::Closed)?;
+    Ok(target)
 }
 
 /// Passive conversation: stream events until the execution ends.
@@ -707,7 +863,7 @@ mod routing_tests {
     use crate::clients::interactive::{AttachError, InteractiveSessionFactory};
 
     #[tokio::test]
-    async fn pipelined_message_and_detach_are_both_acknowledged() {
+    async fn pipelined_continue_and_detach_are_both_acknowledged() {
         let (mut factory, handle) = InteractiveSessionFactory::for_chat();
         let _session = factory.next_session();
         let attachment = handle.target().attach().unwrap();
@@ -719,7 +875,7 @@ mod routing_tests {
         assert!(
             !dispatch_attach_command(
                 &message,
-                "message",
+                "continue",
                 Some("request-1".into()),
                 "chat",
                 &writer,
@@ -736,6 +892,41 @@ mod routing_tests {
         assert_eq!(ack["req_id"], "request-1");
         let detached = socket::read_json_line(&mut reader).await.unwrap().unwrap();
         assert_eq!(detached["type"], "detached");
+    }
+
+    #[tokio::test]
+    async fn readiness_stops_on_execution_end_while_run_remains_running() {
+        let (mut factory, handle) = InteractiveSessionFactory::for_chat();
+        let _terminal = factory.supervise_next_turn();
+        let session = factory.next_session();
+        let target = handle.target();
+        let mut lease = target.attach_debugger().unwrap();
+        let (client, server) = tokio::net::UnixStream::pair().unwrap();
+        let (read, write) = server.into_split();
+        let writer = SharedWriter::new(write);
+        let mut reader = BufReader::new(read);
+        let (_state_tx, mut state) = watch::channel(RunState {
+            status: "running".into(),
+            id: "chat".into(),
+            stage: String::new(),
+            started_at: String::new(),
+        });
+        drop(session);
+        let result = tokio::time::timeout(
+            std::time::Duration::from_secs(1),
+            wait_for_ready(
+                &mut lease,
+                &mut state,
+                &mut reader,
+                &writer,
+                "chat",
+                Some(&target.end_signal()),
+            ),
+        )
+        .await
+        .unwrap();
+        assert!(matches!(result, Err(ReadinessFailure::Ended)));
+        drop(client);
     }
 
     #[tokio::test]

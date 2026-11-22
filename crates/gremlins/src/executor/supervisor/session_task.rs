@@ -360,11 +360,47 @@ pub(crate) enum SessionTaskMsg {
 #[derive(Clone)]
 pub(crate) struct SessionTaskHandle {
     tx: mpsc::UnboundedSender<SessionTaskMsg>,
+    #[cfg(test)]
+    turn_gates: Arc<tokio::sync::Mutex<HashMap<(String, &'static str), TestTurnGate>>>,
+}
+
+#[cfg(test)]
+#[derive(Clone, Default)]
+pub(crate) struct TestTurnGate {
+    pub(crate) entered: Arc<tokio::sync::Notify>,
+    pub(crate) release: Arc<tokio::sync::Notify>,
 }
 
 impl SessionTaskHandle {
     fn new(tx: mpsc::UnboundedSender<SessionTaskMsg>) -> Self {
-        Self { tx }
+        Self {
+            tx,
+            #[cfg(test)]
+            turn_gates: Default::default(),
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) async fn gate_turn(&self, turn: &str, phase: &'static str) -> TestTurnGate {
+        let gate = TestTurnGate::default();
+        self.turn_gates
+            .lock()
+            .await
+            .insert((turn.into(), phase), gate.clone());
+        gate
+    }
+
+    #[cfg(test)]
+    pub(crate) async fn wait_turn_gate(&self, turn: Option<&str>, phase: &'static str) {
+        let gate = self
+            .turn_gates
+            .lock()
+            .await
+            .remove(&(turn.unwrap_or_default().into(), phase));
+        if let Some(gate) = gate {
+            gate.entered.notify_one();
+            gate.release.notified().await;
+        }
     }
 
     /// Move a parked gremlin out of the session. `None` if the session is

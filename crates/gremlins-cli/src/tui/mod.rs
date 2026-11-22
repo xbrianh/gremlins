@@ -1020,7 +1020,7 @@ fn is_daemon_broadcast(value: &serde_json::Value) -> bool {
 
 /// Open a fresh debug session socket for `id` and spawn a reader task.
 ///
-/// Sends `{"op": "attach", "scope": "conversation", "id", "session_id"}`
+/// Sends `{"op": "attach", "scope": "conversation", "id", "session_id", "mode": "debugger"}`
 /// and waits for the daemon's `attached`/`ready` frames before the session is
 /// considered live.
 ///
@@ -1043,6 +1043,7 @@ async fn start_debug_session(
 
     let request = serde_json::json!({
         "op": "attach",
+        "mode": "debugger",
         "scope": "conversation",
         "id": id,
         "session_id": client.session_id().await,

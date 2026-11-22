@@ -1322,7 +1322,7 @@ async fn log_gremlin(id: &str) -> Result<(), String> {
 /// Interactive debug session for a running gremlin.
 ///
 /// Connects to the executor socket, sends
-/// `{"op": "attach", "scope": "conversation", "id": "..."}`,
+/// `{"op": "attach", "scope": "conversation", "id": "...", "mode": "debugger"}`,
 /// and enters an interactive line-based loop. Plain text becomes
 /// `{"op": "message", "text": "..."}` (deliver and resume autonomously).
 /// Slash commands: `/step`, `/continue`, `/exit`, `/quit [reason]`.
@@ -1342,7 +1342,9 @@ async fn debug_gremlin(id: &str) -> Result<(), String> {
 
     spawn::check_version(&mut stream).await?;
 
-    let request = serde_json::json!({"op": "attach", "scope": "conversation", "id": id});
+    let request = serde_json::json!({
+        "op": "attach", "scope": "conversation", "id": id, "mode": "debugger"
+    });
     log::debug!("debug: sending request: {request}");
     socket::write_json_line(&mut stream, &request).await?;
     log::debug!("debug: request sent, waiting for agent to pause…");
