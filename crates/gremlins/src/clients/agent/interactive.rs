@@ -17,6 +17,20 @@ pub(super) enum InteractiveLoopResult {
     MessageDelivered,
 }
 
+/// Only the live execution announces a withdrawn owner. Cleanup of a stale
+/// session must not announce a disconnect against the successor's execution.
+pub(super) async fn announce_live_disconnect(session: &InteractiveSession, message_prefix: &str) {
+    if !session.execution_ended() {
+        emit_run_event_async(
+            message_prefix,
+            EventKind::Ended {
+                reason: "disconnect".into(),
+            },
+        )
+        .await;
+    }
+}
+
 /// Wait at an accepted pause or at the next boundary after a single step.
 ///
 /// On entry, emits `Ready { turn }` through the bus. Then blocks
@@ -68,11 +82,9 @@ pub(super) async fn interactive_loop(
             if let Some(tx) = delivery {
                 let _ = tx.send(());
             }
-            // Drop the accepted inbox without firing `ended`: the socket
-            // handler releases the lease itself (message path) or keeps the
-            // debugger lease live for the next command. Either way the
-            // observer must stay connected.
-            session.finish_attachment_without_outcome();
+            // Retained debugger leases stay attached for subsequent commands;
+            // one-shot message leases are released so execution resumes.
+            session.finish_message_delivery();
             Ok(InteractiveLoopResult::MessageDelivered)
         }
         Some(InteractiveCommand::RunTurn) => {
@@ -96,6 +108,16 @@ pub(super) async fn interactive_loop(
             })
         }
         Some(InteractiveCommand::Quit) | None => {
+            // A replaced execution has already lost its acquisition. Its
+            // cleanup must not report a disconnect for the successor's owner.
+            if received.is_none() && !session.has_accepted_acquisition() {
+                // A live owner disconnect withdraws its lease without ending
+                // the execution. Replacements end the execution itself and
+                // must remain silent during stale-session cleanup.
+                announce_live_disconnect(session, message_prefix).await;
+                session.discard_revoked_inbox();
+                return Ok(InteractiveLoopResult::Resumed);
+            }
             let reason = if received.is_some() {
                 "resumed"
             } else {

@@ -258,13 +258,10 @@ pub(crate) async fn handle_chat(
                 }
                 _ => {}
             }
-        } else {
-            // The plan requires rejecting missing execution_id — a
-            // client must identify the target execution.
-            let resp = error_response("execution_id required for targeted correction");
-            let _ = writer.write_json_line(&resp).await;
-            return;
         }
+        // Nonce-only targets remain valid for existing clients. Execution IDs
+        // strengthen validation when supplied; requiring them is a protocol
+        // migration, separate from the execution-owned lease lifecycle.
 
         // `attach()` checks the nonce under the slot lock, closing the
         // TOCTOU window between the coarse check above and actual
@@ -286,6 +283,19 @@ pub(crate) async fn handle_chat(
                 return;
             }
         };
+
+        // Preserve the immediate response contract: queued means the live
+        // execution owns the pending request, not that incorporation finished.
+        // Write it before spawning delivery so asynchronous notifications cannot
+        // overtake the request's acknowledgement.
+        let response = ok_response(serde_json::json!({
+            "id": target_id,
+            "status": "queued",
+            "nonce": target_nonce,
+        }));
+        if writer.write_json_line(&response).await.is_err() {
+            return;
+        }
 
         // Spawn a task that holds the attachment, waits for Ready, and
         // delivers the message. The session dispatcher remains responsive

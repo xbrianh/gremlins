@@ -1,15 +1,20 @@
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex, Weak};
 
 use rig_core::error::ProviderError;
 use tokio::sync::Notify;
 
 use super::error::ClientError;
 
+pub(crate) trait CancelListener: std::fmt::Debug + Send + Sync {
+    fn on_cancel(&self);
+}
+
 #[derive(Debug)]
 pub struct CancelToken {
     flag: AtomicBool,
     notify: Notify,
+    listeners: Mutex<Vec<Weak<dyn CancelListener>>>,
 }
 
 impl CancelToken {
@@ -17,11 +22,30 @@ impl CancelToken {
         Arc::new(Self {
             flag: AtomicBool::new(false),
             notify: Notify::new(),
+            listeners: Mutex::default(),
         })
+    }
+
+    /// Subscribe without extending the lifetime of the execution. Serialize
+    /// registration with cancellation so an already-fired token is not missed.
+    pub(crate) fn listen(&self, listener: Arc<dyn CancelListener>) {
+        let mut listeners = self.listeners.lock().unwrap_or_else(|e| e.into_inner());
+        if self.is_cancelled() {
+            drop(listeners);
+            listener.on_cancel();
+        } else {
+            listeners.retain(|listener| listener.strong_count() != 0);
+            listeners.push(Arc::downgrade(&listener));
+        }
     }
 
     pub fn cancel(&self) {
         self.flag.store(true, Ordering::Relaxed);
+        let listeners =
+            std::mem::take(&mut *self.listeners.lock().unwrap_or_else(|e| e.into_inner()));
+        for listener in listeners.into_iter().filter_map(|weak| weak.upgrade()) {
+            listener.on_cancel();
+        }
         // Cancellation is broadcast: an active chat turn has both
         // `run_chat_turn` and the tool-phase select arm waiting on this
         // token. `notify_waiters()` wakes every waiter so the outer

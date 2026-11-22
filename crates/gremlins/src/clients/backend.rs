@@ -163,6 +163,12 @@ pub trait Backend: Send + Sync {
         "unknown"
     }
 
+    /// Whether this backend accepts interactive operator commands.
+    /// Command backends cannot service debugger commands while running a process.
+    fn accepts_interactive_commands(&self) -> bool {
+        true
+    }
+
     /// Return the last `RunParams` that were used, for resume support.
     fn last_run_params(&self) -> Result<RunParams, ClientError> {
         Err(ClientError::Runtime {

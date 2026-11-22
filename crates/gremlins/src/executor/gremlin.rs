@@ -332,10 +332,25 @@ pub struct Gremlin {
 }
 
 impl Gremlin {
+    #[allow(dead_code)]
     pub(crate) fn next_interactive_session(&mut self) -> InteractiveSession {
+        self.next_interactive_session_with_commands(true)
+            .expect("default interactive capability must match")
+    }
+
+    /// Mint the next interactive session after resolving the backend's command
+    /// capability, so the published slot never advertises stale capabilities.
+    pub(crate) fn next_interactive_session_with_commands(
+        &mut self,
+        accepts_commands: bool,
+    ) -> Result<InteractiveSession, String> {
         self.interactive_sessions.as_mut().map_or_else(
-            InteractiveSession::unattached,
-            InteractiveSessionFactory::next_session,
+            || Ok(InteractiveSession::unattached()),
+            |sessions| {
+                sessions
+                    .next_session_with_commands(accepts_commands, self.cancel_token.as_deref())
+                    .map_err(str::to_owned)
+            },
         )
     }
 
@@ -345,10 +360,28 @@ impl Gremlin {
     /// before `run_agent` asks for the session via
     /// [`Self::next_interactive_session`], which then hands back the prepared
     /// session instead of minting another one.
+    #[allow(dead_code)]
     pub(crate) fn prepare_interactive_session(&mut self) -> Option<String> {
-        self.interactive_sessions
-            .as_mut()
-            .map(|sessions| sessions.prepare_next())
+        self.prepare_interactive_session_with_commands(true)
+    }
+
+    /// Prepare and publish a chat execution with its command capability fixed.
+    pub(crate) fn prepare_interactive_session_with_commands(
+        &mut self,
+        accepts_commands: bool,
+    ) -> Option<String> {
+        self.interactive_sessions.as_mut().map(|sessions| {
+            sessions.prepare_next_with_commands(accepts_commands, self.cancel_token.as_deref())
+        })
+    }
+
+    /// Drop an eagerly prepared interactive session when turn setup aborts
+    /// before the stage runner consumes it. The session drop revokes the
+    /// published execution identity and wakes any observers of that execution.
+    pub(crate) fn discard_prepared_interactive_session(&mut self) {
+        if let Some(sessions) = self.interactive_sessions.as_mut() {
+            sessions.discard_prepared();
+        }
     }
 
     /// Start a fresh run: generate an id, reserve the state directory, create
@@ -1761,6 +1794,33 @@ mod tests {
 
     use crate::executor::state::FileSystemStateStore;
     use crate::test_support::{EnvGuard, GitSandbox, Sandbox};
+    use futures::FutureExt;
+
+    #[tokio::test]
+    async fn aborting_prepared_chat_turn_ends_only_that_execution() {
+        let sandbox = tempfile::tempdir().unwrap();
+        let state_dir = sandbox.path().join("state");
+        std::fs::create_dir_all(&state_dir).unwrap();
+        let mut gremlin = test_gremlin(
+            "gr-prepared",
+            state_dir.clone(),
+            state_dir,
+            None,
+            sandbox.path().to_path_buf(),
+        );
+        let (sessions, handle) = crate::clients::interactive::InteractiveSessionFactory::for_chat();
+        gremlin.interactive_sessions = Some(sessions);
+        let execution_id = gremlin
+            .prepare_interactive_session_with_commands(true)
+            .unwrap();
+        let mut pending = handle.target().attach().unwrap();
+        assert_eq!(handle.target().execution_id(), Some(execution_id.as_str()));
+
+        gremlin.discard_prepared_interactive_session();
+        assert!(handle.end_signal().unwrap().is_ended());
+        assert!((&mut pending.ready).now_or_never().unwrap().is_err());
+        assert_eq!(handle.target().execution_id(), Some(execution_id.as_str()));
+    }
 
     #[test]
     fn from_reports_invalid_state_details() {

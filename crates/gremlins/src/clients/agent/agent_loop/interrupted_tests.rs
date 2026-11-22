@@ -415,6 +415,57 @@ async fn uninterrupted_text_blocks_are_finalized_once_without_ready() {
     assert_eq!(text.text, format!("{FIRST}{SECOND}"));
 }
 
+#[tokio::test]
+async fn accepted_debugger_detach_resumes_with_an_ordinary_model_turn() {
+    let id = "debugger-detach-resumes-model";
+    let dir = tempfile::tempdir().unwrap();
+    let transport = HeldResponse {
+        prefix: two_blocks(),
+        stalled: Arc::new(Notify::new()),
+        requests: Arc::default(),
+    };
+    let model = Model::new(MockScript::default(), transport.clone()).erase();
+    let (mut sessions, handle) = InteractiveSessionFactory::for_chat();
+    let session = sessions.next_session();
+    let (sub, mut events) = subscribe_run(id);
+    let _guard = BusSubGuard::new(sub);
+    let agent = tokio::spawn(run_agent_loop(
+        model,
+        PROMPT,
+        standard_ctx(dir.path(), id),
+        CancelToken::new(),
+        loop_opts(None),
+        session,
+    ));
+
+    timeout(WAIT, transport.stalled.notified())
+        .await
+        .expect("first model turn stalls");
+    let mut owner = handle.target().attach_debugger().unwrap();
+    timeout(WAIT, async {
+        loop {
+            let Recv::Event(event) = events.recv().await else {
+                panic!("lost run events");
+            };
+            if matches!(event.kind(), EventKind::Ready { .. }) {
+                break;
+            }
+        }
+    })
+    .await
+    .expect("accepted debugger reaches readiness");
+    (&mut owner.ready).await.unwrap();
+    drop(owner);
+
+    let run = timeout(WAIT, agent)
+        .await
+        .expect("detach resumes the agent")
+        .unwrap()
+        .unwrap();
+    assert_eq!(run.text_result.as_deref(), Some("finished"));
+    assert_eq!(transport.requests.lock().unwrap().len(), 2);
+}
+
 // ── Message (correction + release) ────────────────────────────────────────
 
 #[tokio::test]
@@ -438,7 +489,7 @@ async fn message_correction_injects_text_and_releases_slot_so_agent_resumes() {
     let _guard = BusSubGuard::new(sub);
     let (mut sessions, handle) = InteractiveSessionFactory::for_chat();
     let session = sessions.next_session();
-    let commands = handle.attach().unwrap();
+    let commands = handle.target().attach().unwrap();
     let agent = tokio::spawn(run_agent_loop(
         model.clone().erase(),
         PROMPT,
@@ -511,7 +562,7 @@ async fn message_does_not_amend_system_prompt() {
     ]);
     let (mut sessions, handle) = InteractiveSessionFactory::for_chat();
     let session = sessions.next_session();
-    let commands = handle.attach().unwrap();
+    let commands = handle.target().attach().unwrap();
     let agent = tokio::spawn(run_agent_loop(
         model.clone().erase(),
         PROMPT,
@@ -611,7 +662,7 @@ async fn message_releases_slot_so_second_debugger_can_attach() {
     let (mut sessions, handle) = InteractiveSessionFactory::for_chat();
     let session = sessions.next_session();
 
-    let first = handle.attach().unwrap();
+    let first = handle.target().attach().unwrap();
     let agent = tokio::spawn(run_agent_loop(
         model.clone().erase(),
         PROMPT,
@@ -690,7 +741,7 @@ async fn message_correction_with_nonterminal_tool_requires_second_iteration() {
     let _guard = BusSubGuard::new(sub);
     let (mut sessions, handle) = InteractiveSessionFactory::for_chat();
     let session = sessions.next_session();
-    let commands = handle.attach().unwrap();
+    let commands = handle.target().attach().unwrap();
     let agent = tokio::spawn(run_agent_loop(
         model.clone().erase(),
         PROMPT,

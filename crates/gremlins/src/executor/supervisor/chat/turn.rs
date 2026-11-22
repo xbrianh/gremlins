@@ -213,10 +213,23 @@ async fn run_turn(
     let done_tx = Arc::new(done_tx);
     let hard = Arc::new(AtomicBool::new(false));
 
-    // Prepare this turn's interactive session eagerly so the execution_id is
-    // published before `run_agent` asks for the session, letting the turn
-    // announce it at start (stored on `CurrentTurn` below).
-    let execution_id = gremlin.prepare_interactive_session();
+    // Resolve the current turn's client and backend capability before
+    // publishing an interactive session. Keep the parse result for the usual
+    // post-announcement error path so TurnStarted ordering is unchanged.
+    let llm_client = ModelClient::from_uri(chat_model.clone());
+    let backend = match &llm_client {
+        Ok(client) => client.get_or_build_backend().map_err(|error| {
+            log::warn!("chat turn {id}: failed to build backend: {error}");
+            error
+        }),
+        Err(error) => Err(error.clone()),
+    };
+    let accepts_commands = backend
+        .as_ref()
+        .map(|backend| backend.accepts_interactive_commands())
+        .unwrap_or(false);
+    gremlin.cancel_token = Some(turn_cancel.clone());
+    let execution_id = gremlin.prepare_interactive_session_with_commands(accepts_commands);
 
     // Announce the in-flight turn so cancel / stop / compact can find it.
     session_task
@@ -257,10 +270,15 @@ async fn run_turn(
     // Rebuild the parsed model handle for the reused gremlin so a `/model`
     // change takes effect on the next turn rather than only after the chat
     // gremlin is recreated.
-    let llm_client = match ModelClient::from_uri(chat_model.clone()) {
-        Ok(client) => client,
-        Err(e) => {
-            let msg = format!("invalid chat model '{chat_model}': {e}");
+    let llm_client = match (llm_client, backend) {
+        (Ok(client), Ok(_backend)) => client,
+        (Err(error), _) => {
+            let msg = format!("invalid chat model '{chat_model}': {error}");
+            runner.abort(gremlin, &msg).await;
+            return;
+        }
+        (Ok(_), Err(error)) => {
+            let msg = format!("failed to build chat backend for '{chat_model}': {error}");
             runner.abort(gremlin, &msg).await;
             return;
         }
@@ -284,7 +302,6 @@ async fn run_turn(
     if let Some(fields) = state_patch.as_object() {
         gremlin.state.patch(&[], fields);
     }
-    gremlin.cancel_token = Some(runner.turn_cancel.clone());
     // Point the run-map handle's cancel token at this turn so `stop` cancels
     // the in-flight stage rather than the persistent token.
     runner

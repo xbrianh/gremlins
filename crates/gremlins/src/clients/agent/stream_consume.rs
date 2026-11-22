@@ -51,7 +51,13 @@ pub(super) async fn consume_stream_events(
                 drop(response);
                 return Err(ClientError::Cancelled);
             }
-            _ = state.interactive.paused() => {
+            paused = state.interactive.paused() => {
+                if !paused {
+                    state.hook_log(&format!("agent_loop: execution revoked mid-stream (label={prefix})"));
+                    state.hook_log(&format!("{prefix}exit: interactive execution revoked mid-stream"));
+                    drop(response);
+                    return Err(ClientError::Cancelled);
+                }
                 // Rig reconciles ended text parts with their deltas and includes
                 // deltas from open parts. Only sealed reasoning is replayable.
                 return Ok(StreamTurnOutcome::Interrupted {

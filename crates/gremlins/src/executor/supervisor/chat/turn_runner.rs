@@ -151,12 +151,15 @@ impl TurnRunner {
             (result, gremlin)
         });
 
-        loop {
+        let (result, writer_live) = loop {
             macro_rules! send {
                 ($fields:expr) => {
                     let payload = chat_payload(&self.turn, $fields);
                     if self.writer.write_json_line(&payload).await.is_err() {
-                        break;
+                        // No consumer remains for the bounded chat stream.
+                        Self::drop_guard(&mut stream_guard);
+                        drop(stream_rx);
+                        break (run_task.await, false);
                     }
                 };
             }
@@ -173,7 +176,7 @@ impl TurnRunner {
                                 message: "agent exited before completing".to_string(),
                                 turn: self.turn.clone(),
                             };
-                            self.dispatch_terminal(
+                            let payload = self.dispatch_terminal(
                                 TurnEnd::Terminal(
                                     serde_json::to_value(&ev).unwrap_or_default(),
                                 ),
@@ -183,6 +186,7 @@ impl TurnRunner {
                                 chat_turn_num,
                             )
                             .await;
+                            self.write_payload(payload).await;
                             return;
                         }
                     };
@@ -203,7 +207,7 @@ impl TurnRunner {
                         EventKind::Done { text, summary, usage } => {
                             let usage = usage.as_ref().map(|u| add_usage_stats(&baseline_usage, u));
                             let ev = EventKind::Done { text, summary, usage };
-                            self.dispatch_terminal(
+                            let payload = self.dispatch_terminal(
                                 TurnEnd::Terminal(
                                     serde_json::to_value(&ev).unwrap_or_default(),
                                 ),
@@ -213,6 +217,7 @@ impl TurnRunner {
                                 chat_turn_num,
                             )
                             .await;
+                            self.write_payload(payload).await;
                             return;
                         }
                         // Detaching the debugger resumes the model. Keep draining
@@ -220,7 +225,7 @@ impl TurnRunner {
                         EventKind::Ended { ref reason }
                             if matches!(reason.as_str(), "resumed" | "disconnect" | MESSAGE_DELIVERED_REASON) => {}
                         EventKind::Ended { .. } => {
-                            self.dispatch_terminal(
+                            let payload = self.dispatch_terminal(
                                 TurnEnd::Terminal(
                                     serde_json::to_value(&event).unwrap_or_default(),
                                 ),
@@ -230,6 +235,7 @@ impl TurnRunner {
                                 chat_turn_num,
                             )
                             .await;
+                            self.write_payload(payload).await;
                             return;
                         }
                         // Ignore Ready in chat mode.
@@ -259,19 +265,18 @@ impl TurnRunner {
                 }
                 result = &mut run_task => result,
             };
-            let (gremlin, end) = self.classify_task_result(result);
-            if let (Some(terminal), TurnEnd::Cancelled { reason, .. }) = (&debug_terminal, &end) {
-                terminal.end(reason);
-            }
-            self.dispatch_terminal(end, gremlin, &mut stream_guard, None, chat_turn_num)
-                .await;
-            return;
+            break (result, true);
+        };
+        let (gremlin, end) = self.classify_task_result(result);
+        if let (Some(terminal), TurnEnd::Cancelled { reason, .. }) = (&debug_terminal, &end) {
+            terminal.end(reason);
         }
-
-        // Reached on a write error (client gone). Re-park the gremlin and
-        // signal completion; nothing more can be written to the dead socket.
-        self.finish(&mut stream_guard, &mut run_task).await;
-        log::debug!("chat turn {}: done forwarding", self.id);
+        let payload = self
+            .dispatch_terminal(end, gremlin, &mut stream_guard, None, chat_turn_num)
+            .await;
+        if writer_live {
+            self.write_payload(payload).await;
+        }
     }
 
     /// A cancelled stage can finish between polling the cancel token and the
@@ -317,9 +322,15 @@ impl TurnRunner {
         )
     }
 
-    /// Abort a turn before the stage ran (invalid model, definition error):
-    /// re-park the gremlin, clear the in-flight turn, and report the error.
+    /// Abort turn setup before the stage runner consumes its prepared session
+    /// (invalid model, definition error): re-park the gremlin, clear the
+    /// in-flight turn, and report the error.
     pub(super) async fn abort(&self, mut gremlin: Gremlin, message: &str) {
+        // The chat turn eagerly published an interactive session before
+        // validating the model/building its stage. If this aborts before the
+        // stage runner consumes that session, drop it before parking the
+        // gremlin so the execution is revoked rather than left live.
+        gremlin.discard_prepared_interactive_session();
         gremlin.cancel_token = None;
         self.restore_run_cancel().await;
         self.session_task.reinsert_gremlin(&self.id, gremlin).await;
@@ -359,13 +370,13 @@ impl TurnRunner {
         guard: &mut Option<BusSubGuard>,
         run_task: Option<&mut RunTaskHandle>,
         chat_turn_num: Option<usize>,
-    ) {
+    ) -> Value {
         match end {
             TurnEnd::Terminal(payload) => {
                 // Stream-terminal: gremlin not yet recovered; finish() does it.
                 let rt = run_task.expect("Terminal path requires run_task");
                 self.finish(guard, rt).await;
-                self.write_payload(payload).await;
+                payload
             }
             TurnEnd::Cancelled {
                 reason,
@@ -386,10 +397,7 @@ impl TurnRunner {
                     self.restore_run_cancel().await;
                 }
                 self.clear_turn_and_signal().await;
-                self.write_payload(
-                    serde_json::to_value(EventKind::Ended { reason }).unwrap_or_default(),
-                )
-                .await;
+                serde_json::to_value(EventKind::Ended { reason }).unwrap_or_default()
             }
         }
     }

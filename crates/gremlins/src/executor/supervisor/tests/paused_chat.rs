@@ -43,7 +43,7 @@ async fn expect_cancellation(chat: &mut BufReader<OwnedReadHalf>, reason: &str) 
     .expect("a paused turn must end without debugger input");
 }
 
-async fn cancel_paused_chat(mode: &str) {
+async fn cancel_paused_chat(mode: &str, lose_chat_writer: bool) {
     let provider = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let sandbox = Sandbox::with_providers(
         &json!({"openrouter": {
@@ -53,13 +53,17 @@ async fn cancel_paused_chat(mode: &str) {
     );
     std::fs::write(
         sandbox.join("config/settings.yaml"),
-        format!("default-model: openrouter/test-paused-{mode}\n"),
+        format!("default-model: openrouter/test-paused-{mode}-{lose_chat_writer}\n"),
     )
     .unwrap();
     let (registry, _) = spawn_test_actor().await;
     let (session_id, session) = create_session(&registry).await;
     let (client, server) = UnixStream::pair().unwrap();
-    let (server_read, server_write) = server.into_split();
+    // Separate request and response sockets so losing only the chat writer
+    // does not trigger session teardown (which would race the test cancel).
+    let (response_client, response_server) = UnixStream::pair().unwrap();
+    let (server_read, _unused) = server.into_split();
+    let (_, server_write) = response_server.into_split();
     let chat_server = tokio::spawn(handle_session_main(
         server_read,
         SharedWriter::new(server_write),
@@ -67,7 +71,8 @@ async fn cancel_paused_chat(mode: &str) {
         registry.clone(),
         session.clone(),
     ));
-    let (read, mut write) = client.into_split();
+    let (_, mut write) = client.into_split();
+    let (read, _) = response_client.into_split();
     let mut chat = BufReader::new(read);
     let prompt = |turn: &str, text: &str| {
         json!({
@@ -97,18 +102,32 @@ async fn cancel_paused_chat(mode: &str) {
     )
     .await
     .unwrap();
-    // New protocol: attach acks without pausing. Send `continue` to acquire
-    // the debugger lease and pause the agent.
     let attached = read_until_type(&mut debug, "attached").await;
     assert_eq!(attached["id"], id);
-    write_json_line(&mut debug_write, &json!({"op": "continue"}))
-        .await
-        .unwrap();
     assert_eq!(read_until_type(&mut debug, "ready").await["id"], id);
-    // The lease's `continue` runs one turn, which re-issues the interrupted
-    // request. Hold it so the follow-up assertion below sees the next
-    // request (the actual follow-up prompt) rather than this re-run.
-    let (_rerun, _rerun_held) = pending_request(&provider).await;
+
+    if lose_chat_writer {
+        drop(chat);
+        // The first reset fails the write. More events than the bounded
+        // mailbox can hold prove the runner stopped backpressuring the stage
+        // before joining it. Keep the model request pending until then.
+        timeout(WAIT, async {
+            for _ in 0..258 {
+                gremlins_magic_bus::emit_run_event_async(id, EventKind::StreamReset).await;
+            }
+        })
+        .await
+        .expect("failed chat writer kept backpressuring the stage");
+        session.cancel_turn(Some(id)).await.expect("active turn");
+        let ended = read_until_type(&mut debug, "ended").await;
+        assert_eq!(ended["reason"], "interrupted");
+        drop(debug_write);
+        drop(debug);
+        timeout(WAIT, debug_server).await.unwrap().unwrap();
+        drop(write);
+        timeout(WAIT, chat_server).await.unwrap().unwrap();
+        return;
+    }
 
     let (sub, mut events) = subscribe_run(id);
     let _guard = BusSubGuard::new(sub);
@@ -172,15 +191,20 @@ async fn cancel_paused_chat(mode: &str) {
 
 #[tokio::test]
 async fn soft_cancel_paused_chat_preserves_interruption_history() {
-    cancel_paused_chat("soft").await;
+    cancel_paused_chat("soft", false).await;
 }
 
 #[tokio::test]
 async fn hard_cancel_paused_chat_discards_interrupted_turn() {
-    cancel_paused_chat("hard").await;
+    cancel_paused_chat("hard", false).await;
 }
 
 #[tokio::test]
 async fn permanent_stop_exits_paused_chat_task() {
-    cancel_paused_chat("permanent").await;
+    cancel_paused_chat("permanent", false).await;
+}
+
+#[tokio::test]
+async fn failed_chat_write_releases_backpressure_and_classifies_debugger_cancellation() {
+    cancel_paused_chat("soft", true).await;
 }

@@ -646,6 +646,10 @@ impl Backend for CmdBackend {
         "cmd"
     }
 
+    fn accepts_interactive_commands(&self) -> bool {
+        false
+    }
+
     fn build_model(&self, _spec: &str) -> Option<DynModel<Completion>> {
         None
     }

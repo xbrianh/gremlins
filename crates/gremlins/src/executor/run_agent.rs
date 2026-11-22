@@ -17,13 +17,13 @@ use crate::clients::client::ModelURI;
 use crate::clients::compaction::ResolvedRequestContext;
 use crate::config;
 use crate::definition::ExecutorStage;
+use crate::executor::RunError;
 use crate::executor::agent_runner::{commit_agent, prepare_agent};
 use crate::executor::gremlin::Gremlin;
 use crate::executor::state;
 use crate::executor::state::{Checkout, Collision, FileSystemStateStore};
-use crate::executor::RunError;
 use crate::task_kind::TaskKind;
-use gremlins_magic_bus::{emit_event, EventKind};
+use gremlins_magic_bus::{EventKind, emit_event};
 use indexmap::IndexMap;
 use rig_core::completion::Message;
 
@@ -80,12 +80,16 @@ pub(crate) async fn run_agent(
         unreachable!("run_agent is only called for agent stages")
     };
 
-    let interactive = gremlin.next_interactive_session();
     let stage_path = if !stage_usage_path.is_empty() {
         stage_key(stage_usage_path, &agent.name)
     } else {
         stage_key(scope, &agent.name)
     };
+
+    // Chat turns publish their execution identity before TurnStarted. If setup
+    // fails before we take that prepared session, revoke it rather than leaving
+    // the announced execution live. Pipeline sessions are not published yet.
+    let is_chat = gremlin.state.read_str("kind") == "chat";
 
     let task_models_by_kind =
         if let Some(selection) = &gremlin.runtime_config.resolved_model_selection {
@@ -97,10 +101,43 @@ pub(crate) async fn run_agent(
                 enclosing_task_models,
                 stage_task_models.as_ref(),
             )
+        };
+    let task_models_by_kind = match task_models_by_kind {
+        Ok(models) => models,
+        Err(error) => {
+            if is_chat {
+                gremlin.discard_prepared_interactive_session();
+            }
+            return Err(stage_failed(&agent.name, error));
         }
-        .map_err(|e| stage_failed(&agent.name, e))?;
+    };
 
-    let client = resolve_client(node, gremlin, enclosing_model)?;
+    let client = match resolve_client(node, gremlin, enclosing_model) {
+        Ok(client) => client,
+        Err(error) => {
+            if is_chat {
+                gremlin.discard_prepared_interactive_session();
+            }
+            return Err(error);
+        }
+    };
+    // Resolve the actual backend before preparing a session. Lookup failures
+    // are real stage failures; don't silently publish a command-disabled
+    // session and then retry backend selection inside Client::run.
+    let backend = match client.get_or_build_backend() {
+        Ok(backend) => backend,
+        Err(error) => {
+            if is_chat {
+                gremlin.discard_prepared_interactive_session();
+            }
+            return Err(stage_failed(&agent.name, error));
+        }
+    };
+    let accepts_commands = backend.accepts_interactive_commands();
+    let interactive = match gremlin.next_interactive_session_with_commands(accepts_commands) {
+        Ok(session) => session,
+        Err(error) => return Err(stage_failed(&agent.name, error)),
+    };
     let framework_subs = gremlin.framework_subs(&agent.name);
     let _attempt = gremlin.state.read_str("attempt");
     let loop_iter = gremlin.loop_iter.clone();
@@ -137,8 +174,6 @@ pub(crate) async fn run_agent(
 
     prepared.cwd = gremlin.cwd().to_string_lossy().into_owned();
     prepared.artifact_dir = artifact_dir.to_string_lossy().into_owned();
-
-    let is_chat = gremlin.state.read_str("kind") == "chat";
 
     // Ensure the checkout artifact directory exists so the agent's
     // local state store can create files under it.
@@ -206,7 +241,7 @@ pub(crate) async fn run_agent(
             Err(e) => {
                 return Err(RunError::Message(format!(
                     "failed to read current-turn conversation artifact {cur_uri}: {e}"
-                )))
+                )));
             }
         }
 
@@ -215,18 +250,11 @@ pub(crate) async fn run_agent(
         None
     };
 
-    let backend = match client.get_or_build_backend() {
-        Ok(b) => Some(b),
-        Err(e) => {
-            log::warn!("run_agent: failed to build backend: {e}");
-            None
-        }
-    };
     let mut conv = crate::conversation::standard::StandardConversation::new(
         "",
         false,
         verbatim_history,
-        backend,
+        Some(backend),
     );
     // Let the request environment override the compaction threshold
     // so the TUI chat gremlin can pin it to u64::MAX without changing
@@ -247,7 +275,7 @@ pub(crate) async fn run_agent(
         std::sync::Mutex<Option<crate::clients::protocol::UsageStats>>,
     > = std::sync::Arc::new(std::sync::Mutex::new(None));
     let (prompt_dumper_guard, prompt_dumper_task) = {
-        use gremlins_magic_bus::{subscribe_run, Recv};
+        use gremlins_magic_bus::{Recv, subscribe_run};
         let (sub, mut rx) = subscribe_run(gremlin.id.as_str());
         let guard = gremlins_magic_bus::connection::BusSubGuard::new(sub);
         let store = gremlin.state.store_handle();
@@ -671,7 +699,7 @@ pub(crate) async fn read_chat_conversation_with_context(
                 if e.downcast_ref::<crate::executor::state::MissingArtifact>()
                     .is_some() =>
             {
-                break
+                break;
             }
             Err(_) => continue,
         }
@@ -744,13 +772,13 @@ pub(crate) fn done_check_env(
 mod tests {
     use super::*;
     use crate::builders::agent::AgentBuilder;
+    use crate::clients::InteractiveSession;
     use crate::clients::agent::task::TaskModel;
     use crate::clients::backend::Backend;
-    use crate::clients::client::{install_test_backend, Client};
+    use crate::clients::client::{Client, install_test_backend};
     use crate::clients::protocol::CompletedRun;
-    use crate::clients::InteractiveSession;
     use crate::definition::{ResolvedModelSelection, StageSpec, StaticDefinition};
-    use crate::executor::gremlin::{validate_gremlin_id, RuntimeConfig};
+    use crate::executor::gremlin::{RuntimeConfig, validate_gremlin_id};
     use crate::executor::state::StateData;
     use crate::schemas::bootstrap::Bootstrap;
     use crate::test_support::Sandbox;

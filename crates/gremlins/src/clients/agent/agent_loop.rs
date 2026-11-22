@@ -14,7 +14,7 @@ use crate::clients::interactive::InteractiveSession;
 use gremlins_magic_bus::EventKind;
 
 use super::done_assess::DoneAssessment;
-use super::interactive::{interactive_loop, InteractiveLoopResult};
+use super::interactive::{announce_live_disconnect, interactive_loop, InteractiveLoopResult};
 use crate::clients::cancel::{default_classify, is_retryable, CancelToken};
 use crate::clients::conversation::{Conversation, TurnScriptError};
 use crate::clients::error::ClientError;
@@ -494,7 +494,12 @@ impl LoopState {
                 self.hook_log(&format!("{prefix}exit: cancelled mid-tool"));
                 return Err(cancelled_error());
             }
-            _ = self.interactive.paused() => {
+            paused = self.interactive.paused() => {
+                if !paused {
+                    self.hook_log(&format!("agent_loop: execution revoked mid-tool (label={})", prefix));
+                    self.hook_log(&format!("{prefix}exit: interactive execution revoked mid-tool"));
+                    return Err(cancelled_error());
+                }
                 // Operator triggered debug mid-tool — drop the join_all future
                 // (cancels pending tool futures). Completed tool side effects
                 // (files written, bash commands run) are not unwound.
@@ -579,18 +584,36 @@ impl LoopState {
         cancel: &CancelToken,
         prefix: &str,
     ) -> Result<InteractiveBoundary, ClientError> {
-        if std::mem::take(&mut self.pending_run_one_turn) {
+        // A deferred step belongs to the debugger that granted it. Retire its
+        // inbox and prompt before looking for a successor at this boundary.
+        let retired = self.retire_revoked_debugger().await;
+        if !retired && std::mem::take(&mut self.pending_run_one_turn) {
+            return Ok(InteractiveBoundary::RunTurn);
+        }
+        if !self.interactive.accepts_commands() {
             return Ok(InteractiveBoundary::RunTurn);
         }
         if !self.interactive.is_attached() && !self.interactive.accept_pause() {
             return Ok(InteractiveBoundary::RunTurn);
         }
-        match self.enter_interactive_mode(cancel, prefix).await? {
-            InteractiveLoopResult::Resumed => Ok(InteractiveBoundary::ContinueLoop),
+        let boundary = match self.enter_interactive_mode(cancel, prefix).await? {
+            InteractiveLoopResult::Resumed => InteractiveBoundary::ContinueLoop,
             InteractiveLoopResult::RunOneTurn | InteractiveLoopResult::MessageDelivered => {
-                Ok(InteractiveBoundary::RunTurn)
+                InteractiveBoundary::RunTurn
             }
+        };
+        Ok(boundary)
+    }
+
+    /// Retire local debugger state before any path can accept its successor.
+    async fn retire_revoked_debugger(&mut self) -> bool {
+        if !self.interactive.detach_revoked_debugger() {
+            return false;
         }
+        self.pending_run_one_turn = false;
+        self.system_prompt = self.original_system_prompt.clone();
+        announce_live_disconnect(&self.interactive, &self.message_prefix).await;
+        true
     }
 
     /// History has already been committed (mid-stream) or rolled back (mid-tool).
@@ -600,6 +623,15 @@ impl LoopState {
         cancel: &CancelToken,
         prefix: &str,
     ) -> Result<(), ClientError> {
+        if !self.interactive.accepts_commands() {
+            return Ok(());
+        }
+        // `paused` may wake to retire a withdrawn single-step owner rather
+        // than to report a newly accepted request. Restore its prompt and
+        // announce disconnect before accepting a successor's inbox.
+        if self.retire_revoked_debugger().await && !self.interactive.accept_pause() {
+            return Ok(());
+        }
         self.pending_run_one_turn = matches!(
             self.enter_interactive_mode(cancel, prefix).await?,
             InteractiveLoopResult::RunOneTurn
@@ -615,6 +647,9 @@ impl LoopState {
         cancel: &CancelToken,
         prefix: &str,
     ) -> Result<InteractiveLoopResult, ClientError> {
+        if !self.interactive.accepts_commands() {
+            return Ok(InteractiveLoopResult::Resumed);
+        }
         match interactive_loop(
             cancel,
             &mut *self.conv,
@@ -5156,6 +5191,116 @@ mod tests {
 
     // ── Interactive session tests ───────────────────────────────────────
 
+    #[tokio::test]
+    async fn debugger_disconnect_after_step_restores_prompt_and_honors_pending_request() {
+        for deferred in [false, true] {
+            for successor in [false, true] {
+                for interrupted in [false, true] {
+                    tokio::time::timeout(
+                        Duration::from_secs(5),
+                        check_debugger_disconnect_boundary(deferred, successor, interrupted),
+                    )
+                    .await
+                    .expect("interactive boundary stalled");
+                }
+            }
+        }
+    }
+
+    async fn check_debugger_disconnect_boundary(
+        deferred: bool,
+        successor: bool,
+        interrupted: bool,
+    ) {
+        let prefix = format!("debugger-disconnect-boundary-{deferred}-{successor}-{interrupted}");
+        let (_sub, mut events) = subscribe_log(&prefix);
+        let (mut sessions, handle) = InteractiveSessionFactory::for_chat();
+        let terminal = sessions.supervise_next_turn();
+        let mut state = LoopState::new(
+            Some("original prompt".into()),
+            "hello",
+            Box::new(ConversationStub::new("hello")),
+            0,
+            0,
+            false,
+            sessions.next_session(),
+            5,
+            false,
+            &prefix,
+        );
+
+        let mut debugger = handle.target().attach_debugger().unwrap();
+        assert!(state.interactive.accept_pause());
+        let step = async {
+            (&mut debugger.ready).await.unwrap();
+            debugger.try_send(InteractiveCommand::RunTurn).unwrap();
+        };
+        let cancel = CancelToken::new();
+        if deferred {
+            let entering = state.pause_interrupted_turn(&cancel, &prefix);
+            let (result, ()) = tokio::join!(entering, step);
+            result.unwrap();
+            assert!(state.pending_run_one_turn);
+        } else {
+            let entering = state.await_interactive_turn(&cancel, &prefix);
+            let (result, ()) = tokio::join!(entering, step);
+            assert!(matches!(result.unwrap(), InteractiveBoundary::RunTurn));
+        }
+        assert!(state.system_prompt.as_ref().unwrap().contains("debug mode"));
+        drop(debugger);
+
+        let replacement = successor.then(|| handle.target().attach_debugger().unwrap());
+        if interrupted {
+            // This is the shared mid-stream/mid-tool wakeup path. In
+            // particular B must not replace A's local inbox in `paused`.
+            assert!(state.interactive.paused().await);
+            assert!(state.interactive.has_revoked_debugger());
+            {
+                let boundary = state.pause_interrupted_turn(&cancel, &prefix);
+                tokio::pin!(boundary);
+                if let Some(replacement) = &replacement {
+                    assert!(futures::poll!(&mut boundary).is_pending());
+                    replacement.try_send(InteractiveCommand::Quit).unwrap();
+                }
+                boundary.await.unwrap();
+            }
+            assert_eq!(state.system_prompt.as_deref(), Some("original prompt"));
+        } else {
+            let boundary = state.await_interactive_turn(&cancel, &prefix);
+            tokio::pin!(boundary);
+            if let Some(replacement) = &replacement {
+                assert!(futures::poll!(&mut boundary).is_pending());
+                replacement.try_send(InteractiveCommand::RunTurn).unwrap();
+            }
+            assert!(matches!(
+                boundary.await.unwrap(),
+                InteractiveBoundary::RunTurn
+            ));
+        }
+        assert!(!state.pending_run_one_turn);
+        if successor && !interrupted {
+            assert!(state.system_prompt.as_ref().unwrap().contains("debug mode"));
+        } else {
+            assert_eq!(state.system_prompt.as_deref(), Some("original prompt"));
+        }
+        let mut announcements = Vec::new();
+        while let Ok(event) = events.try_recv() {
+            match event.kind() {
+                EventKind::Ready { .. } => announcements.push("ready"),
+                EventKind::Ended { reason } if reason == "disconnect" => {
+                    announcements.push("disconnect")
+                }
+                _ => (),
+            }
+        }
+        let mut expected = vec!["ready", "disconnect"];
+        if successor {
+            expected.push("ready");
+        }
+        assert_eq!(announcements, expected);
+        terminal.end("test");
+    }
+
     /// An attachment pauses the loop before the first API call.
     #[tokio::test]
     async fn interactive_pause_at_turn_boundary_broadcasts_ready() {
@@ -5527,6 +5672,24 @@ mod tests {
         assert!(ready);
 
         drop(commands);
+
+        let ended = tokio::time::timeout(Duration::from_secs(2), async {
+            loop {
+                match evt_rx.recv().await {
+                    Recv::Event(event)
+                        if matches!(event.kind(), EventKind::Ended { reason } if reason == "disconnect") =>
+                    {
+                        return true;
+                    }
+                    Recv::Closed => return false,
+                    Recv::Lagged(_) => continue,
+                    _ => continue,
+                }
+            }
+        })
+        .await
+        .unwrap();
+        assert!(ended, "live detach must announce disconnect");
 
         // Agent should resume and complete normally.
         let result = tokio::time::timeout(Duration::from_secs(2), agent)

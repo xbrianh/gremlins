@@ -6,14 +6,6 @@
 //! so they exercise the full handshake, command loop, and bus subscription path
 //! without going through the socket-routing layer.
 //!
-//! ## Protocol after attach-then-command restructure
-//!
-//! Since the handler no longer pauses on `attach`, tests that need the
-//! agent paused must send a debugger command (`continue`, `talk`, `bail`,
-//! `quit`) after the `attached` ack. The `message` op acquires its own
-//! non-crossing lease, delivers the correction, reports `delivered`, and
-//! releases — all without the test sending a separate pause command.
-
 use std::future::Future;
 use std::sync::Arc;
 use std::time::Duration;
@@ -179,18 +171,8 @@ async fn drive_sequence(sandbox: &Sandbox, model: TcpListener) {
     };
     assert_stage();
 
-    // 1) Attach while in exec stage: `attached` ack comes immediately
-    //    (no stage validation at attach time). Then send `message` —
-    //    the handler validates the leaf and finds it's not an agent stage.
+    // Control attach validates the active leaf before requesting a pause.
     let mut client_a = connect(&registry, &id);
-    let attached = socket::read_json_line(&mut client_a)
-        .await
-        .unwrap()
-        .unwrap();
-    assert_eq!(attached["type"], "attached");
-    socket::write_json_line(client_a.get_mut(), &json!({"op":"message", "text":"test"}))
-        .await
-        .unwrap();
     let rejected = next_response(&mut client_a).await;
     assert_eq!(rejected["type"], "error");
     assert!(rejected["message"]
@@ -200,9 +182,7 @@ async fn drive_sequence(sandbox: &Sandbox, model: TcpListener) {
     drop(client_a);
     exec.write_all(b"go\n").await.unwrap();
 
-    // 2) Attach during cmd-backed agent: attach succeeds, send message.
-    //    The cmd-backed agent exits before accepting the pause, so we
-    //    get an error.
+    // A command backend remains observable but cannot acquire control.
     let (mut preflight, _) = gate.accept().await.unwrap();
     let mut expiring = connect(&registry, &id);
     let attached = socket::read_json_line(&mut expiring)
@@ -210,10 +190,7 @@ async fn drive_sequence(sandbox: &Sandbox, model: TcpListener) {
         .unwrap()
         .unwrap();
     assert_eq!(attached["type"], "attached", "{attached}");
-    // Send a message — this triggers the lease, but the agent will exit.
-    socket::write_json_line(expiring.get_mut(), &json!({"op":"message", "text":"test"}))
-        .await
-        .unwrap();
+    assert_eq!(attached["capabilities"], json!(["observe"]));
     preflight.write_all(b"go\n").await.unwrap();
     let expired = next_response(&mut expiring).await;
     assert_eq!(expired["type"], "error", "{expired}");
@@ -227,17 +204,16 @@ async fn drive_sequence(sandbox: &Sandbox, model: TcpListener) {
     assert_eq!(attached["type"], "attached");
     assert_eq!(attached["scope"], "conversation");
     assert_eq!(attached["id"].as_str(), Some(id.as_str()));
+    wait_for(&mut debug, |frame| {
+        frame["type"] == "ready" && frame["id"].as_str() == Some(id.as_str())
+    })
+    .await;
     socket::write_json_line(
         debug.get_mut(),
         &json!({"op":"message", "text":"review the corrected implementation"}),
     )
     .await
     .unwrap();
-    // The handler will: acquire lease, wait Ready, send Message, wait for
-    // delivery oneshot, report `delivered`.
-    let delivered = next_response(&mut debug).await;
-    assert_eq!(delivered["type"], "delivered", "{delivered}");
-    assert_eq!(delivered["id"].as_str(), Some(id.as_str()));
     let (body, _corrected) = pending_request(&model).await;
     assert!(body
         .to_string()
@@ -300,11 +276,6 @@ async fn drive_handshake(sandbox: &Sandbox, provider: &TcpListener, id: &str, ac
     };
     assert_eq!(ack["type"], "attached");
 
-    // Send a debugger command to request the pause.
-    socket::write_json_line(first.get_mut(), &json!({"op":"continue"}))
-        .await
-        .unwrap();
-
     tokio::select! {
         _ = &mut handler => panic!("attach handler ended before status frame"),
         // Wait for the status frame that follows the pause request.
@@ -351,23 +322,16 @@ async fn drive_handshake(sandbox: &Sandbox, provider: &TcpListener, id: &str, ac
     let ack2 = socket::read_json_line(&mut second).await.unwrap().unwrap();
     assert_eq!(ack2["type"], "attached");
 
-    // Send a message — it acquires its own non-crossing lease, pauses the
-    // agent at the next boundary, injects the correction, and releases.
-    // If a stale Quit released a prior pause, the correction is never
-    // incorporated and `delivered` never arrives.
+    tokio::select! {
+        _ = &mut agent => panic!("agent exited instead of pausing again"),
+        _ = wait_for(&mut second, |frame| frame["type"] == "ready" && frame["id"].as_str() == Some(id)) => {}
+    }
     socket::write_json_line(
         second.get_mut(),
         &json!({"op": "message", "text": "try revision two"}),
     )
     .await
     .unwrap();
-    // Wait for `delivered` while driving the agent (it must be polled to
-    // accept the pause and incorporate the correction).
-    let delivered = tokio::select! {
-        _ = &mut agent => panic!("agent exited instead of pausing for the message"),
-        frame = next_response(&mut second) => frame,
-    };
-    assert_eq!(delivered["type"], "delivered", "{delivered}");
     let (corrected, _held) = tokio::select! {
         _ = &mut agent => panic!("agent exited before consuming second operator's command"),
         next = pending_request(provider) => next,
@@ -405,15 +369,11 @@ async fn full_debug_queue_does_not_block_disconnect_and_reattach() {
         gremlin.state.set_stage("chat-0001", None, "");
         let mut session = gremlin.next_interactive_session();
 
-        // Connect, read `attached`, then send `continue` to trigger the
-        // debugger pause so the agent accepts it.
+        // Control attach requests the pause before the first command.
         let (mut client, handler) = connection(&registry, id);
         let handler = tokio::spawn(handler);
         let ack = socket::read_json_line(&mut client).await.unwrap().unwrap();
         assert_eq!(ack["type"], "attached");
-        socket::write_json_line(client.get_mut(), &json!({"op":"continue"}))
-            .await
-            .unwrap();
 
         session.paused().await;
         let step = json!({"op":"continue"});
@@ -451,9 +411,6 @@ async fn full_debug_queue_does_not_block_disconnect_and_reattach() {
             .unwrap()
             .unwrap();
         assert_eq!(ack2["type"], "attached");
-        socket::write_json_line(replacement.get_mut(), &json!({"op":"continue"}))
-            .await
-            .unwrap();
         wait_for(&mut replacement, |frame| {
             frame["type"] == "status" && frame["stage"] == "waiting_for_ready"
         })
