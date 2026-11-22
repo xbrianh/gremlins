@@ -11,6 +11,9 @@
 //!   Displays `StageBoundary`, `StageTransition`, `RunCompleted`, etc.
 //! - **`conversation`** — pinned to one execution (one agent-loop
 //!   invocation). Only `conversation`-scoped attachments can inject text.
+//!   Supply both `nonce` and `execution_id` to require a particular live
+//!   execution (e.g. the one identified by the owner's `turn_started` frame).
+//!   A mismatch rejects the attachment before observation or control begins.
 //!
 //! ## Commands
 //!
@@ -291,6 +294,21 @@ pub(crate) async fn handle_conversation_attach(
     setup_gate::wait(id).await;
     let execution_nonce = target.nonce();
     let mut execution_id = target.execution_id().map(|s| s.to_string());
+    // Validate against the immutable snapshot used by the command loop, never
+    // against a second lookup that might already describe a successor.
+    if request.get("nonce").is_some() || request.get("execution_id").is_some() {
+        let expected_id = request.get("execution_id").and_then(Value::as_str);
+        if between_turn
+            || request.get("nonce").and_then(Value::as_u64) != Some(execution_nonce)
+            || expected_id.is_none()
+            || expected_id != execution_id.as_deref()
+        {
+            let _ = writer
+                .write_json_line(&error_response("requested execution is not active"))
+                .await;
+            return;
+        }
+    }
     // This signal belongs to the snapshot, not a later debugger-bound target:
     // a between-turn handoff may replace the execution while readiness awaits.
     // Capture the end signal for this execution so a passive observer can
@@ -336,7 +354,7 @@ pub(crate) async fn handle_conversation_attach(
     if mode != "passive" && target.accepts_commands() {
         caps.extend(["message", "talk", "continue", "bail", "quit", "detach"]);
     }
-    let ack = serde_json::json!({
+    let mut ack = serde_json::json!({
         "type": "attached",
         "scope": "conversation",
         "id": id,
@@ -344,6 +362,25 @@ pub(crate) async fn handle_conversation_attach(
         "nonce": execution_nonce,
         "capabilities": caps,
     });
+    // A stage selector addresses a named leaf, not whichever conversation
+    // happens to be running when its attach request arrives. Reading the
+    // leaf after capturing the target is safe: the end signal fences the ack
+    // if a successor was published in between.
+    if let Some(expected) = request.get("stage").and_then(Value::as_str) {
+        let tree = store.state_tree();
+        let stage = tree
+            .get("sub_stage")
+            .and_then(Value::as_str)
+            .filter(|s| !s.is_empty())
+            .or_else(|| tree.get("stage").and_then(Value::as_str));
+        if stage != Some(expected) || expected.is_empty() || between_turn || end_signal.is_ended() {
+            let _ = writer
+                .write_json_line(&error_response("selected stage is not active"))
+                .await;
+            return;
+        }
+        ack["stage"] = Value::String(expected.to_owned());
+    }
     let ack_end = (!(mode == "debugger" && between_turn)).then_some(&end_signal);
     if !write_view(writer, &ack, ack_end).await {
         return;

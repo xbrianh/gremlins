@@ -15,19 +15,24 @@
 use std::collections::VecDeque;
 use std::sync::Arc;
 
+use super::protocol::{Execution, Selector};
 use gremlins::executor::socket;
 use gremlins_magic_bus::EventKind;
-use serde_json::Value;
+use serde_json::{json, Value};
+
 use tokio::io::BufReader;
 use tokio::net::unix::{OwnedReadHalf, OwnedWriteHalf};
 use tokio::sync::{mpsc, oneshot, Mutex};
+
+/// A home event, its client-side turn tag, and (only at turn start) its execution.
+pub(super) type ChatEvent = (EventKind, Option<String>, Option<Execution>);
 
 /// Outbound side of a single daemon socket connection.
 struct OutState {
     /// Daemon lifecycle events forwarded to the TUI event loop.
     event_tx: mpsc::UnboundedSender<EventKind>,
     /// Chat stream events tagged with the client turn id for staleness filtering.
-    chat_tx: mpsc::UnboundedSender<(EventKind, Option<String>)>,
+    chat_tx: mpsc::UnboundedSender<ChatEvent>,
     /// Raw JSON lines that are neither responses nor EventKinds.
     raw_tx: mpsc::UnboundedSender<Value>,
 }
@@ -311,6 +316,36 @@ impl DaemonClient {
         socket::connect_session_socket(&state_root, &self.session_id().await).await
     }
 
+    async fn attach_conversation(
+        &self,
+        selector: Selector<'_>,
+    ) -> Result<(BufReader<tokio::net::UnixStream>, Execution), String> {
+        let session = self.session_id().await;
+        let stream =
+            socket::connect_session_socket(&gremlins::config::state_root(), &session).await?;
+        attach_conversation(stream, &session, selector).await
+    }
+
+    /// Resolve the named stage once. Subsequent messages use only its pinned identity.
+    pub async fn bind_stage(&self, run: &str, stage: &str) -> Result<Execution, String> {
+        let (_, execution) = self
+            .attach_conversation(Selector::Stage { run, stage })
+            .await?;
+        Ok(execution)
+    }
+
+    /// Send exactly one correction on a socket pinned to the operator's execution.
+    /// This connection never forwards display frames to either TUI event stream.
+    pub async fn deliver_correction(
+        &self,
+        execution: &Execution,
+        id: u64,
+        text: &str,
+    ) -> Result<(), String> {
+        let (stream, bound) = self.attach_conversation(Selector::Exact(execution)).await?;
+        send_correction(stream, &bound, id, text).await
+    }
+
     /// Open a dedicated session connection for a streaming log follow.
     pub async fn follow_log(
         &self,
@@ -458,9 +493,68 @@ impl DaemonClient {
     /// A sender for daemon events, so a caller can inject a locally-detected
     /// error (e.g. a failed chat request) into the same stream the TUI's
     /// event loop consumes.
-    pub fn chat_sender(&self) -> mpsc::UnboundedSender<(EventKind, Option<String>)> {
+    pub fn chat_sender(&self) -> mpsc::UnboundedSender<ChatEvent> {
         self.out.chat_tx.clone()
     }
+}
+
+async fn attach_conversation(
+    stream: tokio::net::UnixStream,
+    session: &str,
+    selector: Selector<'_>,
+) -> Result<(BufReader<tokio::net::UnixStream>, Execution), String> {
+    let mut stream = BufReader::new(stream);
+    socket::write_json_line(stream.get_mut(), &selector.request(session)).await?;
+    let ack = socket::read_json_line(&mut stream)
+        .await?
+        .ok_or("execution ended before attachment")?;
+    Ok((stream, selector.binding(&ack)?))
+}
+
+async fn send_correction(
+    mut stream: BufReader<tokio::net::UnixStream>,
+    execution: &Execution,
+    id: u64,
+    text: &str,
+) -> Result<(), String> {
+    let req_id = id.to_string();
+    let message = json!({"op":"message", "req_id":req_id, "text":text});
+    let uncertain = |reason: String| format!("delivery uncertain: {reason}");
+    socket::write_json_line(stream.get_mut(), &message)
+        .await
+        .map_err(uncertain)?;
+    while let Some(frame) = socket::read_json_line(&mut stream)
+        .await
+        .map_err(uncertain)?
+    {
+        match frame["type"].as_str() {
+            Some(kind @ ("delivered" | "correction_dropped")) => {
+                if frame["scope"] != "conversation"
+                    || frame["req_id"] != req_id
+                    || Execution::from_frame(&frame).as_ref() != Some(execution)
+                {
+                    return Err(uncertain("mismatched acknowledgment".to_owned()));
+                }
+                return if kind == "delivered" {
+                    Ok(())
+                } else {
+                    Err("correction not delivered".to_owned())
+                };
+            }
+            // Errors from the command handler are unscoped. A scoped error
+            // is a display event from the conversation, not a rejection.
+            Some("error") if frame.get("scope").is_none() => {
+                return Err(frame["message"]
+                    .as_str()
+                    .unwrap_or("correction rejected")
+                    .to_owned())
+            }
+            _ => {}
+        }
+    }
+    Err(uncertain(
+        "attachment closed without confirmation".to_owned(),
+    ))
 }
 
 /// Connect to the executor daemon, create a session, and return the client
@@ -470,7 +564,7 @@ pub async fn connect() -> Result<
     (
         DaemonClient,
         mpsc::UnboundedReceiver<EventKind>,
-        mpsc::UnboundedReceiver<(EventKind, Option<String>)>,
+        mpsc::UnboundedReceiver<ChatEvent>,
         mpsc::UnboundedReceiver<Value>,
     ),
     String,
@@ -590,7 +684,13 @@ async fn read_loop(
                     }
                 };
                 if can_route_to_chat(&event) {
-                    let _ = out.chat_tx.send((event, chat_turn));
+                    let execution =
+                        if matches!(event, EventKind::TurnStarted { .. }) && chat_turn.is_some() {
+                            Execution::from_frame(&value)
+                        } else {
+                            None
+                        };
+                    let _ = out.chat_tx.send((event, chat_turn, execution));
                 } else {
                     // Bare error/system_warning — treat as a response.
                     let response_tx = {
@@ -627,4 +727,155 @@ async fn read_loop(
     // Drop all pending response senders so waiters see "connection
     // closed" instead of hanging forever.
     responses.lock().await.clear();
+}
+
+#[cfg(test)]
+mod correction_tests {
+    use super::*;
+    use tokio::net::UnixStream;
+
+    #[tokio::test]
+    async fn turn_start_preserves_the_owner_turn_and_execution_as_one_event() {
+        let (client, mut peer) = UnixStream::pair().unwrap();
+        let (reader, _writer) = client.into_split();
+        let (chat_tx, mut chat_rx) = mpsc::unbounded_channel();
+        let out = Arc::new(OutState {
+            event_tx: mpsc::unbounded_channel().0,
+            chat_tx,
+            raw_tx: mpsc::unbounded_channel().0,
+        });
+        let reader = tokio::spawn(read_loop(BufReader::new(reader), out, Arc::default()));
+        socket::write_json_line(&mut peer, &json!({"type":"turn_started", "chat_turn":"owner-turn", "id":"home", "execution_id":"exec-home", "nonce":23})).await.unwrap();
+        drop(peer);
+        reader.await.unwrap();
+        let (kind, turn, target) = chat_rx.recv().await.unwrap();
+        assert!(matches!(kind, EventKind::TurnStarted { .. }));
+        assert_eq!(turn.as_deref(), Some("owner-turn"));
+        assert_eq!(
+            target,
+            Some(Execution {
+                run_id: "home".into(),
+                execution_id: "exec-home".into(),
+                nonce: 23
+            })
+        );
+        assert!(chat_rx.recv().await.is_none());
+    }
+
+    fn execution() -> Execution {
+        Execution {
+            run_id: "pipeline".into(),
+            execution_id: "exec-stage".into(),
+            nonce: 9,
+        }
+    }
+
+    fn frame(kind: &str) -> Value {
+        json!({"type":kind,"id":"pipeline","nonce":9,"scope":"conversation","execution_id":"exec-stage"})
+    }
+
+    fn attached() -> Value {
+        let mut ack = frame("attached");
+        ack["capabilities"] = json!(["observe", "message"]);
+        ack
+    }
+
+    /// Drive the actual auxiliary socket; assert exactly one undecorated
+    /// message (or none if the handshake failed), then EOF, with no retries.
+    async fn exchange(ack: Value, expect_message: bool, replies: Vec<Value>) -> Result<(), String> {
+        let (client, server) = UnixStream::pair().unwrap();
+        let server = tokio::spawn(async move {
+            let mut peer = BufReader::new(server);
+            let attach = socket::read_json_line(&mut peer).await.unwrap().unwrap();
+            assert_eq!(
+                attach,
+                json!({"op":"attach", "scope":"conversation", "mode":"control", "id":"pipeline", "execution_id":"exec-stage", "nonce":9,"session_id":"owner"})
+            );
+            socket::write_json_line(peer.get_mut(), &ack).await.unwrap();
+            if expect_message {
+                let cmd = socket::read_json_line(&mut peer).await.unwrap().unwrap();
+                assert_eq!(
+                    cmd,
+                    json!({"op":"message", "text":"  stop here\n", "req_id":"17"})
+                );
+            }
+            for reply in replies {
+                socket::write_json_line(peer.get_mut(), &reply)
+                    .await
+                    .unwrap();
+            }
+            use tokio::io::AsyncWriteExt;
+            let _ = peer.get_mut().shutdown().await;
+            assert!(socket::read_json_line(&mut peer).await.unwrap().is_none());
+        });
+        let result = match attach_conversation(client, "owner", Selector::Exact(&execution())).await
+        {
+            Ok((stream, bound)) => send_correction(stream, &bound, 17, "  stop here\n").await,
+            Err(reason) => Err(reason),
+        };
+        server.await.unwrap();
+        result
+    }
+
+    #[tokio::test]
+    async fn correction_receipt_ignores_scoped_display_and_correlates_submission() {
+        let mut delivered = frame("delivered");
+        delivered["req_id"] = json!("17");
+        exchange(
+            attached(),
+            true,
+            vec![frame("operator_message"), frame("error"), delivered.clone()],
+        )
+        .await
+        .unwrap();
+        for (field, wrong) in [
+            ("req_id", json!("16")),
+            ("execution_id", json!("next")),
+            ("nonce", json!(10)),
+            ("id", json!("home")),
+        ] {
+            let mut foreign = delivered.clone();
+            foreign[field] = wrong;
+            let err = exchange(attached(), true, vec![foreign]).await.unwrap_err();
+            assert!(err.contains("uncertain"), "{err}");
+        }
+    }
+
+    #[tokio::test]
+    async fn stale_and_read_only_attachments_receive_no_message() {
+        for (field, wrong) in [
+            ("capabilities", json!(["observe"])),
+            ("execution_id", json!("replacement")),
+            ("id", json!("foreign")),
+            ("nonce", json!(11)),
+        ] {
+            let mut ack = attached();
+            ack[field] = wrong;
+            assert!(exchange(ack, false, vec![]).await.is_err());
+        }
+    }
+
+    #[tokio::test]
+    async fn correction_dropped_busy_and_unconfirmed_disconnect_are_not_success() {
+        let mut dropped = frame("correction_dropped");
+        dropped["req_id"] = json!("17");
+        assert!(exchange(attached(), true, vec![dropped])
+            .await
+            .unwrap_err()
+            .contains("not delivered"));
+        assert_eq!(
+            exchange(
+                attached(),
+                true,
+                vec![json!({"type":"error","message":"busy"})]
+            )
+            .await
+            .unwrap_err(),
+            "busy"
+        );
+        assert!(exchange(attached(), true, vec![])
+            .await
+            .unwrap_err()
+            .contains("uncertain"));
+    }
 }

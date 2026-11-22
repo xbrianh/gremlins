@@ -1,0 +1,104 @@
+//! Wire identities and selectors for conversation-scoped attachments.
+
+use serde_json::{json, Value};
+
+#[derive(Debug, Clone, Eq, PartialEq)]
+pub(crate) struct Execution {
+    pub run_id: String,
+    pub execution_id: String,
+    pub nonce: u64,
+}
+
+impl Execution {
+    pub(super) fn from_frame(frame: &Value) -> Option<Self> {
+        Some(Self {
+            run_id: frame["id"].as_str()?.to_owned(),
+            execution_id: frame["execution_id"]
+                .as_str()
+                .filter(|s| !s.is_empty())?
+                .to_owned(),
+            nonce: frame["nonce"].as_u64()?,
+        })
+    }
+}
+
+pub(super) enum Selector<'a> {
+    Stage { run: &'a str, stage: &'a str },
+    Exact(&'a Execution),
+}
+
+impl Selector<'_> {
+    pub(super) fn request(&self, session: &str) -> Value {
+        let mut req =
+            json!({"op":"attach", "scope":"conversation", "mode":"control", "session_id":session});
+        match self {
+            Self::Stage { run, stage } => {
+                req["id"] = json!(run);
+                req["stage"] = json!(stage);
+            }
+            Self::Exact(execution) => {
+                req["id"] = json!(execution.run_id);
+                req["execution_id"] = json!(execution.execution_id);
+                req["nonce"] = json!(execution.nonce);
+            }
+        }
+        req
+    }
+
+    pub(super) fn binding(&self, ack: &Value) -> Result<Execution, String> {
+        if ack["type"] == "error" {
+            return Err(ack["message"]
+                .as_str()
+                .unwrap_or("attachment rejected")
+                .into());
+        }
+        if ack["type"] != "attached" || ack["scope"] != "conversation" {
+            return Err("not attached to a conversation".into());
+        }
+        let execution = Execution::from_frame(ack).ok_or("attachment has no execution identity")?;
+        let matches = match self {
+            Self::Stage { run, stage } => execution.run_id == *run && ack["stage"] == *stage,
+            Self::Exact(expected) => &execution == *expected,
+        };
+        if !matches {
+            return Err("not attached to the addressed execution".into());
+        }
+        if !ack["capabilities"]
+            .as_array()
+            .is_some_and(|caps| caps.iter().any(|cap| cap == "message"))
+        {
+            return Err("addressed execution is read-only".into());
+        }
+        Ok(execution)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn binds_only_the_requested_writable_stage() {
+        let ack = json!({"type":"attached", "scope":"conversation", "id":"run", "stage":"review", "execution_id":"A", "nonce":5, "capabilities":["message"]});
+        let selector = Selector::Stage {
+            run: "run",
+            stage: "review",
+        };
+        assert_eq!(
+            selector.request("owner"),
+            json!({"op":"attach", "mode":"control", "scope":"conversation", "id":"run", "stage":"review", "session_id":"owner"})
+        );
+        assert_eq!(selector.binding(&ack).unwrap().execution_id, "A");
+        for (key, other) in [
+            ("id", json!("other")),
+            ("stage", json!("successor")),
+            ("nonce", Value::Null),
+            ("execution_id", json!("")),
+            ("capabilities", json!(["observe"])),
+        ] {
+            let mut wrong = ack.clone();
+            wrong[key] = other;
+            assert!(selector.binding(&wrong).is_err());
+        }
+    }
+}

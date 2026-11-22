@@ -86,14 +86,12 @@ enum ScreenView {
     Debug(DebugWidget),
 }
 
-/// Per-target render state: the transcript, reasoning band, and input draft
+/// Per-target render state: the transcript and reasoning band
 /// that belong to one conversation target. Swapped in/out of the active
 /// [`Scene`] when the selected target changes.
 pub(crate) struct RenderTargetState {
     transcript: TranscriptWidget,
     reasoning: StreamingWidget,
-    input: crate::tui::input_buffer::InputBuffer,
-    input_cursor: usize,
     active_request: bool,
     chat_model: Option<String>,
 }
@@ -103,8 +101,6 @@ impl RenderTargetState {
         Self {
             transcript: TranscriptWidget::new(),
             reasoning: new_reasoning_band(),
-            input: crate::tui::input_buffer::InputBuffer::new(),
-            input_cursor: 0,
             active_request: false,
             chat_model: None,
         }
@@ -501,11 +497,25 @@ impl<B: Backend> LiveArea<B> {
 
     // ── Conversation target switch ───────────────────────────────
 
+    /// Park the current composer and widgets together before restoring the destination.
+    pub fn select_conversation(&mut self, app: &mut App, target: crate::tui::app::Target) {
+        if app.selected_target != target {
+            app.clear_completion();
+            app.history_cursor = None;
+            self.sync_app_state(app);
+            self.switch_target(target.clone());
+            app.select_composer(target);
+            self.copy_app_state_to(app);
+            self.reset_input_scroll();
+            self.invalidate();
+        }
+    }
+
     /// Switch the active conversation target, saving current widgets and
     /// loading the new target's state.
     ///
     /// Widgets are swapped rather than cloned, so no rendered content is
-    /// lost. Scalar fields (input, cursor, active-request, chat-model) stay
+    /// lost. Scalar fields (active-request, chat-model) stay
     /// in the per-target map entry; the caller is responsible for syncing
     /// App-level state via [`sync_app_state`] before calling this method and
     /// for restoring via [`copy_app_state_to`] afterwards.
@@ -547,17 +557,37 @@ impl<B: Backend> LiveArea<B> {
             .active_request = active;
     }
 
+    /// Render a receipt that the model has already correlated and applied.
+    pub fn show_receipt(&mut self, receipt: crate::tui::app::Receipt) {
+        if receipt.clear_draft && receipt.target == self.active_target {
+            self.reset_input_scroll();
+        }
+        let message = match receipt.result {
+            Ok(()) => format!("> {}", receipt.text),
+            Err(reason) => format!("correction: {}\n{reason}", receipt.text),
+        };
+        self.with_target_transcript(&receipt.target, |transcript, _| {
+            transcript.push_transcript_block(message.lines().map(str::to_owned).collect());
+        });
+    }
+
+    pub fn clear_target_input(&mut self, target: &crate::tui::app::Target, app: &mut App) {
+        app.clear_composer(target);
+        if target == &self.active_target {
+            self.reset_input_scroll();
+        }
+    }
+
     /// Sync App-level per-target state into the current target's stored state.
     ///
     /// Called before switching away from a target so the next time it's selected
-    /// the operator's draft, cursor position, and turn status are preserved.
+    /// the displayed turn status is preserved.
     pub fn sync_app_state(&mut self, app: &App) {
         let state = self
             .target_states
             .entry(self.active_target.clone())
             .or_default();
-        state.input = app.input.clone();
-        state.input_cursor = app.input_cursor;
+
         state.active_request = app.active_request;
         state.chat_model = app.chat_model.clone();
     }
@@ -568,8 +598,6 @@ impl<B: Backend> LiveArea<B> {
     /// context operate on the correct transcript, draft, and status.
     pub fn copy_app_state_to(&self, app: &mut App) {
         if let Some(state) = self.target_states.get(&self.active_target) {
-            app.input = state.input.clone();
-            app.input_cursor = state.input_cursor;
             app.active_request = state.active_request;
             app.chat_model = state.chat_model.clone();
         }
@@ -607,9 +635,7 @@ impl<B: Backend> LiveArea<B> {
         }
     }
 
-    /// Reset a target's full state — transcript, reasoning widget, input
-    /// buffer, cursor, and turn status — so a later execution of the same
-    /// stage starts with a clean slate.
+    /// Reset a target's render state for a later execution of the same stage.
     pub fn reset_target_state(&mut self, target: &crate::tui::app::Target) {
         if *target == self.active_target {
             self.scene.transcript.clear_scrollable();
@@ -619,8 +645,7 @@ impl<B: Backend> LiveArea<B> {
             if let Some(state) = self.target_states.get_mut(target) {
                 state.transcript.clear_scrollable();
                 state.reasoning = new_reasoning_band();
-                state.input.clear();
-                state.input_cursor = 0;
+
                 state.active_request = false;
             }
         }
@@ -2130,6 +2155,106 @@ mod tests {
     /// Create a LiveArea<TestBackend> with the given dimensions.
     fn new_live(cols: u16, rows: u16) -> LiveArea<TestBackend> {
         LiveArea::with_backend(TestBackend::new(cols, rows), cols, rows)
+    }
+
+    #[test]
+    fn receipt_preserves_history_search_and_clears_only_the_delivered_draft() {
+        use crate::tui::app::{Execution, Submission, Target};
+
+        for success in [true, false] {
+            let mut live = new_live(90, 20);
+            let mut app = App::new();
+            app.conversations.set_execution(
+                Target::Home,
+                Some(Execution {
+                    run_id: "home".into(),
+                    execution_id: "home-turn".into(),
+                    nonce: 1,
+                }),
+            );
+            app.input.replace_all("home correction");
+            app.input_cursor = 4;
+            let Submission::Correction { id, .. } =
+                app.conversations.submit(&Target::Home, &app.input, true)
+            else {
+                panic!("expected correction")
+            };
+            app.enter_search();
+            app.search_push_char('é');
+            let result = if success {
+                Ok(())
+            } else {
+                Err("failed".into())
+            };
+            live.show_receipt(app.finish_delivery(id, result).unwrap());
+
+            assert!(app.history_search.is_some());
+            assert_eq!(app.input.text(), "é");
+            assert_eq!(app.input_cursor, "é".len());
+            app.cancel_search();
+            assert_eq!(
+                app.input.text(),
+                if success { "" } else { "home correction" }
+            );
+            assert_eq!(app.input_cursor, if success { 0 } else { 4 });
+        }
+    }
+
+    #[test]
+    fn background_receipt_updates_only_its_composer_and_transcript() {
+        use crate::tui::app::{Execution, Submission, Target};
+        for success in [true, false] {
+            let mut live = new_live(90, 20);
+            let mut app = App::new();
+            app.active_request = true;
+            app.conversations.set_execution(
+                Target::Home,
+                Some(Execution {
+                    run_id: "home".into(),
+                    execution_id: "home-turn".into(),
+                    nonce: 1,
+                }),
+            );
+            app.input.replace_all("home correction");
+            let Submission::Correction { id, .. } =
+                app.conversations.submit(&Target::Home, &app.input, true)
+            else {
+                panic!("expected correction")
+            };
+            let stage = Target::StageExecution {
+                run_id: "pipeline".into(),
+                stage: "review".into(),
+            };
+            live.select_conversation(&mut app, stage);
+            app.input.replace_all("stage draft");
+            let receipt = app.finish_delivery(
+                id,
+                if success {
+                    Ok(())
+                } else {
+                    Err("delivery uncertain".into())
+                },
+            );
+            live.show_receipt(receipt.unwrap());
+            assert_eq!(app.input.text(), "stage draft");
+            assert!(!app.active_request);
+            live.compose(&app).unwrap();
+            assert!(!dump_buffer(live.backend().buffer()).contains("home correction"));
+            live.select_conversation(&mut app, Target::Home);
+            assert!(app.active_request);
+            assert_eq!(
+                app.input.text(),
+                if success { "" } else { "home correction" }
+            );
+            assert!(app.finish_delivery(id, Ok(())).is_none()); // duplicate receipt is inert
+            live.compose(&app).unwrap();
+            let visible = dump_buffer(live.backend().buffer());
+            assert_eq!(
+                visible.matches("home correction").count(),
+                if success { 1 } else { 2 }
+            );
+            assert_eq!(visible.contains("delivery uncertain"), !success);
+        }
     }
 
     #[test]

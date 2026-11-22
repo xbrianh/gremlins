@@ -9,6 +9,7 @@ pub mod editor;
 pub mod input_buffer;
 pub mod markdown;
 pub mod motif;
+mod protocol;
 pub mod screen;
 pub mod theme;
 mod watch_replay;
@@ -39,7 +40,7 @@ use tokio::sync::mpsc;
 
 use crate::display;
 
-use app::{App, Screen, Target};
+use app::{App, Screen, Submission, Target};
 use commands::{dispatch, CommandResult};
 use editor::{open_editor, ReaderChannels, SuspendHandle};
 use gremlins::executor::socket;
@@ -312,6 +313,31 @@ fn interrupt_press(count: &mut u8, window: &mut Option<Instant>, now: Instant) -
     }
 }
 
+/// Escalation belongs to the home conversation and only lasts one gesture.
+#[derive(Default)]
+struct HomeInterrupt {
+    count: u8,
+    window: Option<Instant>,
+    ended_turn: Option<String>,
+}
+
+impl HomeInterrupt {
+    fn in_window(&self, now: Instant) -> bool {
+        self.window
+            .is_some_and(|first| now.duration_since(first) <= PENDING_QUIT_WINDOW)
+    }
+
+    fn disarm_if_stale(&mut self, target: &Target, now: Instant) {
+        if !target.is_home() || !self.in_window(now) {
+            *self = Self::default();
+        }
+    }
+
+    fn press(&mut self, now: Instant) -> InterruptAction {
+        interrupt_press(&mut self.count, &mut self.window, now)
+    }
+}
+
 /// Exit any non-chat screen and tear down its session-owned aux sockets.
 ///
 /// Returns `true` when a full-screen view was active and is now dropped.
@@ -390,14 +416,24 @@ fn send_cancel_chat(client: &Arc<client::DaemonClient>, active_turn: Option<&str
     });
 }
 
-/// Clear the input bar and retire the current turn after a hard cancel.
-fn clear_active_turn_ui(app: &mut App, live_area: &mut LiveArea, active_turn: &mut Option<String>) {
-    app.input.clear();
-    app.input_cursor = 0;
-    app.clear_completion();
-    live_area.reset_input_scroll();
+/// The live flag mirrors the selected target; home also has a parked flag
+/// that must be retired even if its terminal event arrives off screen.
+fn finish_home_request<B: ratatui::backend::Backend>(app: &mut App, live_area: &mut LiveArea<B>) {
+    live_area.set_target_active_request(&Target::Home, false);
+    if app.selected_target.is_home() {
+        app.active_request = false;
+    }
+    app.conversations.set_execution(Target::Home, None);
+}
+
+/// Retire the interrupted turn without dismissing its addressed draft.
+fn clear_active_turn_ui<B: ratatui::backend::Backend>(
+    app: &mut App,
+    live_area: &mut LiveArea<B>,
+    active_turn: &mut Option<String>,
+) {
     live_area.clear_current_turn();
-    app.active_request = false;
+    finish_home_request(app, live_area);
     *active_turn = None;
 }
 
@@ -406,8 +442,7 @@ fn soft_interrupt_active_turn(client: &Arc<client::DaemonClient>, active_turn: &
     send_cancel_chat(client, active_turn.as_deref(), "soft");
 }
 
-/// Hard-cancel the active turn: discard the turn, clear the input, and reset
-/// the request guard so the next submit can start cleanly.
+/// Hard-cancel the active turn and invalidate its pending events.
 fn hard_cancel_active_turn(
     app: &mut App,
     live_area: &mut LiveArea,
@@ -458,7 +493,7 @@ fn handle_esc_reset(
     // when no turn is active). This path is only reached for the idle
     // Ctrl+C first-press fall-through; clear the prompt to match the
     // historical behaviour.
-    app.input.clear();
+    app.clear_input();
     app.input_cursor = 0;
     app.clear_completion();
     live_area.reset_input_scroll();
@@ -543,6 +578,7 @@ fn send_chat_input(
     app.active_request = true;
     *turn_gen += 1;
     let turn_id = turn_gen.to_string();
+    app.conversations.begin_home_turn(turn_id.clone());
     *active_turn = Some(turn_id.clone());
     let client_for_chat = Arc::clone(client);
     let chat_tx = client_for_chat.chat_sender();
@@ -634,6 +670,7 @@ fn send_chat_input(
                             turn: Some(turn_id.clone()),
                         },
                         Some(turn_id.clone()),
+                        None,
                     ));
                 } else {
                     // The chat turn is now airborne: the daemon has created
@@ -657,6 +694,7 @@ fn send_chat_input(
                         turn: Some(turn_id.clone()),
                     },
                     Some(turn_id.clone()),
+                    None,
                 ));
             }
         }
@@ -1370,9 +1408,12 @@ async fn run_app(live_area: &mut LiveArea) -> io::Result<()> {
     let mut turn_gen: u64 = 0;
     // The turn id of the currently active turn, if any.
     let mut active_turn: Option<String> = None;
-    // A turn that was soft-interrupted and is awaiting a possible hard
-    // cancel escalation within the double-press window.
-    let mut interrupted_turn: Option<String> = None;
+    // A navigation shortcut must not replace the very draft being parked.
+    let mut last_stage: Option<Target> = None;
+    // This set belongs to one selection. Replacing it aborts its handshake and
+    // discards even an already-queued result (including on same-stage reattach).
+    let mut stage_lookup = tokio::task::JoinSet::new();
+    let (delivery_tx, mut delivery_rx) = mpsc::unbounded_channel::<(u64, Result<(), String>)>();
     let (log_tx, mut log_rx) = mpsc::unbounded_channel::<serde_json::Value>();
 
     // ── Debug session state ────────────────────────────────────────
@@ -1391,13 +1432,13 @@ async fn run_app(live_area: &mut LiveArea) -> io::Result<()> {
     // ── Ctrl+C pending-quit state (event-loop-local input routing) ──
     let mut pending_quit: Option<Instant> = None;
     // ── Active-turn interrupt state (soft -> hard -> no-op) ──
-    let mut interrupt_count: u8 = 0;
-    let mut interrupt_window: Option<Instant> = None;
+    let mut interrupt = HomeInterrupt::default();
 
     // ── Event loop ────────────────────────────────────────────────
     loop {
         let (cols, _rows) = live_area.size();
         app.width = cols;
+        interrupt.disarm_if_stale(&app.selected_target, Instant::now());
         live_area.compose(&app)?;
 
         tokio::select! {
@@ -1405,6 +1446,20 @@ async fn run_app(live_area: &mut LiveArea) -> io::Result<()> {
             Some(ev) = ct_rx.recv() => {
                 match ev {
                     Event::Key(key) if key.kind == KeyEventKind::Press => match key.code {
+                        KeyCode::Char('t')
+                            if key.modifiers.contains(crossterm::event::KeyModifiers::CONTROL)
+                                && app.screen.is_chat() && app.history_search.is_none() =>
+                        {
+                            let next = if app.selected_target.is_home() {
+                                last_stage.clone()
+                            } else {
+                                Some(Target::Home)
+                            };
+                            if let Some(target) = next {
+                                stage_lookup = tokio::task::JoinSet::new();
+                                live_area.select_conversation(&mut app, target);
+                            }
+                        }
                         KeyCode::Char('r')
                             if key.modifiers.contains(crossterm::event::KeyModifiers::CONTROL) =>
                         {
@@ -1458,11 +1513,7 @@ async fn run_app(live_area: &mut LiveArea) -> io::Result<()> {
                                 ) {
                                     continue;
                                 }
-                                match interrupt_press(
-                                    &mut interrupt_count,
-                                    &mut interrupt_window,
-                                    now,
-                                ) {
+                                match interrupt.press(now) {
                                     InterruptAction::SendSoft => {
                                         soft_interrupt_active_turn(&client, &active_turn);
                                     }
@@ -1485,9 +1536,7 @@ async fn run_app(live_area: &mut LiveArea) -> io::Result<()> {
                             // any press inside it as a no-op so Ctrl+C never
                             // arms the quit path while the turn is being
                             // torn down.
-                            if interrupt_window
-                                .is_some_and(|first| now.duration_since(first) <= PENDING_QUIT_WINDOW)
-                                && interrupt_count >= 2
+                            if interrupt.in_window(now) && interrupt.count >= 2
                             {
                                 continue;
                             }
@@ -1639,7 +1688,7 @@ async fn run_app(live_area: &mut LiveArea) -> io::Result<()> {
                                             // substitutions: the editor edits the
                                             // display form, so completed paths
                                             // revert to their as-typed form.
-                                            app.input.replace_all(&text);
+                                            app.replace_input(&text);
                                             app.reset_cursor_to_end();
                                             app.clear_completion();
                                             app.history_cursor = None;
@@ -1706,13 +1755,14 @@ async fn run_app(live_area: &mut LiveArea) -> io::Result<()> {
                                 continue;
                             }
 
+                            // Explicit dismissal releases the draft's execution address.
+                            if app.conversations.is_correction_draft(&app.selected_target) {
+                                live_area.clear_target_input(&app.selected_target.clone(), &mut app);
+                                continue;
+                            }
                             // Idle ESC is inert — the input bar is left intact.
                             if app.active_request {
-                                match interrupt_press(
-                                    &mut interrupt_count,
-                                    &mut interrupt_window,
-                                    Instant::now(),
-                                ) {
+                                match interrupt.press(Instant::now()) {
                                     InterruptAction::SendSoft => {
                                         soft_interrupt_active_turn(&client, &active_turn);
                                     }
@@ -1736,26 +1786,20 @@ async fn run_app(live_area: &mut LiveArea) -> io::Result<()> {
                             // `SendHard` is meaningful here — a soft
                             // cancel on an already-interrupted turn is a
                             // no-op (the supervisor ignores it).
-                            if interrupted_turn.is_some()
-                                && interrupt_press(
-                                    &mut interrupt_count,
-                                    &mut interrupt_window,
-                                    Instant::now(),
-                                ) == InterruptAction::SendHard
+                            let now = Instant::now();
+                            if interrupt.ended_turn.is_some() && interrupt.in_window(now)
+                                && interrupt.press(now) == InterruptAction::SendHard
                             {
                                 send_cancel_chat(
                                     &client,
-                                    interrupted_turn.as_deref(),
+                                    interrupt.ended_turn.as_deref(),
                                     "hard",
                                 );
                                 clear_active_turn_ui(
                                     &mut app,
                                     live_area,
-                                    &mut interrupted_turn,
+                                    &mut interrupt.ended_turn,
                                 );
-                            }
-                            if interrupted_turn.is_some() {
-                                continue;
                             }
                         }
                         KeyCode::Tab => {
@@ -1788,7 +1832,7 @@ async fn run_app(live_area: &mut LiveArea) -> io::Result<()> {
                                 app.replace_input_span(span.clone(), next.clone());
                                 let new_span = span.start..span.start + next.len();
                                 app.update_completion_span(new_span.clone());
-                                app.input.add_substitution(new_span, next_absolute);
+                                app.add_input_substitution(new_span, next_absolute);
                             } else {
                                 let cursor = app.input_cursor.min(app.input.len());
                                 let Some(mut state) = completion::complete(app.input.text(), cursor) else {
@@ -1800,7 +1844,7 @@ async fn run_app(live_area: &mut LiveArea) -> io::Result<()> {
                                     let absolute = state.absolutes[0].clone();
                                     app.replace_input_span(span.clone(), candidate.clone());
                                     let new_span = span.start..span.start + candidate.len();
-                                    app.input.add_substitution(new_span, absolute);
+                                    app.add_input_substitution(new_span, absolute);
                                 } else {
                                     let prefix = completion::common_prefix(&state.candidates);
                                     let absolute_prefix =
@@ -1811,7 +1855,7 @@ async fn run_app(live_area: &mut LiveArea) -> io::Result<()> {
                                     app.set_completion(state);
                                     app.replace_input_span(span, prefix);
                                     if !new_span.is_empty() {
-                                        app.input.add_substitution(new_span, absolute_prefix);
+                                        app.add_input_substitution(new_span, absolute_prefix);
                                     }
                                 }
                             }
@@ -1841,7 +1885,7 @@ async fn run_app(live_area: &mut LiveArea) -> io::Result<()> {
                             app.replace_input_span(span.clone(), candidate.clone());
                             let new_span = span.start..span.start + candidate.len();
                             app.update_completion_span(new_span.clone());
-                            app.input.add_substitution(new_span, absolute);
+                            app.add_input_substitution(new_span, absolute);
                             live_area.ensure_input_cursor_visible(
                                 app.input_cursor,
                                 app.input.text(),
@@ -1910,7 +1954,34 @@ async fn run_app(live_area: &mut LiveArea) -> io::Result<()> {
                                 continue;
                             }
 
-                            let input_buf: InputBuffer = std::mem::take(&mut app.input);
+                            let command = dispatch(app.input.text());
+                            if command.is_none() {
+                                if app.input.is_empty() {
+                                    continue;
+                                }
+                                if app.session_recreating {
+                                    live_area.push_transcript_line("session reset is in progress — wait before sending".into());
+                                    continue;
+                                }
+                                match app.conversations.submit(&app.selected_target, &app.input, active_turn.is_some()) {
+                                    Submission::HomePrompt => {}
+                                    Submission::Blocked(message) => {
+                                        live_area.push_transcript_line(message.into());
+                                        continue;
+                                    }
+                                    Submission::Correction { id, execution, text } => {
+                                        let c = Arc::clone(&client);
+                                        let tx = delivery_tx.clone();
+                                        tokio::spawn(async move {
+                                            let outcome = c.deliver_correction(&execution, id, &text).await;
+                                            let _ = tx.send((id, outcome));
+                                        });
+                                        continue;
+                                    }
+                                }
+                            }
+
+                            let input_buf: InputBuffer = app.take_input();
                             let display_input = input_buf.text().to_string();
                             let input = input_buf.resolve();
                             app.input_cursor = 0;
@@ -1934,7 +2005,7 @@ async fn run_app(live_area: &mut LiveArea) -> io::Result<()> {
                                 app.following_log = None;
                             }
 
-                            if let Some(result) = dispatch(&display_input) {
+                            if let Some(result) = command {
                                 match result {
                                     CommandResult::ShowRuns => {
                                         close_watch_follow(&mut app, live_area, &mut watch_follow_handle);
@@ -1981,6 +2052,8 @@ async fn run_app(live_area: &mut LiveArea) -> io::Result<()> {
                                             );
                                             continue;
                                         }
+                                        stage_lookup = tokio::task::JoinSet::new();
+                                        live_area.select_conversation(&mut app, Target::Home);
                                         // Clear current turn.
                                         live_area.clear_current_turn();
                                         // Clear the transcript/scrollback so the
@@ -2000,7 +2073,9 @@ async fn run_app(live_area: &mut LiveArea) -> io::Result<()> {
                                         // to the dying session first, before the
                                         // new session is installed.
                                         turn_gen += 1;
+                                        interrupt = HomeInterrupt::default();
                                         active_turn = None;
+                                        app.conversations.retire_home_session();
                                         app.active_request = false;
                                         if let Some(handle) = log_follow_handle.take() {
                                             handle.abort();
@@ -2025,7 +2100,7 @@ async fn run_app(live_area: &mut LiveArea) -> io::Result<()> {
                                             let result = c.recreate_session().await;
                                             let _ = tx.send(result);
                                         });
-                                        app.input.clear();
+                                        app.clear_input();
                                         app.input_cursor = 0;
                                         app.clear_completion();
                                         app.active_skills.clear();
@@ -2035,17 +2110,8 @@ async fn run_app(live_area: &mut LiveArea) -> io::Result<()> {
                                         break;
                                     }
                                     CommandResult::AttachHome => {
-                                        if !app.selected_target.is_home() {
-                                            // Sync App state back to LiveArea for the
-                                            // current target before switching away.
-                                            live_area.sync_app_state(&app);
-                                            live_area.switch_target(Target::Home);
-                                            app.selected_target = Target::Home;
-                                            // Reset input/cursor from the
-                                            // freshly-loaded home target's state.
-                                            live_area.copy_app_state_to(&mut app);
-                                            live_area.invalidate();
-                                        }
+                                        stage_lookup = tokio::task::JoinSet::new();
+                                        live_area.select_conversation(&mut app, Target::Home);
                                     }
                                     CommandResult::AttachStage { run_id, stage } => {
                                         let stage_name = stage.unwrap_or_else(|| {
@@ -2060,26 +2126,23 @@ async fn run_app(live_area: &mut LiveArea) -> io::Result<()> {
                                                 })
                                                 .unwrap_or_default()
                                         });
-                                        if stage_name.is_empty() {
-                                            live_area.push_transcript_line(format!(
-                                                "> {display_input}\nno active stage for gremlin {run_id}"
-                                            ));
-                                            continue;
-                                        }
                                         let new_target = Target::StageExecution {
-                                            run_id,
-                                            stage: stage_name,
+                                            run_id: run_id.clone(),
+                                            stage: stage_name.clone(),
                                         };
-                                        if app.selected_target == new_target {
-                                            continue;
+                                        stage_lookup = tokio::task::JoinSet::new();
+                                        app.conversations.set_execution(new_target.clone(), None);
+                                        last_stage = Some(new_target.clone());
+                                        live_area.select_conversation(&mut app, new_target.clone());
+                                        if stage_name.is_empty() {
+                                            live_area.push_transcript_line(format!("read-only: no active stage for gremlin {run_id}"));
+                                        } else {
+                                            let client = Arc::clone(&client);
+                                            stage_lookup.spawn(async move {
+                                                let binding = client.bind_stage(&run_id, &stage_name).await;
+                                                (new_target, binding)
+                                            });
                                         }
-                                        // Sync current target's state back.
-                                        live_area.sync_app_state(&app);
-                                        live_area.switch_target(new_target.clone());
-                                        app.selected_target = new_target;
-                                        // Load the new target's state into App.
-                                        live_area.copy_app_state_to(&mut app);
-                                        live_area.invalidate();
                                     }
                                     CommandResult::ActivateSkill(name) => {
                                         // Discover skills to validate the name.
@@ -2162,28 +2225,13 @@ async fn run_app(live_area: &mut LiveArea) -> io::Result<()> {
                                 }
                             } else {
                                 // Plain text — send to chat agent.
-                                if app.session_recreating {
-                                    live_area.push_transcript_line(
-                                        "session reset is in progress — wait before sending"
-                                            .to_string(),
-                                    );
-                                    continue;
-                                }
-                                if app.active_request {
-                                    let msg = "a request is already in progress — wait for the response";
-                                    live_area.push_transcript_line(msg.to_string());
-                                    continue;
-                                }
-
                                 // Capture the session generation at submission
                                 // time. If `/clear` recreates the session while
                                 // repository context is still being gathered,
                                 // the request is discarded atomically before it
                                 // can execute in the new conversation.
                                 let session_generation = client.session_generation().await;
-                                interrupt_count = 0;
-                                interrupt_window = None;
-                                interrupted_turn = None;
+                                interrupt = HomeInterrupt::default();
                                 send_chat_input(
                                     live_area,
                                     &mut app,
@@ -2382,7 +2430,7 @@ async fn run_app(live_area: &mut LiveArea) -> io::Result<()> {
                                 app.watch_move(-1);
                             } else if app.screen.is_chat() {
                                 if let Some(entry) = app.history_up().map(|s| s.to_string()) {
-                                    app.input.replace_all(&entry);
+                                    app.replace_input(&entry);
                                     app.reset_cursor_to_end();
                                     app.dismiss_completion();
                                     live_area.ensure_input_cursor_visible(
@@ -2401,7 +2449,7 @@ async fn run_app(live_area: &mut LiveArea) -> io::Result<()> {
                                 app.watch_move(1);
                             } else if app.screen.is_chat() && app.history_cursor.is_some() {
                                 let entry = app.history_down().unwrap_or("").to_string();
-                                app.input.replace_all(&entry);
+                                app.replace_input(&entry);
                                 app.reset_cursor_to_end();
                                 app.dismiss_completion();
                                 live_area.ensure_input_cursor_visible(
@@ -2481,18 +2529,13 @@ async fn run_app(live_area: &mut LiveArea) -> io::Result<()> {
                         log::info!("[{id}] bail: {reason}");
                     }
                     gremlins_magic_bus::EventKind::StageBoundary { id, stage, active, .. } => {
-                        if active {
-                            // Seed a target state for this stage so the
-                            // user can `/attach` to it at any time.
-                            let target = Target::StageExecution {
-                                run_id: id.clone(),
-                                stage: stage.clone(),
-                            };
-                            // Clear the full per-target state on re-entry
-                            // (the stage may replay after a reconnect /
-                            // resume). A later execution of the same stage
-                            // must not inherit the earlier transcript or
-                            // draft.
+                        let target = Target::StageExecution { run_id: id, stage };
+                        // Boundaries name a stage, not an execution. An old end
+                        // cannot revoke a newer binding; the pinned attach at
+                        // delivery rejects an execution that has actually ended.
+                        if active && !app.conversations.retain_target(&target) {
+                            // Re-entry may replace an empty conversation, never a
+                            // parked draft or a transcript awaiting a receipt.
                             live_area.reset_target_state(&target);
                         }
                     }
@@ -2717,13 +2760,30 @@ async fn run_app(live_area: &mut LiveArea) -> io::Result<()> {
                 }
             }
 
+            Some(result) = stage_lookup.join_next(), if !stage_lookup.is_empty() => {
+                match result {
+                    Ok((target, binding)) if target == app.selected_target => match binding {
+                        Ok(execution) => app.conversations.set_execution(target, Some(execution)),
+                        Err(reason) => live_area.push_transcript_line(format!("read-only: {reason}")),
+                    },
+                    Ok(_) => {}
+                    Err(reason) => live_area.push_transcript_line(format!("stage lookup failed: {reason}")),
+                }
+            }
+
+            Some((id, result)) = delivery_rx.recv() => {
+                if let Some(receipt) = app.finish_delivery(id, result) {
+                    live_area.show_receipt(receipt);
+                }
+            }
+
             // ── Socket-op results ─────────────────────────────
             Some(lines) = result_rx.recv() => {
                 live_area.push_transcript_block(lines);
             }
 
             // ── Chat events ────────────────────────────────
-            Some((event, turn)) = chat_rx.recv() => {
+            Some((event, turn, execution)) = chat_rx.recv() => {
                 // All chat events belong to the home conversation target
                 // regardless of which target is currently selected for
                 // display. Stage-execution targets only receive explicit
@@ -2758,7 +2818,7 @@ async fn run_app(live_area: &mut LiveArea) -> io::Result<()> {
                     // Exception: events for a recently-interrupted turn
                     // (from a hard-cancel escalation) are allowed through.
                     (None, Some(ev))
-                        if interrupted_turn.as_deref() != Some(ev.as_str()) =>
+                        if interrupt.ended_turn.as_deref() != Some(ev.as_str()) =>
                     {
                         log::debug!("dropping retired-session chat event for turn {ev}");
                         continue;
@@ -2768,7 +2828,10 @@ async fn run_app(live_area: &mut LiveArea) -> io::Result<()> {
 
                 match event {
                     gremlins_magic_bus::EventKind::TurnStarted { execution_id } => {
-                        log::debug!("chat turn started: execution_id={execution_id}");
+                        if let Some(turn) = event_turn.as_deref().filter(|turn| active_turn.as_deref() == Some(*turn)) {
+                            log::debug!("chat turn started: execution_id={execution_id}");
+                            app.conversations.home_turn_started(turn, execution);
+                        }
                     }
                     gremlins_magic_bus::EventKind::StreamChunk { text, .. } => {
                         log::debug!("StreamChunk len={}", text.len());
@@ -2848,8 +2911,7 @@ async fn run_app(live_area: &mut LiveArea) -> io::Result<()> {
                             transcript.clear_tool_output();
                         });
 
-                        app.active_request = false;
-                        live_area.set_target_active_request(&home, false);
+                        finish_home_request(&mut app, live_area);
                         active_turn = None;
 
                         // Repaint immediately so the finished response text
@@ -2861,8 +2923,7 @@ async fn run_app(live_area: &mut LiveArea) -> io::Result<()> {
                         if !live_area.target_has_current_turn(&home) {
                             continue;
                         }
-                        app.active_request = false;
-                        live_area.set_target_active_request(&home, false);
+                        finish_home_request(&mut app, live_area);
                         let msg = format!("chat ended: {reason}");
                         live_area.with_target_transcript(&home, |transcript, reasoning| {
                             let had_turn = transcript.has_current_turn();
@@ -2880,13 +2941,13 @@ async fn run_app(live_area: &mut LiveArea) -> io::Result<()> {
                         // double-press window can escalate to a hard
                         // cancel that cleans up the partial artifact
                         // and the interrupt flag.
-                        if reason == "interrupted" {
-                            interrupted_turn = active_turn.take();
+                        if reason == "interrupted" && interrupt.in_window(Instant::now()) {
+                            interrupt.ended_turn = active_turn.take();
                         } else {
                             active_turn = None;
                             // Also clear a lingering interrupted turn
                             // when a hard-cancel escalation completes.
-                            interrupted_turn = None;
+                            interrupt.ended_turn = None;
                         }
 
                         // Repaint immediately so the ended state is visible
@@ -2897,8 +2958,7 @@ async fn run_app(live_area: &mut LiveArea) -> io::Result<()> {
                         if !live_area.target_has_current_turn(&home) {
                             continue;
                         }
-                        app.active_request = false;
-                        live_area.set_target_active_request(&home, false);
+                        finish_home_request(&mut app, live_area);
                         active_turn = None;
                         let full = format!("chat error: {msg}");
                         live_area.with_target_transcript(&home, |transcript, reasoning| {
@@ -3610,6 +3670,88 @@ mod tests {
     }
 
     // ── interrupt_press ──
+
+    #[test]
+    fn home_completion_while_viewing_a_stage_retires_only_home() {
+        use super::{finish_home_request, LiveArea, Target};
+        use ratatui::backend::TestBackend;
+
+        let mut app = App::new();
+        let mut area = LiveArea::with_backend(TestBackend::new(80, 24), 80, 24);
+        app.active_request = true;
+        let stage = Target::StageExecution {
+            run_id: "pipeline".into(),
+            stage: "review".into(),
+        };
+        area.select_conversation(&mut app, stage.clone());
+        assert!(!app.active_request);
+        app.active_request = true;
+        finish_home_request(&mut app, &mut area);
+        assert!(app.active_request, "the visible stage is unaffected");
+        area.select_conversation(&mut app, Target::Home);
+        assert!(!app.active_request, "home must not restore a stale request");
+        area.select_conversation(&mut app, stage);
+        assert!(app.active_request);
+    }
+
+    #[test]
+    fn switching_away_from_home_disarms_interrupt_escalation() {
+        use super::{HomeInterrupt, Target};
+
+        let mut interrupt = HomeInterrupt::default();
+        let now = Instant::now();
+        assert_eq!(interrupt.press(now), InterruptAction::SendSoft);
+        interrupt.ended_turn = Some("old turn".into());
+        interrupt.disarm_if_stale(
+            &Target::StageExecution {
+                run_id: "pipeline".into(),
+                stage: "review".into(),
+            },
+            now,
+        );
+        assert!(interrupt.ended_turn.is_none());
+        assert!(!interrupt.in_window(now));
+        assert_eq!(interrupt.press(now), InterruptAction::SendSoft);
+    }
+
+    #[test]
+    fn hard_interrupt_retires_home_turn_without_dismissing_its_correction() {
+        use super::{app::Execution, clear_active_turn_ui, LiveArea, Submission, Target};
+        use ratatui::backend::TestBackend;
+
+        let mut app = App::new();
+        let mut area = LiveArea::with_backend(TestBackend::new(80, 24), 80, 24);
+        let mut active_turn = Some(String::from("old"));
+        let execution = |turn: &str, nonce| Execution {
+            run_id: "session".into(),
+            execution_id: turn.into(),
+            nonce,
+        };
+        app.active_request = true;
+        app.conversations
+            .set_execution(Target::Home, Some(execution("old", 1)));
+        app.replace_input("change course");
+        app.cursor_end();
+
+        clear_active_turn_ui(&mut app, &mut area, &mut active_turn);
+        assert!(active_turn.is_none());
+        assert!(!app.active_request);
+        assert_eq!(app.input.text(), "change course");
+        assert_eq!(app.input_cursor, app.input.len());
+        assert!(matches!(
+            app.conversations.submit(&Target::Home, &app.input, false),
+            Submission::Blocked(_)
+        ));
+
+        app.conversations
+            .set_execution(Target::Home, Some(execution("next", 2)));
+        assert!(matches!(
+            app.conversations.submit(&Target::Home, &app.input, true),
+            Submission::Blocked(_)
+        ));
+        area.clear_target_input(&Target::Home, &mut app);
+        assert!(!app.conversations.is_correction_draft(&Target::Home));
+    }
 
     #[test]
     fn interrupt_first_press_is_soft() {

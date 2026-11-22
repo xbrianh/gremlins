@@ -1,5 +1,9 @@
 use std::collections::HashMap;
 
+mod conversations;
+pub(crate) use super::protocol::Execution;
+pub(crate) use conversations::{Conversations, Receipt, Submission};
+
 use crate::tui::completion::CompletionState;
 use crate::tui::input_buffer::InputBuffer;
 
@@ -15,6 +19,8 @@ pub struct App {
     pub input: InputBuffer,
     /// Cursor byte index into `input` (always on a `char` boundary).
     pub input_cursor: usize,
+    /// Inactive composers are moved here, never copied into render state.
+    parked_inputs: HashMap<Target, (InputBuffer, usize)>,
     /// Live gremlin state: id → run details.
     pub active_runs: HashMap<String, ActiveRun>,
     /// Cached project name for the info bar.
@@ -37,6 +43,8 @@ pub struct App {
     /// The conversation target currently selected in the UI. The home chat is
     /// the default; stage-execution targets are attached from run events.
     pub selected_target: Target,
+    /// Routing metadata is independent of which target currently owns the input widget.
+    pub conversations: Conversations,
     /// Highlighted gremlin id on the `/watch` screen.
     pub watch_selection: Option<String>,
     /// Gremlin whose inline watch stream pane is open, if any.
@@ -128,6 +136,12 @@ pub struct HistorySearch {
 }
 
 impl HistorySearch {
+    /// Forget the underlying draft without disturbing the incremental search.
+    pub(super) fn clear_saved_draft(&mut self) {
+        self.saved_input.clear();
+        self.saved_cursor = 0;
+    }
+
     /// Whether no history entries match the current query.
     pub fn is_failed(&self) -> bool {
         self.matches.is_empty()
@@ -199,6 +213,7 @@ impl App {
         Self {
             input: InputBuffer::new(),
             input_cursor: 0,
+            parked_inputs: HashMap::new(),
             active_runs: HashMap::new(),
             project_name,
             chat_model: None,
@@ -207,6 +222,7 @@ impl App {
             session_recreating: false,
             screen: Screen::Chat,
             selected_target: Target::Home,
+            conversations: Conversations::default(),
             watch_selection: None,
             watch_following: None,
             watch_follow_error: None,
@@ -217,6 +233,73 @@ impl App {
             active_skills: Vec::new(),
             history_search: None,
         }
+    }
+
+    /// Record an edit when it happens. A history search edits its own query,
+    /// leaving the saved draft and its execution address untouched.
+    fn input_edited(&mut self) {
+        if self.history_search.is_none() {
+            self.conversations.observe_draft(
+                &self.selected_target,
+                &self.input,
+                self.active_request,
+            );
+        }
+    }
+
+    pub fn replace_input(&mut self, text: &str) {
+        self.input.replace_all(text);
+        self.input_edited();
+    }
+
+    pub fn add_input_substitution(&mut self, span: std::ops::Range<usize>, value: String) {
+        self.input.add_substitution(span, value);
+        self.input_edited();
+    }
+
+    pub fn clear_input(&mut self) {
+        self.input.clear();
+        self.input_cursor = 0;
+        self.input_edited();
+    }
+
+    pub fn take_input(&mut self) -> InputBuffer {
+        let input = std::mem::take(&mut self.input);
+        self.input_cursor = 0;
+        self.input_edited();
+        input
+    }
+
+    pub fn select_composer(&mut self, target: Target) {
+        let next = self.parked_inputs.remove(&target).unwrap_or_default();
+        let previous = std::mem::replace(&mut self.selected_target, target);
+        let input = std::mem::replace(&mut self.input, next.0);
+        let cursor = std::mem::replace(&mut self.input_cursor, next.1);
+        if !input.is_empty() {
+            self.parked_inputs.insert(previous, (input, cursor));
+        }
+    }
+
+    pub fn clear_composer(&mut self, target: &Target) {
+        self.conversations.dismiss(target);
+        if &self.selected_target == target {
+            if let Some(search) = &mut self.history_search {
+                search.clear_saved_draft();
+            } else {
+                self.clear_input();
+                self.clear_completion();
+            }
+        } else {
+            self.parked_inputs.remove(target);
+        }
+    }
+
+    pub fn finish_delivery(&mut self, id: u64, result: Result<(), String>) -> Option<Receipt> {
+        let receipt = self.conversations.finish(id, result)?;
+        if receipt.clear_draft {
+            self.clear_composer(&receipt.target);
+        }
+        Some(receipt)
     }
 
     /// Number of active (running) gremlins.
@@ -672,6 +755,7 @@ impl App {
         let idx = self.input_cursor.min(self.input.len());
         self.input.insert_char(idx, ch);
         self.input_cursor = idx + ch.len_utf8();
+        self.input_edited();
     }
 
     /// Delete the character *before* the cursor (backspace).
@@ -686,6 +770,7 @@ impl App {
         }
         self.input.delete_range(start..self.input_cursor);
         self.input_cursor = start;
+        self.input_edited();
     }
 
     /// Delete the character *at* the cursor (delete key).
@@ -699,6 +784,7 @@ impl App {
             end += 1;
         }
         self.input.delete_range(self.input_cursor..end);
+        self.input_edited();
     }
 
     /// Replace the completion span with `replacement` and move the cursor to
@@ -712,6 +798,7 @@ impl App {
         debug_assert!(self.input.is_char_boundary(span.end));
         self.input.replace_range(span.clone(), &replacement);
         self.input_cursor = span.start + replacement.len();
+        self.input_edited();
     }
 
     /// Reset the cursor to the end of the current input (e.g. after history
@@ -839,6 +926,7 @@ impl App {
         if let Some(&idx) = search.matches.get(search.position) {
             if let Some(entry) = self.input_history.get(idx) {
                 self.input.replace_all(entry);
+                self.input_edited();
                 self.input_cursor = self.input.len();
                 return;
             }
@@ -892,6 +980,60 @@ impl App {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn newer_parked_edit_survives_a_successful_home_receipt() {
+        let mut app = App::new();
+        app.conversations.set_execution(
+            Target::Home,
+            Some(Execution {
+                run_id: "run".into(),
+                execution_id: "home".into(),
+                nonce: 4,
+            }),
+        );
+        app.insert_char('x');
+        let Submission::Correction { id, .. } =
+            app.conversations.submit(&Target::Home, &app.input, true)
+        else {
+            panic!("expected correction")
+        };
+        app.delete_before_cursor();
+        app.insert_char('x');
+        app.select_composer(Target::StageExecution {
+            run_id: "other".into(),
+            stage: "build".into(),
+        });
+        app.insert_char('y');
+        assert!(!app.finish_delivery(id, Ok(())).unwrap().clear_draft);
+        assert_eq!(app.input.text(), "y");
+        app.select_composer(Target::Home);
+        assert_eq!(app.input.text(), "x");
+        assert_eq!(app.input_cursor, 1);
+    }
+
+    #[test]
+    fn cancel_search_does_not_rebind_a_stale_home_draft() {
+        let mut app = App::new();
+        app.conversations.set_execution(
+            Target::Home,
+            Some(Execution {
+                run_id: "home".into(),
+                execution_id: "original".into(),
+                nonce: 5,
+            }),
+        );
+        app.replace_input("original correction");
+        app.enter_search();
+        app.conversations.set_execution(Target::Home, None);
+        app.search_push_char('x');
+        app.cancel_search();
+        assert_eq!(app.input.text(), "original correction");
+        assert!(matches!(
+            app.conversations.submit(&Target::Home, &app.input, false),
+            Submission::Blocked(_)
+        ));
+    }
 
     #[test]
     fn cursor_moves_left_right_on_char_boundaries() {

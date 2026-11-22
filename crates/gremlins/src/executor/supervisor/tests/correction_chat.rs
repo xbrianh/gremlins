@@ -483,7 +483,7 @@ async fn chat_announces_execution_identity_only_when_the_turn_starts() {
     )
     .unwrap();
     let (registry, _) = spawn_test_actor().await;
-    let (writer, mut reader, _read, _session_id, session) = chat_pair_actor(&registry).await;
+    let (writer, mut reader, _read, session_id, session) = chat_pair_actor(&registry).await;
     handle_chat(
         &json!({
             "op": "chat", "turn": "first", "text": "Review this draft.",
@@ -518,6 +518,45 @@ async fn chat_announces_execution_identity_only_when_the_turn_starts() {
     assert_eq!(target.execution_id(), Some(execution_id));
 
     let (_request, _held) = pending_request(&provider).await;
+    // A correction connection needs only the owner's announcement. Check
+    // both halves of the identity independently, then attach to the exact
+    // execution without taking a pause or subscribing the owner twice.
+    for (nonce, eid, expected) in [
+        (
+            started["nonce"].as_u64().unwrap() + 1,
+            execution_id,
+            "error",
+        ),
+        (target.nonce(), "previous-execution", "error"),
+        (target.nonce(), execution_id, "attached"),
+    ] {
+        let (client, server) = UnixStream::pair().unwrap();
+        let (read, write) = server.into_split();
+        let aux = tokio::spawn(crate::executor::supervisor::session::handle_session_aux(
+            read,
+            write,
+            session_id.clone(),
+            registry.clone(),
+        ));
+        let mut client = BufReader::new(client);
+        socket::write_json_line(
+            client.get_mut(),
+            &json!({
+                "op": "attach", "scope": "conversation", "session_id": session_id,
+                "id": id, "nonce": nonce, "execution_id": eid,
+            }),
+        )
+        .await
+        .unwrap();
+        let response = socket::read_json_line(&mut client).await.unwrap().unwrap();
+        assert_eq!(response["type"], expected, "{response}");
+        if expected == "attached" {
+            assert_eq!(response["nonce"], started["nonce"]);
+            assert_eq!(response["execution_id"], started["execution_id"]);
+        }
+        drop(client);
+        aux.await.unwrap();
+    }
     teardown_session(&session).await;
 }
 

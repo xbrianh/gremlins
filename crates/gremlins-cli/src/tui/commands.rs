@@ -333,6 +333,7 @@ fn help_text() -> Vec<String> {
         "  set GREMLINS_COMPACTION_THRESHOLD_TOKENS=<tokens> to enable it".to_string(),
         "keybindings:".to_string(),
         "  Ctrl+C           — clear / cancel; repeat within 1s to exit".to_string(),
+        "  Ctrl+T           — switch between home and the last attached stage, keeping both drafts".to_string(),
         "  Ctrl+D (empty)   — exit".to_string(),
         "  Ctrl+L           — redraw screen".to_string(),
         "  Ctrl+W           — enter the watch screen; in /watch: toggle the selected gremlin's live log"
@@ -340,6 +341,8 @@ fn help_text() -> Vec<String> {
         "  Ctrl+O           — in /watch: open or close the selected gremlin's live log"
             .to_string(),
         "  j/k/Up/Down      — in /watch: move the gremlin selection".to_string(),
+        "  Enter            — start an idle home turn, or send a correction to the selected execution".to_string(),
+        "  Esc              — dismiss a correction draft without interrupting its turn".to_string(),
         "  Enter             — in /watch: open the selected gremlin's chat"
             .to_string(),
         "  s                 — in /watch: stop the selected gremlin".to_string(),
