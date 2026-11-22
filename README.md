@@ -282,7 +282,7 @@ stages:
 | `cancel_on_error` | If true, cancel outstanding parallel children when one bails (default: false) |
 | `error_policy` | `"any"` (default) or `"all"` — when to halt the parallel group on child bail |
 
-**Model precedence:** per-stage `model:` beats an enclosing composite's explicit `model:`; `default-model-by-stage` beats the definition default. The definition default is the YAML's `default_model:`; `--model` or settings `default-model` fill that default only when the YAML does not declare one.
+**Launch model precedence (highest first):** per-stage `model:`, enclosing composite's explicit `model:`, selected default profile's `model-by-stage`, settings `default-model-by-stage`, then the definition default. Stage maps use an exact match, then the longest matching prefix. The definition default is the YAML's `default_model:`; launch `--model` or settings `default-model` fill that default only when the YAML does not declare one. Resume `--model` instead replaces all selection pins for remaining or rerun work (see [recovery](#recovering-from-gremlin-failures)).
 
 **Parallel-group form:**
 
@@ -308,7 +308,7 @@ stages:
 
 ### Model specifiers
 
-Models are specified as `provider/model` inline strings, either at the definition level (`default_model:`) or per stage (`model:`).
+Model values accept canonical `model://provider/model` URIs or scheme-omitted `provider/model` strings everywhere a model is selected: definition defaults, stages, settings, task mappings, and CLI `--model`. Both support `?key=value,...` parameters. The command backend is the exception: use `cmd/<command>`, never `model://cmd/...`. Use `profile/<name>` to select a named settings profile.
 
 ```yaml
 default_model: xai/grok-4     # all stages default to this
@@ -320,7 +320,35 @@ stages:
     model: openai/gpt-4o      # this stage uses openai instead
 ```
 
-Providers: `openai`, `chatgpt`, `xai`, `openrouter`, `anthropic`, `azure-openai`, `copilot`, `cmd`. The CLI `--model provider/model` flag supplies the definition default only when the YAML does not declare `default_model:`; per-stage `model:` and `default-model-by-stage` still take precedence.
+Providers: `openai`, `chatgpt`, `xai`, `openrouter`, `anthropic`, `azure-openai`, `copilot`, `cmd`. Launch `--model` supplies the definition default only when the YAML does not declare `default_model:`; it does not override stage selections. Resume `--model` has replacement semantics instead.
+
+#### Model profile example
+
+In `~/.config/gremlins/settings.yaml`:
+
+```yaml
+model-profiles:
+  recovery:
+    model: model://openai/gpt-4o
+    model-by-stage:
+      "review*": model://anthropic/claude-sonnet-4
+      review/security: model://openai/o3
+      "review/security*": model://openai/o3
+    task-models:
+      Scout: model://openai/gpt-4o-mini
+```
+
+```sh
+gremlins resume <id> --model profile/recovery
+gremlins resume <id> --stage review --model model://openai/gpt-4o
+```
+
+With `profile/recovery`, `review/security` matches exactly; descendants of
+`review/security` match `review/security*`, the longest prefix, rather than
+`review*`. Prefix rules require a trailing `*`; keys without it match exactly.
+Other review stages match `review*`, and unmatched stages use the profile's `model`.
+New Scout tasks use the profile's task mapping; unmapped task kinds use the
+effective model of their stage, not an old task-model pin.
 
 ### `prompt:` field
 
@@ -645,7 +673,23 @@ When a gremlin bails and halts, you have three recovery options:
 **`gremlins resume <id>`** — Re-spawn the bailed gremlin from the stage where it
 bailed. Use this when the cause has been fixed externally (e.g., a code review
 fix has been merged, or a merge conflict has been resolved). The gremlin will
-restart from the bailed stage with the current worktree state.
+restart from the bailed stage with the current worktree state. After an explicit
+`resume --model` replacement, resume without `--model` reuses that frozen model
+selection, not current settings or changed profile definitions. Runs without an
+explicit replacement retain existing launch-time resolution behavior.
+
+**`gremlins resume <id> --model <selection>`** replaces all model-selection pins
+for remaining or rerun work: the definition default, explicit stage and enclosing
+composite models, stage maps, and old task-model mappings. A concrete model URI
+selects that model throughout. A `profile/<name>` selects its exact stage match,
+then longest matching stage prefix, then profile default. The new selection's
+task mappings replace the old mappings; unmapped task kinds inherit the effective
+stage model.
+
+Completed history is immutable. Ordinary resume keeps existing artifacts;
+`--stage <name>` forks from that top-level stage and reruns onward while preserving
+the parent run. A model replacement affects only remaining or rerun work, never
+rewrites completed history. Launch `--model` behavior is unchanged.
 
 **`gremlins ack <id>`** — Acknowledge the gremlin without re-running. Use this
 when the bailed condition is acceptable (e.g., the review found minor style

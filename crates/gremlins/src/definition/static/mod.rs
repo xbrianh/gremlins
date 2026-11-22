@@ -5,6 +5,7 @@ use std::path::{Path, PathBuf};
 
 use async_trait::async_trait;
 use indexmap::IndexMap;
+use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 
 use std::collections::HashSet;
@@ -34,6 +35,56 @@ pub(crate) mod yaml;
 // StaticDefinition
 // ---------------------------------------------------------------------------
 
+/// A concrete replacement model selection, independent of settings profiles.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ResolvedModelSelection {
+    /// Original user request; may name a profile.
+    pub requested: String,
+    pub default_model: String,
+    #[serde(default)]
+    pub stage_models_exact: IndexMap<String, String>,
+    #[serde(default)]
+    pub stage_models_prefix: IndexMap<String, String>,
+    #[serde(default)]
+    pub task_models: Option<IndexMap<String, String>>,
+}
+
+impl ResolvedModelSelection {
+    /// Exact matches win, followed by the longest matching prefix, then default.
+    pub fn model_for_stage(&self, name: &str) -> &str {
+        self.stage_models_exact
+            .get(name)
+            .or_else(|| {
+                self.stage_models_prefix
+                    .iter()
+                    .filter(|(prefix, _)| name.starts_with(prefix.as_str()))
+                    .max_by_key(|(prefix, _)| prefix.len())
+                    .map(|(_, model)| model)
+            })
+            .map(String::as_str)
+            .unwrap_or(&self.default_model)
+    }
+
+    /// Require concrete model URIs and valid task-model keys.
+    pub fn validate(&self) -> Result<(), String> {
+        crate::config::parse_task_models_map(self.task_models.as_ref())
+            .map_err(|e| e.to_string())?;
+        for model in std::iter::once(&self.default_model)
+            .chain(self.stage_models_exact.values())
+            .chain(self.stage_models_prefix.values())
+            .chain(self.task_models.iter().flat_map(|models| models.values()))
+        {
+            if model.starts_with("profile/") || model.starts_with("profile:") {
+                return Err(format!(
+                    "resolved model must be concrete, not a profile reference: {model:?}"
+                ));
+            }
+            ModelURI::parse(model)?;
+        }
+        Ok(())
+    }
+}
+
 /// A [`GremlinDefinition`] trait implementation that owns the definition
 /// data directly.
 ///
@@ -48,6 +99,8 @@ pub struct StaticDefinition {
     pub path: PathBuf,
     /// Every stage runs with this model unless it declares its own.
     pub default_model: ModelURI,
+    /// Persisted replacement selection; runtime applies it over stage pins.
+    pub resolved_model_selection: Option<ResolvedModelSelection>,
     /// Bootstrap commands and input sources.
     pub bootstrap: Bootstrap,
     /// The stage tree, in declaration order.
@@ -89,6 +142,7 @@ impl StaticDefinition {
             name,
             path,
             default_model,
+            resolved_model_selection: None,
             bootstrap,
             stages,
             stage_names,
@@ -118,9 +172,24 @@ impl StaticDefinition {
             clean_cmds: Vec::new(),
             expanded_json: Value::Null,
             default_task_models: None,
+            resolved_model_selection: None,
             inherited_artifact_inputs: Vec::new(),
             cursor: 0,
         }
+    }
+
+    /// Install a validated replacement without changing the declared stage pins.
+    pub fn apply_resolved_model_selection(
+        &mut self,
+        selection: ResolvedModelSelection,
+    ) -> Result<(), DefinitionError> {
+        selection.validate().map_err(DefinitionError::Message)?;
+        let default_model =
+            ModelURI::parse(&selection.default_model).map_err(DefinitionError::Message)?;
+        self.default_model = default_model;
+        self.default_task_models = selection.task_models.clone();
+        self.resolved_model_selection = Some(selection);
+        Ok(())
     }
 
     /// Whether this definition is the [`StaticDefinition::stub`] rather than a loaded one.
@@ -149,6 +218,7 @@ impl StaticDefinition {
             clean_cmds,
             expanded_json: Value::Null,
             default_task_models: None,
+            resolved_model_selection: None,
             inherited_artifact_inputs: Vec::new(),
             cursor: 0,
         }
@@ -263,6 +333,13 @@ impl StaticDefinition {
             "default_model".to_string(),
             Value::String(self.default_model.to_string()),
         );
+
+        if let Some(selection) = &self.resolved_model_selection {
+            root.insert(
+                "resolved_model_selection".into(),
+                serde_json::to_value(selection).expect("model selection is serializable"),
+            );
+        }
 
         // default_task_models — included when present so child processes
         // do not depend on the current settings.yaml.
@@ -461,6 +538,10 @@ impl GremlinDefinition for StaticDefinition {
         self.default_model = model.clone();
     }
 
+    fn as_any_mut(&mut self) -> Option<&mut dyn std::any::Any> {
+        Some(self)
+    }
+
     fn clone_box(&self) -> Box<dyn GremlinDefinition> {
         Box::new(self.clone())
     }
@@ -616,6 +697,142 @@ mod tests {
         ModelURI::parse(spec).unwrap()
     }
 
+    fn selection() -> ResolvedModelSelection {
+        serde_json::from_value(serde_json::json!({
+            "requested": "profile://replacement",
+            "default_model": "openai/default"
+        }))
+        .unwrap()
+    }
+
+    #[test]
+    fn resolved_selection_precedence() {
+        let mut selection = selection();
+        selection.stage_models_prefix = IndexMap::from([
+            ("review".into(), "openai/short".into()),
+            ("review.deep".into(), "openai/long".into()),
+        ]);
+        selection
+            .stage_models_exact
+            .insert("review.deep.exact".into(), "openai/exact".into());
+        assert_eq!(
+            selection.model_for_stage("review.deep.exact"),
+            "openai/exact"
+        );
+        assert_eq!(
+            selection.model_for_stage("review.deep.other"),
+            "openai/long"
+        );
+        assert_eq!(selection.model_for_stage("review.other"), "openai/short");
+        assert_eq!(selection.model_for_stage("implement"), "openai/default");
+        selection.validate().unwrap();
+    }
+
+    #[test]
+    fn resolved_selection_preserves_stage_map_order() {
+        let mut selection = selection();
+        for name in ["z", "a", "m"] {
+            selection
+                .stage_models_exact
+                .insert(name.into(), "openai/exact".into());
+            selection
+                .stage_models_prefix
+                .insert(name.into(), "openai/prefix".into());
+        }
+        let bytes = serde_json::to_vec(&selection).unwrap();
+        let loaded: ResolvedModelSelection = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(
+            loaded
+                .stage_models_exact
+                .keys()
+                .map(String::as_str)
+                .collect::<Vec<_>>(),
+            ["z", "a", "m"]
+        );
+        assert_eq!(
+            loaded
+                .stage_models_prefix
+                .keys()
+                .map(String::as_str)
+                .collect::<Vec<_>>(),
+            ["z", "a", "m"]
+        );
+        assert_eq!(serde_json::to_vec(&loaded).unwrap(), bytes);
+    }
+
+    #[test]
+    fn resolved_selection_requires_concrete_models() {
+        let mut selection = selection();
+        selection.validate().unwrap();
+        selection.default_model = "profile://replacement".into();
+        assert!(selection.validate().is_err());
+        selection = self::selection();
+        selection
+            .stage_models_exact
+            .insert("x".into(), "profile://x".into());
+        assert!(selection.validate().is_err());
+        selection.stage_models_exact.clear();
+        selection
+            .stage_models_prefix
+            .insert("x".into(), String::new());
+        assert!(selection.validate().is_err());
+        selection.stage_models_prefix.clear();
+        selection.task_models = Some(IndexMap::from([("Scout".into(), "profile://x".into())]));
+        assert!(selection.validate().is_err());
+        selection.task_models = Some(IndexMap::from([("unknown".into(), "openai/task".into())]));
+        assert!(selection.validate().is_err());
+    }
+
+    #[test]
+    fn resolved_selection_roundtrip_and_empty_maps() {
+        for task_models in [
+            None,
+            Some(IndexMap::new()),
+            Some(IndexMap::from([("Scout".into(), "openai/task".into())])),
+        ] {
+            let mut selection = selection();
+            selection.task_models = task_models;
+            let mut def = stub_definition();
+            def.apply_resolved_model_selection(selection.clone())
+                .unwrap();
+            assert_eq!(def.default_task_models, selection.task_models);
+            let mut json = def.to_expanded_json();
+            // Persisted replacement wins over older default pins on load.
+            json["default_model"] = serde_json::json!("openai/old");
+            let loaded =
+                StaticDefinition::deserialize_owned(&serde_json::to_vec(&json).unwrap()).unwrap();
+            assert_eq!(loaded.default_model, model("openai/default"));
+            assert_eq!(loaded.default_task_models, selection.task_models);
+            assert_eq!(loaded.resolved_model_selection, Some(selection));
+        }
+        let def = stub_definition();
+        assert!(def
+            .to_expanded_json()
+            .get("resolved_model_selection")
+            .is_none());
+        assert!(StaticDefinition::deserialize_owned(
+            &serde_json::to_vec(&def.to_expanded_json()).unwrap()
+        )
+        .unwrap()
+        .resolved_model_selection
+        .is_none());
+    }
+
+    #[test]
+    fn invalid_resolved_selection_does_not_mutate_definition() {
+        let mut def = stub_definition();
+        let before = def.to_expanded_json();
+        let mut selection = selection();
+        selection.default_model.clear();
+        assert!(def.apply_resolved_model_selection(selection).is_err());
+        assert_eq!(def.to_expanded_json(), before);
+        let mut json = before;
+        json["resolved_model_selection"] = serde_json::json!({
+            "requested": "bad", "default_model": "profile://bad"
+        });
+        assert!(StaticDefinition::deserialize_owned(&serde_json::to_vec(&json).unwrap()).is_err());
+    }
+
     fn stub_definition() -> StaticDefinition {
         StaticDefinition::stub()
     }
@@ -660,6 +877,7 @@ mod tests {
             clean_cmds: vec![],
             expanded_json: serde_json::Value::Null,
             default_task_models: None,
+            resolved_model_selection: None,
             inherited_artifact_inputs: Vec::new(),
             cursor: 0,
         };
@@ -681,6 +899,7 @@ mod tests {
             clean_cmds: vec![],
             expanded_json: serde_json::Value::Null,
             default_task_models: None,
+            resolved_model_selection: None,
             inherited_artifact_inputs: Vec::new(),
             cursor: 0,
         };
@@ -713,6 +932,7 @@ mod tests {
             clean_cmds: vec![],
             expanded_json: serde_json::Value::Null,
             default_task_models: None,
+            resolved_model_selection: None,
             inherited_artifact_inputs: Vec::new(),
             cursor: 0,
         };
@@ -922,6 +1142,7 @@ mod tests {
             clean_cmds: vec![],
             expanded_json: serde_json::Value::Null,
             default_task_models: None,
+            resolved_model_selection: None,
             inherited_artifact_inputs: Vec::new(),
             cursor: 0,
         }

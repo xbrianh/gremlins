@@ -474,6 +474,29 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn empty_replacement_selector_retains_lazy_fallback_on_clone() {
+        let calls = Arc::new(AtomicU64::new(0));
+        let flag = calls.clone();
+        let factory = sync_factory(move |spec| {
+            assert_eq!(spec, "effective/stage");
+            flag.fetch_add(1, Ordering::SeqCst);
+            Err("fallback credential failure".into())
+        });
+        let selector = TaskModelSelector::from_overrides(HashMap::new(), factory)
+            .with_fallback_spec("effective/stage");
+        let cloned = selector.clone();
+        assert_eq!(calls.load(Ordering::SeqCst), 0);
+        for selector in [selector, cloned] {
+            let err = selector
+                .model_for(TaskKind::Implement, &gm_mock_task())
+                .await
+                .unwrap_err();
+            assert_eq!(err, "fallback credential failure");
+        }
+        assert_eq!(calls.load(Ordering::SeqCst), 2);
+    }
+
+    #[tokio::test]
     async fn build_task_selector_does_not_eagerly_resolve_entries() {
         let calls = Arc::new(AtomicU64::new(0));
         let calls_flag = calls.clone();
@@ -837,6 +860,166 @@ mod tests {
                 "nested turn must carry the target passthrough, not the parent's"
             );
         }
+    }
+
+    /// Exercise selection through the Task tool installed on a mapped child,
+    /// rather than calling model_for directly with a fabricated parent.
+    async fn assert_recursive_task_selection(pinned_fallback: bool, grandchild_kind: TaskKind) {
+        use rig_core::test_utils::{MockCompletionModel, MockStreamEvent};
+
+        let done_turn = |id: &str, summary: &str| {
+            vec![
+                MockStreamEvent::tool_call(id, "Done", serde_json::json!({"summary": summary})),
+                MockStreamEvent::final_response_with_default_usage(),
+            ]
+        };
+        let uses_stage = pinned_fallback && grandchild_kind != TaskKind::Fork;
+        let mut mapped_turns = vec![vec![
+            MockStreamEvent::text("mapped scout history sentinel"),
+            MockStreamEvent::tool_call(
+                "recursive-task",
+                "Task",
+                serde_json::json!({
+                    "kind": grandchild_kind.to_string(),
+                    "prompt": "grandchild prompt sentinel"
+                }),
+            ),
+            MockStreamEvent::final_response_with_default_usage(),
+        ]];
+        if !uses_stage {
+            mapped_turns.push(done_turn("grandchild-done", "grandchild result"));
+        }
+        mapped_turns.push(done_turn("scout-done", "scout result"));
+        let mapped = MockCompletionModel::from_stream_turns(mapped_turns);
+        let stage = MockCompletionModel::from_stream_turns(if uses_stage {
+            vec![done_turn("stage-grandchild-done", "grandchild result")]
+        } else {
+            vec![]
+        });
+        let stage_extra = serde_json::json!({"stage_option": true});
+        let mapped_extra = serde_json::json!({"mapped_option": true});
+        let calls = Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
+        let calls_for_factory = calls.clone();
+        let mapped_for_factory = mapped.clone();
+        let stage_for_factory = stage.clone();
+        let mapped_options = mapped_extra.clone();
+        let stage_options = stage_extra.clone();
+        let factory: TaskModelFactory =
+            crate::clients::agent::task_models::sync_factory(move |spec: &str| {
+                calls_for_factory.lock().unwrap().push(spec.to_owned());
+                match spec {
+                    "mapped/scout" => Ok(TaskModel {
+                        model: mapped_for_factory.clone().erase(),
+                        temperature: Some(0.7),
+                        max_tokens: Some(8192),
+                        extra: Some(mapped_options.clone()),
+                        preserve_reasoning: None,
+                    }),
+                    "stage/model" => Ok(TaskModel {
+                        model: stage_for_factory.clone().erase(),
+                        temperature: Some(0.2),
+                        max_tokens: Some(2048),
+                        extra: Some(stage_options.clone()),
+                        preserve_reasoning: None,
+                    }),
+                    other => panic!("unexpected model resolution: {other}"),
+                }
+            });
+        let selector = TaskModelSelector::from_overrides(
+            HashMap::from([(TaskKind::Scout, "mapped/scout".into())]),
+            factory,
+        );
+        let selector = if pinned_fallback {
+            selector.with_fallback_spec("stage/model")
+        } else {
+            selector
+        };
+        assert!(calls.lock().unwrap().is_empty(), "selection must be lazy");
+        let runner = make_task_runner(
+            stage.clone().erase(),
+            Some(selector),
+            None,
+            crate::clients::cancel::CancelToken::new(),
+            depth_test_ctx(),
+            String::new(),
+            "stage".into(),
+            5.0,
+            10,
+            0,
+            Some(0.2),
+            Some(2048),
+            Some(stage_extra.clone()),
+            false,
+        );
+        let output = runner(
+            TaskKind::Scout,
+            "mapped scout prompt sentinel".into(),
+            Box::new(ConversationStub::new("")),
+            String::new(),
+            String::new(),
+        )
+        .await;
+        assert_eq!(output.output, "scout result");
+        let expected_calls = if uses_stage {
+            vec!["mapped/scout", "stage/model"]
+        } else {
+            vec!["mapped/scout"]
+        };
+        assert_eq!(*calls.lock().unwrap(), expected_calls);
+        let mapped_requests = mapped.requests();
+        let stage_requests = stage.requests();
+        assert_eq!(mapped_requests.len(), if uses_stage { 2 } else { 3 });
+        assert_eq!(stage_requests.len(), usize::from(uses_stage));
+        let resumed_history = format!("{:?}", mapped_requests.last().unwrap().chat_history);
+        assert!(
+            resumed_history.contains("grandchild result"),
+            "grandchild result must reach the resumed Scout: {resumed_history}"
+        );
+        for req in &mapped_requests {
+            assert_eq!(req.temperature, Some(0.7));
+            assert_eq!(req.max_tokens, Some(8192));
+            assert_eq!(req.additional_params, Some(mapped_extra.clone()));
+        }
+        for req in &stage_requests {
+            assert_eq!(req.temperature, Some(0.2));
+            assert_eq!(req.max_tokens, Some(2048));
+            assert_eq!(req.additional_params, Some(stage_extra.clone()));
+        }
+        let grandchild_request = if uses_stage {
+            &stage_requests[0]
+        } else {
+            &mapped_requests[1]
+        };
+        let history = format!("{:?}", grandchild_request.chat_history);
+        assert!(history.contains("grandchild prompt sentinel"), "{history}");
+        if grandchild_kind == TaskKind::Fork {
+            assert!(
+                history.contains("mapped scout prompt sentinel"),
+                "{history}"
+            );
+            // The active Task turn is not committed yet; Fork inherits the
+            // preceding conversation, including the mapped child's prompt.
+        } else {
+            assert!(
+                !history.contains("mapped scout history sentinel"),
+                "{history}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn recursive_unmapped_task_inherits_mapped_parent_model_and_options() {
+        assert_recursive_task_selection(false, TaskKind::Implement).await;
+    }
+
+    #[tokio::test]
+    async fn recursive_unmapped_task_uses_pinned_stage_fallback_model_and_options() {
+        assert_recursive_task_selection(true, TaskKind::Implement).await;
+    }
+
+    #[tokio::test]
+    async fn recursive_fork_bypasses_pinned_fallback_and_inherits_mapped_history() {
+        assert_recursive_task_selection(true, TaskKind::Fork).await;
     }
 
     /// When the factory fails to resolve a matched spec, the task must return

@@ -111,12 +111,25 @@ async fn assert_runtime_default_replaced(stage: Option<&str>) {
     assert_eq!(persisted["metadata"]["acceptance"], "keep");
     let mut expected: Value = serde_json::from_slice(&parent_definition).unwrap();
     expected["default_model"] = json!(REPLACEMENT);
+    expected["resolved_model_selection"] = json!({
+        "requested": REPLACEMENT,
+        "default_model": REPLACEMENT,
+        "stage_models_exact": {},
+        "stage_models_prefix": {},
+        "task_models": null
+    });
     assert_eq!(read_json(resumed.join("definition.json")), expected);
     assert_eq!(worker.model_override.as_deref(), Some(REPLACEMENT));
     worker.init_runtime(None).await.unwrap();
     assert_eq!(worker.definition.default_model().to_string(), REPLACEMENT);
     let pinned = worker.definition.next_stage().await.unwrap();
     assert_eq!(pinned.model().unwrap().to_string(), CONFIGURED);
+    assert_eq!(
+        crate::executor::run::resolve_client(&pinned, &worker, None)
+            .unwrap()
+            .to_string(),
+        REPLACEMENT
+    );
     let unpinned = worker.definition.next_stage().await.unwrap();
     assert_eq!(unpinned.name(), "run");
     assert!(unpinned.model().is_none());

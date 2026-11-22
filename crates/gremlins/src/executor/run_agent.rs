@@ -86,12 +86,18 @@ pub(crate) async fn run_agent(
         stage_key(scope, &agent.name)
     };
 
-    let task_models_by_kind = resolve_task_models(
-        gremlin.runtime_config.default_task_models.as_ref(),
-        enclosing_task_models,
-        stage_task_models.as_ref(),
-    )
-    .map_err(|e| stage_failed(&agent.name, e))?;
+    let task_models_by_kind =
+        if let Some(selection) = &gremlin.runtime_config.resolved_model_selection {
+            // Replacement maps are complete, not another layer over old pins.
+            resolve_task_models(selection.task_models.as_ref(), None, None)
+        } else {
+            resolve_task_models(
+                gremlin.runtime_config.default_task_models.as_ref(),
+                enclosing_task_models,
+                stage_task_models.as_ref(),
+            )
+        }
+        .map_err(|e| stage_failed(&agent.name, e))?;
 
     let client = resolve_client(node, gremlin, enclosing_model)?;
     let framework_subs = gremlin.framework_subs(&agent.name);
@@ -141,13 +147,22 @@ pub(crate) async fn run_agent(
 
     let stage_env = gremlin.env.clone();
 
-    let task_models = crate::clients::agent::task::build_task_selector(
+    let task_model_factory: crate::clients::agent::task::TaskModelFactory =
         std::sync::Arc::new(|spec: &str| {
             let spec = spec.to_string();
             Box::pin(async move { crate::clients::client::resolve_model(&spec).await })
-        }),
-        &task_models_by_kind,
-    );
+        });
+    let task_models = if gremlin.runtime_config.resolved_model_selection.is_some() {
+        Some(
+            crate::clients::agent::task::TaskModelSelector::from_overrides(
+                task_models_by_kind,
+                task_model_factory,
+            )
+            .with_fallback_spec(client.to_string()),
+        )
+    } else {
+        crate::clients::agent::task::build_task_selector(task_model_factory, &task_models_by_kind)
+    };
 
     let chat_turn: Option<usize> = chat_turn_from_stage_name(&agent.name);
 
@@ -330,10 +345,14 @@ pub(crate) async fn run_agent(
     let params = RunParams {
         prompt: prepared.user_prompt(),
         label: prepared.name.clone(),
-        model: prepared
-            .model
-            .clone()
-            .or_else(|| Some(client.model().to_string())),
+        model: if gremlin.runtime_config.resolved_model_selection.is_some() {
+            Some(client.model().to_string())
+        } else {
+            prepared
+                .model
+                .clone()
+                .or_else(|| Some(client.model().to_string()))
+        },
         raw_path: Some(
             agent_raw_stream_path(gremlin, &prepared.name)
                 .map_err(|e| stage_failed(&prepared.name, e))?,
@@ -642,4 +661,169 @@ pub(crate) fn done_check_env(
         .chain(&command.env)
         .map(|(k, v)| (k.clone(), v.clone()))
         .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::builders::agent::AgentBuilder;
+    use crate::clients::agent::task::TaskModel;
+    use crate::clients::backend::Backend;
+    use crate::clients::client::{install_test_backend, Client};
+    use crate::clients::protocol::CompletedRun;
+    use crate::clients::InteractiveSession;
+    use crate::definition::{ResolvedModelSelection, StageSpec, StaticDefinition};
+    use crate::executor::gremlin::{validate_gremlin_id, RuntimeConfig};
+    use crate::executor::state::StateData;
+    use crate::schemas::bootstrap::Bootstrap;
+    use crate::test_support::Sandbox;
+    use std::sync::{Arc, Mutex};
+
+    const CAPTURED: &str = "deliberate run_agent dispatch capture";
+
+    #[derive(Default)]
+    struct CaptureBackend(Mutex<Option<RunParams>>);
+
+    #[async_trait::async_trait]
+    impl Backend for CaptureBackend {
+        async fn run(
+            &self,
+            params: RunParams,
+            _interactive: InteractiveSession,
+        ) -> Result<CompletedRun, ClientError> {
+            *self.0.lock().unwrap() = Some(params);
+            Err(ClientError::Runtime {
+                message: CAPTURED.into(),
+            })
+        }
+
+        fn model(&self) -> &str {
+            ""
+        }
+    }
+
+    fn test_gremlin(stage: StageSpec) -> (Sandbox, Gremlin) {
+        let sandbox = Sandbox::new();
+        let default_model = "cmd/run-agent-old-default";
+        let state_dir = config::state_root().join("gr-test-0001");
+        std::fs::create_dir_all(state_dir.join("artifacts")).unwrap();
+        let data = serde_json::json!({
+            "id": "gr-test", "attempt": "test-0001", "stage": "starting",
+            "model": default_model
+        });
+        state::write_state(&state_dir, data.as_object().unwrap()).unwrap();
+        let gremlin = Gremlin {
+            id: validate_gremlin_id("gr-test").unwrap(),
+            definition: Box::new(StaticDefinition::new(
+                "test".into(),
+                PathBuf::from("test.yaml"),
+                ModelURI::parse(default_model).unwrap(),
+                Bootstrap::default(),
+                vec![stage],
+                None,
+                vec![],
+                serde_json::Value::Null,
+                None,
+            )),
+            definition_path: None,
+            model_override: None,
+            workdir: None,
+            project_root: sandbox.path().to_path_buf(),
+            state: StateData::open("gr-test").unwrap(),
+            env: HashMap::new(),
+            client: Client::parse(default_model).unwrap(),
+            loop_iter: "1".into(),
+            stage_inputs: HashMap::new(),
+            runtime_config: RuntimeConfig::snapshot(None),
+            cancel_token: None,
+            interactive_sessions: None,
+            clean_cmds: vec![],
+            enclosing_task_models: None,
+            enclosing_model: None,
+            discovered_skills: None,
+            extra_sandbox_roots: vec![],
+            native_definition: None,
+        };
+        (sandbox, gremlin)
+    }
+
+    async fn capture_dispatch(name: &str, replacement: bool, expected: &str) -> RunParams {
+        let stage = AgentBuilder::new(name)
+            .prompt("hi")
+            .option("model", "old-prepared-model")
+            .build()
+            .unwrap();
+        let (_sandbox, mut gremlin) = test_gremlin(stage);
+        gremlin.runtime_config.default_task_models = None;
+        gremlin.runtime_config.resolved_model_selection =
+            replacement.then(|| ResolvedModelSelection {
+                requested: "profile/replacement".into(),
+                default_model: "cmd/run-agent-new-default".into(),
+                stage_models_exact: [("review-exact".into(), "cmd/run-agent-new-exact".into())]
+                    .into(),
+                stage_models_prefix: [("review-".into(), "cmd/run-agent-new-prefix".into())].into(),
+                task_models: None,
+            });
+        let backend = Arc::new(CaptureBackend::default());
+        let spec = if replacement {
+            format!("cmd/{expected}")
+        } else {
+            "cmd/run-agent-old-default".into()
+        };
+        install_test_backend(&spec, backend.clone());
+        let node = gremlin.definition.next_stage().await.unwrap();
+        let error = run_agent(&node, &mut gremlin, "", "", None, None)
+            .await
+            .expect_err("capture backend deliberately fails");
+        assert!(error.to_string().contains(CAPTURED), "{error}");
+        let params = backend
+            .0
+            .lock()
+            .unwrap()
+            .take()
+            .expect("backend was invoked");
+        assert_eq!(params.model.as_deref(), Some(expected));
+        params
+    }
+
+    async fn assert_replacement_dispatch(name: &str, expected: &str) {
+        let params = capture_dispatch(name, true, expected).await;
+        let selector = params
+            .task_models
+            .expect("replacement installs a selector even without task overrides");
+        let parent = TaskModel {
+            model: rig_core::test_utils::MockCompletionModel::from_turns([]).erase(),
+            temperature: None,
+            max_tokens: None,
+            extra: None,
+            preserve_reasoning: None,
+        };
+        // A cmd fallback cannot build a task model; its error exposes the selected full spec.
+        let error = selector
+            .model_for(TaskKind::Implement, &parent)
+            .await
+            .unwrap_err();
+        assert!(error.contains(&format!("cmd/{expected}")), "{error}");
+    }
+
+    #[tokio::test]
+    async fn replacement_default_overrides_prepared_model_at_dispatch() {
+        assert_replacement_dispatch("writer", "run-agent-new-default").await;
+    }
+
+    #[tokio::test]
+    async fn replacement_exact_overrides_prepared_model_at_dispatch() {
+        assert_replacement_dispatch("review-exact", "run-agent-new-exact").await;
+    }
+
+    #[tokio::test]
+    async fn replacement_prefix_overrides_prepared_model_at_dispatch() {
+        assert_replacement_dispatch("review-leaf", "run-agent-new-prefix").await;
+    }
+
+    #[tokio::test]
+    async fn no_replacement_preserves_prepared_model_at_dispatch() {
+        let params = capture_dispatch("writer", false, "old-prepared-model").await;
+        assert!(params.task_models.is_none());
+    }
 }

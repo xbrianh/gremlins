@@ -236,19 +236,123 @@ pub(crate) async fn handle_stop(request: &Value, registry: &Arc<RunRegistry>) ->
 // resume
 // ---------------------------------------------------------------------------
 
-fn load_definition_snapshot(gremlin: &Gremlin) -> Result<StaticDefinition, Value> {
+#[cfg(test)]
+mod snapshot_tests {
+    use super::*;
+    use state::StateStore;
+
+    #[test]
+    fn snapshot_bail_lookup_distinguishes_missing_corrupt_and_unreadable() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = state::FileSystemStateStore::from_path(dir.path().to_path_buf());
+        let snapshot = serde_json::json!({"attempt": 1})
+            .as_object()
+            .unwrap()
+            .clone();
+        store.write_state(&snapshot).unwrap();
+        let data = state::StateData::from_store(None, Box::new(store));
+        assert!(!snapshot_has_bail(&data, &snapshot).unwrap());
+        let path = dir.path().join("bail_1.json");
+        std::fs::write(&path, b"broken json").unwrap();
+        assert!(snapshot_has_bail(&data, &snapshot).is_err());
+        std::fs::remove_file(&path).unwrap();
+        std::fs::create_dir(&path).unwrap();
+        assert!(snapshot_has_bail(&data, &snapshot).is_err());
+    }
+
+    #[tokio::test]
+    async fn stale_resume_snapshot_is_rejected_at_publication_boundary() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = state::FileSystemStateStore::from_path(dir.path().to_path_buf());
+        let original = serde_json::json!({
+            "status": "stopped", "stage": "review", "attempt": 1, "kind": "pipeline"
+        })
+        .as_object()
+        .unwrap()
+        .clone();
+        store.write_state(&original).unwrap();
+        let data = state::StateData::from_store(None, Box::new(store));
+        let expected = data.state_tree();
+        assert_eq!(snapshot_str(&expected, "status"), "stopped");
+        assert_eq!(snapshot_str(&expected, "stage"), "review");
+
+        data.record_stage_error("other", "old attempt");
+        assert!(snapshot_has_bail(&data, &expected).unwrap());
+        let changed = serde_json::json!({
+            "status": "running", "stage": "implement", "attempt": 2, "kind": "changed"
+        })
+        .as_object()
+        .unwrap()
+        .clone();
+        data.write_state(&changed).unwrap();
+
+        // Bail lookup and all planning fields remain tied to the original attempt.
+        assert!(snapshot_has_bail(&data, &expected).unwrap());
+        assert!(data.stage_error().is_none());
+        assert_eq!(snapshot_str(&expected, "attempt"), "1");
+        assert_eq!(snapshot_str(&expected, "kind"), "pipeline");
+        let fields = serde_json::json!({"status": "running"})
+            .as_object()
+            .unwrap()
+            .clone();
+        assert!(data
+            .store_ref()
+            .publish_resume_conditional(&expected, &fields, None, &serde_json::Map::new())
+            .is_err());
+        assert!(data
+            .store_ref()
+            .fork_to_stage_conditional(&expected, &[], &expected, None)
+            .await
+            .is_err());
+        assert_eq!(data.state_tree(), changed);
+    }
+}
+
+fn snapshot_str(snapshot: &serde_json::Map<String, Value>, field: &str) -> String {
+    match snapshot.get(field) {
+        Some(Value::String(s)) => s.clone(),
+        Some(Value::Number(n)) if n.as_f64() != Some(0.0) => n.to_string(),
+        Some(Value::Bool(true)) => "True".into(),
+        _ => String::new(),
+    }
+}
+
+fn snapshot_has_bail(
+    state: &state::StateData,
+    snapshot: &serde_json::Map<String, Value>,
+) -> Result<bool, String> {
+    let attempt = snapshot_str(snapshot, "attempt");
+    if attempt.is_empty() {
+        return Ok(false);
+    }
+    state
+        .stage_error_for_attempt(&attempt)
+        .map(|error| error.is_some())
+}
+
+fn resume_definition_bytes(
+    gremlin: &Gremlin,
+    snapshot: &serde_json::Map<String, Value>,
+) -> Result<Vec<u8>, String> {
+    if let Some(Value::String(revision)) = snapshot.get("definition_revision") {
+        return gremlin.state.store_ref().read_definition_revision(revision);
+    }
     let mut blob = gremlin
         .state
-        .open_blob("definition.json", state::BlobMode::Read)
-        .map_err(|e| {
-            error_response(&format!(
-                "gremlin {}: failed to read definition snapshot: {e}",
-                gremlin.id.as_str()
-            ))
-        })?;
+        .store_ref()
+        .open("definition.json", state::BlobMode::Read)
+        .map_err(|e| e.to_string())?;
     let mut bytes = Vec::new();
     use std::io::Read;
-    blob.read_to_end(&mut bytes).map_err(|e| {
+    blob.read_to_end(&mut bytes).map_err(|e| e.to_string())?;
+    Ok(bytes)
+}
+
+fn load_definition_snapshot(
+    gremlin: &Gremlin,
+    snapshot: &serde_json::Map<String, Value>,
+) -> Result<StaticDefinition, Value> {
+    let bytes = resume_definition_bytes(gremlin, snapshot).map_err(|e| {
         error_response(&format!(
             "gremlin {}: failed to read definition snapshot: {e}",
             gremlin.id.as_str()
@@ -331,25 +435,73 @@ fn collect_parallel_runtime_keys(stage: &StageSpec, rerun: bool, keys: &mut Para
     }
 }
 
-fn prepare_resume_model(gremlin: &Gremlin, spec: &str) -> Result<(String, Vec<u8>), String> {
+fn prepare_resume_model(
+    gremlin: &Gremlin,
+    snapshot: &serde_json::Map<String, Value>,
+    spec: &str,
+) -> Result<(String, Vec<u8>), String> {
     let cfg = config::Config::load().map_err(|e| format!("config init: {e}"))?;
     let concrete = config::resolve_model_reference(spec, &cfg)?
         .trim()
         .to_owned();
     crate::clients::client::Client::parse(&concrete)?;
-    let mut blob = gremlin
-        .state
-        .open_blob("definition.json", state::BlobMode::Read)
+    let bytes = resume_definition_bytes(gremlin, snapshot)
         .map_err(|e| format!("failed to read definition snapshot: {e}"))?;
-    let mut bytes = Vec::new();
-    use std::io::Read;
-    blob.read_to_end(&mut bytes).map_err(|e| e.to_string())?;
     let mut snapshot = crate::definition::r#static::yaml::parse_expanded_json(&bytes)
         .map_err(|e| e.to_string())?;
     let root = snapshot
         .as_object_mut()
         .ok_or("invalid definition snapshot: expected object")?;
+    let mut selection = crate::definition::r#static::ResolvedModelSelection {
+        requested: spec.trim().to_owned(),
+        default_model: concrete.clone(),
+        stage_models_exact: Default::default(),
+        stage_models_prefix: Default::default(),
+        task_models: None,
+    };
+    if let Some(name) = config::profile_name(spec.trim()) {
+        let profile = cfg
+            .model_profiles()
+            .get(name)
+            .ok_or("unknown model profile")?;
+        if let Some(mappings) = &profile.model_by_stage {
+            for (stage, model) in mappings {
+                let model = config::resolve_model_reference(model, &cfg)?
+                    .trim()
+                    .to_owned();
+                crate::clients::client::Client::parse(&model)?;
+                if let Some(prefix) = stage.strip_suffix('*') {
+                    selection
+                        .stage_models_prefix
+                        .insert(prefix.to_owned(), model);
+                } else {
+                    selection.stage_models_exact.insert(stage.clone(), model);
+                }
+            }
+        }
+        selection.task_models = profile
+            .task_models
+            .as_ref()
+            .map(|models| {
+                models
+                    .iter()
+                    .map(|(task, model)| {
+                        let model = config::resolve_model_reference(model, &cfg)?
+                            .trim()
+                            .to_owned();
+                        crate::clients::client::Client::parse(&model)?;
+                        Ok((task.clone(), model))
+                    })
+                    .collect::<Result<_, String>>()
+            })
+            .transpose()?;
+    }
+    selection.validate()?;
     root.insert("default_model".into(), Value::String(concrete.clone()));
+    root.insert(
+        "resolved_model_selection".into(),
+        serde_json::to_value(selection).map_err(|e| e.to_string())?,
+    );
     let bytes = serde_json::to_vec(&snapshot).map_err(|e| e.to_string())?;
     StaticDefinition::from_expanded_bytes(&bytes, None, None).map_err(|e| e.to_string())?;
     Ok((concrete, bytes))
@@ -384,7 +536,8 @@ pub(crate) async fn handle_resume(request: &Value, registry: &Arc<RunRegistry>) 
         Err(e) => return error_response(&format!("gremlin {id}: failed to recover resume: {e}")),
     }
 
-    let status = gremlin.state.read_str("status");
+    let expected_state = gremlin.state.state_tree();
+    let status = snapshot_str(&expected_state, "status");
     if status == "running" {
         return error_response(&format!("gremlin {id} is already running — use stop first"));
     }
@@ -399,7 +552,10 @@ pub(crate) async fn handle_resume(request: &Value, registry: &Arc<RunRegistry>) 
         return error_response(&format!("gremlin {id} is already done"));
     }
 
-    let has_bail = gremlin.state.stage_error().is_some();
+    let has_bail = match snapshot_has_bail(&gremlin.state, &expected_state) {
+        Ok(has_bail) => has_bail,
+        Err(e) => return error_response(&format!("gremlin {id}: failed to read bail record: {e}")),
+    };
     if status != "stopped" && !has_bail && !(status == "done" && resume_with_stage) {
         return error_response(&format!(
             "gremlin {id} cannot be resumed — status is {status:?}"
@@ -407,7 +563,7 @@ pub(crate) async fn handle_resume(request: &Value, registry: &Arc<RunRegistry>) 
     }
 
     if !resume_with_stage {
-        let stage = gremlin.state.read_str("stage");
+        let stage = snapshot_str(&expected_state, "stage");
         if stage.is_empty() || stage == "starting" {
             return error_response(&format!(
                 "gremlin {id} has no recorded stage to resume from"
@@ -419,7 +575,7 @@ pub(crate) async fn handle_resume(request: &Value, registry: &Arc<RunRegistry>) 
         let Some(spec) = spec.as_str() else {
             return error_response("model must be a string");
         };
-        match prepare_resume_model(&gremlin, spec) {
+        match prepare_resume_model(&gremlin, &expected_state, spec) {
             Ok(prepared) => Some(prepared),
             Err(e) => return error_response(&format!("gremlin {id}: {e}")),
         }
@@ -428,19 +584,13 @@ pub(crate) async fn handle_resume(request: &Value, registry: &Arc<RunRegistry>) 
     };
 
     let mut running = serde_json::Map::new();
-    let current_attempt = gremlin.state.read_str("attempt");
+    let current_attempt = snapshot_str(&expected_state, "attempt");
     running.extend(serde_json::json!({
         "status": "running", "ended_at": null, "exit_code": null,
         "attempt": format!("{}-resume-{}", if current_attempt.is_empty() { "1" } else { &current_attempt }, state::token_hex(2)),
     }).as_object().unwrap().clone());
     if let Some((model, _)) = &replacement {
-        let profile = gremlin
-            .state
-            .state_tree()
-            .get("model_selection_profile")
-            .cloned()
-            .unwrap_or_else(|| Value::String(gremlin.model_override.clone().unwrap_or_default()));
-        running.insert("model_selection_profile".into(), profile);
+        running.insert("model_selection_profile".into(), Value::Null);
         running.insert("model_override".into(), Value::String(model.clone()));
         running.insert("model".into(), Value::String(model.clone()));
     }
@@ -451,7 +601,7 @@ pub(crate) async fn handle_resume(request: &Value, registry: &Arc<RunRegistry>) 
                 Ok(d) => d,
                 Err(e) => return error_response(&format!("gremlin {id}: {e}")),
             },
-            None => match load_definition_snapshot(&gremlin) {
+            None => match load_definition_snapshot(&gremlin, &expected_state) {
                 Ok(d) => d,
                 Err(resp) => return resp,
             },
@@ -480,7 +630,7 @@ pub(crate) async fn handle_resume(request: &Value, registry: &Arc<RunRegistry>) 
         let mut keys: Vec<String> = preserve.into_iter().collect();
         keys.sort();
 
-        let mut rewind_state = gremlin.state.state_tree();
+        let mut rewind_state = expected_state.clone();
         rewind_state.extend(running.clone());
         rewind_state.insert("stage".into(), Value::String(target.clone()));
 
@@ -490,19 +640,16 @@ pub(crate) async fn handle_resume(request: &Value, registry: &Arc<RunRegistry>) 
         rewind_state.insert("subprocess_cost_usd".into(), Value::Null);
         rewind_state.remove("parallel_attempts");
 
-        let fork_result = if let Some((_, bytes)) = &replacement {
-            gremlin
-                .state
-                .store_ref()
-                .fork_to_stage_with_definition(&keys, &rewind_state, Some(bytes))
-                .await
-        } else {
-            gremlin
-                .state
-                .store_ref()
-                .fork_to_stage(&keys, &rewind_state)
-                .await
-        };
+        let fork_result = gremlin
+            .state
+            .store_ref()
+            .fork_to_stage_conditional(
+                &expected_state,
+                &keys,
+                &rewind_state,
+                replacement.as_ref().map(|(_, bytes)| bytes.as_slice()),
+            )
+            .await;
         let forked = match fork_result {
             Ok(forked) => forked,
             Err(e) => return error_response(&format!("gremlin {id}: failed to fork state: {e}")),
@@ -511,18 +658,30 @@ pub(crate) async fn handle_resume(request: &Value, registry: &Arc<RunRegistry>) 
 
         target
     } else {
-        let stage = gremlin.state.read_str("stage");
-        if let Err(e) = gremlin.state.store_ref().publish_resume(
+        let stage = snapshot_str(&expected_state, "stage");
+        let metadata = replacement
+            .as_ref()
+            .map(|(_, bytes)| {
+                let snapshot: Value = serde_json::from_slice(bytes).expect("validated snapshot");
+                serde_json::json!({
+                    "requested_selection": request.get("model"),
+                    "resolved_selection": snapshot.get("resolved_model_selection"),
+                })
+                .as_object()
+                .unwrap()
+                .clone()
+            })
+            .unwrap_or_default();
+        if let Err(e) = gremlin.state.store_ref().publish_resume_conditional(
+            &expected_state,
             &running,
             replacement.as_ref().map(|(_, bytes)| bytes.as_slice()),
+            &metadata,
         ) {
             return error_response(&format!(
                 "gremlin {id}: failed to publish resume state: {e}"
             ));
         }
-        let state_dir = gremlin.state.state_dir();
-        let finished = state_dir.join("finished");
-        let _ = std::fs::remove_file(&finished);
         stage
     };
 
@@ -530,7 +689,7 @@ pub(crate) async fn handle_resume(request: &Value, registry: &Arc<RunRegistry>) 
         gremlin.model_override = Some(model);
     }
 
-    let definition_name = gremlin.state.read_str("kind");
+    let definition_name = snapshot_str(&expected_state, "kind");
 
     registry
         .launch_run_detached(
