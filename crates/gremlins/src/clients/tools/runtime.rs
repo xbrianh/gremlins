@@ -6,7 +6,7 @@ use std::sync::Arc;
 use crate::clients::conversation::Conversation;
 use crate::clients::path_context::PathContext;
 use crate::task_kind::TaskKind;
-use gremlins_magic_bus::{emit_run_event_async, EventKind};
+use gremlins_magic_bus::{emit_corr_event_async, CorrId, EventKind};
 
 type ToolFuture = Pin<Box<dyn std::future::Future<Output = ToolOutcome> + Send>>;
 
@@ -95,9 +95,10 @@ pub(crate) struct AgentLoopRuntime {
     /// loop sets its own task-chain prefix to keep IDs unique. Empty at the top
     /// level, so top-level IDs are unchanged.
     pub(crate) id_prefix: String,
-    /// Run-scoped id (gremlin_id) used for direct bus emission of log lines
-    /// and stream events. Empty in tests / naked runs.
+    /// Run-scoped payload id (gremlin_id). Empty in tests / naked runs.
     pub(crate) message_prefix: String,
+    /// Event attribution, independent of payload and nested tool-call IDs.
+    pub(crate) corr_id: CorrId,
     /// Discovered skills for this session. Session-bound so concurrent chat
     /// sessions resolve their own project's skills instead of a shared slot.
     /// When `None`, skills-gated tools (Mischief, WebSearch) are rejected at
@@ -119,12 +120,12 @@ pub(crate) struct AgentLoopRuntime {
 }
 
 impl AgentLoopRuntime {
-    /// Emit one live tool-output chunk directly to the bus, tagged with the
-    /// run-scoped `message_prefix`. The chunk id carries `id_prefix` so nested
+    /// Emit one live tool-output chunk with this runtime's correlation.
+    /// The chunk id carries `id_prefix` so nested
     /// task loops keep their IDs unique on the shared stream.
     pub(crate) async fn emit_output(&self, id: &str, name: &str, call: &str, text: &str) {
-        emit_run_event_async(
-            &self.message_prefix,
+        emit_corr_event_async(
+            &self.corr_id,
             EventKind::ToolOutputChunk {
                 id: format!("{}{}", self.id_prefix, id),
                 name: name.to_string(),

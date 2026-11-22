@@ -96,11 +96,20 @@ run -> stage -> turn -> tool -> attempt
 - Every field is optional; the empty `CorrId::new()` matches everything.
 - Prefix matching is **segment-aware, not string-based**: `r:ab` must not match
   `r:abc`. A `None` prefix field is a wildcard for that segment only.
-- The tagged string form is `r:<run>:s:<stage>:t:<turn>:c:<tool>:a:<attempt>`,
+- Run filters retain colon-component ancestor matching: run `parent` matches
+  `parent:child`, but not `parentish`. Other fields match exactly.
+- `with_execution_id(impl Into<String>)` sets an optional opaque execution id;
+  `execution_id() -> Option<&str>` borrows it. Colons have no hierarchy meaning
+  in execution ids. An omitted execution filter is a wildcard, including for
+  legacy events without an execution id. A set filter requires an exact value.
+  This field is routing metadata only; the bus does not attribute events at
+  registration or dequeue time.
+- The tagged string form is `r:<run>:s:<stage>:t:<turn>:c:<tool>:a:<attempt>:x:<execution_id>`,
+  in that fixed order. Legacy forms without `x` are unchanged,
   with missing segments omitted. String values may contain `:` and `\`, escaped
   as `\:` and `\\` on render, so `to_string().parse::<CorrId>()` always
   round-trips. String segments must be non-empty.
-- `with_run`/`with_stage`/`with_tool` panic on empty values; `try_parse` rejects
+- `with_run`/`with_stage`/`with_tool`/`with_execution_id` panic on empty values; `try_parse` rejects
   them with `ParseCorrIdError::EmptyValue`.
 
 ### Delivery policies

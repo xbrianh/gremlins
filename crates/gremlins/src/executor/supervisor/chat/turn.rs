@@ -251,6 +251,10 @@ async fn run_turn(
         })
         .await;
 
+    let mut corr_id = gremlins_magic_bus::CorrId::new().with_run(id);
+    if let Some(execution_id) = execution_id.as_deref() {
+        corr_id = corr_id.with_execution_id(execution_id);
+    }
     let runner = TurnRunner::new(TurnRunnerCfg {
         id: id.to_string(),
         turn,
@@ -259,6 +263,7 @@ async fn run_turn(
         registry: Arc::clone(registry),
         session_task: session_task.clone(),
         writer: writer.clone(),
+        corr_id,
         done: done_tx,
         hard,
     });
@@ -345,13 +350,10 @@ async fn run_turn(
     if !unresolved_skills.is_empty() {
         let msg = format!("skill(s) not found: {}", unresolved_skills.join(", "));
         runner
-            .write(
-                serde_json::to_value(EventKind::SystemWarning {
-                    message: msg,
-                    turn: runner.turn.clone(),
-                })
-                .unwrap_or_default(),
-            )
+            .write_event(EventKind::SystemWarning {
+                message: msg,
+                turn: runner.turn.clone(),
+            })
             .await;
     }
 

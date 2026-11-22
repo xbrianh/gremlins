@@ -19,7 +19,7 @@ use crate::clients::tools::schema::validate_tool_args;
 use crate::clients::tools::tool_specs::ToolMode;
 use crate::core::paths::*;
 use crate::test_support::EnvGuard;
-use gremlins_magic_bus::{subscribe_run, EventKind, Recv};
+use gremlins_magic_bus::{subscribe_run, CorrId, EventKind, Recv};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
@@ -76,6 +76,7 @@ fn tmp() -> PathBuf {
 
 fn ctx(cwd: &Path) -> AgentLoopRuntime {
     AgentLoopRuntime {
+        corr_id: CorrId::new(),
         cwd: Some(cwd.to_path_buf()),
         extra_env: None,
         base_env: None,
@@ -98,6 +99,7 @@ async fn emit_output_prefixes_the_tool_call_id() {
     let mut c = ctx(&dir);
     c.id_prefix = "a3f1.".to_string();
     c.message_prefix = "test.prefix".to_string();
+    c.corr_id = CorrId::new().with_run("test.prefix");
 
     let (_sub, mut rx) = subscribe_run("test.prefix");
 
@@ -132,6 +134,7 @@ async fn emit_output_without_prefix_keeps_the_raw_id() {
     let dir = tmp();
     let mut c = ctx(&dir);
     c.message_prefix = "test.no-prefix".to_string();
+    c.corr_id = CorrId::new().with_run("test.no-prefix");
 
     let (_sub, mut rx) = subscribe_run("test.no-prefix");
 
@@ -149,6 +152,88 @@ async fn emit_output_without_prefix_keeps_the_raw_id() {
         }
     };
     assert_eq!(id, "call_0", "top-level ids must stay unprefixed");
+}
+
+async fn next_tool_event(
+    rx: &mut gremlins_magic_bus::ReceiverHalf<EventKind>,
+) -> gremlins_magic_bus::DispatchEvent<EventKind> {
+    tokio::time::timeout(Duration::from_secs(2), async {
+        loop {
+            match rx.recv().await {
+                Recv::Event(event) => return event,
+                Recv::Lagged(_) => continue,
+                Recv::Closed => panic!("bus closed before tool event"),
+            }
+        }
+    })
+    .await
+    .expect("tool event was not routed to its correlation run")
+}
+
+#[tokio::test]
+async fn tool_output_nested_clone_preserves_execution_attribution() {
+    let mut parent = ctx(&tmp());
+    parent.message_prefix = "payload-only".into();
+    parent.corr_id = CorrId::new()
+        .with_run("test.tools.nested-correlation")
+        .with_stage("agent")
+        .with_execution_id("execution-original");
+    let mut nested = parent.clone();
+    nested.id_prefix = "task.child.".into();
+    let (_sub, mut rx) = subscribe_run("test.tools.nested-correlation");
+
+    parent.emit_output("call_0", "Bash", "call", "parent").await;
+    nested.emit_output("call_0", "Bash", "call", "nested").await;
+
+    for (id, text) in [("call_0", "parent"), ("task.child.call_0", "nested")] {
+        let event = next_tool_event(&mut rx).await;
+        assert_eq!(event.corr_id(), &parent.corr_id);
+        assert_eq!(event.corr_id().execution_id(), Some("execution-original"));
+        match event.into_kind() {
+            EventKind::ToolOutputChunk {
+                id: actual,
+                text: actual_text,
+                ..
+            } => {
+                assert_eq!(actual, id);
+                assert_eq!(actual_text, text);
+            }
+            other => panic!("unexpected event: {other:?}"),
+        }
+    }
+}
+
+#[tokio::test]
+async fn skill_loaded_uses_correlation_but_preserves_payload_id() {
+    let mut c = ctx(&tmp());
+    c.message_prefix = "skill-payload-id".into();
+    c.id_prefix = "task.child.".into();
+    c.corr_id = CorrId::new()
+        .with_run("test.tools.skill-correlation")
+        .with_stage("agent")
+        .with_execution_id("skill-execution");
+    c.discovered_skills = Some(Arc::new(vec![crate::skills::LoadedSkill {
+        skill: crate::skills::Skill {
+            name: "pdf".into(),
+            dir: PathBuf::from("/tmp/pdf-skill"),
+            ..Default::default()
+        },
+        files: vec![],
+    }]));
+    let nested = c.clone();
+    let (_sub, mut rx) = subscribe_run("test.tools.skill-correlation");
+
+    let result = load_skill_invoke(&nested, &serde_json::json!({"name": "pdf"})).await;
+    assert!(result.starts_with("Skill \"pdf\" loaded successfully."));
+    let event = next_tool_event(&mut rx).await;
+    assert_eq!(event.corr_id(), &c.corr_id);
+    match event.into_kind() {
+        EventKind::SkillLoaded { id, name } => {
+            assert_eq!(id, "skill-payload-id");
+            assert_eq!(name, "pdf");
+        }
+        other => panic!("unexpected event: {other:?}"),
+    }
 }
 
 #[tokio::test]
@@ -355,6 +440,7 @@ async fn bash_streaming_emits_completed_lines_and_final_flush() {
     let dir = tmp();
     let mut c = ctx(&dir);
     c.message_prefix = "test.bash".to_string();
+    c.corr_id = CorrId::new().with_run("test.bash");
 
     let (_sub, mut rx) = subscribe_run("test.bash");
 
@@ -483,6 +569,7 @@ async fn bash_invoke_respects_cwd() {
     let marker = "gremlins-cwd-test-marker";
     std::fs::write(dir.join(marker), "ok").unwrap();
     let c = AgentLoopRuntime {
+        corr_id: CorrId::new(),
         cwd: Some(dir.clone()),
         extra_env: None,
         base_env: None,
@@ -519,6 +606,7 @@ async fn bash_invoke_cwd_none_uses_project_root() {
     let dir = tmp();
     std::env::set_var("GREMLINS_PROJECT_ROOT", dir.to_str().unwrap());
     let c = AgentLoopRuntime {
+        corr_id: CorrId::new(),
         cwd: None,
         extra_env: None,
         base_env: None,
@@ -553,6 +641,7 @@ async fn bash_invoke_cwd_none_diverges_from_process_cwd() {
     let daemon = tmp();
     std::env::set_var("GREMLINS_PROJECT_ROOT", project.to_str().unwrap());
     let c = AgentLoopRuntime {
+        corr_id: CorrId::new(),
         cwd: None,
         extra_env: None,
         base_env: None,
@@ -995,6 +1084,7 @@ async fn mischief_invoke_blocked_in_headless() {
     // omits Mischief must get "unknown tool".
     let dir = tmp();
     let c = AgentLoopRuntime {
+        corr_id: CorrId::new(),
         cwd: Some(dir.clone()),
         extra_env: None,
         base_env: None,
@@ -1022,6 +1112,7 @@ async fn websearch_invoke_blocked_in_headless() {
     // omits WebSearch must get "unknown tool".
     let dir = tmp();
     let c = AgentLoopRuntime {
+        corr_id: CorrId::new(),
         cwd: Some(dir.clone()),
         extra_env: None,
         base_env: None,
@@ -1055,6 +1146,7 @@ async fn websearch_invoke_blocked_in_headless_no_filter() {
     // reject it — the None branch must not open a bypass.
     let dir = tmp();
     let c = AgentLoopRuntime {
+        corr_id: CorrId::new(),
         cwd: Some(dir.clone()),
         extra_env: None,
         base_env: None,
@@ -1088,6 +1180,7 @@ async fn websearch_invoke_blocked_in_headless_explicit_allowlist() {
     // includes it the gate must reject the call.
     let dir = tmp();
     let c = AgentLoopRuntime {
+        corr_id: CorrId::new(),
         cwd: Some(dir.clone()),
         extra_env: None,
         base_env: None,
@@ -1121,6 +1214,7 @@ async fn mischief_invoke_allowed_when_skills_available() {
     // even when the allowlist omits it.
     let dir = tmp();
     let c = AgentLoopRuntime {
+        corr_id: CorrId::new(),
         cwd: Some(dir.clone()),
         extra_env: None,
         base_env: None,
@@ -1270,6 +1364,7 @@ async fn load_skill_invoke_blocked_in_headless() {
     // omits LoadSkill must get "unknown tool".
     let dir = tmp();
     let c = AgentLoopRuntime {
+        corr_id: CorrId::new(),
         cwd: Some(dir.clone()),
         extra_env: None,
         base_env: None,
@@ -1297,6 +1392,7 @@ async fn load_skill_invoke_allowed_when_skills_available() {
     // even when the allowlist omits it.
     let dir = tmp();
     let c = AgentLoopRuntime {
+        corr_id: CorrId::new(),
         cwd: Some(dir.clone()),
         extra_env: None,
         base_env: None,
@@ -2115,6 +2211,7 @@ async fn filtered_tool_does_not_mutate_or_spawn() {
     let dir = tmp();
     let target = dir.join("must-not-exist.txt");
     let c = AgentLoopRuntime {
+        corr_id: CorrId::new(),
         cwd: Some(dir.clone()),
         extra_env: None,
         base_env: None,
@@ -3065,6 +3162,7 @@ fn edit_scope_end_line_without_start_accepted() {
 async fn task_no_callback_returns_error() {
     let dir = tmp();
     let c = AgentLoopRuntime {
+        corr_id: CorrId::new(),
         cwd: Some(dir.clone()),
         extra_env: None,
         base_env: None,
@@ -3094,6 +3192,7 @@ async fn task_callback_called_when_set() {
         Box::pin(async move { ToolOutcome::text(format!("task result: {kind} / {prompt}")) })
     });
     let c = AgentLoopRuntime {
+        corr_id: CorrId::new(),
         cwd: Some(dir.clone()),
         extra_env: None,
         base_env: None,
@@ -3121,6 +3220,7 @@ async fn task_empty_prompt_returns_error() {
         Box::pin(async move { ToolOutcome::text("should not be called") })
     });
     let c = AgentLoopRuntime {
+        corr_id: CorrId::new(),
         cwd: Some(dir.clone()),
         extra_env: None,
         base_env: None,
@@ -3155,6 +3255,7 @@ async fn task_unknown_kind_rejected_before_callback() {
         Box::pin(async move { ToolOutcome::text("should not be called") })
     });
     let c = AgentLoopRuntime {
+        corr_id: CorrId::new(),
         cwd: Some(dir.clone()),
         extra_env: None,
         base_env: None,
@@ -3185,6 +3286,7 @@ async fn task_result_is_headered_with_kind() {
         Box::pin(async move { ToolOutcome::text("body") })
     });
     let c = AgentLoopRuntime {
+        corr_id: CorrId::new(),
         cwd: Some(dir.clone()),
         extra_env: None,
         base_env: None,
@@ -3633,6 +3735,7 @@ async fn invoke_does_not_cap_task() {
         Box::pin(async move { ToolOutcome::text("x".repeat(500)) })
     });
     let c = AgentLoopRuntime {
+        corr_id: CorrId::new(),
         cwd: Some(dir.clone()),
         extra_env: None,
         base_env: None,
@@ -3664,6 +3767,7 @@ async fn invoke_does_not_cap_task() {
 
 fn allow_all_ctx(cwd: &Path) -> AgentLoopRuntime {
     AgentLoopRuntime {
+        corr_id: CorrId::new(),
         cwd: Some(cwd.to_path_buf()),
         extra_env: None,
         base_env: None,

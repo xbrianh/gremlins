@@ -18,8 +18,49 @@ use crate::clients::interactive::InteractiveSession;
 use crate::clients::params::ResolvedParams;
 use crate::clients::protocol::CompletedRun;
 use crate::clients::stream_json::{self, StreamState};
-use gremlins_magic_bus::EventKind;
-use gremlins_magic_bus::emit_event;
+use gremlins_magic_bus::{emit_corr_event, CorrId, EventKind};
+
+fn producer_corr_id(run_id: &str, execution_id: Option<&str>) -> CorrId {
+    let mut corr_id = CorrId::new();
+    if !run_id.is_empty() {
+        corr_id = corr_id.with_run(run_id);
+    }
+    if let Some(execution_id) = execution_id {
+        corr_id = corr_id.with_execution_id(execution_id);
+    }
+    corr_id
+}
+
+#[cfg(test)]
+mod attribution_tests {
+    use super::*;
+
+    #[test]
+    fn producer_identity_keeps_run_and_execution_separate() {
+        let corr = producer_corr_id("parent:child", Some("opaque:execution"));
+        assert_eq!(corr.run(), Some("parent:child"));
+        assert_eq!(corr.execution_id(), Some("opaque:execution"));
+        let payload = EventKind::LogLine {
+            id: corr.run().unwrap().to_owned(),
+            line: "hello".into(),
+        };
+        let EventKind::LogLine { id, .. } = payload else {
+            unreachable!();
+        };
+        assert_eq!(id, "parent:child");
+    }
+
+    #[test]
+    fn missing_identity_does_not_invent_an_execution() {
+        let corr = producer_corr_id("run", None);
+        assert_eq!(corr.run(), Some("run"));
+        assert_eq!(corr.execution_id(), None);
+        assert_eq!(producer_corr_id("", None), CorrId::new());
+        let corr = producer_corr_id("", Some("execution"));
+        assert_eq!(corr.run(), None);
+        assert_eq!(corr.execution_id(), Some("execution"));
+    }
+}
 
 fn footer_re() -> &'static Regex {
     static RE: OnceLock<Regex> = OnceLock::new();
@@ -54,6 +95,7 @@ struct CmdContext {
     last_session_id: Option<String>,
     artifact_dir: Option<PathBuf>,
     gremlin_id: String,
+    corr_id: CorrId,
 }
 
 impl CmdBackend {
@@ -363,7 +405,17 @@ impl CmdBackend {
         session_id: Option<&str>,
         gremlin_id: &str,
     ) -> Result<CompletedRun, ClientError> {
-        let (model, cwd, extra_env, prefix, raw_path, capture_events, idle_timeout, artifact_dir) = {
+        let (
+            model,
+            cwd,
+            extra_env,
+            prefix,
+            raw_path,
+            capture_events,
+            idle_timeout,
+            artifact_dir,
+            corr_id,
+        ) = {
             let ctx_guard = self.ctx.lock().unwrap();
             let ctx = ctx_guard
                 .get(gremlin_id)
@@ -379,6 +431,7 @@ impl CmdBackend {
                 ctx.capture_events,
                 ctx.idle_timeout,
                 ctx.artifact_dir.clone(),
+                ctx.corr_id.clone(),
             )
         };
 
@@ -394,10 +447,13 @@ impl CmdBackend {
         let result = if self.stream_json {
             let gid = gremlin_id.to_string();
             let on_log: &(dyn Fn(String) + Send + Sync) = &move |msg: String| {
-                emit_event(EventKind::LogLine {
-                    id: gid.clone(),
-                    line: msg,
-                });
+                emit_corr_event(
+                    &corr_id,
+                    EventKind::LogLine {
+                        id: gid.clone(),
+                        line: msg,
+                    },
+                );
             };
             let (state, events, timed_out, sid) = Self::read_stream_json(
                 &mut child,
@@ -493,7 +549,7 @@ impl Backend for CmdBackend {
     async fn run(
         &self,
         params: RunParams,
-        _interactive: InteractiveSession,
+        interactive: InteractiveSession,
     ) -> Result<CompletedRun, ClientError> {
         // Concatenation of harness system prompt and definition user content —
         // this is the single string bound for the child process's stdin.
@@ -512,6 +568,8 @@ impl Backend for CmdBackend {
         };
 
         let gremlin_id = params.gremlin_id.clone().unwrap_or_default();
+        let snapshot = interactive.snapshot();
+        let corr_id = producer_corr_id(&gremlin_id, snapshot.execution_id());
         {
             let mut ctx = self.ctx.lock().unwrap();
             ctx.insert(
@@ -530,6 +588,7 @@ impl Backend for CmdBackend {
                     last_session_id: None,
                     artifact_dir: params.artifact_dir.clone(),
                     gremlin_id: gremlin_id.clone(),
+                    corr_id,
                 },
             );
             *self.last_gremlin_id.lock().unwrap() = Some(gremlin_id.clone());
@@ -588,7 +647,9 @@ impl Backend for CmdBackend {
         } else {
             active_prompt
         };
-        let result = self.attempt(&p, last_session_id.as_deref(), &gremlin_id).await;
+        let result = self
+            .attempt(&p, last_session_id.as_deref(), &gremlin_id)
+            .await;
 
         match result {
             Ok(r) => {

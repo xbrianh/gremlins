@@ -149,6 +149,51 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn execution_filters_route_exactly_without_changing_run_filters() {
+        for asynchronous in [false, true] {
+            let bus: Bus<Payload> = Bus::new();
+            let prefixes = [
+                CorrId::new(),
+                CorrId::new().with_run("parent"),
+                CorrId::new().with_execution_id("exec"),
+                CorrId::new().with_run("parent").with_execution_id("exec"),
+                CorrId::new().with_run("other").with_execution_id("exec"),
+            ];
+            let mut receivers: Vec<_> = prefixes
+                .into_iter()
+                .map(|prefix| {
+                    bus.subscribe(SubscriberRegistration::lossless(prefix))
+                        .unwrap()
+                        .1
+                })
+                .collect();
+            let base = CorrId::new().with_run("parent:child").with_stage("build");
+            let events = [
+                base.clone().with_execution_id("exec"),
+                base.clone().with_execution_id("exec:child"),
+                base.clone().with_execution_id("execution"),
+                base.clone().with_execution_id("other"),
+                base,
+            ];
+            for (index, corr_id) in events.into_iter().enumerate() {
+                let event = DispatchEvent::new(corr_id, Payload(index as u64));
+                if asynchronous {
+                    bus.emit_async(event).await;
+                } else {
+                    bus.emit(event);
+                }
+            }
+            let expected: &[&[u64]] = &[&[0, 1, 2, 3, 4], &[0, 1, 2, 3, 4], &[0], &[0], &[]];
+            for (rx, expected) in receivers.iter_mut().zip(expected) {
+                for value in *expected {
+                    assert_eq!(rx.try_recv().unwrap().kind(), &Payload(*value));
+                }
+                assert!(matches!(rx.try_recv(), Err(TryRecvError::Empty)));
+            }
+        }
+    }
+
+    #[tokio::test]
     async fn emit_async_delivers_to_lossless_subscribers() {
         let bus: Bus<Payload> = Bus::new();
         let (_, mut rx) = bus

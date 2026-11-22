@@ -286,15 +286,17 @@ pub(crate) async fn handle_conversation_attach(
     };
 
     // 2. Snapshot target and nonce before any async work.
-    let mut target = handle.target();
+    let (mut target, between_turn) = handle.attachment_target();
+    #[cfg(test)]
+    setup_gate::wait(id).await;
     let execution_nonce = target.nonce();
-    let execution_id = target.execution_id().map(|s| s.to_string());
+    let mut execution_id = target.execution_id().map(|s| s.to_string());
     // This signal belongs to the snapshot, not a later debugger-bound target:
     // a between-turn handoff may replace the execution while readiness awaits.
     // Capture the end signal for this execution so a passive observer can
     // stop when the execution ends even if no terminal event is emitted on
     // the bus (e.g. the run is cancelled before `Done`/`Ended`).
-    let end_signal = target.end_signal();
+    let mut end_signal = target.end_signal();
 
     // Observation never owns a pause. Only explicit debugger intent may
     // reserve entry into a future chat turn.
@@ -303,10 +305,13 @@ pub(crate) async fn handle_conversation_attach(
         .and_then(|v| v.as_str())
         .unwrap_or("control");
 
+    // Observation requires a captured execution, including before the first turn.
+    if mode != "debugger" && between_turn {
+        return;
+    }
+
     // Between-turn chat reservations have no live stage to validate yet.
-    if mode == "debugger"
-        && (!debugger_between_turn(&target) || store.state_tree()["kind"] != "chat")
-    {
+    if mode == "debugger" && (!between_turn || store.state_tree()["kind"] != "chat") {
         let checked_store = store.clone();
         let checked = tokio::task::spawn_blocking(move || check_agent_stage(&checked_store))
             .await
@@ -339,12 +344,23 @@ pub(crate) async fn handle_conversation_attach(
         "nonce": execution_nonce,
         "capabilities": caps,
     });
-    if writer.write_json_line(&ack).await.is_err() {
+    let ack_end = (!(mode == "debugger" && between_turn)).then_some(&end_signal);
+    if !write_view(writer, &ack, ack_end).await {
         return;
     }
 
+    #[cfg(test)]
+    receiver_gate::wait(id).await;
+
     if mode == "passive" {
-        handle_passive_conversation(id, &mut reader, writer, &mut evt_rx, end_signal).await;
+        handle_passive_conversation(
+            execution_id.as_deref(),
+            &mut reader,
+            writer,
+            &mut evt_rx,
+            end_signal,
+        )
+        .await;
         return;
     }
 
@@ -352,7 +368,7 @@ pub(crate) async fn handle_conversation_attach(
     // sending their first command. Only chat registration gaps reserve entry.
     let mut attachment = None;
     if mode == "debugger" {
-        let lease = if debugger_between_turn(&target) {
+        let lease = if between_turn {
             handle.attach_next_turn_debugger(execution_id.clone())
         } else {
             target.attach_debugger()
@@ -366,14 +382,15 @@ pub(crate) async fn handle_conversation_attach(
         };
         // TOCTOU: do not wait on a stale ended signal when reserving a future
         // turn; the bound target is selected only after readiness completes.
-        let readiness_end = (!debugger_between_turn(&target)).then(|| target.end_signal());
-        let readiness = wait_for_ready(
+        let readiness_end = (!between_turn).then(|| target.end_signal());
+        let readiness = wait_for_ready_view(
             &mut lease,
             &mut run_state,
             &mut reader,
             writer,
             id,
             readiness_end.as_ref(),
+            Some((&mut evt_rx, execution_id.as_deref())),
         )
         .await;
         target = match readiness {
@@ -384,6 +401,10 @@ pub(crate) async fn handle_conversation_attach(
                 return;
             }
         };
+        // Only an explicit between-turn debugger reservation may bind a new
+        // execution. Ordinary viewers and corrections retain their snapshot.
+        execution_id = target.execution_id().map(str::to_owned);
+        end_signal = target.end_signal();
         attachment = Some(lease);
     }
 
@@ -396,13 +417,19 @@ pub(crate) async fn handle_conversation_attach(
                         let op = cmd.get("op").and_then(Value::as_str).unwrap_or("");
                         let req_id = cmd.get("req_id").and_then(Value::as_str).map(|s| s.to_string());
                         if op == "detach" {
-                            let _ = writer.write_json_line(&serde_json::json!({
+                            let _ = write_view(writer, &serde_json::json!({
                                 "type": "detached", "scope": "conversation", "id": id,
-                            })).await;
+                            }), Some(&end_signal)).await;
                             break;
                         }
+                        if end_signal.is_ended() {
+                            // A retained debugger may still be awaiting its
+                            // classified outcome, but cannot command an ended
+                            // execution or reopen its observation.
+                            continue;
+                        }
                         if !matches!(op, "message" | "talk" | "continue" | "bail" | "quit") {
-                            let _ = writer.write_json_line(&error_response("unknown attach op")).await;
+                            if !write_view(writer, &error_response("unknown attach op"), Some(&end_signal)).await { break; }
                             continue;
                         }
                         let temporary = attachment.is_none() && op == "message";
@@ -419,7 +446,7 @@ pub(crate) async fn handle_conversation_attach(
                                 Ok(lease) => lease,
                                 Err(error) => { report_attach_error(writer, error).await; continue; }
                             };
-                            if let Err(failure) = wait_for_ready(&mut lease, &mut run_state, &mut reader, writer, id, Some(&target.end_signal())).await {
+                            if let Err(failure) = wait_for_ready_view(&mut lease, &mut run_state, &mut reader, writer, id, Some(&end_signal), Some((&mut evt_rx, execution_id.as_deref()))).await {
                                 drop(lease);
                                 let dropped = (op == "message").then(|| message_outcome(false, id, target.nonce(), target.execution_id(), req_id.as_deref()));
                                 report_readiness_failure(writer, failure, dropped).await;
@@ -429,9 +456,12 @@ pub(crate) async fn handle_conversation_attach(
                         }
                         let should_break = if op == "message" {
                             deliver_message(&cmd, req_id, id, target.nonce(), target.execution_id(),
-                                writer, &mut reader, &mut run_state, &target.end_signal(), &mut attachment, temporary).await
+                                writer, &mut reader, &mut run_state, &end_signal, &mut attachment, temporary, &mut evt_rx).await
                         } else {
-                            dispatch_attach_command(&cmd, op, req_id, id, writer, attachment.as_ref().unwrap()).await
+                            tokio::select! {
+                                result = dispatch_attach_command(&cmd, op, req_id, id, writer, attachment.as_ref().unwrap()) => result,
+                                _ = end_signal.wait() => true,
+                            }
                         };
                         if should_break {
                             break;
@@ -444,20 +474,13 @@ pub(crate) async fn handle_conversation_attach(
                     }
                 }
             }
-            result = evt_rx.recv() => {
+            _ = end_signal.wait(), if attachment.is_none() => break,
+            result = evt_rx.recv(), if !end_signal.is_ended() => {
                 match result {
                     Recv::Event(dispatch) => {
-                        let kind = dispatch.kind();
-                        let mut payload = conversation_display_event(kind);
-                        // Tag every display frame with scope so clients can
-                        // distinguish display events from control replies.
-                        if let Some(ref mut p) = payload {
-                            if let Some(obj) = p.as_object_mut() {
-                                obj.insert("scope".into(), "conversation".into());
-                            }
-                        }
-                        if let Some(p) = payload {
-                            if writer.write_json_line(&p).await.is_err() { break; }
+                        if let Some(p) = matching_display(&dispatch, execution_id.as_deref()) {
+                            if !write_view(writer, &p, Some(&end_signal)).await
+                                && !(end_signal.is_ended() && attachment.is_some()) { break; }
                         }
                     }
                     Recv::Lagged(skipped) => {
@@ -466,7 +489,8 @@ pub(crate) async fn handle_conversation_attach(
                             "scope": "conversation",
                             "skipped": skipped,
                         });
-                        if writer.write_json_line(&payload).await.is_err() { break; }
+                        if !write_view(writer, &payload, Some(&end_signal)).await
+                            && !(end_signal.is_ended() && attachment.is_some()) { break; }
                     }
                     Recv::Closed => break,
                 }
@@ -493,10 +517,16 @@ pub(crate) async fn handle_conversation_attach(
                     obj.insert("scope".into(), "conversation".into());
                     obj.entry("id").or_insert_with(|| serde_json::Value::String(id.into()));
                 }
-                let _ = writer.write_json_line(&frame).await;
+                // Classification may follow the execution's end signal. Give
+                // its final control reply a bounded flush, without reopening
+                // observation or waiting indefinitely for a stalled viewer.
+                tokio::select! {
+                    _ = writer.write_json_line(&frame) => {},
+                    _ = socket::read_json_line(&mut reader) => {},
+                    _ = tokio::time::sleep(std::time::Duration::from_secs(1)) => {},
+                }
                 break;
             }
-            _ = end_signal.wait(), if attachment.is_none() => break,
         }
     }
 }
@@ -516,6 +546,7 @@ async fn deliver_message(
     end: &EndSignal,
     attachment: &mut Option<DebugAttachment>,
     temporary: bool,
+    evt_rx: &mut gremlins_magic_bus::ReceiverHalf<EventKind>,
 ) -> bool {
     let (tx, mut rx) = tokio::sync::oneshot::channel();
     if let Err(error) = attachment
@@ -538,10 +569,7 @@ async fn deliver_message(
         if temporary {
             drop(attachment.take());
         }
-        return writer
-            .write_json_line(&error_response(reason))
-            .await
-            .is_err();
+        return !write_view(writer, &error_response(reason), Some(end)).await;
     }
     let delivered = loop {
         tokio::select! {
@@ -552,21 +580,86 @@ async fn deliver_message(
                     if temporary { drop(attachment.take()); }
                     return true;
                 }
-                if writer.write_json_line(&error_response("busy delivering correction")).await.is_err() {
+                #[cfg(test)]
+                delivery_busy_gate::wait(id).await;
+                let frame = error_response("busy delivering correction");
+                let write = write_view(writer, &frame, Some(end));
+                tokio::pin!(write);
+                let written = tokio::select! {
+                    biased;
+                    result = &mut rx => {
+                        if temporary { drop(attachment.take()); }
+                        let _ = write.await;
+                        break result.is_ok();
+                    }
+                    written = &mut write => written,
+                };
+                if !written {
+                    if end.is_ended() { break false; }
                     if temporary { drop(attachment.take()); }
                     return true;
                 }
             }
             _ = end.wait() => break false,
+            event = evt_rx.recv() => {
+                #[cfg(test)]
+                delivery_display_gate::wait(id).await;
+                let display = forward_display(event, execution_id, writer, Some(end));
+                tokio::pin!(display);
+                let forwarded = tokio::select! {
+                    biased;
+                    result = &mut rx => {
+                        // Keep the in-flight write intact, but release control at
+                        // incorporation rather than after socket backpressure.
+                        if temporary { drop(attachment.take()); }
+                        let _ = display.await;
+                        break result.is_ok();
+                    }
+                    forwarded = &mut display => forwarded,
+                };
+                if !forwarded {
+                    if end.is_ended() { break false; }
+                    if temporary { drop(attachment.take()); }
+                    return true;
+                }
+            }
             // Discard the watch Ref before select holds an output across socket I/O.
             _ = futures::FutureExt::map(run_state.wait_for(|state| state.status != "running"), |_| ()) => break false,
         }
     };
+    // Display or busy-reply I/O can observe the end after incorporation was confirmed.
+    // Ending observation must not retract an already-sent command outcome.
+    let delivered = delivered || rx.try_recv().is_ok();
     if temporary {
         drop(attachment.take());
     }
     let frame = message_outcome(delivered, id, nonce, execution_id, req_id.as_deref());
-    writer.write_json_line(&frame).await.is_err() || !delivered
+    if delivered {
+        // Confirmation is a command outcome, not an observation. Expiration
+        // cannot retract it; bound only the flush after execution has ended.
+        let write = writer.write_json_line(&frame);
+        tokio::pin!(write);
+        let written = tokio::select! {
+            biased;
+            result = &mut write => result.is_ok(),
+            _ = end.wait() => {
+                tokio::select! {
+                    biased;
+                    result = &mut write => result.is_ok(),
+                    _ = writer.closed() => false,
+                    _ = tokio::time::sleep(std::time::Duration::from_secs(1)) => false,
+                }
+            }
+            _ = writer.closed() => false,
+        };
+        return !written || end.is_ended();
+    }
+    tokio::select! {
+        _ = writer.write_json_line(&frame) => {},
+        _ = socket::read_json_line(reader) => {},
+        _ = tokio::time::sleep(std::time::Duration::from_secs(1)) => {},
+    }
+    true
 }
 
 fn message_outcome(
@@ -646,13 +739,6 @@ async fn report_attach_error(writer: &SharedWriter, error: AttachError) {
         .await;
 }
 
-fn debugger_between_turn(target: &crate::clients::interactive::DebugTarget) -> bool {
-    // Registration-only handles are observation-live before the first turn,
-    // but have no execution to attach to. Ended executions may reserve the
-    // next chat turn; a live target (including read-only snapshots) may not.
-    target.is_registration_only() || target.end_signal().is_ended()
-}
-
 enum ReadinessFailure {
     Closed,
     Ended,
@@ -676,6 +762,7 @@ async fn report_readiness_failure(
 
 /// Readiness owns its run-stop future; whichever branch loses is dropped.
 /// Failures are reported by the caller only after releasing the lease.
+#[cfg(test)]
 async fn wait_for_ready(
     lease: &mut DebugAttachment,
     run_state: &mut watch::Receiver<RunState>,
@@ -684,26 +771,79 @@ async fn wait_for_ready(
     id: &str,
     end: Option<&EndSignal>,
 ) -> Result<crate::clients::interactive::DebugTarget, ReadinessFailure> {
-    send_debug_status(writer, "waiting_for_ready").await;
-    let ready = tokio::select! {
-        biased;
-        frame = socket::read_json_line(reader) => {
-            if matches!(frame, Ok(Some(_))) {
-                return Err(ReadinessFailure::Error(error_response(
-                    "command received before ready; attachment closed",
-                )));
-            }
-            return Err(ReadinessFailure::Closed);
-        }
-        _ = async { let _ = run_state.wait_for(|state| state.status != "running").await; } => false,
+    wait_for_ready_view(lease, run_state, reader, writer, id, end, None).await
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn wait_for_ready_view(
+    lease: &mut DebugAttachment,
+    run_state: &mut watch::Receiver<RunState>,
+    reader: &mut BufReader<OwnedReadHalf>,
+    writer: &SharedWriter,
+    id: &str,
+    end: Option<&EndSignal>,
+    mut display: Option<(
+        &mut gremlins_magic_bus::ReceiverHalf<EventKind>,
+        Option<&str>,
+    )>,
+) -> Result<crate::clients::interactive::DebugTarget, ReadinessFailure> {
+    if end.is_some_and(EndSignal::is_ended) {
+        return Err(ReadinessFailure::Ended);
+    }
+    let status_written = tokio::select! {
+        _ = send_debug_status(writer, "waiting_for_ready") => true,
         _ = async {
             match end {
                 Some(end) => end.wait().await,
                 None => std::future::pending().await,
             }
         } => false,
-        result = &mut lease.ready => result.is_ok(),
-        _ = &mut lease.ended => false,
+    };
+    if !status_written {
+        return Err(if end.is_some_and(EndSignal::is_ended) {
+            ReadinessFailure::Ended
+        } else {
+            ReadinessFailure::Closed
+        });
+    }
+    let ready = loop {
+        let ready = tokio::select! {
+            biased;
+            frame = socket::read_json_line(reader) => {
+                if matches!(frame, Ok(Some(_))) {
+                    return Err(ReadinessFailure::Error(error_response(
+                        "command received before ready; attachment closed",
+                    )));
+                }
+                return Err(ReadinessFailure::Closed);
+            }
+            _ = async { let _ = run_state.wait_for(|state| state.status != "running").await; } => false,
+            _ = async {
+                match end {
+                    Some(end) => end.wait().await,
+                    None => std::future::pending().await,
+                }
+            } => false,
+            _ = &mut lease.ended => false,
+            result = &mut lease.ready => result.is_ok(),
+            event = async {
+                match display.as_mut() {
+                    Some((rx, _)) => rx.recv().await,
+                    None => std::future::pending().await,
+                }
+            } => {
+                let execution_id = display.as_ref().and_then(|(_, id)| *id);
+                if !forward_display(event, execution_id, writer, end).await {
+                    return Err(if end.is_some_and(EndSignal::is_ended) {
+                        ReadinessFailure::Ended
+                    } else {
+                        ReadinessFailure::Closed
+                    });
+                }
+                continue;
+            }
+        };
+        break ready;
     };
     if !ready {
         return Err(ReadinessFailure::Ended);
@@ -716,22 +856,30 @@ async fn wait_for_ready(
             )));
         }
     };
-    writer
-        .write_json_line(&serde_json::json!({
+    if !write_view(
+        writer,
+        &serde_json::json!({
             "type": "ready", "scope": "conversation", "id": id, "nonce": target.nonce(),
-        }))
-        .await
-        .map_err(|_| ReadinessFailure::Closed)?;
+        }),
+        end,
+    )
+    .await
+    {
+        return Err(if end.is_some_and(EndSignal::is_ended) {
+            ReadinessFailure::Ended
+        } else {
+            ReadinessFailure::Closed
+        });
+    }
     Ok(target)
 }
 
 /// Passive conversation: stream events until the execution ends.
 ///
-/// The event loop exits on a terminal bus event (`Done`/`Ended`), on socket
-/// EOF, or when `end_signal` fires — the last covering executions that end
-/// without ever emitting a terminal event (e.g. cancellation).
+/// Socket EOF or the latched snapshot end signal closes the viewer, even
+/// without a terminal bus event. Buffered successor events never retarget it.
 async fn handle_passive_conversation(
-    _id: &str,
+    execution_id: Option<&str>,
     reader: &mut BufReader<tokio::net::unix::OwnedReadHalf>,
     writer: &SharedWriter,
     evt_rx: &mut gremlins_magic_bus::ReceiverHalf<EventKind>,
@@ -746,34 +894,71 @@ async fn handle_passive_conversation(
 
     loop {
         tokio::select! {
-            result = evt_rx.recv() => {
-                match result {
-                    Recv::Event(dispatch) => {
-                        let kind = dispatch.into_kind();
-                        let payload = conversation_display_event(&kind);
-                        if let Some(p) = payload {
-                            if writer.write_json_line(&p).await.is_err() { break; }
-                        }
-                        // Terminal: Done or Ended.
-                        if matches!(kind, EventKind::Done { .. } | EventKind::Ended { .. }) {
-                            break;
-                        }
-                    }
-                    Recv::Lagged(skipped) => {
-                        let payload = serde_json::json!({
-                            "type": "lagged",
-                            "skipped": skipped,
-                        });
-                        if writer.write_json_line(&payload).await.is_err() { break; }
-                    }
-                    Recv::Closed => break,
-                }
-            }
-            // The execution ended (return, error, cancellation, or a
-            // successor execution started) without a terminal bus event.
+            biased;
             _ = &mut end => break,
             _ = socket::read_json_line(reader) => break,
+            result = evt_rx.recv() => {
+                if !forward_display(result, execution_id, writer, Some(&end_signal)).await {
+                    break;
+                }
+            }
+
         }
+    }
+}
+
+// All viewer phases use this exact execution match. Missing execution identity
+// is never a wildcard: registration-only viewers must not follow the next turn.
+fn matching_display(
+    dispatch: &gremlins_magic_bus::DispatchEvent<EventKind>,
+    execution_id: Option<&str>,
+) -> Option<Value> {
+    let expected = execution_id?;
+    if dispatch.corr_id().execution_id() != Some(expected) {
+        return None;
+    }
+    let mut frame = conversation_display_event(dispatch.kind())?;
+    if matches!(dispatch.kind(), EventKind::Ready { .. }) {
+        frame["type"] = serde_json::json!("execution_ready");
+        frame["id"] = serde_json::json!(dispatch.corr_id().run());
+        frame["execution_id"] = serde_json::json!(expected);
+    }
+    frame
+        .as_object_mut()?
+        .insert("scope".into(), "conversation".into());
+    Some(frame)
+}
+
+async fn write_view(writer: &SharedWriter, frame: &Value, end: Option<&EndSignal>) -> bool {
+    tokio::select! {
+        biased;
+        _ = async {
+            match end {
+                Some(end) => end.wait().await,
+                None => std::future::pending().await,
+            }
+        } => false,
+        result = writer.write_json_line(frame) => result.is_ok(),
+        _ = writer.closed() => false,
+    }
+}
+
+async fn forward_display(
+    event: Recv<EventKind>,
+    execution_id: Option<&str>,
+    writer: &SharedWriter,
+    end: Option<&EndSignal>,
+) -> bool {
+    let frame = match event {
+        Recv::Event(dispatch) => matching_display(&dispatch, execution_id),
+        Recv::Lagged(skipped) => Some(serde_json::json!({
+            "type": "lagged", "scope": "conversation", "skipped": skipped,
+        })),
+        Recv::Closed => return false,
+    };
+    match frame {
+        Some(frame) => write_view(writer, &frame, end).await,
+        None => true,
     }
 }
 
@@ -857,6 +1042,145 @@ fn conversation_display_event(kind: &EventKind) -> Option<Value> {
     }
 }
 
+/// Deterministically hold a subscribed viewer before it consumes bus events.
+/// Run-keyed and one-shot so unrelated viewers/tests remain independent.
+#[cfg(test)]
+pub(crate) mod setup_gate {
+    use std::collections::HashMap;
+    use std::sync::{Mutex, OnceLock};
+    use tokio::sync::oneshot;
+
+    type Gate = (oneshot::Sender<()>, oneshot::Receiver<()>);
+    static GATES: OnceLock<Mutex<HashMap<String, Gate>>> = OnceLock::new();
+
+    pub(crate) fn install(id: &str) -> (oneshot::Receiver<()>, oneshot::Sender<()>) {
+        let (entered_tx, entered_rx) = oneshot::channel();
+        let (release_tx, release_rx) = oneshot::channel();
+        assert!(GATES
+            .get_or_init(Default::default)
+            .lock()
+            .unwrap()
+            .insert(id.into(), (entered_tx, release_rx))
+            .is_none());
+        (entered_rx, release_tx)
+    }
+
+    pub(super) async fn wait(id: &str) {
+        let gate = GATES
+            .get_or_init(Default::default)
+            .lock()
+            .unwrap()
+            .remove(id);
+        if let Some((entered, release)) = gate {
+            let _ = entered.send(());
+            let _ = release.await;
+        }
+    }
+}
+
+#[cfg(test)]
+pub(crate) mod receiver_gate {
+    use std::collections::HashMap;
+    use std::sync::{Mutex, OnceLock};
+    use tokio::sync::oneshot;
+
+    type Gate = (oneshot::Sender<()>, oneshot::Receiver<()>);
+    static GATES: OnceLock<Mutex<HashMap<String, Gate>>> = OnceLock::new();
+
+    pub(crate) fn install(id: &str) -> (oneshot::Receiver<()>, oneshot::Sender<()>) {
+        let (entered_tx, entered_rx) = oneshot::channel();
+        let (release_tx, release_rx) = oneshot::channel();
+        assert!(GATES
+            .get_or_init(Default::default)
+            .lock()
+            .unwrap()
+            .insert(id.into(), (entered_tx, release_rx))
+            .is_none());
+        (entered_rx, release_tx)
+    }
+
+    pub(super) async fn wait(id: &str) {
+        let gate = GATES
+            .get_or_init(Default::default)
+            .lock()
+            .unwrap()
+            .remove(id);
+        if let Some((entered, release)) = gate {
+            let _ = entered.send(());
+            let _ = release.await;
+        }
+    }
+}
+
+#[cfg(test)]
+pub(crate) mod delivery_display_gate {
+    use std::collections::HashMap;
+    use std::sync::{Mutex, OnceLock};
+    use tokio::sync::oneshot;
+
+    type Gate = (oneshot::Sender<()>, oneshot::Receiver<()>);
+    static GATES: OnceLock<Mutex<HashMap<String, Gate>>> = OnceLock::new();
+
+    pub(crate) fn install(id: &str) -> (oneshot::Receiver<()>, oneshot::Sender<()>) {
+        let (entered_tx, entered_rx) = oneshot::channel();
+        let (release_tx, release_rx) = oneshot::channel();
+        assert!(GATES
+            .get_or_init(Default::default)
+            .lock()
+            .unwrap()
+            .insert(id.into(), (entered_tx, release_rx))
+            .is_none());
+        (entered_rx, release_tx)
+    }
+
+    pub(super) async fn wait(id: &str) {
+        let gate = GATES
+            .get_or_init(Default::default)
+            .lock()
+            .unwrap()
+            .remove(id);
+        if let Some((entered, release)) = gate {
+            let _ = entered.send(());
+            let _ = release.await;
+        }
+    }
+}
+
+/// Hold a selected busy reply before writing it, so confirmation and end can race it.
+#[cfg(test)]
+pub(crate) mod delivery_busy_gate {
+    use std::collections::HashMap;
+    use std::sync::{Mutex, OnceLock};
+    use tokio::sync::oneshot;
+
+    type Gate = (oneshot::Sender<()>, oneshot::Receiver<()>);
+    static GATES: OnceLock<Mutex<HashMap<String, Gate>>> = OnceLock::new();
+
+    pub(crate) fn install(id: &str) -> (oneshot::Receiver<()>, oneshot::Sender<()>) {
+        let (entered_tx, entered_rx) = oneshot::channel();
+        let (release_tx, release_rx) = oneshot::channel();
+        assert!(GATES
+            .get_or_init(Default::default)
+            .lock()
+            .unwrap()
+            .insert(id.into(), (entered_tx, release_rx))
+            .is_none());
+        (entered_rx, release_tx)
+    }
+
+    pub(super) async fn wait(id: &str) {
+        let gate = GATES
+            .get_or_init(Default::default)
+            .lock()
+            .unwrap()
+            .remove(id);
+        if let Some((entered, release)) = gate {
+            let _ = entered.send(());
+            let _ = release.await;
+        }
+    }
+}
+
 #[cfg(test)]
 mod routing_tests {
     use super::*;
@@ -930,10 +1254,59 @@ mod routing_tests {
     }
 
     #[tokio::test]
+    async fn ready_lease_precedes_queued_foreign_display() {
+        let (mut factory, handle) = InteractiveSessionFactory::for_chat();
+        let mut session = factory.next_session();
+        let target = handle.target();
+        let mut lease = target.attach_debugger().unwrap();
+        assert!(session.accept_pause());
+        // Readiness is acknowledged when the agent polls its command inbox.
+        assert!(futures::poll!(Box::pin(session.next_command())).is_pending());
+        let (_client, server) = tokio::net::UnixStream::pair().unwrap();
+        let (read, write) = server.into_split();
+        let writer = SharedWriter::new(write);
+        let mut reader = BufReader::new(read);
+        let (_state_tx, mut state) = watch::channel(RunState {
+            status: "running".into(),
+            id: "readiness-priority".into(),
+            stage: String::new(),
+            started_at: String::new(),
+        });
+        let (sub, mut events) = subscribe_run_lag_tolerant("readiness-priority", 256);
+        let _guard = BusSubGuard::new(sub);
+        for _ in 0..16 {
+            gremlins_magic_bus::emit_corr_event(
+                &gremlins_magic_bus::CorrId::new()
+                    .with_run("readiness-priority")
+                    .with_execution_id("foreign"),
+                EventKind::StreamChunk {
+                    text: "foreign".into(),
+                },
+            );
+        }
+        let end = target.end_signal();
+        let result = wait_for_ready_view(
+            &mut lease,
+            &mut state,
+            &mut reader,
+            &writer,
+            "readiness-priority",
+            Some(&end),
+            Some((&mut events, target.execution_id())),
+        )
+        .await;
+        assert!(result.is_ok());
+        // An already-ready lease must not drain even one queued display event.
+        for _ in 0..16 {
+            assert!(events.try_recv().is_ok());
+        }
+    }
+
+    #[tokio::test]
     async fn registration_target_routes_debugger_to_first_writable_turn() {
         let (mut factory, handle) = InteractiveSessionFactory::for_chat();
-        let registration_target = handle.target();
-        assert!(debugger_between_turn(&registration_target));
+        let (_, between_turn) = handle.attachment_target();
+        assert!(between_turn);
 
         let reservation = handle.attach_next_turn_debugger(None).unwrap();
         let mut first_turn = factory.next_session();
@@ -949,8 +1322,8 @@ mod routing_tests {
     async fn live_targets_and_corrections_cannot_reserve_successors() {
         let (mut factory, handle) = InteractiveSessionFactory::for_chat();
         let mut turn = factory.next_session();
-        let live = handle.target();
-        assert!(!debugger_between_turn(&live));
+        let (live, between_turn) = handle.attachment_target();
+        assert!(!between_turn);
         assert!(matches!(
             handle.attach_next_turn_debugger(None),
             Err(AttachError::Busy)
@@ -958,7 +1331,7 @@ mod routing_tests {
         assert!(live.attach().is_ok());
 
         let readonly = live.read_only();
-        assert!(!debugger_between_turn(&readonly));
+        assert!(!readonly.accepts_commands());
         assert!(matches!(
             handle.attach_next_turn_debugger(None),
             Err(AttachError::Busy)

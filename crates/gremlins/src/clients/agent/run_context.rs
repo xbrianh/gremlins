@@ -5,6 +5,46 @@ use crate::clients::cancel::ErrorClassifier;
 use crate::clients::conversation::Conversation;
 use crate::clients::tools::tool_specs::ToolMode;
 
+pub(crate) fn execution_corr_id(
+    run_id: &str,
+    session: &crate::clients::interactive::InteractiveSession,
+) -> gremlins_magic_bus::CorrId {
+    let mut corr = gremlins_magic_bus::CorrId::new();
+    if !run_id.is_empty() {
+        corr = corr.with_run(run_id);
+    }
+    if let Some(id) = session.snapshot().execution_id() {
+        corr = corr.with_execution_id(id);
+    }
+    corr
+}
+
+#[cfg(test)]
+mod tests {
+    use super::execution_corr_id;
+    use crate::clients::interactive::{InteractiveSession, InteractiveSessionFactory};
+
+    #[test]
+    fn producer_identity_is_captured_from_the_executing_session() {
+        let (mut sessions, _) = InteractiveSessionFactory::for_chat();
+        let first = sessions.next_session();
+        let expected = first.snapshot().execution_id().unwrap().to_owned();
+        let corr = execution_corr_id("producer-run", &first);
+        let successor = sessions.next_session();
+        assert_ne!(successor.snapshot().execution_id(), Some(expected.as_str()));
+        assert_eq!(corr.run(), Some("producer-run"));
+        assert_eq!(corr.execution_id(), Some(expected.as_str()));
+        assert_eq!(execution_corr_id("producer-run", &first), corr);
+    }
+
+    #[test]
+    fn unattached_producer_does_not_invent_execution_identity() {
+        let corr = execution_corr_id("", &InteractiveSession::unattached());
+        assert_eq!(corr.run(), None);
+        assert_eq!(corr.execution_id(), None);
+    }
+}
+
 #[derive(Clone)]
 pub(crate) struct RunContext {
     pub(crate) params: RunParams,

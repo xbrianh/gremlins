@@ -287,6 +287,13 @@ impl InteractiveHandle {
         self.0.lock().unwrap().clone()
     }
 
+    /// Capture setup intent with the target, before its execution can expire.
+    pub(crate) fn attachment_target(&self) -> (DebugTarget, bool) {
+        let target = self.0.lock().unwrap();
+        let between_turn = target.registration_only || target.end_signal.is_ended();
+        (target.clone(), between_turn)
+    }
+
     /// A handle to the pause slot's end signal, if the target is still alive.
     ///
     /// The returned [`EndSignal`] fires when the captured execution ends —
@@ -418,11 +425,6 @@ impl DebugTarget {
     /// Whether this snapshot permits interactive control.
     pub(crate) fn accepts_commands(&self) -> bool {
         !self.readonly && self.commands_supported
-    }
-
-    /// Whether this snapshot describes the pre-execution registration target.
-    pub(crate) fn is_registration_only(&self) -> bool {
-        self.registration_only
     }
 
     /// Place a message/correction pause request. The reservation does NOT cross
@@ -942,6 +944,19 @@ impl Drop for InteractiveSession {
 impl InteractiveSession {
     pub fn unattached() -> Self {
         Self::default()
+    }
+
+    /// Snapshot this execution directly, never the factory's latest registration.
+    pub(crate) fn snapshot(&self) -> DebugTarget {
+        DebugTarget {
+            slot: Arc::downgrade(&self.slot),
+            nonce: self.nonce,
+            execution_id: self.slot.execution_id(),
+            readonly: false,
+            commands_supported: self.accepts_commands,
+            end_signal: self.end_signal.clone(),
+            registration_only: false,
+        }
     }
 
     pub(crate) fn accepts_commands(&self) -> bool {

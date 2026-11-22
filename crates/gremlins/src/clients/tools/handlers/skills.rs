@@ -1,6 +1,6 @@
 use async_trait::async_trait;
 
-use gremlins_magic_bus::emit_run_event_async;
+use gremlins_magic_bus::emit_corr_event_async;
 use gremlins_magic_bus::EventKind;
 
 use crate::clients::conversation::Conversation;
@@ -64,8 +64,8 @@ pub(crate) async fn load_skill_invoke(ctx: &AgentLoopRuntime, args: &serde_json:
     //
     // Emit the canonical name from the resolved skill, not the raw
     // invocation argument, in case find_skill resolved an alias.
-    emit_run_event_async(
-        &ctx.message_prefix,
+    emit_corr_event_async(
+        &ctx.corr_id,
         EventKind::SkillLoaded {
             id: ctx.message_prefix.clone(),
             name: loaded.skill.name.clone(),

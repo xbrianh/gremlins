@@ -128,6 +128,21 @@ pub fn emit_event(event: EventKind) {
     }
 }
 
+/// Emit at the producer with its captured correlation identity.
+pub fn emit_corr_event(corr_id: &CorrId, event: EventKind) {
+    if let Some(bus) = BUS.get() {
+        bus.emit(DispatchEvent::new(corr_id.clone(), event));
+    }
+}
+
+/// Await delivery using the producer's captured correlation identity.
+pub async fn emit_corr_event_async(corr_id: &CorrId, event: EventKind) {
+    if let Some(bus) = BUS.get() {
+        bus.emit_async(DispatchEvent::new(corr_id.clone(), event))
+            .await;
+    }
+}
+
 /// Emit an event tagged with a specific run id so per-run subscribers
 /// (subscribed with an `r:<id>` prefix) receive it.
 ///

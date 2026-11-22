@@ -567,6 +567,7 @@ mod tests {
             audit_lock: None,
             id_prefix: String::new(),
             message_prefix: String::new(),
+            corr_id: gremlins_magic_bus::CorrId::new(),
             discovered_skills: None,
             path_context: crate::clients::path_context::PathContext::default(),
             root_raw_stream_path: None,
@@ -575,13 +576,36 @@ mod tests {
 
     #[tokio::test]
     async fn make_task_runner_invokes_and_sets_task_fn() {
-        let ctx = depth_test_ctx();
+        use gremlins_magic_bus::{CorrId, EventKind};
+        use rig_core::test_utils::{MockCompletionModel, MockStreamEvent};
 
-        // Model that returns a single text response in one turn.
-        let model = rig_core::test_utils::MockCompletionModel::from_stream_turns([vec![
-            rig_core::test_utils::MockStreamEvent::text("nested reply"),
-            rig_core::test_utils::MockStreamEvent::final_response_with_default_usage(),
-        ]]);
+        gremlins_magic_bus::init_bus();
+        let mut ctx = depth_test_ctx();
+        ctx.message_prefix = "task-runner-payload".into();
+        ctx.corr_id = CorrId::new()
+            .with_run("test.task-runner.nested-correlation")
+            .with_stage("agent")
+            .with_execution_id("execution-original");
+        let corr_id = ctx.corr_id.clone();
+        let payload_id = ctx.message_prefix.clone();
+        let (_sub, mut rx) =
+            gremlins_magic_bus::subscribe_run("test.task-runner.nested-correlation");
+        std::fs::write(ctx.cwd.as_ref().unwrap().join("input.txt"), "evidence").unwrap();
+
+        let model = MockCompletionModel::from_stream_turns([
+            vec![
+                MockStreamEvent::tool_call(
+                    "read-call",
+                    "Read",
+                    serde_json::json!({"file_path": "input.txt"}),
+                ),
+                MockStreamEvent::final_response_with_default_usage(),
+            ],
+            vec![
+                MockStreamEvent::text("nested reply"),
+                MockStreamEvent::final_response_with_default_usage(),
+            ],
+        ]);
 
         let cancel = crate::clients::cancel::CancelToken::new();
         let runner = make_task_runner(
@@ -606,8 +630,8 @@ mod tests {
             TaskKind::Scout,
             "first call".into(),
             Box::new(ConversationStub::new("")),
-            String::new(),
-            String::new(),
+            "parent-message".into(),
+            "task-call".into(),
         )
         .await;
         assert!(
@@ -615,6 +639,58 @@ mod tests {
             "depth 0 should not hit guard, got: {}",
             output.output
         );
+
+        assert!(output.output.contains("nested reply"));
+        let mut progress_chain = None;
+        let mut read_result_id = None;
+        let mut saw_log = false;
+        let mut saw_reply = false;
+        while let Ok(event) = rx.try_recv() {
+            match event.kind() {
+                EventKind::TaskProgress { .. }
+                | EventKind::ToolResult { .. }
+                | EventKind::LogLine { .. } => {
+                    assert_eq!(event.corr_id(), &corr_id);
+                    assert_eq!(event.corr_id().execution_id(), Some("execution-original"));
+                }
+                _ => continue,
+            }
+            match event.into_kind() {
+                EventKind::TaskProgress {
+                    parent_id,
+                    chain,
+                    kind,
+                    call,
+                    text,
+                    ..
+                } => {
+                    assert_eq!(parent_id, "parent-message");
+                    assert_eq!(call, "task-call");
+                    assert_eq!(kind, "Scout");
+                    assert!(!chain.is_empty());
+                    if let Some(previous) = &progress_chain {
+                        assert_eq!(&chain, previous);
+                    }
+                    progress_chain = Some(chain);
+                    saw_reply |= text.contains("nested reply");
+                }
+                EventKind::ToolResult { id, .. } => {
+                    assert!(
+                        read_result_id.replace(id).is_none(),
+                        "duplicate tool result"
+                    );
+                }
+                EventKind::LogLine { id, .. } => {
+                    assert_eq!(id, payload_id);
+                    saw_log = true;
+                }
+                _ => unreachable!(),
+            }
+        }
+        let chain = progress_chain.expect("nested model must emit TaskProgress");
+        assert_eq!(read_result_id, Some(format!("{chain}.read-call")));
+        assert!(saw_reply, "nested text must reach TaskProgress");
+        assert!(saw_log, "nested runner must emit logs");
 
         // The task harness prompt must reach the model as a leading system message.
         for req in model.requests() {
@@ -1385,6 +1461,7 @@ mod tests {
             let mut ctx = depth_test_ctx();
             let prefix = unique_prefix();
             ctx.message_prefix = prefix.clone();
+            ctx.corr_id = gremlins_magic_bus::CorrId::new().with_run(&prefix);
             let (sub, log_rx) = gremlins_magic_bus::subscribe_run(&prefix);
             let guard = BusSubGuard::new(sub);
             let runner = make_task_runner(
@@ -1527,6 +1604,7 @@ mod tests {
                 audit_lock: None,
                 id_prefix: String::new(),
                 message_prefix: String::new(),
+                corr_id: gremlins_magic_bus::CorrId::new(),
                 discovered_skills: None,
                 path_context: crate::clients::path_context::PathContext::default(),
                 root_raw_stream_path,
@@ -1978,6 +2056,7 @@ mod tests {
 
             let mut ctx = task_ctx(dir.path().to_path_buf(), None);
             ctx.message_prefix = run_id.to_string();
+            ctx.corr_id = gremlins_magic_bus::CorrId::new().with_run(run_id);
 
             let collected = Arc::new(std::sync::Mutex::new(
                 Vec::<gremlins_magic_bus::EventKind>::new(),

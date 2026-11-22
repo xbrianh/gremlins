@@ -2,7 +2,7 @@ use crate::clients::cancel::CancelToken;
 use crate::clients::conversation::Conversation;
 use crate::clients::error::ClientError;
 use crate::clients::interactive::{DebugOutcome, InteractiveCommand, InteractiveSession};
-use gremlins_magic_bus::{emit_run_event_async, EventKind};
+use gremlins_magic_bus::{emit_corr_event_async, CorrId, EventKind};
 
 // ── interactive loop ─────────────────────────────────────────────────────
 
@@ -19,10 +19,14 @@ pub(super) enum InteractiveLoopResult {
 
 /// Only the live execution announces a withdrawn owner. Cleanup of a stale
 /// session must not announce a disconnect against the successor's execution.
-pub(super) async fn announce_live_disconnect(session: &InteractiveSession, message_prefix: &str) {
+pub(super) async fn announce_live_disconnect(
+    session: &InteractiveSession,
+    _message_prefix: &str,
+    corr_id: &CorrId,
+) {
     if !session.execution_ended() {
-        emit_run_event_async(
-            message_prefix,
+        emit_corr_event_async(
+            corr_id,
             EventKind::Ended {
                 reason: "disconnect".into(),
             },
@@ -43,13 +47,14 @@ pub(super) async fn interactive_loop(
     session: &mut InteractiveSession,
     turn: usize,
     message_prefix: &str,
+    corr_id: &CorrId,
 ) -> Result<InteractiveLoopResult, ClientError> {
     log::debug!("interactive_loop: broadcasting Ready (turn={turn})");
     let received = tokio::select! {
         biased;
         _ = cancel.cancelled() => return Err(ClientError::Cancelled),
         cmd = async {
-            emit_run_event_async(message_prefix, EventKind::Ready { turn }).await;
+            emit_corr_event_async(corr_id, EventKind::Ready { turn }).await;
             session.next_command().await
         } => cmd,
     };
@@ -68,8 +73,8 @@ pub(super) async fn interactive_loop(
                 text.len()
             );
             conv.inject_operator(&text);
-            emit_run_event_async(
-                message_prefix,
+            emit_corr_event_async(
+                corr_id,
                 EventKind::OperatorMessage {
                     id: message_prefix.to_string(),
                     text: text.clone(),
@@ -93,8 +98,8 @@ pub(super) async fn interactive_loop(
         }
         Some(InteractiveCommand::Bail(reason)) => {
             log::debug!("interactive_loop: Bail command (reason={reason:?}, turn={turn})");
-            emit_run_event_async(
-                message_prefix,
+            emit_corr_event_async(
+                corr_id,
                 EventKind::Ended {
                     reason: "bailed".to_string(),
                 },
@@ -114,7 +119,7 @@ pub(super) async fn interactive_loop(
                 // A live owner disconnect withdraws its lease without ending
                 // the execution. Replacements end the execution itself and
                 // must remain silent during stale-session cleanup.
-                announce_live_disconnect(session, message_prefix).await;
+                announce_live_disconnect(session, message_prefix, corr_id).await;
                 session.discard_revoked_inbox();
                 return Ok(InteractiveLoopResult::Resumed);
             }
@@ -123,8 +128,8 @@ pub(super) async fn interactive_loop(
             } else {
                 "disconnect"
             };
-            emit_run_event_async(
-                message_prefix,
+            emit_corr_event_async(
+                corr_id,
                 EventKind::Ended {
                     reason: reason.into(),
                 },

@@ -23,7 +23,7 @@ use crate::executor::state;
 use crate::executor::state::{Checkout, Collision, FileSystemStateStore};
 use crate::executor::RunError;
 use crate::task_kind::TaskKind;
-use gremlins_magic_bus::{emit_event, EventKind};
+use gremlins_magic_bus::{emit_corr_event, CorrId, EventKind};
 use indexmap::IndexMap;
 use rig_core::completion::Message;
 
@@ -61,6 +61,14 @@ pub(crate) fn resolve_task_models(
 ) -> Result<HashMap<TaskKind, String>, config::ConfigError> {
     let effective = config::merge_task_models_runtime(global, enclosing, stage);
     config::parse_task_models_map(effective.as_ref())
+}
+
+fn leaf_corr_id(run_id: &str, session: &crate::clients::interactive::InteractiveSession) -> CorrId {
+    let mut corr_id = CorrId::new().with_run(run_id);
+    if let Some(execution_id) = session.snapshot().execution_id() {
+        corr_id = corr_id.with_execution_id(execution_id);
+    }
+    corr_id
 }
 
 pub(crate) async fn run_agent(
@@ -138,6 +146,7 @@ pub(crate) async fn run_agent(
         Ok(session) => session,
         Err(error) => return Err(stage_failed(&agent.name, error)),
     };
+    let corr_id = leaf_corr_id(gremlin.id.as_str(), &interactive);
     let framework_subs = gremlin.framework_subs(&agent.name);
     let _attempt = gremlin.state.read_str("attempt");
     let loop_iter = gremlin.loop_iter.clone();
@@ -426,10 +435,13 @@ pub(crate) async fn run_agent(
         name = agent.name,
         model = effective_model,
     );
-    emit_event(EventKind::LogLine {
-        id: gremlin.id.to_string(),
-        line: msg,
-    });
+    emit_corr_event(
+        &corr_id,
+        EventKind::LogLine {
+            id: gremlin.id.to_string(),
+            line: msg,
+        },
+    );
 
     log::debug!(
         "agent stage '{}' (gremlin={}): invoking client.run (model={})",
@@ -881,6 +893,42 @@ mod tests {
             .await
             .1
             .is_none());
+    }
+
+    #[tokio::test]
+    async fn leaf_producer_keeps_its_identity_after_session_replacement() {
+        use crate::clients::interactive::InteractiveSessionFactory;
+        use gremlins_magic_bus::{subscribe_run, Recv};
+
+        let id = "executor-leaf-producer-identity";
+        let (mut sessions, _) = InteractiveSessionFactory::for_chat();
+        let first = sessions.next_session();
+        let expected = first.snapshot().execution_id().unwrap().to_owned();
+        let corr_id = leaf_corr_id(id, &first);
+        let successor = sessions.next_session();
+        assert_ne!(successor.snapshot().execution_id(), Some(expected.as_str()));
+        assert_eq!(leaf_corr_id(id, &first), corr_id);
+        let (sub, mut rx) = subscribe_run(id);
+        let _guard = gremlins_magic_bus::connection::BusSubGuard::new(sub);
+        emit_corr_event(
+            &corr_id,
+            EventKind::LogLine {
+                id: id.into(),
+                line: "late leaf output".into(),
+            },
+        );
+        let event = tokio::time::timeout(std::time::Duration::from_secs(2), rx.recv())
+            .await
+            .unwrap();
+        let Recv::Event(event) = event else {
+            panic!("missing leaf event")
+        };
+        assert_eq!(event.corr_id().run(), Some(id));
+        assert_eq!(event.corr_id().execution_id(), Some(expected.as_str()));
+        assert_eq!(
+            leaf_corr_id(id, &InteractiveSession::unattached()).execution_id(),
+            None
+        );
     }
 
     const CAPTURED: &str = "deliberate run_agent dispatch capture";

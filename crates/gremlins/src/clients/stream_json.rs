@@ -46,6 +46,7 @@ pub(crate) struct StreamState {
 
 /// Emit a stream-json event to stderr (via `log`).
 /// When `on_log` is provided, it is also called with each formatted log line.
+/// The caller owns bus emission and captures the producer's execution identity.
 pub(crate) fn emit_event(
     prefix: &str,
     evt: &Value,
@@ -176,5 +177,42 @@ fn tool_result_body(body: &Value) -> String {
         Value::String(s) => s.clone(),
         Value::Null => String::new(),
         _ => body.to_string(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::Mutex;
+
+    #[test]
+    fn forwards_each_formatted_line_to_the_producer_callback() {
+        let lines = Mutex::new(Vec::new());
+        let on_log = |line| lines.lock().unwrap().push(line);
+        for evt in [
+            serde_json::json!({"type": "system", "subtype": "init", "model": "model", "cwd": "/work"}),
+            serde_json::json!({"type": "assistant", "message": {"content": [
+                {"type": "text", "text": "hello"},
+                {"type": "thinking", "thinking": "consider"},
+                {"type": "tool_use", "name": "Read", "input": {"file_path": "file.rs"}}
+            ]}}),
+            serde_json::json!({"type": "user", "message": {"content": [
+                {"type": "tool_result", "is_error": true, "content": "failed"}
+            ]}}),
+            serde_json::json!({"type": "result", "subtype": "success", "num_turns": 1, "total_cost_usd": 0.5}),
+        ] {
+            emit_event("[run] ", &evt, Some(&on_log));
+        }
+        assert_eq!(
+            *lines.lock().unwrap(),
+            [
+                "[run] using client model=model cwd=/work reasoning_effort=default",
+                "[run] text: hello",
+                "[run] think: consider",
+                "[run] tool: Read file.rs",
+                "[run] result ERROR: failed",
+                "[run] final: subtype=success turns=1 cost=0.5",
+            ]
+        );
     }
 }

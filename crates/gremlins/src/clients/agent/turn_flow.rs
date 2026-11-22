@@ -24,7 +24,7 @@ use crate::clients::format::{format_tool_call, trunc};
 use crate::clients::interactive::DebugOutcome;
 use crate::clients::protocol::{add_opt, CompletedRun, TurnStats, UsageStats};
 use crate::clients::tools::{self, AgentLoopRuntime};
-use gremlins_magic_bus::{emit_run_event_async, EventKind};
+use gremlins_magic_bus::{emit_corr_event_async, EventKind};
 
 use super::agent_loop::{cancelled_error, DoneDecision, EmptyTurnAction, LoopState};
 
@@ -183,7 +183,7 @@ pub(super) async fn handle_done_decision(
                     _ = cancel.cancelled() => {
                         return Err(cancelled_error());
                     }
-                    _ = emit_run_event_async(&state.message_prefix, EventKind::Done {
+                    _ = emit_corr_event_async(&state.corr_id, EventKind::Done {
                         text: result_text.clone(),
                         summary: done_summary.clone(),
                         usage: Some(usage.clone()),
@@ -421,7 +421,7 @@ pub(super) async fn emit_turn_artifacts(
                 _ = cancel.cancelled() => {
                     return Err(cancelled_error());
                 }
-                _ = emit_run_event_async(&state.message_prefix, EventKind::TaskProgress {
+                _ = emit_corr_event_async(&state.corr_id, EventKind::TaskProgress {
                     parent_id: parent_id.to_string(),
                     chain: chain.to_string(),
                     kind: kind.to_string(),
@@ -442,7 +442,7 @@ pub(super) async fn emit_turn_artifacts(
                 _ = cancel.cancelled() => {
                     return Err(cancelled_error());
                 }
-                _ = emit_run_event_async(&state.message_prefix, EventKind::TurnComplete {
+                _ = emit_corr_event_async(&state.corr_id, EventKind::TurnComplete {
                     turn: state.turn_num,
                     text: text.to_string(),
                     tool_calls: tool_calls.iter().map(format_tool_call).collect(),

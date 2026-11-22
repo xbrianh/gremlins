@@ -9,7 +9,7 @@ use rig_core::streaming::{Item, StreamEvent, Streamed};
 use crate::clients::cancel::CancelToken;
 use crate::clients::error::ClientError;
 use crate::clients::format::{apply_chunk, format_tool_call};
-use gremlins_magic_bus::{emit_run_event_async, EventKind};
+use gremlins_magic_bus::{emit_corr_event_async, EventKind};
 
 use super::agent_loop::{retry_backoff, LoopOpts, LoopState, StreamTurnOutcome, StreamTurnOutput};
 
@@ -124,7 +124,7 @@ pub(super) async fn consume_stream_events(
                         tokio::select! {
                             biased;
                             _ = cancel.cancelled() => return Err(ClientError::Cancelled),
-                            _ = emit_run_event_async(&state.message_prefix, EventKind::StreamReset) => {}
+                            _ = emit_corr_event_async(&state.corr_id, EventKind::StreamReset) => {}
                         }
                     }
                     return Ok(StreamTurnOutcome::RetryModelError);
@@ -154,7 +154,7 @@ pub(super) async fn consume_stream_events(
                                     _ = cancel.cancelled() => {
                                         return Err(ClientError::Cancelled);
                                     }
-                                    _ = emit_run_event_async(&state.message_prefix, EventKind::TaskProgress {
+                                    _ = emit_corr_event_async(&state.corr_id, EventKind::TaskProgress {
                                         parent_id: parent_id.to_string(),
                                         chain: chain.to_string(),
                                         kind: kind.to_string(),
@@ -172,7 +172,7 @@ pub(super) async fn consume_stream_events(
                                     _ = cancel.cancelled() => {
                                         return Err(ClientError::Cancelled);
                                     }
-                                    _ = emit_run_event_async(&state.message_prefix, EventKind::TaskProgress {
+                                    _ = emit_corr_event_async(&state.corr_id, EventKind::TaskProgress {
                                         parent_id: parent_id.to_string(),
                                         chain: chain.to_string(),
                                         kind: kind.to_string(),
@@ -194,7 +194,7 @@ pub(super) async fn consume_stream_events(
                                     _ = cancel.cancelled() => {
                                         return Err(ClientError::Cancelled);
                                     }
-                                    _ = emit_run_event_async(&state.message_prefix, EventKind::TaskProgress {
+                                    _ = emit_corr_event_async(&state.corr_id, EventKind::TaskProgress {
                                         parent_id: parent_id.to_string(),
                                         chain: chain.to_string(),
                                         kind: kind.to_string(),
@@ -216,7 +216,7 @@ pub(super) async fn consume_stream_events(
                                     _ = cancel.cancelled() => {
                                         return Err(ClientError::Cancelled);
                                     }
-                                    _ = emit_run_event_async(&state.message_prefix, EventKind::StreamChunk {
+                                    _ = emit_corr_event_async(&state.corr_id, EventKind::StreamChunk {
                                         text: text.clone(),
                                     }) => {}
                                 }
@@ -227,7 +227,7 @@ pub(super) async fn consume_stream_events(
                                     _ = cancel.cancelled() => {
                                         return Err(ClientError::Cancelled);
                                     }
-                                    _ = emit_run_event_async(&state.message_prefix, EventKind::ReasoningChunk {
+                                    _ = emit_corr_event_async(&state.corr_id, EventKind::ReasoningChunk {
                                         text: text.clone(),
                                     }) => {}
                                 }
@@ -242,7 +242,7 @@ pub(super) async fn consume_stream_events(
                                     _ = cancel.cancelled() => {
                                         return Err(ClientError::Cancelled);
                                     }
-                                    _ = emit_run_event_async(&state.message_prefix, EventKind::ReasoningChunk {
+                                    _ = emit_corr_event_async(&state.corr_id, EventKind::ReasoningChunk {
                                         text: format_tool_call(tc),
                                     }) => {}
                                 }

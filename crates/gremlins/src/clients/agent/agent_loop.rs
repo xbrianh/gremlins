@@ -24,7 +24,7 @@ use crate::clients::path_context::PathContext;
 use crate::clients::protocol::{CompletedRun, TurnStats, UsageStats};
 use crate::clients::tools::tool_specs::ToolMode;
 use crate::clients::tools::{self, AgentLoopRuntime, ToolOutcome};
-use gremlins_magic_bus::{emit_event, emit_run_event_async};
+use gremlins_magic_bus::{emit_corr_event, emit_corr_event_async, CorrId};
 
 pub(crate) use super::run_context::{LoopOpts, RunContext};
 
@@ -103,6 +103,7 @@ pub(super) struct LoopState {
     pub(super) single_turn: bool,
     /// Run-scoped id for direct bus emission of log lines and stream events.
     pub(super) message_prefix: String,
+    pub(super) corr_id: CorrId,
 }
 
 /// Result of streaming one turn's request: the accumulated assistant content
@@ -173,6 +174,7 @@ impl LoopState {
         max_turns: usize,
         preserve_reasoning_in_history: bool,
         message_prefix: &str,
+        corr_id: CorrId,
     ) -> Self {
         let original_system_prompt = system_prompt.clone();
 
@@ -209,6 +211,7 @@ impl LoopState {
             completion_nudge_budget,
             single_turn,
             message_prefix: message_prefix.to_string(),
+            corr_id,
         }
     }
 
@@ -221,10 +224,13 @@ impl LoopState {
     pub(super) fn hook_log(&self, msg: &str) {
         log::info!("{msg}");
         if !self.message_prefix.is_empty() {
-            emit_event(EventKind::LogLine {
-                id: self.message_prefix.clone(),
-                line: msg.to_string(),
-            });
+            emit_corr_event(
+                &self.corr_id,
+                EventKind::LogLine {
+                    id: self.message_prefix.clone(),
+                    line: msg.to_string(),
+                },
+            );
         }
     }
 
@@ -261,10 +267,13 @@ impl LoopState {
         // DEBUG-threshold check. Nested loops never dump (they share the
         // parent run's id and would otherwise duplicate the parent's dumps).
         if !nested {
-            emit_event(EventKind::PromptRequest {
-                id: self.message_prefix.clone(),
-                json: serde_json::to_string_pretty(&builder).unwrap_or_default(),
-            });
+            emit_corr_event(
+                &self.corr_id,
+                EventKind::PromptRequest {
+                    id: self.message_prefix.clone(),
+                    json: serde_json::to_string_pretty(&builder).unwrap_or_default(),
+                },
+            );
         }
 
         // Phase 2: launch the model stream, handling pre-stream errors and
@@ -556,7 +565,7 @@ impl LoopState {
                 _ = cancel.cancelled() => {
                     return Err(cancelled_error());
                 }
-                _ = emit_run_event_async(&self.message_prefix, EventKind::ToolResult {
+                _ = emit_corr_event_async(&self.corr_id, EventKind::ToolResult {
                     id: format!("{}{}", tool_ctx.id_prefix, job.id),
                     name: job.name.clone(),
                     call: job.call.clone(),
@@ -612,7 +621,7 @@ impl LoopState {
         }
         self.pending_run_one_turn = false;
         self.system_prompt = self.original_system_prompt.clone();
-        announce_live_disconnect(&self.interactive, &self.message_prefix).await;
+        announce_live_disconnect(&self.interactive, &self.message_prefix, &self.corr_id).await;
         true
     }
 
@@ -656,6 +665,7 @@ impl LoopState {
             &mut self.interactive,
             self.turn_num,
             &self.message_prefix,
+            &self.corr_id,
         )
         .await
         {
@@ -1059,6 +1069,7 @@ pub(crate) async fn run_agent_loop(
         audit_lock: Some(Arc::new(std::sync::Mutex::new(()))),
         id_prefix: String::new(),
         message_prefix: message_prefix.clone(),
+        corr_id: super::run_context::execution_corr_id(&message_prefix, &interactive),
         discovered_skills: ctx.params.discovered_skills.clone(),
         path_context: ctx.params.path_context.clone(),
         root_raw_stream_path: raw_path.clone(),
@@ -1258,10 +1269,13 @@ pub(crate) async fn run_agent_loop_nested(
     let wants_events = !nested_tool_ctx.message_prefix.is_empty();
     log::info!("{prefix}task: begin (max_turns={max_turns})");
     if !nested_tool_ctx.message_prefix.is_empty() {
-        emit_event(EventKind::LogLine {
-            id: nested_tool_ctx.message_prefix.clone(),
-            line: format!("{prefix}task: begin (max_turns={max_turns})"),
-        });
+        emit_corr_event(
+            &nested_tool_ctx.corr_id,
+            EventKind::LogLine {
+                id: nested_tool_ctx.message_prefix.clone(),
+                line: format!("{prefix}task: begin (max_turns={max_turns})"),
+            },
+        );
     }
     let result = run_agent_loop_core(
         &model,
@@ -1291,10 +1305,13 @@ pub(crate) async fn run_agent_loop_nested(
     .await;
     log::info!("{prefix}task: end");
     if !nested_tool_ctx.message_prefix.is_empty() {
-        emit_event(EventKind::LogLine {
-            id: nested_tool_ctx.message_prefix.clone(),
-            line: format!("{prefix}task: end"),
-        });
+        emit_corr_event(
+            &nested_tool_ctx.corr_id,
+            EventKind::LogLine {
+                id: nested_tool_ctx.message_prefix.clone(),
+                line: format!("{prefix}task: end"),
+            },
+        );
     }
     result
 }
@@ -1365,6 +1382,7 @@ pub(crate) async fn run_agent_loop_core(
         max_turns,
         opts.preserve_reasoning_in_history,
         &tool_ctx.message_prefix,
+        tool_ctx.corr_id.clone(),
     );
     let loop_start = Instant::now();
     let turn_retry_backoff = crate::config::turn_retry_backoff();
@@ -1458,13 +1476,16 @@ pub(crate) async fn run_agent_loop_core(
                 .as_ref()
                 .map(|ts| (ts.prompt_tokens, ts.cached_input_tokens))
                 .unwrap_or((None, None));
-            emit_event(EventKind::TokenUsage {
-                id: state.message_prefix.clone(),
-                usage: totals.clone(),
-                cost_usd: None,
-                last_prompt_tokens: last_prompt,
-                last_cached_input_tokens: last_cached,
-            });
+            emit_corr_event(
+                &state.corr_id,
+                EventKind::TokenUsage {
+                    id: state.message_prefix.clone(),
+                    usage: totals.clone(),
+                    cost_usd: None,
+                    last_prompt_tokens: last_prompt,
+                    last_cached_input_tokens: last_cached,
+                },
+            );
         }
 
         emit_turn_stats(prefix, state.turn_num, turn_stats.as_ref(), &totals);
@@ -1777,6 +1798,7 @@ pub(crate) fn test_tool_ctx() -> crate::clients::tools::AgentLoopRuntime {
         audit_lock: Some(std::sync::Arc::new(std::sync::Mutex::new(()))),
         id_prefix: String::new(),
         message_prefix: String::new(),
+        corr_id: CorrId::new(),
         discovered_skills: None,
         path_context: PathContext::default(),
         root_raw_stream_path: None,
@@ -1787,6 +1809,9 @@ pub(crate) fn test_tool_ctx() -> crate::clients::tools::AgentLoopRuntime {
 pub(crate) fn test_tool_ctx_with_prefix(prefix: &str) -> crate::clients::tools::AgentLoopRuntime {
     let mut ctx = test_tool_ctx();
     ctx.message_prefix = prefix.to_string();
+    if !prefix.is_empty() {
+        ctx.corr_id = CorrId::new().with_run(prefix);
+    }
     ctx
 }
 
@@ -5216,6 +5241,8 @@ mod tests {
         let (_sub, mut events) = subscribe_log(&prefix);
         let (mut sessions, handle) = InteractiveSessionFactory::for_chat();
         let terminal = sessions.supervise_next_turn();
+        let interactive = sessions.next_session();
+        let corr_id = super::super::run_context::execution_corr_id(&prefix, &interactive);
         let mut state = LoopState::new(
             Some("original prompt".into()),
             "hello",
@@ -5223,10 +5250,11 @@ mod tests {
             0,
             0,
             false,
-            sessions.next_session(),
+            interactive,
             5,
             false,
             &prefix,
+            corr_id,
         );
 
         let mut debugger = handle.target().attach_debugger().unwrap();

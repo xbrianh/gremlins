@@ -13,7 +13,7 @@
 //!
 //! # String form
 //!
-//! The tagged form is `r:<run>:s:<stage>:t:<turn>:c:<tool>:a:<attempt>`, with
+//! The tagged form is `r:<run>:s:<stage>:t:<turn>:c:<tool>:a:<attempt>:x:<execution_id>`, with
 //! missing segments omitted entirely. String segment values may contain `:`
 //! and `\`; both are escaped on render (`\:` and `\\`) and unescaped on parse,
 //! so `to_string().parse::<CorrId>()` always round-trips for a valid
@@ -23,7 +23,7 @@ use std::fmt;
 use std::str::FromStr;
 
 /// Fixed segment order for both rendering and parsing.
-const FIELD_TAGS: &[u8] = b"rstca";
+const FIELD_TAGS: &[u8] = b"rstcax";
 
 /// A segment-aware correlation identifier.
 ///
@@ -36,6 +36,7 @@ pub struct CorrId {
     turn: Option<u64>,
     tool: Option<String>,
     attempt: Option<u32>,
+    execution_id: Option<String>,
 }
 
 impl CorrId {
@@ -69,6 +70,18 @@ impl CorrId {
         self
     }
 
+    /// Set an opaque execution identity, independent of the run hierarchy.
+    ///
+    /// Panics if the value is empty, like the other string segment builders.
+    pub fn with_execution_id(mut self, value: impl Into<String>) -> Self {
+        self.execution_id = Some(into_segment(value));
+        self
+    }
+
+    pub fn execution_id(&self) -> Option<&str> {
+        self.execution_id.as_deref()
+    }
+
     pub fn run(&self) -> Option<&str> {
         self.run.as_deref()
     }
@@ -96,20 +109,21 @@ impl CorrId {
     ///
     /// **Run** uses component-wise ancestor matching on colon-delimited
     /// hierarchy levels: `r:parent` matches `r:parent:child` and
-    /// `r:parent:child:grand`. **Stage**, **turn**, **tool**, and **attempt**
-    /// remain exact-match: `r:ab` does *not* match `r:abc`.
+    /// `r:parent:child:grand`. All other fields, including the opaque
+    /// **execution id**, remain exact-match: `r:ab` does *not* match `r:abc`.
     pub fn matches_prefix(&self, prefix: &CorrId) -> bool {
         run_matches_ancestor(prefix.run.as_deref(), self.run.as_deref())
             && segment_matches(&self.stage, &prefix.stage)
             && segment_matches(&self.turn, &prefix.turn)
             && segment_matches(&self.tool, &prefix.tool)
             && segment_matches(&self.attempt, &prefix.attempt)
+            && segment_matches(&self.execution_id, &prefix.execution_id)
     }
 
-    /// Parse the tagged string form: `r:<run>:s:<stage>:t:<turn>:c:<tool>:a:<attempt>`.
+    /// Parse the tagged string form, with optional `x:<execution_id>` last.
     ///
     /// Segments must appear in the fixed run -> stage -> turn -> tool ->
-    /// attempt order and each tag may appear at most once. String values may
+    /// attempt -> execution id order and each tag may appear at most once. String values may
     /// use `\:` and `\\` escapes for literal `:` and `\` characters.
     pub fn try_parse(s: &str) -> Result<Self, ParseCorrIdError> {
         let parsed = split_segments(s.as_bytes())?;
@@ -244,6 +258,7 @@ fn interpret_segments(
                         .map_err(|_| ParseCorrIdError::InvalidInteger)?,
                 )
             }
+            b'x' => corr_id.execution_id = Some(value),
             _ => unreachable!("segment tags are validated by split_segments"),
         }
 
@@ -349,6 +364,10 @@ impl fmt::Display for CorrId {
             segments.push(format!("a:{attempt}"));
         }
 
+        if let Some(execution_id) = &self.execution_id {
+            segments.push(format!("x:{}", escape_segment(execution_id)));
+        }
+
         f.write_str(&segments.join(":"))
     }
 }
@@ -364,7 +383,7 @@ impl FromStr for CorrId {
 /// Error returned when a string is not a well-formed correlation identifier.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ParseCorrIdError {
-    /// A segment starts with a tag other than `r`, `s`, `t`, `c`, or `a`.
+    /// A segment starts with a tag other than `r`, `s`, `t`, `c`, `a`, or `x`.
     UnknownTag,
     /// A tag is not followed by `:`.
     MissingColon,
@@ -372,7 +391,7 @@ pub enum ParseCorrIdError {
     EmptyValue,
     /// The same segment tag appears more than once.
     DuplicateTag,
-    /// Segments appear out of the run -> stage -> turn -> tool -> attempt order.
+    /// Segments violate run -> stage -> turn -> tool -> attempt -> execution id order.
     OutOfOrder,
     /// A `\` escape is not followed by `\` or `:`.
     InvalidEscape,
@@ -426,6 +445,55 @@ mod tests {
         let rendered = "r:abc123:s:reviews/checks:t:3:c:call_0:a:1";
         assert_eq!(corr_id.to_string(), rendered);
         assert_eq!(rendered.parse::<CorrId>().unwrap(), corr_id);
+    }
+
+    #[test]
+    fn execution_id_round_trips_as_an_opaque_string() {
+        assert_eq!(full().execution_id(), None);
+        for value in ["exec-123", r"opaque:雪\:x:value", "00042"] {
+            for base in [CorrId::new(), full()] {
+                let corr_id = base.with_execution_id(value.to_owned());
+                assert_eq!(corr_id.execution_id(), Some(value));
+                assert_eq!(corr_id.to_string().parse::<CorrId>().unwrap(), corr_id);
+            }
+        }
+        assert_eq!(
+            full().with_execution_id(r"e:x\y").to_string(),
+            r"r:abc123:s:reviews/checks:t:3:c:call_0:a:1:x:e\:x\\y"
+        );
+    }
+
+    #[test]
+    fn execution_id_matching_is_exact_and_optional() {
+        let prefix = CorrId::new().with_execution_id("exec");
+        assert!(full().with_execution_id("exec").matches_prefix(&prefix));
+        for value in ["exec:child", "execution", "other"] {
+            assert!(!full().with_execution_id(value).matches_prefix(&prefix));
+        }
+        assert!(!full().matches_prefix(&prefix));
+        assert!(full().with_execution_id("exec").matches_prefix(&full()));
+        assert!(full()
+            .with_execution_id("exec")
+            .matches_prefix(&CorrId::new()));
+        assert_ne!(full(), full().with_execution_id("exec"));
+    }
+
+    #[test]
+    fn execution_id_parser_validation() {
+        for (input, expected) in [
+            ("x:", ParseCorrIdError::EmptyValue),
+            ("x:a:x:b", ParseCorrIdError::DuplicateTag),
+            ("x:a:r:b", ParseCorrIdError::OutOfOrder),
+            (r"x:a\q", ParseCorrIdError::InvalidEscape),
+        ] {
+            assert_eq!(CorrId::try_parse(input).unwrap_err(), expected);
+        }
+    }
+
+    #[test]
+    #[should_panic(expected = "non-empty")]
+    fn empty_execution_id_is_rejected() {
+        CorrId::new().with_execution_id("");
     }
 
     #[test]
@@ -566,7 +634,7 @@ mod tests {
             ParseCorrIdError::DuplicateTag
         );
         assert_eq!(
-            CorrId::try_parse("x:1").unwrap_err(),
+            CorrId::try_parse("z:1").unwrap_err(),
             ParseCorrIdError::UnknownTag
         );
         assert_eq!(

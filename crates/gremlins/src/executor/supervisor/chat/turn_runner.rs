@@ -20,7 +20,7 @@ use crate::executor::run::run_stage;
 use crate::executor::run_agent;
 use crate::executor::RunError;
 use gremlins_magic_bus::connection::{BusSubGuard, SharedWriter};
-use gremlins_magic_bus::{subscribe_run_backpressured, EventKind, Recv};
+use gremlins_magic_bus::{emit_corr_event, subscribe_run_backpressured, CorrId, EventKind, Recv};
 
 use super::super::run_registry::RunRegistry;
 use super::super::session_task::SessionTaskHandle;
@@ -77,6 +77,7 @@ pub(super) struct TurnRunner {
     session_task: SessionTaskHandle,
     /// The task's persistent token, restored on the run map after each turn.
     persistent: Arc<CancelToken>,
+    corr_id: CorrId,
     writer: SharedWriter,
     done: Arc<watch::Sender<bool>>,
     hard: Arc<AtomicBool>,
@@ -91,6 +92,7 @@ pub(super) struct TurnRunnerCfg {
     pub persistent: Arc<CancelToken>,
     pub registry: Arc<RunRegistry>,
     pub session_task: SessionTaskHandle,
+    pub corr_id: CorrId,
     pub writer: SharedWriter,
     pub done: Arc<watch::Sender<bool>>,
     pub hard: Arc<AtomicBool>,
@@ -106,6 +108,7 @@ impl TurnRunner {
             persistent,
             registry,
             session_task,
+            corr_id,
             writer,
             done,
             hard,
@@ -117,6 +120,7 @@ impl TurnRunner {
             persistent,
             registry,
             session_task,
+            corr_id,
             writer,
             done,
             hard,
@@ -176,6 +180,7 @@ impl TurnRunner {
                                 message: "agent exited before completing".to_string(),
                                 turn: self.turn.clone(),
                             };
+                            emit_corr_event(&self.corr_id, ev.clone());
                             let payload = self.dispatch_terminal(
                                 TurnEnd::Terminal(
                                     serde_json::to_value(&ev).unwrap_or_default(),
@@ -335,13 +340,10 @@ impl TurnRunner {
         self.restore_run_cancel().await;
         self.session_task.reinsert_gremlin(&self.id, gremlin).await;
         self.clear_turn_and_signal().await;
-        self.write_payload(
-            serde_json::to_value(EventKind::Error {
-                message: message.to_string(),
-                turn: self.turn.clone(),
-            })
-            .unwrap_or_default(),
-        )
+        self.write_event(EventKind::Error {
+            message: message.to_string(),
+            turn: self.turn.clone(),
+        })
         .await;
     }
 
@@ -350,6 +352,12 @@ impl TurnRunner {
     /// (e.g. unresolved-skill warnings) before entering `run`.
     pub(super) async fn write(&self, payload: Value) {
         self.write_payload(payload).await;
+    }
+
+    pub(super) async fn write_event(&self, event: EventKind) {
+        emit_corr_event(&self.corr_id, event.clone());
+        self.write_payload(serde_json::to_value(event).unwrap_or_default())
+            .await;
     }
 
     // ── Internal helpers ────────────────────────────────────────────────
@@ -397,7 +405,9 @@ impl TurnRunner {
                     self.restore_run_cancel().await;
                 }
                 self.clear_turn_and_signal().await;
-                serde_json::to_value(EventKind::Ended { reason }).unwrap_or_default()
+                let event = EventKind::Ended { reason };
+                emit_corr_event(&self.corr_id, event.clone());
+                serde_json::to_value(event).unwrap_or_default()
             }
         }
     }
