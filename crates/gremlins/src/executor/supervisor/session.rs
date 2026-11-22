@@ -159,12 +159,16 @@ pub(crate) async fn handle_session_main(
 
     let reader_session_id = session_id.clone();
     let reader_session_task = session_task.clone();
+    let reader_writer = writer.clone();
+    let read_guard = writer.read_lifetime_guard();
     let mut reader_handle = tokio::spawn(async move {
+        let _read_guard = read_guard;
         run_session_main_reader(
             main_read,
             request_tx,
             reader_session_id,
             reader_session_task,
+            reader_writer,
         )
         .await;
     });
@@ -211,6 +215,7 @@ pub(crate) async fn run_session_main_reader(
     request_tx: mpsc::Sender<Value>,
     session_id: String,
     session_task: SessionTaskHandle,
+    writer: SharedWriter,
 ) {
     let mut reader = BufReader::new(main_read);
 
@@ -223,6 +228,7 @@ pub(crate) async fn run_session_main_reader(
             }
             Ok(None) | Err(_) => {
                 log::debug!("session {session_id}: main socket EOF/error");
+                writer.mark_closed();
                 session_task.mark_closed().await;
                 break;
             }
@@ -365,6 +371,7 @@ pub(crate) async fn handle_session_aux(
         )
     };
     let writer = SharedWriter::new(write_half);
+    let _read_guard = writer.read_lifetime_guard();
     let mut reader = BufReader::new(read_half);
 
     let request = match socket::read_json_line(&mut reader).await {

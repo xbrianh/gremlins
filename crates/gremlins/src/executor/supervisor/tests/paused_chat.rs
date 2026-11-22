@@ -98,7 +98,7 @@ async fn cancel_paused_chat(mode: &str, lose_chat_writer: bool) {
     let mut debug = BufReader::new(read);
     write_json_line(
         &mut debug_write,
-        &json!({"op": "attach", "scope": "conversation", "id": id}),
+        &json!({"op": "attach", "scope": "conversation", "id": id, "mode": "debugger"}),
     )
     .await
     .unwrap();
