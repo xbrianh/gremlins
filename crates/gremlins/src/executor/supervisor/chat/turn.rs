@@ -229,12 +229,7 @@ async fn run_turn(
         .map(|backend| backend.accepts_interactive_commands())
         .unwrap_or(false);
     gremlin.cancel_token = Some(turn_cancel.clone());
-    let interactive = registry.get_run_interactive(id).await;
-    gremlin.prepare_interactive_session_with_commands(accepts_commands);
-    let starting_target = interactive.map(|(interactive, _, _)| interactive.target());
-    let execution_id = starting_target
-        .as_ref()
-        .and_then(|target| target.execution_id().map(str::to_owned));
+    let execution_id = gremlin.prepare_interactive_session_with_commands(accepts_commands);
 
     // Announce the in-flight turn so cancel / stop / compact can find it.
     session_task
@@ -265,13 +260,10 @@ async fn run_turn(
     // always carry an interactive factory; `None` (no factory) is a naked-run
     // case where there is nothing to target.
     if let Some(execution_id) = execution_id {
-        let mut event = serde_json::to_value(EventKind::TurnStarted {
+        let event = serde_json::to_value(EventKind::TurnStarted {
             execution_id: execution_id.clone(),
         })
         .expect("TurnStarted must serialize");
-        event["id"] = serde_json::json!(id);
-        event["turn"] = serde_json::json!(runner.turn);
-        event["nonce"] = serde_json::json!(starting_target.as_ref().unwrap().nonce());
         runner.write(event).await;
     }
 

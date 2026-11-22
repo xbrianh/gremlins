@@ -286,7 +286,7 @@ pub(crate) async fn handle_conversation_attach(
     };
 
     // 2. Snapshot target and nonce before any async work.
-    let mut target = handle.target();
+    let target = handle.target();
     let execution_nonce = target.nonce();
     let execution_id = target.execution_id().map(|s| s.to_string());
     // Capture the end signal for this execution so a passive observer can
@@ -294,15 +294,23 @@ pub(crate) async fn handle_conversation_attach(
     // the bus (e.g. the run is cancelled before `Done`/`Ended`).
     let end_signal = target.end_signal();
 
-    // Observation never owns a pause. Only explicit debugger intent may
-    // reserve entry into a future chat turn.
+    // 3. Check if the caller wants passive observation only. Conversation
+    //    scope is interactive by default: a client that names no mode expects
+    //    the operator commands advertised in the `attached` ack.
+    //
+    //    NOTE: the default changed from "passive" to "control" as part of
+    //    the debug→attach cutover (the TUI and CLI debug clients both send
+    //    no explicit mode and expect to control). Any /watch-style observer
+    //    or third-party client that omits `mode` must now
+    //    send `"mode": "passive"` explicitly, or it will be rejected
+    //    when the target is not an agent leaf.
     let mode = request
         .get("mode")
         .and_then(|v| v.as_str())
         .unwrap_or("control");
 
     // Between-turn chat reservations have no live stage to validate yet.
-    if mode == "debugger"
+    if mode != "passive"
         && (!debugger_between_turn(&target) || store.state_tree()["kind"] != "chat")
     {
         let checked_store = store.clone();
@@ -348,35 +356,29 @@ pub(crate) async fn handle_conversation_attach(
 
     // Preserve pause-on-attach: existing debuggers wait for readiness before
     // sending their first command. Only chat registration gaps reserve entry.
-    let mut attachment = None;
-    if mode == "debugger" {
-        let lease = if debugger_between_turn(&target) {
-            handle.attach_next_turn_debugger(execution_id.clone())
-        } else {
-            target.attach_debugger()
-        };
-        let mut lease = match lease {
-            Ok(lease) => lease,
-            Err(error) => {
-                report_attach_error(writer, error).await;
-                return;
-            }
-        };
-        let readiness_end = (!debugger_between_turn(&target)).then(|| target.end_signal());
-        let Some(bound_target) = wait_for_ready(
-            &mut lease,
-            &mut run_state,
-            &mut reader,
-            writer,
-            id,
-            readiness_end.as_ref(),
-        )
-        .await
-        else {
+    let lease = if debugger_between_turn(&target) {
+        handle.attach_next_turn_debugger(execution_id.clone())
+    } else {
+        target.attach()
+    };
+    let mut attachment = match lease {
+        Ok(lease) => lease,
+        Err(error) => {
+            report_attach_error(writer, error).await;
             return;
-        };
-        target = bound_target;
-        attachment = Some(lease);
+        }
+    };
+    if !wait_for_ready(
+        &mut attachment,
+        &mut run_state,
+        &mut reader,
+        writer,
+        id,
+        execution_nonce,
+    )
+    .await
+    {
+        return;
     }
 
     loop {
@@ -387,42 +389,9 @@ pub(crate) async fn handle_conversation_attach(
                     Ok(Some(cmd)) => {
                         let op = cmd.get("op").and_then(Value::as_str).unwrap_or("");
                         let req_id = cmd.get("req_id").and_then(Value::as_str).map(|s| s.to_string());
-                        if op == "detach" {
-                            let _ = writer.write_json_line(&serde_json::json!({
-                                "type": "detached", "scope": "conversation", "id": id,
-                            })).await;
-                            break;
-                        }
-                        if !matches!(op, "message" | "talk" | "continue" | "bail" | "quit") {
-                            let _ = writer.write_json_line(&error_response("unknown attach op")).await;
-                            continue;
-                        }
-                        let temporary = attachment.is_none() && op == "message";
-                        if attachment.is_none() {
-                            let checked_store = store.clone();
-                            let checked = tokio::task::spawn_blocking(move || check_agent_stage(&checked_store))
-                                .await.map_err(|error| error.to_string()).and_then(|result| result);
-                            if let Err(error) = checked {
-                                let _ = writer.write_json_line(&error_response(&error)).await;
-                                continue;
-                            }
-                            let lease = if op == "message" { target.attach() } else { target.attach_debugger() };
-                            let mut lease = match lease {
-                                Ok(lease) => lease,
-                                Err(error) => { report_attach_error(writer, error).await; continue; }
-                            };
-                            if wait_for_ready(&mut lease, &mut run_state, &mut reader, writer, id, Some(&target.end_signal())).await.is_none() {
-                                break;
-                            }
-                            attachment = Some(lease);
-                        }
-                        let should_break = if op == "message" {
-                            deliver_message(&cmd, req_id, id, target.nonce(), target.execution_id(),
-                                writer, &mut reader, &mut run_state, &target.end_signal(), attachment.as_ref().unwrap()).await
-                        } else {
-                            dispatch_attach_command(&cmd, op, req_id, id, writer, attachment.as_ref().unwrap()).await
-                        };
-                        if temporary { drop(attachment.take()); }
+                        let should_break = dispatch_attach_command(
+                            &cmd, op, req_id, id, writer, &attachment,
+                        ).await;
                         if should_break {
                             break;
                         }
@@ -464,12 +433,7 @@ pub(crate) async fn handle_conversation_attach(
             // Report the classified terminal outcome when the execution ends
             // so the debugger sees the same outcome as the chat rather than
             // a bare socket EOF.
-            outcome = async {
-                match attachment.as_mut() {
-                    Some(lease) => (&mut lease.ended).await,
-                    None => std::future::pending().await,
-                }
-            } => {
+            outcome = &mut attachment.ended => {
                 let mut frame = match outcome {
                     Ok(outcome) => {
                         serde_json::to_value(&outcome).unwrap_or(serde_json::Value::Null)
@@ -486,66 +450,11 @@ pub(crate) async fn handle_conversation_attach(
                 let _ = writer.write_json_line(&frame).await;
                 break;
             }
-            _ = end_signal.wait(), if attachment.is_none() => break,
         }
     }
 }
 
 // ── Control-mode command dispatch ──────────────────────────────────────
-
-#[allow(clippy::too_many_arguments)]
-async fn deliver_message(
-    cmd: &Value,
-    req_id: Option<String>,
-    id: &str,
-    nonce: u64,
-    execution_id: Option<&str>,
-    writer: &SharedWriter,
-    reader: &mut BufReader<OwnedReadHalf>,
-    run_state: &mut watch::Receiver<RunState>,
-    end: &EndSignal,
-    attachment: &DebugAttachment,
-) -> bool {
-    let (tx, mut rx) = tokio::sync::oneshot::channel();
-    if let Err(error) = attachment.try_send(InteractiveCommand::Message(
-        cmd["text"].as_str().unwrap_or("").into(),
-        req_id.clone(),
-        Some(tx),
-    )) {
-        let reason = match error {
-            tokio::sync::mpsc::error::TrySendError::Full(_) => {
-                "command queue is full; message not delivered"
-            }
-            tokio::sync::mpsc::error::TrySendError::Closed(_) => {
-                "attachment is ending; message not delivered"
-            }
-        };
-        return writer
-            .write_json_line(&error_response(reason))
-            .await
-            .is_err();
-    }
-    let delivered = loop {
-        tokio::select! {
-            biased;
-            result = &mut rx => break result.is_ok(),
-            frame = socket::read_json_line(reader) => {
-                if !matches!(frame, Ok(Some(_))) { return true; }
-                if writer.write_json_line(&error_response("busy delivering correction")).await.is_err() {
-                    return true;
-                }
-            }
-            _ = end.wait() => break false,
-            _ = async { let _ = run_state.wait_for(|state| state.status != "running").await; } => break false,
-        }
-    };
-    let frame = serde_json::json!({
-        "type": if delivered { "delivered" } else { "correction_dropped" },
-        "scope": "conversation", "id": id, "nonce": nonce,
-        "execution_id": execution_id, "req_id": req_id,
-    });
-    writer.write_json_line(&frame).await.is_err() || !delivered
-}
 
 async fn dispatch_attach_command(
     cmd: &Value,
@@ -556,6 +465,11 @@ async fn dispatch_attach_command(
     attachment: &DebugAttachment,
 ) -> bool {
     let command = match op {
+        "message" => InteractiveCommand::Message(
+            cmd["text"].as_str().unwrap_or("").into(),
+            req_id.clone(),
+            None,
+        ),
         "talk" => InteractiveCommand::Inject(cmd["text"].as_str().unwrap_or("").into()),
         "continue" => InteractiveCommand::RunTurn,
         "bail" => {
@@ -577,7 +491,8 @@ async fn dispatch_attach_command(
                 .is_err();
         }
     };
-    // Debugger commands acknowledge enqueue; messages use incorporation above.
+    // Never wait for incorporation here: keep reading pipelined commands and
+    // disconnects, preserving the existing enqueue acknowledgement contract.
     let response = match attachment.try_send(command) {
         Ok(()) => match req_id {
             Some(req_id) => {
@@ -624,8 +539,8 @@ async fn wait_for_ready(
     reader: &mut BufReader<OwnedReadHalf>,
     writer: &SharedWriter,
     id: &str,
-    end: Option<&EndSignal>,
-) -> Option<crate::clients::interactive::DebugTarget> {
+    nonce: u64,
+) -> bool {
     send_debug_status(writer, "waiting_for_ready").await;
     let ready = tokio::select! {
         biased;
@@ -635,38 +550,23 @@ async fn wait_for_ready(
                     "command received before ready; attachment closed",
                 )).await;
             }
-            return None;
+            return false;
         }
         _ = async { let _ = run_state.wait_for(|state| state.status != "running").await; } => false,
-        _ = async {
-            match end {
-                Some(end) => end.wait().await,
-                None => std::future::pending().await,
-            }
-        } => false,
         result = &mut lease.ready => result.is_ok(),
-        _ = &mut lease.ended => false,
     };
     if !ready {
         let _ = writer
             .write_json_line(&error_response("agent exited before accepting pause"))
             .await;
-        return None;
+        return false;
     }
-    let target = match lease.bound_target() {
-        Ok(target) => target,
-        Err(error) => {
-            report_attach_error(writer, error).await;
-            return None;
-        }
-    };
     writer
         .write_json_line(&serde_json::json!({
-            "type": "ready", "scope": "conversation", "id": id, "nonce": target.nonce(),
+            "type": "ready", "scope": "conversation", "id": id, "nonce": nonce,
         }))
         .await
-        .ok()?;
-    Some(target)
+        .is_ok()
 }
 
 /// Passive conversation: stream events until the execution ends.
@@ -807,7 +707,7 @@ mod routing_tests {
     use crate::clients::interactive::{AttachError, InteractiveSessionFactory};
 
     #[tokio::test]
-    async fn pipelined_continue_and_detach_are_both_acknowledged() {
+    async fn pipelined_message_and_detach_are_both_acknowledged() {
         let (mut factory, handle) = InteractiveSessionFactory::for_chat();
         let _session = factory.next_session();
         let attachment = handle.target().attach().unwrap();
@@ -819,7 +719,7 @@ mod routing_tests {
         assert!(
             !dispatch_attach_command(
                 &message,
-                "continue",
+                "message",
                 Some("request-1".into()),
                 "chat",
                 &writer,
@@ -836,41 +736,6 @@ mod routing_tests {
         assert_eq!(ack["req_id"], "request-1");
         let detached = socket::read_json_line(&mut reader).await.unwrap().unwrap();
         assert_eq!(detached["type"], "detached");
-    }
-
-    #[tokio::test]
-    async fn readiness_stops_on_execution_end_while_run_remains_running() {
-        let (mut factory, handle) = InteractiveSessionFactory::for_chat();
-        let _terminal = factory.supervise_next_turn();
-        let session = factory.next_session();
-        let target = handle.target();
-        let mut lease = target.attach_debugger().unwrap();
-        let (client, server) = tokio::net::UnixStream::pair().unwrap();
-        let (read, write) = server.into_split();
-        let writer = SharedWriter::new(write);
-        let mut reader = BufReader::new(read);
-        let (_state_tx, mut state) = watch::channel(RunState {
-            status: "running".into(),
-            id: "chat".into(),
-            stage: String::new(),
-            started_at: String::new(),
-        });
-        drop(session);
-        let result = tokio::time::timeout(
-            std::time::Duration::from_secs(1),
-            wait_for_ready(
-                &mut lease,
-                &mut state,
-                &mut reader,
-                &writer,
-                "chat",
-                Some(&target.end_signal()),
-            ),
-        )
-        .await
-        .unwrap();
-        assert!(result.is_none());
-        drop(client);
     }
 
     #[tokio::test]

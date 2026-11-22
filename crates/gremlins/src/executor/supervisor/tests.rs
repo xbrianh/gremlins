@@ -1,7 +1,6 @@
 //! Tests for the supervisor module.
 
 mod attachment;
-mod correction_chat;
 mod paused_chat;
 mod resume_context;
 mod resume_dispatch;
@@ -1466,7 +1465,7 @@ async fn debug_connection_injects_into_the_next_chat_loop_without_reconnecting()
     ));
     socket::write_json_line(
         &mut write,
-        &json!({"op":"attach", "scope":"conversation", "id":id, "mode":"debugger"}),
+        &json!({"op":"attach", "scope":"conversation", "id":id}),
     )
     .await
     .unwrap();

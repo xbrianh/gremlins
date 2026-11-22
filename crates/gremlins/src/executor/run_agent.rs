@@ -17,13 +17,13 @@ use crate::clients::client::ModelURI;
 use crate::clients::compaction::ResolvedRequestContext;
 use crate::config;
 use crate::definition::ExecutorStage;
+use crate::executor::RunError;
 use crate::executor::agent_runner::{commit_agent, prepare_agent};
 use crate::executor::gremlin::Gremlin;
 use crate::executor::state;
 use crate::executor::state::{Checkout, Collision, FileSystemStateStore};
-use crate::executor::RunError;
 use crate::task_kind::TaskKind;
-use gremlins_magic_bus::{emit_event, EventKind};
+use gremlins_magic_bus::{EventKind, emit_event};
 use indexmap::IndexMap;
 use rig_core::completion::Message;
 
@@ -275,7 +275,7 @@ pub(crate) async fn run_agent(
         std::sync::Mutex<Option<crate::clients::protocol::UsageStats>>,
     > = std::sync::Arc::new(std::sync::Mutex::new(None));
     let (prompt_dumper_guard, prompt_dumper_task) = {
-        use gremlins_magic_bus::{subscribe_run, Recv};
+        use gremlins_magic_bus::{Recv, subscribe_run};
         let (sub, mut rx) = subscribe_run(gremlin.id.as_str());
         let guard = gremlins_magic_bus::connection::BusSubGuard::new(sub);
         let store = gremlin.state.store_handle();
@@ -772,13 +772,13 @@ pub(crate) fn done_check_env(
 mod tests {
     use super::*;
     use crate::builders::agent::AgentBuilder;
+    use crate::clients::InteractiveSession;
     use crate::clients::agent::task::TaskModel;
     use crate::clients::backend::Backend;
-    use crate::clients::client::{install_test_backend, Client};
+    use crate::clients::client::{Client, install_test_backend};
     use crate::clients::protocol::CompletedRun;
-    use crate::clients::InteractiveSession;
     use crate::definition::{ResolvedModelSelection, StageSpec, StaticDefinition};
-    use crate::executor::gremlin::{validate_gremlin_id, RuntimeConfig};
+    use crate::executor::gremlin::{RuntimeConfig, validate_gremlin_id};
     use crate::executor::state::StateData;
     use crate::schemas::bootstrap::Bootstrap;
     use crate::test_support::Sandbox;

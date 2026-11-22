@@ -151,13 +151,7 @@ pub(crate) async fn handle_chat(
     // in-flight execution without starting a new turn. The message goes
     // through the run's InteractiveHandle directly — never through the
     // session's persistent chat-gremlin task queue.
-    if let Some(target) = request.get("target") {
-        let Some(target_obj) = target.as_object() else {
-            let _ = writer
-                .write_json_line(&error_response("target must be an object"))
-                .await;
-            return;
-        };
+    if let Some(target_obj) = request.get("target").and_then(|v| v.as_object()) {
         let target_id = target_obj.get("id").and_then(|v| v.as_str()).unwrap_or("");
         let target_nonce = target_obj
             .get("nonce")
@@ -177,17 +171,6 @@ pub(crate) async fn handle_chat(
             return;
         }
 
-        let Some(client_execution_id) = target_obj
-            .get("execution_id")
-            .and_then(Value::as_str)
-            .filter(|id| !id.is_empty())
-        else {
-            let _ = writer
-                .write_json_line(&error_response("target.execution_id is required"))
-                .await;
-            return;
-        };
-
         // ── Session ownership check ───────────────────────────────────
         // The session socket provides transport isolation, but also verify
         // that a chat gremlin target belongs to THIS session — not a
@@ -195,7 +178,7 @@ pub(crate) async fn handle_chat(
         // global and pass through; the nonce guards against stale targets.
         {
             let chat_ids = session_task.get_chat_ids().await;
-            if !chat_ids.iter().any(|id| id == target_id) {
+            if !chat_ids.is_empty() && !chat_ids.iter().any(|id| id == target_id) {
                 // The target is not one of our chat gremlins. If the
                 // registry store records `kind: "chat"`, this is another
                 // session's chat gremlin — reject.
@@ -240,14 +223,6 @@ pub(crate) async fn handle_chat(
         // *previous* execution between `prepare_next` and the
         // `CurrentTurn` update. Pipeline runs (no matching turn) fall
         // back to the live target's execution_id.
-        if execution_id.as_deref() != Some(client_execution_id) {
-            let _ = writer
-                .write_json_line(&error_response(
-                    "execution_id mismatch: target has been replaced",
-                ))
-                .await;
-            return;
-        }
         let current_turn = session_task.get_current_turn().await;
         let is_chat_turn = current_turn.as_ref().is_some_and(|cur| cur.id == target_id);
         let announced_execution_id = current_turn
@@ -263,8 +238,8 @@ pub(crate) async fn handle_chat(
             // target's execution_id as the binding descriptor.
             announced_execution_id.or_else(|| execution_id.clone())
         };
-        {
-            let client_eid = client_execution_id;
+        let client_execution_id = target_obj.get("execution_id").and_then(|v| v.as_str());
+        if let Some(client_eid) = client_execution_id {
             match bound_execution_id.as_deref() {
                 Some(actual) if actual != client_eid => {
                     let resp = error_response("execution_id mismatch: target has been replaced");
@@ -284,6 +259,9 @@ pub(crate) async fn handle_chat(
                 _ => {}
             }
         }
+        // Nonce-only targets remain valid for existing clients. Execution IDs
+        // strengthen validation when supplied; requiring them is a protocol
+        // migration, separate from the execution-owned lease lifecycle.
 
         // `attach()` checks the nonce under the slot lock, closing the
         // TOCTOU window between the coarse check above and actual
@@ -330,17 +308,10 @@ pub(crate) async fn handle_chat(
             .map(|s| s.to_string());
         let writer_for_error = writer.clone();
         let execution_id_for_task = execution_id.clone();
-        let execution_end = debug_target.end_signal();
         tokio::spawn(async move {
             // Wait for the agent to accept the pause.
             let mut attachment = attachment;
-            let ready = tokio::select! {
-                biased;
-                _ = writer_for_error.closed() => return,
-                _ = execution_end.wait() => false,
-                result = &mut attachment.ready => result.is_ok(),
-            };
-            if !ready {
+            if (&mut attachment.ready).await.is_err() {
                 log::warn!(
                     "correction for {}: agent exited before accepting pause",
                     target_id_for_log
@@ -349,7 +320,6 @@ pub(crate) async fn handle_chat(
                     "type": "correction_dropped",
                     "id": target_id_for_log,
                     "reason": "agent exited before accepting pause",
-                    "req_id": req_id,
                 });
                 if let Some(ref eid) = execution_id_for_task {
                     payload["execution_id"] = serde_json::Value::String(eid.clone());
@@ -370,7 +340,6 @@ pub(crate) async fn handle_chat(
                     "type": "correction_dropped",
                     "id": target_id_for_log,
                     "reason": format!("command channel closed: {}", e),
-                    "req_id": req_id,
                 });
                 if let Some(ref eid) = execution_id_for_task {
                     payload["execution_id"] = serde_json::Value::String(eid.clone());
@@ -379,13 +348,7 @@ pub(crate) async fn handle_chat(
                 return;
             }
             // Await delivery confirmation from the agent loop.
-            let delivery = tokio::select! {
-                biased;
-                _ = writer_for_error.closed() => return,
-                result = delivery_rx => result.map_err(|_| ()),
-                _ = execution_end.wait() => Err(()),
-            };
-            match delivery {
+            match delivery_rx.await {
                 Ok(()) => {
                     let mut payload = serde_json::json!({
                         "type": "delivered",
@@ -403,7 +366,6 @@ pub(crate) async fn handle_chat(
                         "type": "correction_dropped",
                         "id": target_id_for_log,
                         "reason": "agent exited before incorporation",
-                        "req_id": req_id,
                     });
                     if let Some(ref eid) = execution_id_for_task {
                         payload["execution_id"] = serde_json::Value::String(eid.clone());
