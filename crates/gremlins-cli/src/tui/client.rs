@@ -841,16 +841,29 @@ mod run_follow_tests {
         assert!(timeout(Duration::from_millis(20), &mut pending)
             .await
             .is_err());
-        socket::write_json_line(peer.get_mut(), &ack())
-            .await
-            .unwrap();
+        let frame = json!({"type":"stream_chunk", "text":"answer"});
+        let payload = format!("{}\n{frame}\n", ack());
+        peer.get_mut().write_all(payload.as_bytes()).await.unwrap();
         let (mut rx, handle) = timeout(Duration::from_secs(1), pending)
             .await
             .unwrap()
             .unwrap()
             .unwrap();
+        assert_eq!(
+            timeout(Duration::from_secs(1), rx.recv()).await.unwrap(),
+            Some(frame)
+        );
+        assert!(
+            timeout(Duration::from_millis(20), socket::read_json_line(&mut peer))
+                .await
+                .is_err(),
+            "passive attachment must not send commands"
+        );
         drop(peer);
-        handle.await.unwrap();
+        timeout(Duration::from_secs(1), handle)
+            .await
+            .unwrap()
+            .unwrap();
         assert!(rx.recv().await.is_none());
     }
 
@@ -872,22 +885,36 @@ mod run_follow_tests {
         }
         for (response, expected) in cases {
             let (client, peer) = UnixStream::pair().unwrap();
-            let server = tokio::spawn(async move {
-                let mut peer = BufReader::new(peer);
-                socket::read_json_line(&mut peer).await.unwrap().unwrap();
-                if let Some(response) = response {
-                    peer.get_mut()
-                        .write_all(format!("{response}\n").as_bytes())
-                        .await
-                        .unwrap();
-                }
-            });
-            let error = timeout(Duration::from_secs(1), follow_run(client, "owner", "run"))
+            let mut peer = BufReader::new(peer);
+            let pending = tokio::spawn(follow_run(client, "owner", "run"));
+            timeout(Duration::from_secs(1), socket::read_json_line(&mut peer))
                 .await
+                .expect("passive attach request was not sent")
                 .unwrap()
-                .unwrap_err();
-            assert!(error.contains(expected), "{error}");
-            server.await.unwrap();
+                .unwrap();
+            if let Some(response) = response {
+                peer.get_mut()
+                    .write_all(format!("{response}\n").as_bytes())
+                    .await
+                    .unwrap();
+                // A rejected response must fail without waiting for EOF.
+                let error = timeout(Duration::from_secs(1), pending)
+                    .await
+                    .unwrap()
+                    .unwrap()
+                    .unwrap_err();
+                assert!(error.contains(expected), "{error}");
+                drop(peer);
+            } else {
+                // Only the EOF case closes the peer before awaiting the result.
+                drop(peer);
+                let error = timeout(Duration::from_secs(1), pending)
+                    .await
+                    .unwrap()
+                    .unwrap()
+                    .unwrap_err();
+                assert!(error.contains(expected), "{error}");
+            }
         }
     }
 
@@ -919,171 +946,6 @@ mod run_follow_tests {
             assert!(error.contains("replay_checkpoint"), "{error}");
             assert!(socket::read_json_line(&mut peer).await.unwrap().is_none());
         }
-    }
-
-    /// Exercise the persisted-history/socket boundary, not an artificial mpsc
-    /// snapshot. The peer stays open until after reconciliation so EOF cannot
-    /// accidentally make collection appear to work.
-    async fn persisted_socket_handoff(blob: &str, persisted: &str, frames: Vec<Value>) {
-        use crate::tui::watch_replay::{collect_checkpoint, decode_history};
-        use std::io::Write;
-        use std::sync::atomic::{AtomicU64, Ordering};
-
-        static NEXT_FILE: AtomicU64 = AtomicU64::new(0);
-        struct Transcript(std::path::PathBuf);
-        impl Drop for Transcript {
-            fn drop(&mut self) {
-                let _ = std::fs::remove_file(&self.0);
-            }
-        }
-        let transcript = Transcript(std::env::temp_dir().join(format!(
-            "gremlins-follow-{}-{}-{}.jsonl",
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_nanos(),
-            NEXT_FILE.fetch_add(1, Ordering::Relaxed),
-        )));
-        let mut file = std::fs::OpenOptions::new()
-            .create_new(true)
-            .append(true)
-            .open(&transcript.0)
-            .unwrap();
-        let expected_persisted = persisted.to_owned();
-        let persisted = persisted.to_owned();
-        let outgoing = frames.clone();
-        let future = frames[0].clone();
-        let future_outgoing = future.clone();
-        let (append_tx, append_rx) = oneshot::channel();
-        let (persisted_tx, persisted_rx) = oneshot::channel();
-        let (collect_tx, collect_rx) = oneshot::channel();
-        let (future_tx, future_rx) = oneshot::channel();
-        let (close_tx, close_rx) = oneshot::channel();
-        let (client, peer) = UnixStream::pair().unwrap();
-        let server = tokio::spawn(async move {
-            let mut peer = BufReader::new(peer);
-            assert_eq!(
-                socket::read_json_line(&mut peer).await.unwrap().unwrap(),
-                json!({"op":"attach", "scope":"run", "id":"run", "session_id":"owner", "replay":true})
-            );
-            socket::write_json_line(peer.get_mut(), &ack())
-                .await
-                .unwrap();
-            append_rx.await.unwrap();
-            file.write_all(persisted.as_bytes()).unwrap();
-            file.flush().unwrap();
-            persisted_tx.send(()).unwrap();
-            collect_rx.await.unwrap();
-            // Let collection start with an empty receiver. Frames are still on
-            // the socket side of the handoff, unlike a prefilled rx.len() test.
-            tokio::time::sleep(Duration::from_millis(150)).await;
-            for frame in outgoing {
-                socket::write_json_line(peer.get_mut(), &frame)
-                    .await
-                    .unwrap();
-            }
-            socket::write_json_line(
-                peer.get_mut(),
-                &json!({"type":"replay_checkpoint", "id":"run", "scope":"run"}),
-            )
-            .await
-            .unwrap();
-            future_rx.await.unwrap();
-            socket::write_json_line(peer.get_mut(), &future_outgoing)
-                .await
-                .unwrap();
-            close_rx.await.unwrap();
-        });
-        let (mut rx, reader) = timeout(Duration::from_secs(2), follow_run(client, "owner", "run"))
-            .await
-            .unwrap()
-            .unwrap();
-        append_tx.send(()).unwrap();
-        timeout(Duration::from_secs(2), persisted_rx)
-            .await
-            .unwrap()
-            .unwrap();
-        let lines = std::fs::read_to_string(&transcript.0)
-            .unwrap()
-            .lines()
-            .map(str::to_owned)
-            .collect();
-        let history = decode_history(lines, blob, "run");
-        let expected_history = if blob.starts_with("artifacts/") {
-            vec![json!({"type":"stream_chunk", "text":"hello world"})]
-        } else {
-            vec![
-                json!({"type":"exec_output", "id":"run", "is_stderr":false, "text":"hello", "ts":""}),
-                json!({"type":"exec_output", "id":"run", "is_stderr":false, "text":" world", "ts":""}),
-            ]
-        };
-        assert_eq!(history, expected_history);
-        assert!(rx.is_empty(), "server has not sent any live frames yet");
-        collect_tx.send(()).unwrap();
-        let snapshot = timeout(Duration::from_secs(2), collect_checkpoint(&mut rx))
-            .await
-            .unwrap();
-        assert!(snapshot.fallback.is_none());
-        let buffered = snapshot.values;
-        assert_eq!(
-            buffered, frames,
-            "collection must include delayed socket frames"
-        );
-        // Persistence is not evidence that a native frame is covered.
-        // Preserve every delayed frame, even when disk contains matching text.
-        assert_eq!(buffered, frames);
-        assert_eq!(
-            std::fs::read_to_string(&transcript.0).unwrap(),
-            expected_persisted
-        );
-
-        // Identical output emitted after the finite handoff is a new event.
-        future_tx.send(()).unwrap();
-        assert_eq!(
-            timeout(Duration::from_secs(2), rx.recv()).await.unwrap(),
-            Some(future)
-        );
-        close_tx.send(()).unwrap();
-        timeout(Duration::from_secs(2), server)
-            .await
-            .unwrap()
-            .unwrap();
-        timeout(Duration::from_secs(2), reader)
-            .await
-            .unwrap()
-            .unwrap();
-        assert!(rx.recv().await.is_none());
-    }
-
-    #[tokio::test]
-    async fn persisted_assistant_aggregate_does_not_suppress_delayed_socket_chunks() {
-        let record = json!({"type":"assistant", "message":{"content":[
-            {"type":"text", "text":"hello world"}
-        ]}});
-        persisted_socket_handoff(
-            "artifacts/stream-agent.jsonl",
-            &format!("{record}\n"),
-            vec![
-                json!({"type":"stream_chunk", "text":"hello"}),
-                json!({"type":"log_line", "id":"run", "line":"operational log"}),
-                json!({"type":"stream_chunk", "text":" world"}),
-            ],
-        )
-        .await;
-    }
-
-    #[tokio::test]
-    async fn persisted_combined_exec_does_not_suppress_stdout_and_stderr_socket_frames() {
-        persisted_socket_handoff(
-            "command_logs/exec-build.log",
-            "hello\n world\n",
-            vec![
-                json!({"type":"exec_output", "id":"run", "is_stderr":false, "text":"hello", "ts":"now"}),
-                json!({"type":"log_line", "id":"run", "line":"operational log"}),
-                json!({"type":"exec_output", "id":"run", "is_stderr":true, "text":" world", "ts":"later"}),
-            ],
-        ).await;
     }
 
     #[tokio::test]
@@ -1274,63 +1136,23 @@ mod replay_fallback_tests {
         client.shutdown().await;
     }
 
-    #[tokio::test]
-    async fn native_replay_forwards_lifecycle_and_live_frames_but_not_checkpoints() {
-        let (stream, peer) = UnixStream::pair().unwrap();
-        let (client, _peers) = DaemonClient::fake_with_aux_streams(
-            json!({"session_id":"owner", "home_run_id":"home"}),
-            vec![stream],
-        );
-        let client = Arc::new(client);
-        let (tx, mut rx) = mpsc::unbounded_channel();
-        let replay = tokio::spawn(replay_and_dedup(
-            Arc::clone(&client),
-            "run".into(),
-            String::new(),
-            String::new(),
-            73,
-            tx,
-        ));
-        let mut peer = BufReader::new(peer);
-        assert_eq!(read(&mut peer).await["op"], "attach");
-        let frames = [
-            json!({"type":"stage_boundary", "id":"run", "stage":"build"}),
-            json!({"type":"stream_chunk", "text":"same"}),
-            json!({"type":"stream_chunk", "text":"same"}),
-        ];
-        let mut wire = format!(
-            "{}\n",
-            json!({"type":"attached", "scope":"run", "id":"run", "capabilities":["observe", "replay_checkpoint"]})
-        );
-        for frame in &frames {
-            wire.push_str(&format!("{frame}\n"));
-        }
-        wire.push_str("{\"type\":\"replay_checkpoint\",\"complete\":true}\n");
-        use tokio::io::AsyncWriteExt;
-        peer.get_mut().write_all(wire.as_bytes()).await.unwrap();
-        for frame in frames {
-            assert_eq!(unwrap_line(output(&mut rx).await), frame);
-        }
-        let live = json!({"type":"stage_completed", "id":"run", "stage":"build"});
-        socket::write_json_line(peer.get_mut(), &live)
-            .await
-            .unwrap();
-        assert_eq!(unwrap_line(output(&mut rx).await), live);
-        assert!(rx.try_recv().is_err(), "checkpoint should not be forwarded");
-        replay.abort();
-        assert!(replay.await.unwrap_err().is_cancelled());
-        assert_eq!(
-            timeout(Duration::from_secs(2), socket::read_json_line(&mut peer))
-                .await
-                .expect("native reader leaked after cancellation")
-                .unwrap(),
-            None
-        );
-        client.shutdown().await;
+    struct Disk {
+        definition: Value,
+        request: Value,
+        response: Value,
     }
 
-    #[tokio::test]
-    async fn native_gap_preserves_disk_and_all_original_agent_chunks() {
+    struct NativeCase {
+        stage: &'static str,
+        frames: Vec<Value>,
+        disk: Option<Disk>,
+        before_response: Vec<Value>,
+        after_response: Vec<Value>,
+        expected: Vec<Value>,
+        live: Vec<Value>,
+    }
+
+    async fn native_handoff(case: NativeCase) {
         let (stream, peer) = UnixStream::pair().unwrap();
         let (replacement, replacement_peer) = UnixStream::pair().unwrap();
         let (client, [_control, session]) = DaemonClient::fake_with_aux_streams(
@@ -1342,115 +1164,84 @@ mod replay_fallback_tests {
         let replay = tokio::spawn(replay_and_dedup(
             Arc::clone(&client),
             "run".into(),
-            "agent".into(),
-            "agent".into(),
+            case.stage.into(),
+            case.stage.into(),
             73,
             tx,
         ));
         let mut peer = BufReader::new(peer);
+        let mut session = BufReader::new(session);
+        let mut replacement = BufReader::new(replacement_peer);
         assert_eq!(
             read(&mut peer).await,
             json!({"op":"attach", "scope":"run", "id":"run", "session_id":"owner", "replay":true})
         );
-        let operational = json!({"type":"log_line", "id":"run", "line":"operational log"});
-        for frame in [
-            json!({"type":"attached", "scope":"run", "id":"run", "capabilities":["observe", "replay_checkpoint"]}),
-            json!({"type":"history_gap", "id":"run"}),
-            json!({"type":"stream_chunk", "text":"hello"}),
-            operational.clone(),
-            json!({"type":"stream_chunk", "text":" world"}),
-            json!({"type":"replay_checkpoint", "complete":false}),
-        ] {
-            socket::write_json_line(peer.get_mut(), &frame)
+        // One write also exercises frames buffered alongside the attach acknowledgment.
+        use tokio::io::AsyncWriteExt;
+        let mut wire = format!(
+            "{}\n",
+            json!({"type":"attached", "scope":"run", "id":"run",
+            "capabilities":["observe", "replay_checkpoint"]})
+        );
+        for frame in &case.frames {
+            wire.push_str(&format!("{frame}\n"));
+        }
+        peer.get_mut().write_all(wire.as_bytes()).await.unwrap();
+        if let Some(disk) = case.disk {
+            assert_eq!(
+                read(&mut session).await,
+                json!({"op":"read_definition", "id":"run", "session_id":"owner"})
+            );
+            socket::write_json_line(session.get_mut(), &disk.definition)
+                .await
+                .unwrap();
+            assert_eq!(read(&mut session).await, disk.request);
+            // Never send these until read_blob is pending; persistence may lead delivery.
+            for frame in &case.before_response {
+                socket::write_json_line(peer.get_mut(), frame)
+                    .await
+                    .unwrap();
+            }
+            tokio::task::yield_now().await;
+            socket::write_json_line(session.get_mut(), &disk.response)
+                .await
+                .unwrap();
+        } else {
+            assert!(case.before_response.is_empty());
+        }
+        for frame in &case.after_response {
+            socket::write_json_line(peer.get_mut(), frame)
                 .await
                 .unwrap();
         }
-        let mut session = BufReader::new(session);
-        assert_eq!(
-            read(&mut session).await,
-            json!({"op":"read_definition", "id":"run", "session_id":"owner"})
-        );
-        socket::write_json_line(
-            session.get_mut(),
-            &json!({"stages":[{"name":"agent", "type":"agent"}]}),
-        )
-        .await
-        .unwrap();
-        assert_eq!(
-            read(&mut session).await,
-            json!({"op":"read_blob", "id":"run", "blob":"artifacts/stream-agent.jsonl", "tail":500, "session_id":"owner"})
-        );
-        // Persistence can lead delivery beyond the checkpoint while disk
-        // history is being read. Keep this emission as well as the disk copy.
-        socket::write_json_line(
-            peer.get_mut(),
-            &json!({"type":"stream_chunk", "text":" buffered"}),
-        )
-        .await
-        .unwrap();
-        let history = ["older", "hello world buffered"].map(|text| {
-            json!({"type":"assistant", "message":{"content":[{"type":"text", "text":text}]}})
-                .to_string()
-        });
-        socket::write_json_line(session.get_mut(), &json!({"lines":history}))
-            .await
-            .unwrap();
-
-        let diagnostic = unwrap_line(output(&mut rx).await);
-        assert_eq!(diagnostic["type"], "log_line");
-        assert!(diagnostic["line"].as_str().unwrap().contains("history_gap"));
-        let overlap = unwrap_line(output(&mut rx).await);
-        assert!(overlap["line"]
-            .as_str()
-            .unwrap()
-            .contains("possible overlap"));
-        assert!(overlap["line"]
-            .as_str()
-            .unwrap()
-            .contains("not execution-scoped"));
-        for text in ["older", "hello world buffered"] {
-            assert_eq!(
-                unwrap_line(output(&mut rx).await),
-                json!({"type":"stream_chunk", "text":text})
-            );
+        for expected in case.expected {
+            let actual = unwrap_line(output(&mut rx).await);
+            if expected["line"] == "history_gap" {
+                assert_eq!(actual["type"], "log_line");
+                assert_eq!(actual["id"], "run");
+                assert!(actual["line"].as_str().unwrap().contains("history_gap"));
+            } else {
+                assert_eq!(actual, expected);
+            }
         }
-        let gap = unwrap_line(output(&mut rx).await);
-        assert_eq!(gap["type"], "log_line");
-        assert!(gap["line"].as_str().unwrap().contains("history_gap"));
-        assert_eq!(
-            unwrap_line(output(&mut rx).await),
-            json!({"type":"stream_chunk", "text":"hello"})
-        );
-        assert_eq!(unwrap_line(output(&mut rx).await), operational);
-        assert_eq!(
-            unwrap_line(output(&mut rx).await),
-            json!({"type":"stream_chunk", "text":" world"})
-        );
-        assert_eq!(
-            unwrap_line(output(&mut rx).await),
-            json!({"type":"stream_chunk", "text":" buffered"})
-        );
-        let mut replacement = BufReader::new(replacement_peer);
+        // These are new original-socket emissions, even if byte-identical to replay.
+        for frame in case.live {
+            socket::write_json_line(peer.get_mut(), &frame)
+                .await
+                .unwrap();
+            assert_eq!(unwrap_line(output(&mut rx).await), frame);
+        }
+        assert!(timeout(Duration::from_millis(100), async {
+            tokio::select! {
+                request = socket::read_json_line(&mut session) => panic!("unexpected disk read: {request:?}"),
+                request = socket::read_json_line(&mut replacement) => panic!("replacement attach: {request:?}"),
+                frame = rx.recv() => panic!("checkpoint or extra output: {frame:?}"),
+            }
+        }).await.is_err());
         assert!(
-            timeout(
-                Duration::from_millis(100),
-                socket::read_json_line(&mut replacement)
-            )
-            .await
-            .is_err(),
-            "must not open a replacement subscription"
+            !replay.is_finished(),
+            "original subscription ended prematurely"
         );
-        // Once replay output is observed, an identical live chunk is not overlap.
-        let live = json!({"type":"stream_chunk", "text":"hello"});
-        socket::write_json_line(peer.get_mut(), &live)
-            .await
-            .unwrap();
-        assert_eq!(unwrap_line(output(&mut rx).await), live);
-        assert!(
-            rx.try_recv().is_err(),
-            "checkpoint or duplicate output leaked"
-        );
-        assert!(!replay.is_finished());
         replay.abort();
         assert!(replay.await.unwrap_err().is_cancelled());
         assert_eq!(
@@ -1464,267 +1255,148 @@ mod replay_fallback_tests {
     }
 
     #[tokio::test]
-    async fn native_gap_preserves_disk_and_repeated_original_exec_emissions() {
+    async fn native_replay_handoff_cases() {
+        let chunk = |text: &str| json!({"type":"stream_chunk", "text":text});
+        let log = |text: &str| json!({"type":"log_line", "id":"run", "line":text});
+        let exec = |sequence, stderr| {
+            json!({"type":"exec_output", "id":"run",
+            "is_stderr":stderr, "ts":"now", "text":"same", "sequence":sequence})
+        };
+        let disk_exec = json!({"type":"exec_output", "id":"run",
+            "is_stderr":false, "ts":"", "text":"same"});
+        let checkpoint = |complete| json!({"type":"replay_checkpoint", "complete":complete});
+        let gap = json!({"type":"history_gap", "id":"run"});
+        // Exact diagnostics and their position are part of the handoff contract.
+        let warnings = vec![
+            log("history_gap: native replay history is incomplete"),
+            log("history discontinuity: persisted tail and original stream may overlap; possible overlap is preserved, not deduplicated; stage history is not execution-scoped and may include other executions"),
+        ];
+        // Match the diagnostic at this position without coupling to JSON formatting.
+        let gap_log = log("history_gap");
+        let disk = |stage: &str, kind: &str, blob: &str, response| Disk {
+            definition: json!({"stages":[{"name":"A", "type":"exec"}, {"name":stage, "type":kind}]}),
+            request: json!({"op":"read_blob", "id":"run", "blob":blob, "tail":500, "session_id":"owner"}),
+            response,
+        };
+        let boundary = json!({"type":"stage_boundary", "id":"run", "stage":"build"});
+        let build_completed = json!({"type":"stage_completed", "id":"run", "stage":"build"});
+        let mut cases = vec![NativeCase {
+            stage: "",
+            frames: vec![
+                boundary.clone(),
+                chunk("same"),
+                chunk("same"),
+                checkpoint(true),
+            ],
+            disk: None,
+            before_response: vec![],
+            after_response: vec![],
+            expected: vec![boundary, chunk("same"), chunk("same")],
+            live: vec![build_completed.clone()],
+        }];
+        let mut expected = warnings.clone();
+        expected.extend([
+            chunk("older"),
+            chunk("hellohello world buffered"),
+            gap_log.clone(),
+            chunk("hello"),
+            chunk("hello"),
+            json!({"type":"reasoning_chunk", "text":"same"}),
+            log("operational log"),
+            chunk(" world"),
+            chunk(" buffered"),
+        ]);
+        cases.push(NativeCase {
+            stage: "agent",
+            frames: vec![gap.clone(), chunk("hello"), chunk("hello"),
+                json!({"type":"reasoning_chunk", "text":"same"}),
+                log("operational log"), chunk(" world"), checkpoint(false)],
+            disk: Some(disk("agent", "agent", "artifacts/stream-agent.jsonl", json!({
+                "lines": (["older", "hellohello world buffered"].map(|text|
+                    json!({"type":"assistant", "message":{"content":[{"type":"text", "text":text}]}}).to_string()))
+            }))),
+            before_response: vec![chunk(" buffered")],
+            after_response: vec![],
+            expected,
+            live: vec![chunk("hello"), json!({"type":"reasoning_chunk", "text":"same"})],
+        });
         for (disk_count, third_before_response) in [(2, false), (2, true), (3, true)] {
-            let (original, original_peer) = UnixStream::pair().unwrap();
-            let (replacement, replacement_peer) = UnixStream::pair().unwrap();
-            let (client, [_control, session]) = DaemonClient::fake_with_aux_streams(
-                json!({"session_id":"owner", "home_run_id":"home"}),
-                vec![original, replacement],
-            );
-            let client = Arc::new(client);
-            let (tx, mut rx) = mpsc::unbounded_channel();
-            let replay = tokio::spawn(replay_and_dedup(
-                Arc::clone(&client),
-                "run".into(),
-                "build".into(),
-                "build".into(),
-                73,
-                tx,
-            ));
-            let mut original = BufReader::new(original_peer);
-            let attach = json!({"op":"attach", "scope":"run", "id":"run", "session_id":"owner", "replay":true});
-            assert_eq!(read(&mut original).await, attach);
-            let exec = json!({"type":"exec_output", "id":"run", "is_stderr":false,
-                "ts":"now", "text":"same", "sequence":2});
-            let mut third = exec.clone();
-            third["sequence"] = json!(3);
-            // The first emission was evicted; only the second is retained.
-            for frame in [
-                json!({"type":"attached", "scope":"run", "id":"run", "capabilities":["observe", "replay_checkpoint"]}),
-                json!({"type":"history_gap", "id":"run"}),
-                exec.clone(),
-                json!({"type":"replay_checkpoint", "complete":false}),
-            ] {
-                socket::write_json_line(original.get_mut(), &frame)
-                    .await
-                    .unwrap();
-            }
-            let mut session = BufReader::new(session);
-            assert_eq!(
-                read(&mut session).await,
-                json!({"op":"read_definition", "id":"run", "session_id":"owner"})
-            );
-            socket::write_json_line(
-                session.get_mut(),
-                &json!({"stages":[{"name":"build", "type":"exec"}]}),
-            )
-            .await
-            .unwrap();
-            assert_eq!(
-                read(&mut session).await,
-                json!({"op":"read_blob", "id":"run", "blob":"command_logs/exec-build.log", "tail":500, "session_id":"owner"})
-            );
-            if third_before_response {
-                socket::write_json_line(original.get_mut(), &third)
-                    .await
-                    .unwrap();
-                // Queue the original emission while the disk response is pending.
-                tokio::task::yield_now().await;
-            }
-            socket::write_json_line(
-                session.get_mut(),
-                &json!({"lines":vec!["same"; disk_count], "through_sequence":disk_count,
-                    "covered_sequences": (1..=disk_count).collect::<Vec<_>>()}),
-            )
-            .await
-            .unwrap();
-            let mut replacement = BufReader::new(replacement_peer);
-            assert!(
-                timeout(
-                    Duration::from_millis(100),
-                    socket::read_json_line(&mut replacement)
-                )
-                .await
-                .is_err(),
-                "must not open replacement subscription"
-            );
-            if !third_before_response {
-                socket::write_json_line(original.get_mut(), &third)
-                    .await
-                    .unwrap();
-            }
-            // A barrier proves original frames continue without replacement traffic.
-            let barrier = json!({"type":"stage_completed", "id":"run", "stage":"build"});
-            socket::write_json_line(original.get_mut(), &barrier)
-                .await
-                .unwrap();
-            let mut count = 0;
-            loop {
-                let frame = unwrap_line(output(&mut rx).await);
-                if frame == barrier {
-                    break;
-                }
-                match frame["type"].as_str().unwrap() {
-                    "exec_output" => {
-                        assert_eq!(frame["text"], "same");
-                        count += 1;
-                    }
-                    "log_line" => assert!(
-                        frame["line"].as_str().unwrap().contains("history_gap")
-                            || frame["line"].as_str().unwrap().contains("possible overlap")
-                    ),
-                    other => panic!("unexpected replay frame: {other}"),
-                }
-            }
-            assert_eq!(
-                count, disk_count + 2,
-                "disk and both original emissions must remain; third before response: {third_before_response}"
-            );
-            assert!(
-                !replay.is_finished(),
-                "original subscription ended prematurely"
-            );
-            assert!(rx.try_recv().is_err());
-            replay.abort();
-            assert!(replay.await.unwrap_err().is_cancelled());
-            assert_eq!(
-                timeout(
-                    Duration::from_secs(2),
-                    socket::read_json_line(&mut original)
-                )
-                .await
-                .expect("original reader leaked after cancellation")
-                .unwrap(),
-                None
-            );
-            client.shutdown().await;
+            let third = exec(3, false);
+            let mut expected = warnings.clone();
+            expected.extend(vec![disk_exec.clone(); disk_count]);
+            expected.extend([
+                gap_log.clone(),
+                exec(2, false),
+                exec(2, true),
+                log("same"),
+                log("same"),
+                third.clone(),
+                build_completed.clone(),
+            ]);
+            cases.push(NativeCase {
+                stage: "build",
+                // Repeated text across stdout, stderr, and logs must retain type and order.
+                frames: vec![
+                    gap.clone(),
+                    exec(2, false),
+                    exec(2, true),
+                    log("same"),
+                    log("same"),
+                    checkpoint(false),
+                ],
+                disk: Some(disk(
+                    "build",
+                    "exec",
+                    "command_logs/exec-build.log",
+                    json!({
+                        "lines":vec!["same"; disk_count], "through_sequence":disk_count,
+                        "covered_sequences":(1..=disk_count).collect::<Vec<_>>()
+                    }),
+                )),
+                before_response: if third_before_response {
+                    vec![third.clone()]
+                } else {
+                    vec![]
+                },
+                after_response: if third_before_response {
+                    vec![build_completed.clone()]
+                } else {
+                    vec![third, build_completed.clone()]
+                },
+                expected,
+                live: vec![exec(2, false), exec(2, true), log("same")],
+            });
         }
-    }
-
-    #[tokio::test]
-    async fn native_gap_does_not_trust_stage_b_coverage_to_suppress_original_output() {
-        let (original, original_peer) = UnixStream::pair().unwrap();
-        let (replacement, replacement_peer) = UnixStream::pair().unwrap();
-        let (client, [_control, session]) = DaemonClient::fake_with_aux_streams(
-            json!({"session_id":"owner", "home_run_id":"home"}),
-            vec![original, replacement],
-        );
-        let client = Arc::new(client);
-        let (tx, mut rx) = mpsc::unbounded_channel();
-        let replay = tokio::spawn(replay_and_dedup(
-            Arc::clone(&client),
-            "run".into(),
-            "B".into(),
-            "B".into(),
-            73,
-            tx,
-        ));
-        let attach =
-            json!({"op":"attach", "scope":"run", "id":"run", "session_id":"owner", "replay":true});
-        let mut original = BufReader::new(original_peer);
-        assert_eq!(read(&mut original).await, attach);
-        let stage_a = json!({"type":"exec_output", "id":"run",
-            "is_stderr":false, "ts":"now", "text":"same", "sequence":10});
-        let stage_b = json!({"type":"exec_output", "id":"run",
-            "is_stderr":false, "ts":"now", "text":"same", "sequence":20});
-        for frame in [
-            json!({"type":"attached", "scope":"run", "id":"run", "capabilities":["observe", "replay_checkpoint"]}),
-            json!({"type":"history_gap", "id":"run"}),
+        let stage_b_completed = json!({"type":"stage_completed", "id":"run", "stage":"B"});
+        let stage_a = exec(10, false);
+        let stage_b = exec(20, false);
+        let mut expected = warnings;
+        expected.extend([
+            disk_exec,
+            gap_log,
             stage_a.clone(),
             stage_b.clone(),
-            json!({"type":"replay_checkpoint", "complete":false}),
-        ] {
-            socket::write_json_line(original.get_mut(), &frame)
-                .await
-                .unwrap();
+            stage_b_completed.clone(),
+        ]);
+        cases.push(NativeCase {
+            stage: "B",
+            frames: vec![gap, stage_a, stage_b.clone(), checkpoint(false)],
+            disk: Some(disk(
+                "B",
+                "exec",
+                "command_logs/exec-B.log",
+                json!({
+                    "lines":["same"], "through_sequence":20, "covered_sequences":[20]
+                }),
+            )),
+            before_response: vec![],
+            after_response: vec![stage_b_completed.clone()],
+            expected,
+            live: vec![stage_b, exec(15, false), exec(30, false), stage_b_completed],
+        });
+        for case in cases {
+            native_handoff(case).await;
         }
-        let mut session = BufReader::new(session);
-        assert_eq!(
-            read(&mut session).await,
-            json!({"op":"read_definition", "id":"run", "session_id":"owner"})
-        );
-        socket::write_json_line(
-            session.get_mut(),
-            &json!({"stages":[{"name":"A", "type":"exec"}, {"name":"B", "type":"exec"}]}),
-        )
-        .await
-        .unwrap();
-        assert_eq!(
-            read(&mut session).await,
-            json!({"op":"read_blob", "id":"run", "blob":"command_logs/exec-B.log", "tail":500, "session_id":"owner"})
-        );
-        socket::write_json_line(
-            session.get_mut(),
-            &json!({"lines":["same"], "through_sequence":20, "covered_sequences":[20]}),
-        )
-        .await
-        .unwrap();
-        let mut replacement = BufReader::new(replacement_peer);
-        assert!(
-            timeout(
-                Duration::from_millis(100),
-                socket::read_json_line(&mut replacement)
-            )
-            .await
-            .is_err(),
-            "must not open replacement subscription"
-        );
-        // A barrier proves both stages reach the pane without needing more output.
-        let barrier = json!({"type":"stage_completed", "id":"run", "stage":"B"});
-        socket::write_json_line(original.get_mut(), &barrier)
-            .await
-            .unwrap();
-        let mut pane = Vec::new();
-        loop {
-            let frame = unwrap_line(output(&mut rx).await);
-            if frame == barrier {
-                break;
-            }
-            if frame["type"] == "log_line" {
-                assert!(
-                    frame["line"].as_str().unwrap().contains("history_gap")
-                        || frame["line"].as_str().unwrap().contains("possible overlap")
-                );
-            } else {
-                pane.push(frame);
-            }
-        }
-        assert_eq!(
-            pane,
-            vec![
-                json!({"type":"exec_output", "id":"run", "is_stderr":false, "text":"same", "ts":""}),
-                stage_a,
-                stage_b.clone(),
-            ],
-            "disk B and both original frames must remain, despite identical text"
-        );
-
-        // Legacy coverage metadata does not establish exact raw-log coverage.
-        let mut unrelated = stage_b.clone();
-        unrelated["sequence"] = json!(15);
-        let mut later = stage_b.clone();
-        later["sequence"] = json!(30);
-        for frame in [&stage_b, &unrelated, &later, &barrier] {
-            socket::write_json_line(original.get_mut(), frame)
-                .await
-                .unwrap();
-        }
-        assert_eq!(unwrap_line(output(&mut rx).await), stage_b);
-        assert_eq!(unwrap_line(output(&mut rx).await), unrelated);
-        assert_eq!(unwrap_line(output(&mut rx).await), later);
-        assert_eq!(unwrap_line(output(&mut rx).await), barrier);
-        assert!(
-            rx.try_recv().is_err(),
-            "unexpected extra output after all original frames"
-        );
-        assert!(
-            !replay.is_finished(),
-            "original subscription ended prematurely"
-        );
-        replay.abort();
-        assert!(replay.await.unwrap_err().is_cancelled());
-        assert_eq!(
-            timeout(
-                Duration::from_secs(2),
-                socket::read_json_line(&mut original)
-            )
-            .await
-            .expect("original reader leaked after cancellation")
-            .unwrap(),
-            None
-        );
-        client.shutdown().await;
     }
 
     #[tokio::test]

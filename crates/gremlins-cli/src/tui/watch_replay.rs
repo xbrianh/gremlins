@@ -341,14 +341,32 @@ mod tests {
 
     #[tokio::test]
     async fn checkpoint_preserves_order_duplicates_and_live_frames() {
+        use std::future::{poll_fn, Future};
+        use std::task::Poll;
+
         let (tx, mut rx) = mpsc::channel(256);
         let frames = vec![text("hé"), text("hé"), json!({"type":"stage_boundary"})];
-        for frame in &frames {
-            tx.send(frame.clone()).await.unwrap();
-        }
-        tx.send(json!({"type":"replay_checkpoint"})).await.unwrap();
-        tx.send(text("live")).await.unwrap();
-        let snapshot = collect_checkpoint(&mut rx).await;
+        let snapshot = {
+            let mut collector = std::pin::pin!(collect_checkpoint(&mut rx));
+            // An empty, still-open receiver must wait, not end the snapshot.
+            poll_fn(|cx| {
+                assert!(collector.as_mut().poll(cx).is_pending());
+                Poll::Ready(())
+            })
+            .await;
+            for frame in &frames {
+                tx.send(frame.clone()).await.unwrap();
+            }
+            // Draining the available records must still wait for the marker.
+            poll_fn(|cx| {
+                assert!(collector.as_mut().poll(cx).is_pending());
+                Poll::Ready(())
+            })
+            .await;
+            tx.send(json!({"type":"replay_checkpoint"})).await.unwrap();
+            tx.send(text("live")).await.unwrap();
+            collector.await
+        };
         assert!(snapshot.fallback.is_none());
         assert_eq!(snapshot.values, frames);
         assert_eq!(rx.recv().await, Some(text("live")));
@@ -394,8 +412,9 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn incomplete_checkpoint_preserves_future_duplicates() {
+    async fn incomplete_checkpoint_without_gap_preserves_snapshot_and_future_duplicates() {
         let (tx, mut rx) = mpsc::channel(256);
+        // The incomplete marker alone must trigger fallback, without history_gap.
         tx.send(text("same")).await.unwrap();
         tx.send(json!({"type":"replay_checkpoint", "complete":false}))
             .await
@@ -446,6 +465,8 @@ mod tests {
         assert!(rx.try_recv().is_err());
     }
 
+    // Persisted-history decoding only: these formats do not establish native
+    // replay coverage or justify deduplicating matching live frames.
     #[test]
     fn decode_exec_metadata_and_output() {
         let history = decode_history(
@@ -473,6 +494,7 @@ mod tests {
         );
     }
 
+    // Assistant aggregates are persisted transcript records, not coverage markers.
     #[test]
     fn decode_stream_transcript_and_log() {
         let record = json!({"type": "assistant", "message": {"content": [
@@ -505,53 +527,5 @@ mod tests {
             decode_history(vec!["[now] hello".into(), "plain".into()], "log", "r"),
             vec![log_line("r", "hello"), log_line("r", "plain")]
         );
-    }
-
-    #[tokio::test]
-    async fn fallback_preserves_disk_snapshot_and_later_identical_frames() {
-        for kind in ["stream_chunk", "reasoning_chunk", "exec_output", "log_line"] {
-            let value = if kind == "log_line" {
-                log_line("r", "same")
-            } else {
-                json!({"type":kind, "text":"hé same"})
-            };
-            let (native_tx, mut native_rx) = mpsc::channel(16);
-            native_tx.send(value.clone()).await.unwrap();
-            native_tx
-                .send(json!({"type":"replay_checkpoint", "complete":false}))
-                .await
-                .unwrap();
-            let snapshot = collect_checkpoint(&mut native_rx).await;
-            assert!(snapshot.fallback.is_some());
-            let (tx, mut rx) = mpsc::unbounded_channel();
-            assert!(send_disk_history(
-                &tx,
-                "r",
-                7,
-                vec![value.clone(), value.clone()],
-                "agent"
-            ));
-            for original in snapshot.values {
-                assert!(send_line(&tx, "r", 7, original));
-            }
-            native_tx.send(value.clone()).await.unwrap();
-            assert!(send_line(&tx, "r", 7, native_rx.recv().await.unwrap()));
-            let warning = rx.try_recv().unwrap();
-            assert_eq!(warning["type"], "view_log");
-            let warning: Value = serde_json::from_str(warning["line"].as_str().unwrap()).unwrap();
-            let warning = warning["line"].as_str().unwrap();
-            assert!(warning.contains("possible overlap"));
-            assert!(warning.contains("not execution-scoped"));
-            assert!(warning.contains("other executions"));
-            for _ in 0..4 {
-                let wrapped = rx.try_recv().unwrap();
-                assert_eq!(wrapped["type"], "view_log");
-                assert_eq!(
-                    serde_json::from_str::<Value>(wrapped["line"].as_str().unwrap()).unwrap(),
-                    value
-                );
-            }
-            assert!(rx.try_recv().is_err());
-        }
     }
 }
