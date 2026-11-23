@@ -56,7 +56,9 @@ this section — do not try to run them yourself.
 | `/resume <id>` | resume a gremlin |
 | `/log <id>` | show gremlin log |
 | `/watch` | show the running gremlins table; j/k/arrow keys select, Enter opens the selected gremlin's chat, s/r stop/resume, `Ctrl+O` toggles an inline live log |
-| `/debug <id>` | open a full-screen interactive debug session |
+| `/debug <id>` | select the same conversation with pause-on-entry (interactive agent stages only) |
+| `/attach <id> [stage]` / `/attach home` | select a stage conversation / detach and return home |
+| `/skills` / `/skill <name>` | list / activate operator skills |
 | `/model` / `/model <spec>` / `/model clear` | show, set, or clear the TUI chat model (`model://provider/model` or `provider/model`) |
 | `/compact` | compact conversation history to reduce context usage |
 | `/chat` | chat is always active (type directly) |
@@ -66,23 +68,31 @@ this section — do not try to run them yourself.
 
 ### Keybindings
 
-- `Ctrl+C` — first press acts like `Esc` (returns a full-screen view to chat, or clears input/cancels chat); press again within one second to exit the TUI.
+- `Ctrl+C` — dismiss watch layers first; during an active home request, soft interrupt first and hard cancel on a repeat within one second. Outside an active request, repeat within one second to exit.
 - `Ctrl+D` on an empty input — exit the TUI.
 - `Ctrl+L` — redraw the screen.
-- `Esc` — in `/watch`, the first press closes an open live log and the next returns to chat; otherwise return a full-screen view to chat, or clear the input bar and cancel an in-flight chat turn.
+- `Esc` — in `/watch`, close an open live log first, then return to chat; in chat, dismiss a correction draft without interrupting its execution.
 - `Ctrl+W` — enter the watch screen from chat; inside `/watch`, toggle the selected gremlin's live log (open it, or close an open pane); exits to chat when there is no selection left to follow.
 - `Ctrl+O` — in `/watch`: open or close the selected gremlin's live log.
 - `j` / `k` / `Up` / `Down` — in `/watch`: move the gremlin selection.
-- `Enter` — in `/watch`: open the selected gremlin's chat.
+- `Enter` — in `/watch`: observe the selected gremlin's chat without pausing; it keeps running unaided.
+- `Ctrl+T` — switch between home and the last attached stage, preserving drafts.
 - `s` — in `/watch`: stop the selected gremlin.
 - `r` — in `/watch`: resume the selected gremlin.
 - `Ctrl+G` — open the external editor to compose multi-line input.
 
 ### Interaction model
 
-Chat is always active; `/chat` is not required. Plain text typed in the input
-bar is sent as your chat prompt. Slash commands are the only exception and
-are handled locally by the TUI. Text composed in the external editor is
+Chat is always active; `/chat` is not required. At idle home, plain text starts
+a chat turn. During a turn or in a selected interactive agent conversation,
+ordinary text corrects the same execution and resumes it, rather than starting
+a replacement execution. Exec stages are read-only. `/watch` Enter observes
+without pausing; `/debug <id>` uses the same chat with pause-on-entry for
+interactive agents only. There is no dedicated debug screen or debug prompt.
+Explicit run controls are `/stop <id>` and `/resume <id>` (watch: `s`/`r`).
+`/attach home` or switching away detaches, not cancels; home keeps streaming
+in the background while a stage is selected. Slash commands are handled locally
+by the TUI. Text composed in the external editor is
 placed into the input bar for review and is only sent after the operator
 presses Enter.
 

@@ -339,35 +339,78 @@ async fn incorporation_releases_temporary_lease_while_display_is_blocked() {
 }
 
 #[tokio::test]
-async fn default_observe_attach_does_not_pause() {
+async fn default_and_control_observe_attach_do_not_pause() {
     timeout(Duration::from_secs(5), async {
-        let id = "observe-no-pause";
-        let (registry, mut gremlin, _dir) = synthetic_run(id).await;
-        let mut session = gremlin.next_interactive_session();
-        let (mut client, handler) = connection_mode(&registry, id, None);
-        tokio::pin!(handler);
-        tokio::select! {
-            _ = &mut handler => panic!("observer ended"),
-            _ = wait_for(&mut client, |f| f["type"] == "attached") => {}
+        for mode in [None, Some("control")] {
+            let id = "observe-no-pause";
+            let (registry, mut gremlin, _dir) = synthetic_run(id).await;
+            let mut session = gremlin.next_interactive_session();
+            let (mut client, handler) = connection_mode(&registry, id, mode);
+            tokio::pin!(handler);
+            tokio::select! {
+                _ = &mut handler => panic!("observer ended"),
+                _ = wait_for(&mut client, |f| f["type"] == "attached") => {}
+            }
+            // Poll through all post-ack work, not a wall-clock sleep.
+            pending_once(&mut handler).await;
+            assert!(!session.accept_pause(), "default attach acquired a pause");
+            drop(client);
+            handler.await;
+            registry.stop_run(id).await.unwrap();
         }
-        // Poll through all post-ack work, not a wall-clock sleep.
-        pending_once(&mut handler).await;
-        assert!(!session.accept_pause(), "default attach acquired a pause");
-        drop(client);
-        handler.await;
-        registry.stop_run(id).await.unwrap();
     })
     .await
     .unwrap();
 }
 
 #[tokio::test]
-async fn immediate_message_waits_for_incorporation_and_releases_only_temporary_lease() {
+async fn readonly_control_and_debugger_entry_stream_without_pause_or_ended() {
+    timeout(Duration::from_secs(5), async {
+        for mode in [None, Some("control"), Some("debugger")] {
+            let id = format!("readonly-entry-{}", mode.unwrap_or("default"));
+            let (registry, mut gremlin, _dir) = synthetic_run(&id).await;
+            let mut session = gremlin
+                .next_interactive_session_with_commands(false)
+                .unwrap();
+            let (handle, _, _) = registry.get_run_interactive(&id).await.unwrap();
+            let target = handle.target();
+            let (mut client, handler) = connection_mode(&registry, &id, mode);
+            tokio::pin!(handler);
+            let attached = tokio::select! {
+                _ = &mut handler => panic!("read-only entry ended"),
+                frame = wait_for(&mut client, |f| f["type"] == "attached") => frame,
+            };
+            assert_eq!(attached["capabilities"], json!(["observe"]));
+            assert_eq!(attached["execution_id"], target.execution_id().unwrap());
+            pending_once(&mut handler).await;
+            assert!(!session.accept_pause(), "read-only entry requested a pause");
+            emit_text(&id, target.execution_id().unwrap(), "read-only output");
+            let output = tokio::select! {
+                _ = &mut handler => panic!("read-only stream ended"),
+                frame = socket::read_json_line(&mut client) => frame.unwrap().unwrap(),
+            };
+            assert_eq!(output["type"], "stream_chunk", "{output}");
+            assert_eq!(output["text"], "read-only output");
+            drop(session);
+            handler.await;
+            assert!(
+                socket::read_json_line(&mut client).await.unwrap().is_none(),
+                "read-only entry emitted an error or ended frame"
+            );
+            registry.stop_run(&id).await.unwrap();
+        }
+    })
+    .await
+    .unwrap();
+}
+
+#[tokio::test]
+async fn control_message_waits_for_incorporation_and_releases_only_temporary_lease() {
     timeout(Duration::from_secs(5), async {
         let id = "observe-message";
         let (registry, mut gremlin, _dir) = synthetic_run(id).await;
         let mut session = gremlin.next_interactive_session();
-        let (mut client, handler) = connection_mode(&registry, id, None);
+        let (mut client, handler) = connection_mode(&registry, id, Some("control"));
         tokio::pin!(handler);
         // Pipeline the message before even reading the attached frame.
         socket::write_json_line(client.get_mut(), &json!({
@@ -1347,13 +1390,25 @@ async fn buffered_viewers_do_not_cross_same_name_replacement() {
             // B has really produced output while A's receiver is still gated.
             release.send(()).unwrap();
             old_task.await.unwrap();
+            let mut completions = 0;
+            let mut text = String::new();
             while let Some(frame) = socket::read_json_line(&mut old).await.unwrap() {
+                assert_ne!(frame["type"], "error", "{frame}");
+                assert_ne!(frame["type"], "ended", "{frame}");
                 assert_ne!(frame["text"], "B live", "{frame}");
                 assert_ne!(frame["type"], "delivered", "{frame}");
                 if frame["type"] == "stream_chunk" {
                     assert_eq!(frame["text"], "A buffered", "{frame}");
+                    text.push_str(frame["text"].as_str().unwrap());
+                }
+                if frame["type"] == "done" {
+                    completions += 1;
+                    assert_eq!(frame["text"], "A buffered", "{frame}");
+                    assert_eq!(frame["summary"], "A complete", "{frame}");
                 }
             }
+            assert_eq!(text, "A buffered");
+            assert_eq!(completions, 1, "{mode:?}: A must complete exactly once");
             registry.stop_run(&id).await.unwrap();
             fresh_task.await.unwrap();
             follow_task.abort();
@@ -1361,6 +1416,198 @@ async fn buffered_viewers_do_not_cross_same_name_replacement() {
             let _ = follow_task.await;
         }
     }).await.unwrap();
+}
+
+#[tokio::test]
+async fn debugger_bus_done_and_lease_done_complete_once_with_or_without_execution_end() {
+    use crate::clients::interactive::DebugOutcome;
+
+    timeout(Duration::from_secs(10), async {
+        for end_before_poll in [false, true] {
+            let id = format!("debugger-completion-{end_before_poll}");
+            let (registry, mut gremlin, _dir) = synthetic_run(&id).await;
+            let mut session = gremlin.next_interactive_session();
+            let execution = session.snapshot().execution_id().unwrap().to_owned();
+            let (mut client, handler) = connection(&registry, &id);
+            let handler = tokio::spawn(handler);
+            wait_for(&mut client, |f| f["type"] == "status").await;
+            assert!(session.accept_pause());
+            tokio::select! {
+                command = session.next_command() => panic!("unexpected command: {command:?}"),
+                _ = wait_for(&mut client, |f| f["type"] == "ready") => {}
+            }
+
+            gremlins_magic_bus::emit_corr_event(
+                &gremlins_magic_bus::CorrId::new()
+                    .with_run(&id)
+                    .with_execution_id(&execution),
+                EventKind::Done {
+                    text: "A answer".into(),
+                    summary: "bus summary must not win".into(),
+                    usage: Default::default(),
+                },
+            );
+            // FIFO display fence: the handler must consume bus Done without
+            // closing or reporting it before the reliable lease outcome.
+            emit_text(&id, &execution, "A answer");
+            let frame = next_response(&mut client).await;
+            assert_eq!(frame["type"], "stream_chunk", "{frame}");
+            assert_eq!(frame["text"], "A answer", "{frame}");
+
+            assert!(session.finish_attachment(DebugOutcome::Done {
+                text: "A answer".into(),
+                summary: "A complete".into(),
+                usage: serde_json::from_value(json!({"turns": 1})).unwrap(),
+            }));
+            if !end_before_poll {
+                // Consume the lease outcome while the execution is still live.
+                let frame = next_response(&mut client).await;
+                assert_eq!(frame["type"], "done", "{frame}");
+                assert_eq!(frame["text"], "A answer", "{frame}");
+                assert_eq!(frame["summary"], "A complete", "{frame}");
+            }
+            drop(session);
+            let mut successor = gremlin.next_interactive_session();
+            assert!(!successor.accept_pause(), "debugger reserved successor");
+            emit_text(&id, successor.snapshot().execution_id().unwrap(), "B live");
+            handler.await.unwrap();
+            let mut completions = usize::from(!end_before_poll);
+            while let Some(frame) = socket::read_json_line(&mut client).await.unwrap() {
+                assert_eq!(frame["type"], "done", "{frame}");
+                assert_eq!(frame["text"], "A answer", "{frame}");
+                assert_eq!(frame["summary"], "A complete", "{frame}");
+                completions += 1;
+            }
+            assert_eq!(completions, 1, "end_before_poll={end_before_poll}");
+            drop(successor);
+            registry.stop_run(&id).await.unwrap();
+        }
+    })
+    .await
+    .unwrap();
+}
+
+#[tokio::test]
+async fn debugger_done_while_waiting_for_ready_completes_once_without_pausing_successor() {
+    timeout(Duration::from_secs(10), async {
+        for end_before_poll in [false, true] {
+            let id = format!("debugger-done-before-ready-{end_before_poll}");
+            let (registry, mut gremlin, _dir) = synthetic_run(&id).await;
+            let session = gremlin.next_interactive_session();
+            let execution = session.snapshot().execution_id().unwrap().to_owned();
+            let (mut client, handler) = connection(&registry, &id);
+            tokio::pin!(handler);
+            tokio::select! {
+                _ = &mut handler => panic!("debugger ended before waiting for readiness"),
+                _ = wait_for(&mut client, |f| {
+                    f["type"] == "status" && f["stage"] == "waiting_for_ready"
+                }) => {}
+            }
+
+            // Never accept the pause. Queue completion before polling the handler.
+            gremlins_magic_bus::emit_corr_event(
+                &gremlins_magic_bus::CorrId::new()
+                    .with_run(&id)
+                    .with_execution_id(&execution),
+                EventKind::Done {
+                    text: "A answer".into(),
+                    summary: "A complete".into(),
+                    usage: Default::default(),
+                },
+            );
+            let session = if end_before_poll {
+                drop(session);
+                None
+            } else {
+                Some(session)
+            };
+            handler.await;
+            drop(session);
+            let mut successor = gremlin.next_interactive_session();
+            assert!(!successor.accept_pause(), "debugger reserved successor");
+            emit_text(&id, successor.snapshot().execution_id().unwrap(), "B live");
+            let mut completions = 0;
+            while let Some(frame) = socket::read_json_line(&mut client).await.unwrap() {
+                assert_eq!(frame["type"], "done", "{frame}");
+                assert_eq!(frame["scope"], "conversation", "{frame}");
+                assert_eq!(frame["text"], "A answer", "{frame}");
+                assert_eq!(frame["summary"], "A complete", "{frame}");
+                completions += 1;
+            }
+            assert_eq!(completions, 1, "end_before_poll={end_before_poll}");
+            drop(successor);
+            registry.stop_run(&id).await.unwrap();
+        }
+    })
+    .await
+    .unwrap();
+}
+
+#[tokio::test]
+async fn debugger_quit_resumes_observing_same_execution_until_done() {
+    use crate::clients::interactive::DebugOutcome;
+
+    timeout(Duration::from_secs(10), async {
+        let id = "debugger-quit-resumes-observation";
+        let (registry, mut gremlin, _dir) = synthetic_run(id).await;
+        let mut session = gremlin.next_interactive_session();
+        let execution = session.snapshot().execution_id().unwrap().to_owned();
+        let (mut client, handler) = connection(&registry, id);
+        let handler = tokio::spawn(handler);
+        let ack = wait_for(&mut client, |f| f["type"] == "attached").await;
+        assert_eq!(ack["execution_id"], execution);
+        wait_for(&mut client, |f| {
+            f["type"] == "status" && f["stage"] == "waiting_for_ready"
+        })
+        .await;
+        assert!(session.accept_pause());
+        let (command, ()) = tokio::join!(session.next_command(), async {
+            wait_for(&mut client, |f| f["type"] == "ready").await;
+            socket::write_json_line(client.get_mut(), &json!({"op":"quit"}))
+                .await
+                .unwrap();
+        });
+        assert!(matches!(command, Some(InteractiveCommand::Quit)));
+        assert!(session.finish_attachment(DebugOutcome::Ended {
+            reason: "resumed".into(),
+        }));
+        let frame = next_response(&mut client).await;
+        assert_eq!(frame["type"], "ended", "{frame}");
+        assert_eq!(frame["reason"], "resumed", "{frame}");
+        assert_eq!(frame["scope"], "conversation", "{frame}");
+
+        emit_text(id, &execution, "A after quit");
+        let frame = next_response(&mut client).await;
+        assert_eq!(frame["type"], "stream_chunk", "{frame}");
+        assert_eq!(frame["text"], "A after quit", "{frame}");
+        gremlins_magic_bus::emit_corr_event(
+            &gremlins_magic_bus::CorrId::new()
+                .with_run(id)
+                .with_execution_id(&execution),
+            EventKind::Done {
+                text: "A answer".into(),
+                summary: "A complete".into(),
+                usage: Default::default(),
+            },
+        );
+        drop(session);
+        let mut successor = gremlin.next_interactive_session();
+        assert!(!successor.accept_pause(), "quit reserved successor");
+        emit_text(id, successor.snapshot().execution_id().unwrap(), "B live");
+        handler.await.unwrap();
+        let mut completions = 0;
+        while let Some(frame) = socket::read_json_line(&mut client).await.unwrap() {
+            assert_eq!(frame["type"], "done", "{frame}");
+            assert_eq!(frame["text"], "A answer", "{frame}");
+            assert_eq!(frame["summary"], "A complete", "{frame}");
+            completions += 1;
+        }
+        assert_eq!(completions, 1);
+        drop(successor);
+        registry.stop_run(id).await.unwrap();
+    })
+    .await
+    .unwrap();
 }
 
 #[tokio::test]
@@ -1737,8 +1984,12 @@ async fn drive_sequence(sandbox: &Sandbox, model: TcpListener) {
     assert_eq!(attached["type"], "attached", "{attached}");
     assert_eq!(attached["capabilities"], json!(["observe"]));
     preflight.write_all(b"go\n").await.unwrap();
-    let expired = next_response(&mut expiring).await;
-    assert_eq!(expired["type"], "error", "{expired}");
+    // Read-only debugger entry closes with its execution, without a lease
+    // error or a synthetic `ended` outcome, and cannot bind the native agent.
+    while let Some(frame) = socket::read_json_line(&mut expiring).await.unwrap() {
+        assert_ne!(frame["type"], "error", "{frame}");
+        assert_ne!(frame["type"], "ended", "{frame}");
+    }
 
     // 3) Attach during native agent, send `message` — correction appears.
     let (initial, _held) = pending_request(&model).await;
@@ -1772,7 +2023,14 @@ async fn drive_sequence(sandbox: &Sandbox, model: TcpListener) {
 
 // ── Detach / reattach tests (was tests/debug_detach.rs) ─────────────────
 
-async fn exercise_disconnect(id: &str, accepted: bool) {
+#[derive(Clone, Copy)]
+enum DisconnectAt {
+    BeforeAttached,
+    BeforePause,
+    UnreadReady,
+}
+
+async fn exercise_disconnect(id: &str, at: DisconnectAt) {
     let provider = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let sandbox = Sandbox::with_providers(
         &json!({"openrouter": {
@@ -1782,13 +2040,13 @@ async fn exercise_disconnect(id: &str, accepted: bool) {
     );
     timeout(
         Duration::from_secs(15),
-        drive_handshake(&sandbox, &provider, id, accepted),
+        drive_handshake(&sandbox, &provider, id, at),
     )
     .await
     .expect("timed out disconnecting and reattaching");
 }
 
-async fn drive_handshake(sandbox: &Sandbox, provider: &TcpListener, id: &str, accepted: bool) {
+async fn drive_handshake(sandbox: &Sandbox, provider: &TcpListener, id: &str, at: DisconnectAt) {
     let spec = format!("openrouter/{id}");
     let gremlin = create_chat_gremlin(
         id,
@@ -1818,26 +2076,28 @@ async fn drive_handshake(sandbox: &Sandbox, provider: &TcpListener, id: &str, ac
     let (mut first, handler) = connection(&registry, id);
     tokio::pin!(handler);
 
-    // Read the `attached` ack — the handler must be polled to write it.
-    let ack = tokio::select! {
-        _ = &mut handler => panic!("attach handler ended before attached ack"),
-        frame = socket::read_json_line(&mut first) => frame.unwrap().unwrap(),
-    };
-    assert_eq!(ack["type"], "attached");
+    if !matches!(at, DisconnectAt::BeforeAttached) {
+        // Read the `attached` ack — the handler must be polled to write it.
+        let ack = tokio::select! {
+            _ = &mut handler => panic!("attach handler ended before attached ack"),
+            frame = socket::read_json_line(&mut first) => frame.unwrap().unwrap(),
+        };
+        assert_eq!(ack["type"], "attached");
 
-    tokio::select! {
-        _ = &mut handler => panic!("attach handler ended before status frame"),
-        // Wait for the status frame that follows the pause request.
-        _ = wait_for(&mut first, |frame| {
-            frame["type"] == "status" && frame["stage"] == "waiting_for_ready"
-        }) => {}
+        tokio::select! {
+            _ = &mut handler => panic!("attach handler ended before status frame"),
+            // Wait for the status frame that follows the pause request.
+            _ = wait_for(&mut first, |frame| {
+                frame["type"] == "status" && frame["stage"] == "waiting_for_ready"
+            }) => {}
+        }
     }
-    // The pause is registered but may not yet be observed by the agent.
-    // Neither future is spawned. Leave the handler unpolled; advance only the
-    // agent to its Ready broadcast, or don't let it observe the pause at all.
+    // After the handshake the pause is registered but not yet observed.
+    // Neither future is spawned. Advance only the agent to its Ready broadcast
+    // for UnreadReady; otherwise leave it unpolled until after disconnect.
     let (sub, mut events) = subscribe_run(id);
     let _guard = BusSubGuard::new(sub);
-    if accepted {
+    if matches!(at, DisconnectAt::UnreadReady) {
         tokio::select! {
             _ = &mut agent => panic!("agent exited before accepting pause"),
             _ = async {
@@ -1848,6 +2108,8 @@ async fn drive_handshake(sandbox: &Sandbox, provider: &TcpListener, id: &str, ac
             } => {}
         }
     }
+    // BeforeAttached drops the peer before polling the handler: acquiring a
+    // pause lease followed by a failed ack write must release that lease too.
     drop(first);
     handler.await;
 
@@ -1856,7 +2118,7 @@ async fn drive_handshake(sandbox: &Sandbox, provider: &TcpListener, id: &str, ac
         _ = &mut agent => panic!("agent exited instead of resuming"),
         first = pending_request(provider) => first,
     };
-    if !accepted {
+    if !matches!(at, DisconnectAt::UnreadReady) {
         while let Ok(event) = events.try_recv() {
             assert!(
                 !matches!(event.kind(), EventKind::Ready { .. }),
@@ -1980,11 +2242,16 @@ async fn full_debug_queue_does_not_block_disconnect_and_reattach() {
 }
 
 #[tokio::test]
+async fn debug_detach_before_reading_attached_ack() {
+    exercise_disconnect("detach-before-attached", DisconnectAt::BeforeAttached).await;
+}
+
+#[tokio::test]
 async fn debug_detach_before_agent_observes_pause() {
-    exercise_disconnect("detach-before-pause", false).await;
+    exercise_disconnect("detach-before-pause", DisconnectAt::BeforePause).await;
 }
 
 #[tokio::test]
 async fn debug_detach_after_agent_emits_unread_ready() {
-    exercise_disconnect("detach-unread-ready", true).await;
+    exercise_disconnect("detach-unread-ready", DisconnectAt::UnreadReady).await;
 }

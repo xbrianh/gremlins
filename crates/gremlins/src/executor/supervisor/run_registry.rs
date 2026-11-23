@@ -291,7 +291,9 @@ impl RunRegistry {
 
     // ── Chat ids ────────────────────────────────────────────────────────
 
-    /// Reserve a `chat-{seq:04x}` id not present in the live run map.
+    /// Allocate a unique `chat-{seq:04x}` id not present in the live run map.
+    /// The monotonic sequence reserves identity only; no run or disk state is
+    /// created. Callers track session ownership through `chat_ids`.
     pub(crate) async fn reserve_chat_id(&self) -> String {
         loop {
             let candidate = {

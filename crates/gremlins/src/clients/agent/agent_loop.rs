@@ -643,7 +643,7 @@ impl LoopState {
         }
         self.pending_run_one_turn = matches!(
             self.enter_interactive_mode(cancel, prefix).await?,
-            InteractiveLoopResult::RunOneTurn
+            InteractiveLoopResult::RunOneTurn | InteractiveLoopResult::MessageDelivered
         );
         Ok(())
     }
@@ -670,7 +670,7 @@ impl LoopState {
         .await
         {
             Ok(InteractiveLoopResult::MessageDelivered) => {
-                // Correction injected, slot released, original prompt stays.
+                // Delivery may retain the debugger lease; restore the original prompt.
                 self.system_prompt = self.original_system_prompt.clone();
                 Ok(InteractiveLoopResult::MessageDelivered)
             }

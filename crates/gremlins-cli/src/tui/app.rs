@@ -37,12 +37,14 @@ pub struct App {
     /// submitting a prompt (or starting a second reset) before the
     /// replacement session socket is installed.
     pub session_recreating: bool,
+    pub home_run_id: Option<String>,
     /// Active screen. Chat is the default; the other variants are full-screen
     /// views entered from slash commands and dismissed with `Esc`.
     pub screen: Screen,
     /// The conversation target currently selected in the UI. The home chat is
     /// the default; stage-execution targets are attached from run events.
     pub selected_target: Target,
+    conversation_statuses: HashMap<Target, ConversationStatus>,
     /// Routing metadata is independent of which target currently owns the input widget.
     pub conversations: Conversations,
     /// Highlighted gremlin id on the `/watch` screen.
@@ -152,24 +154,17 @@ impl HistorySearch {
 ///
 /// Chat is the default. The other variants are entered from slash commands
 /// and dismissed by `Esc` (or the first `Ctrl+C` press), which always
-/// returns to [`Screen::Chat`]. Screen-local widget state (log lines, debug
-/// prompt/history, connection flags) lives in `LiveArea`'s screen view.
+/// returns to [`Screen::Chat`]. Screen-local widget state (watch log lines)
+/// lives in `LiveArea`'s screen view.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Screen {
     /// The normal chat transcript with the main input bar.
     Chat,
     /// Full-screen gremlins watch table.
     Runs,
-    /// Full-screen interactive debug session with its own prompt.
-    Debug { id: String },
 }
 
 impl Screen {
-    /// Whether the active screen owns a prompt that should receive keystrokes.
-    pub fn has_prompt(&self) -> bool {
-        matches!(self, Screen::Debug { .. })
-    }
-
     /// Each non-chat screen is a full-screen view.
     pub fn is_chat(&self) -> bool {
         matches!(self, Screen::Chat)
@@ -186,6 +181,27 @@ pub enum Target {
     Home,
     /// A selected stage execution from a run.
     StageExecution { run_id: String, stage: String },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ConversationStatus {
+    Idle,
+    ReadOnly,
+    Running,
+    Paused,
+    Ended,
+}
+
+impl ConversationStatus {
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Idle => "idle",
+            Self::ReadOnly => "read-only",
+            Self::Running => "running",
+            Self::Paused => "paused",
+            Self::Ended => "ended",
+        }
+    }
 }
 
 impl Target {
@@ -220,8 +236,10 @@ impl App {
             following_log: None,
             active_request: false,
             session_recreating: false,
+            home_run_id: None,
             screen: Screen::Chat,
             selected_target: Target::Home,
+            conversation_statuses: HashMap::new(),
             conversations: Conversations::default(),
             watch_selection: None,
             watch_following: None,
@@ -233,6 +251,27 @@ impl App {
             active_skills: Vec::new(),
             history_search: None,
         }
+    }
+
+    pub fn set_conversation_status(&mut self, target: Target, status: ConversationStatus) {
+        self.conversation_statuses.insert(target, status);
+    }
+
+    pub fn conversation_status(&self, target: &Target) -> ConversationStatus {
+        self.conversation_statuses
+            .get(target)
+            .copied()
+            .unwrap_or_else(|| {
+                if target.is_home() {
+                    if self.selected_target.is_home() && self.active_request {
+                        ConversationStatus::Running
+                    } else {
+                        ConversationStatus::Idle
+                    }
+                } else {
+                    ConversationStatus::ReadOnly
+                }
+            })
     }
 
     /// Record an edit when it happens. A history search edits its own query,
@@ -632,11 +671,6 @@ impl App {
         self.watch_selection = Some(ids[next as usize].clone());
     }
 
-    /// Enter the full-screen interactive debug session.
-    pub fn show_debug(&mut self, id: String) {
-        self.screen = Screen::Debug { id };
-    }
-
     /// Exit any non-chat screen and return to chat. Returns `true` when a
     /// full-screen view was actually dismissed.
     pub fn exit_screen(&mut self) -> bool {
@@ -979,6 +1013,50 @@ impl App {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn conversation_status_persists_independently_per_target() {
+        use super::{App, ConversationStatus as Status, Target};
+        let mut app = App::new();
+        let a = Target::StageExecution {
+            run_id: "a".into(),
+            stage: "agent".into(),
+        };
+        let b = Target::StageExecution {
+            run_id: "b".into(),
+            stage: "exec".into(),
+        };
+        assert_eq!(app.conversation_status(&a), Status::ReadOnly);
+        app.set_conversation_status(a.clone(), Status::Paused);
+        app.set_conversation_status(b.clone(), Status::Running);
+        app.select_composer(a.clone());
+        assert_eq!(app.conversation_status(&a), Status::Paused);
+        app.select_composer(b.clone());
+        app.set_conversation_status(a.clone(), Status::Ended);
+        assert_eq!(app.conversation_status(&b), Status::Running);
+        app.select_composer(a.clone());
+        assert_eq!(app.conversation_status(&a), Status::Ended);
+        assert_eq!(app.conversation_status(&Target::Home), Status::Idle);
+    }
+
+    #[test]
+    fn home_status_defaults_to_request_state_and_accepts_explicit_updates() {
+        use super::{App, ConversationStatus as Status, Target};
+        let mut app = App::new();
+        assert_eq!(app.conversation_status(&Target::Home), Status::Idle);
+        app.active_request = true;
+        assert_eq!(app.conversation_status(&Target::Home), Status::Running);
+        app.active_request = false;
+        assert_eq!(app.conversation_status(&Target::Home), Status::Idle);
+        app.set_conversation_status(Target::Home, Status::Running);
+        app.select_composer(Target::StageExecution {
+            run_id: "a".into(),
+            stage: "agent".into(),
+        });
+        assert_eq!(app.conversation_status(&Target::Home), Status::Running);
+        app.set_conversation_status(Target::Home, Status::Idle);
+        assert_eq!(app.conversation_status(&Target::Home), Status::Idle);
+    }
+
     use super::*;
 
     #[test]

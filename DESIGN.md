@@ -700,8 +700,8 @@ inner width to children in every width-taking method.
 - `transcript: TranscriptWidget`
 - `input_bar: InputBarWidget`
 - `info_bar: InfoBarWidget`
-- `screen_view: Option<ScreenView>` — a typed enum of full-screen bodies:
-  `Runs`, `Debug`.
+- `screen_view: Option<ScreenView>` — the full-screen `Runs` watch body.
+  Selected stage conversations use the shared chat scene, not another screen.
 
 On each frame `compose` takes the scene out temporarily, builds an ordered
 `Vec<&mut dyn LiveAreaWidget>` by borrowing the concrete fields (chat =
@@ -900,6 +900,20 @@ selection left to follow.
 ╚══════════════════════════════════════════════════════════════╝
 ```
 
+#### 8.4.5 Selected conversation
+
+`Enter` in watch selects the run's conversation without pausing: it keeps
+running unaided. `/attach <id> [stage]` selects it directly. `/debug <id>`
+selects the same chat with pause-on-entry for interactive agent stages only;
+there is no separate debug screen. Ordinary text supplies a correction to the
+same execution and resumes it. Exec stages remain read-only.
+
+Explicit run controls retain their names: `/stop <id>` and `/resume <id>`
+(or `s`/`r` in watch). `/attach home` returns home; `Ctrl+T` switches between
+home and the last stage, keeping drafts. Leaving detaches rather than cancels.
+Home continues streaming in the background while a stage is selected. The
+inline watch pane remains on `Ctrl+W`, with `Ctrl+O` as an alias.
+
 ### 8.5 Widget lifecycle
 
 ```
@@ -952,8 +966,8 @@ selection left to follow.
   discards the turn and its reasoning without committing it.
 
   system content (banner, events, command output) is pushed directly into the
-  transcript widget. Full-screen views (`Runs`, `Debug`) exist outside this
-  lifecycle — they replace the chat scene while active and are dismissed by
+  transcript widget. The full-screen watch view (`Runs`) exists outside this
+  lifecycle — it replaces the chat scene while active and is dismissed by
   `Esc`.
 ```
 
@@ -965,22 +979,26 @@ their own controls (or none). Key routing rules:
 | Screen / state | Input bar behavior |
 |----------------|--------------------|
 | Chat, idle (no active turn) | Accepts chat text and slash commands |
-| Chat, active turn (streaming) | Disabled — input is not accepted |
+| Chat, active turn (streaming) | Accepts a correction to the same execution |
 | Runs screen | No chat input; `Up`/`Down` move selection, `Ctrl+O` toggles the log pane |
-| Debug screen | Chat input bar disabled; the debug prompt accepts debug commands |
+| Selected interactive agent | Same chat input; ordinary text corrects and resumes the execution |
+| Selected exec stage | Read-only observation |
 
-`Esc` (or the first `Ctrl+C` press) in order of priority:
+`Esc` in order of priority:
 
 1. If the Runs screen's inline log pane is open, close the pane.
-2. If a full-screen view is active (`Runs` or `Debug`), exit back to chat.
-3. If an active turn is streaming, clear the input and cancel the turn
-   (`clear_current_turn` discards the partial turn, tool slots included).
-4. Otherwise, clear the input bar.
+2. If the Runs view is active, exit back to chat.
+3. Otherwise, dismiss the correction draft or clear the input without
+   interrupting its execution. Navigation detaches rather than cancels.
+
+Explicit home interruption uses `Ctrl+C`: soft interruption first, then hard
+cancellation on a repeated press within one second. Outside an active request,
+repeated `Ctrl+C` within one second exits the TUI.
 
 ### 8.7 Summary
 
-The TUI has two layout modes: the chat scene, and full-screen views (`Runs`,
-`Debug`) that wholly replace it while active. Within chat, widgets are laid
+The TUI has two layout modes: the selected chat scene, and the full-screen
+watch view (`Runs`) that wholly replaces it while active. Within chat, widgets are laid
 out top-to-bottom — the transcript is the one elastic, overflow-producing
 widget; reasoning and live tool output are bounded, transient `StreamingWidget`
 children that appear only during a streaming turn; the input and info bars are

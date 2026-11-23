@@ -14,7 +14,7 @@ pub enum CommandResult {
     },
     /// Enter the full-screen gremlins watch table.
     ShowRuns,
-    /// Enter the full-screen interactive debug session.
+    /// Select the conversation with pause-on-entry for an interactive agent.
     Debug(String),
     /// Activate a skill by name. The TUI event loop adds it to the in-memory
     /// active set and includes it in the next chat request.
@@ -210,7 +210,7 @@ pub fn dispatch(input: &str) -> Option<CommandResult> {
                 Some(CommandResult::ShowRuns)
             } else {
                 Some(CommandResult::Lines(vec![
-                    "usage: /watch — select a running gremlin with Up/Down and press Ctrl+O to open or close its live log".to_string(),
+                    "usage: /watch — Up/Down select; Enter observes its chat; Ctrl+W or Ctrl+O toggles its live log".to_string(),
                 ]))
             }
         }
@@ -314,9 +314,9 @@ fn help_text() -> Vec<String> {
         "  /stop <id>       — stop a gremlin".to_string(),
         "  /resume <id>     — resume a gremlin".to_string(),
         "  /log <id>        — show gremlin log".to_string(),
-        "  /watch           — show running gremlins; ↑/↓ select, Ctrl+O toggles live log"
+        "  /watch           — show runs; ↑/↓ select, Enter observes chat, Ctrl+W/Ctrl+O toggles log"
             .to_string(),
-        "  /debug <id>      — open a full-screen interactive debug session".to_string(),
+        "  /debug <id>      — select the same chat with pause-on-entry (interactive agents only)".to_string(),
         "  /model           — show, set (/model <spec>), or clear (/model clear) the TUI chat model"
             .to_string(),
         "  /skills          — list available operator skills".to_string(),
@@ -325,14 +325,24 @@ fn help_text() -> Vec<String> {
         "  /attach [id] [stage] — attach to a stage execution; /attach home to return to chat"
             .to_string(),
         "  /chat            — chat is always active (type directly)".to_string(),
+        "selected conversation:".to_string(),
+        "  Watch Enter observes without pausing; the execution keeps running unaided.".to_string(),
+        "  Ordinary text corrects the same execution and resumes it; exec stages are read-only.".to_string(),
+        "  /attach home or Ctrl+T leaves by detaching, not cancelling; home streams in the background.".to_string(),
+        "  /continue        — single-step the selected execution (one turn).".to_string(),
+        "  /quit            — resume the selected execution autonomously.".to_string(),
+        "  /quit <reason>   — bail the selected execution with a reason.".to_string(),
+        "  /bail <reason>   — alias for /quit <reason>.".to_string(),
+        "  /exit            — detach from the selected execution without cancelling it.".to_string(),
+        "  Explicit run controls: /stop <id>, /resume <id> (watch: s/r).".to_string(),
         "  /clear, /new     — restart chat".to_string(),
         "  /help            — show this help".to_string(),
-        "  /quit            — exit".to_string(),
+        "  /quit            — at home, exit the TUI".to_string(),
         "".to_string(),
         "chat auto-compaction is disabled (GREMLINS_COMPACTION_THRESHOLD_TOKENS=18446744073709551615);".to_string(),
         "  set GREMLINS_COMPACTION_THRESHOLD_TOKENS=<tokens> to enable it".to_string(),
         "keybindings:".to_string(),
-        "  Ctrl+C           — clear / cancel; repeat within 1s to exit".to_string(),
+        "  Ctrl+C           — active home: soft interrupt, repeat within 1s hard cancels; otherwise repeat to exit".to_string(),
         "  Ctrl+T           — switch between home and the last attached stage, keeping both drafts".to_string(),
         "  Ctrl+D (empty)   — exit".to_string(),
         "  Ctrl+L           — redraw screen".to_string(),
@@ -343,11 +353,11 @@ fn help_text() -> Vec<String> {
         "  j/k/Up/Down      — in /watch: move the gremlin selection".to_string(),
         "  Enter            — start an idle home turn, or send a correction to the selected execution".to_string(),
         "  Esc              — dismiss a correction draft without interrupting its turn".to_string(),
-        "  Enter             — in /watch: open the selected gremlin's chat"
+        "  Enter             — in /watch: observe the selected gremlin's chat without pausing"
             .to_string(),
         "  s                 — in /watch: stop the selected gremlin".to_string(),
         "  r                 — in /watch: resume the selected gremlin".to_string(),
-        "  Esc              — in /watch: close the live log first, then return to chat; otherwise clear/cancel"
+        "  Esc              — in /watch: close the live log first, then return to chat; otherwise dismiss draft"
             .to_string(),
         "  Ctrl+G           — open external editor".to_string(),
         "  Tab              — complete filepaths (Shift+Tab cycles back)".to_string(),
@@ -390,6 +400,9 @@ mod tests {
             "/new",
             "/help",
             "/quit",
+            "/continue",
+            "/bail",
+            "/exit",
         ];
 
         for cmd in help_names {
@@ -397,6 +410,22 @@ mod tests {
                 commands.iter().any(|l| l.contains(cmd)),
                 "/help must list {cmd}"
             );
+        }
+    }
+
+    #[test]
+    fn help_text_distinguishes_selected_controls_from_home_and_run_controls() {
+        let text = help_text().join("\n");
+        for expected in [
+            "/continue        — single-step the selected execution (one turn)",
+            "/quit            — resume the selected execution autonomously",
+            "/quit <reason>   — bail the selected execution with a reason",
+            "/bail <reason>   — alias for /quit <reason>",
+            "/exit            — detach from the selected execution without cancelling it",
+            "/quit            — at home, exit the TUI",
+            "Explicit run controls: /stop <id>, /resume <id> (watch: s/r)",
+        ] {
+            assert!(text.contains(expected), "/help must explain {expected}");
         }
     }
 

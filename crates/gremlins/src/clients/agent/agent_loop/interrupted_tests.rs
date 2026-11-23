@@ -148,7 +148,7 @@ async fn pause_and_replay(
         timeout(WAIT, transport.stalled.notified())
             .await
             .expect("first stream stalled");
-        attachment = Some(handle.attach().unwrap());
+        attachment = Some(handle.target().attach_debugger().unwrap());
     }
     timeout(WAIT, async {
         let mut streamed = String::new();
@@ -166,7 +166,7 @@ async fn pause_and_replay(
                         "unexpected text: {streamed:?}"
                     );
                     if !text.is_empty() && streamed == visible {
-                        attachment = Some(handle.attach().unwrap());
+                        attachment = Some(handle.target().attach_debugger().unwrap());
                     }
                 }
                 EventKind::Ready { turn } => {
@@ -182,6 +182,15 @@ async fn pause_and_replay(
     })
     .await
     .expect("expected visible chunks followed by Ready");
+    let mut expected = expected_merged_earlier();
+    if visible.trim().is_empty() {
+        if let InteractiveCommand::Message(text, ..) = &command {
+            let Some(Message::User { content }) = expected.last_mut() else {
+                unreachable!();
+            };
+            content.push(UserContent::text(format!("\n\n[operator]: {text}")));
+        }
+    }
     let commands = attachment.expect("Ready must follow attachment");
     commands.send(command).await.unwrap();
     let run = timeout(WAIT, agent).await.unwrap().unwrap().unwrap();
@@ -206,7 +215,6 @@ async fn pause_and_replay(
         .filter(|m| !matches!(m.as_ref(), Message::System { .. }))
         .map(Arc::unwrap_or_clone)
         .collect();
-    let expected = expected_merged_earlier();
     assert!(
         replay.starts_with(&expected),
         "lost earlier tool results: {replay:?}"
@@ -240,6 +248,46 @@ async fn injected_correction_follows_completed_block_and_visible_delta_once() {
             Message::assistant(partial),
             Message::user("[operator]: Actually, describe the new one."),
         ]
+    );
+}
+
+#[tokio::test]
+async fn retained_debugger_message_grants_turn_after_midstream_pause() {
+    let (delivered, receipt) = tokio::sync::oneshot::channel();
+    let partial = format!("{FIRST}{SECOND}");
+    let replay = pause_and_replay(
+        "history-retained-message-midstream",
+        two_blocks(),
+        &partial,
+        false,
+        InteractiveCommand::Message("Use the new implementation.".into(), None, Some(delivered)),
+    )
+    .await;
+    receipt
+        .await
+        .expect("correction incorporation acknowledged");
+    assert_eq!(
+        replay,
+        [
+            Message::assistant(partial),
+            Message::user("[operator]: Use the new implementation."),
+        ]
+    );
+}
+
+#[tokio::test]
+async fn retained_debugger_message_grants_turn_before_any_stream_output() {
+    let replay = pause_and_replay(
+        "history-retained-message-before-output",
+        vec![],
+        "",
+        false,
+        InteractiveCommand::Message("Use the new implementation.".into(), None, None),
+    )
+    .await;
+    assert!(
+        replay.is_empty(),
+        "expected correction merged into pending prompt"
     );
 }
 

@@ -36,8 +36,8 @@ use crate::tui::buffer::{line_wrapped_height, wrapped_height};
 use crate::tui::motif;
 use crate::tui::theme::DEFAULT_THEME;
 use crate::tui::widgets::{
-    layout_widgets, render_wrapped_tail, DebugWidget, HistorySearchRender, InfoBarWidget,
-    InputBarWidget, LiveAreaWidget, RenderContext, StreamingWidget, TranscriptWidget,
+    layout_widgets, render_wrapped_tail, HistorySearchRender, InfoBarWidget, InputBarWidget,
+    LiveAreaWidget, RenderContext, StreamingWidget, TranscriptWidget,
 };
 use crate::tui::{REASONING_COMPLETED_TITLE, REASONING_PLACEHOLDER_TITLE};
 
@@ -83,7 +83,6 @@ impl Default for Scene {
 /// Full-screen view bodies, typed by the screen they belong to.
 enum ScreenView {
     Runs(RunsView),
-    Debug(DebugWidget),
 }
 
 /// Per-target render state: the transcript and reasoning band
@@ -347,7 +346,7 @@ impl<B: Backend> LiveArea<B> {
 
         // When returning from a full-screen view, clear the visible frame
         // first. Chat widgets paint only their own sub-rects, so any gaps
-        // left unpainted would otherwise retain runs/log/debug text.
+        // left unpainted would otherwise retain runs text.
         if chat && !self.last_screen_was_chat {
             self.clear_visible()?;
         }
@@ -376,6 +375,7 @@ impl<B: Backend> LiveArea<B> {
             chat_model: app.chat_model.as_deref(),
             target_label: app.selected_target.label(),
             target_is_home: app.selected_target.is_home(),
+            conversation_status: app.conversation_status(&app.selected_target),
             active_runs: &app.active_runs,
             watch_selection: app.watch_selection.as_deref(),
             watch_following: app.watch_following.as_deref(),
@@ -435,7 +435,6 @@ impl<B: Backend> LiveArea<B> {
         let mut widget: &mut dyn LiveAreaWidget = match scene.screen_view.as_mut() {
             Some(view) => match view {
                 ScreenView::Runs(w) => w,
-                ScreenView::Debug(w) => w,
             },
             None => {
                 log::warn!("compose_screen_view without an active screen view; composing chat");
@@ -483,11 +482,6 @@ impl<B: Backend> LiveArea<B> {
     /// Show the full-screen runs table.
     pub fn show_runs(&mut self) {
         self.scene.screen_view = Some(ScreenView::Runs(RunsView::new()));
-    }
-
-    /// Show the full-screen interactive debug session.
-    pub fn show_debug(&mut self, id: String) {
-        self.scene.screen_view = Some(ScreenView::Debug(DebugWidget::new(id)));
     }
 
     /// Drop the active full-screen view and return the renderer to chat.
@@ -563,7 +557,9 @@ impl<B: Backend> LiveArea<B> {
             self.reset_input_scroll();
         }
         let message = match receipt.result {
-            Ok(()) => format!("> {}", receipt.text),
+            // Home's owner stream does not forward operator-message events.
+            Ok(()) if receipt.target.is_home() => format!("> {}", receipt.text),
+            Ok(()) => return,
             Err(reason) => format!("correction: {}\n{reason}", receipt.text),
         };
         self.with_target_transcript(&receipt.target, |transcript, _| {
@@ -672,13 +668,6 @@ impl<B: Backend> LiveArea<B> {
     fn runs_view_mut(&mut self) -> Option<&mut RunsView> {
         match self.scene.screen_view.as_mut() {
             Some(ScreenView::Runs(w)) => Some(w),
-            _ => None,
-        }
-    }
-
-    fn debug_mut(&mut self) -> Option<&mut DebugWidget> {
-        match self.scene.screen_view.as_mut() {
-            Some(ScreenView::Debug(w)) => Some(w),
             _ => None,
         }
     }
@@ -918,53 +907,6 @@ impl<B: Backend> LiveArea<B> {
     pub fn clear_watch_stream(&mut self) {
         if let Some(w) = self.runs_view_mut() {
             w.clear_stream();
-        }
-    }
-
-    /// Append output to the full-screen debug view, if present.
-    pub fn push_debug_output(&mut self, line: String) {
-        if let Some(w) = self.debug_mut() {
-            w.push_output(line);
-        }
-    }
-
-    /// Borrow the debug prompt, if the debug view is present.
-    pub fn debug_prompt_mut(&mut self) -> Option<&mut String> {
-        self.debug_mut().map(|w| w.prompt_mut())
-    }
-
-    /// Take the debug prompt for submission, if the debug view is present.
-    pub fn take_debug_prompt(&mut self) -> Option<String> {
-        self.debug_mut().map(|w| w.take_prompt())
-    }
-
-    /// Whether the debug view is still connecting.
-    pub fn debug_connecting(&self) -> bool {
-        match self.scene.screen_view.as_ref() {
-            Some(ScreenView::Debug(w)) => w.connecting(),
-            _ => false,
-        }
-    }
-
-    /// Whether the debug view is still connected.
-    pub fn debug_connected(&self) -> bool {
-        match self.scene.screen_view.as_ref() {
-            Some(ScreenView::Debug(w)) => w.connected(),
-            _ => false,
-        }
-    }
-
-    /// Set the connected flag on the debug view.
-    pub fn set_debug_connected(&mut self, connected: bool) {
-        if let Some(w) = self.debug_mut() {
-            w.set_connected(connected);
-        }
-    }
-
-    /// Mark the debug view as connected.
-    pub fn mark_debug_ready(&mut self) {
-        if let Some(w) = self.debug_mut() {
-            w.mark_ready();
         }
     }
 }
@@ -2215,7 +2157,7 @@ mod tests {
                     nonce: 1,
                 }),
             );
-            app.input.replace_all("home correction");
+            app.replace_input("home correction");
             let Submission::Correction { id, .. } =
                 app.conversations.submit(&Target::Home, &app.input, true)
             else {
@@ -2226,7 +2168,7 @@ mod tests {
                 stage: "review".into(),
             };
             live.select_conversation(&mut app, stage);
-            app.input.replace_all("stage draft");
+            app.replace_input("stage draft");
             let receipt = app.finish_delivery(
                 id,
                 if success {
@@ -2249,12 +2191,56 @@ mod tests {
             assert!(app.finish_delivery(id, Ok(())).is_none()); // duplicate receipt is inert
             live.compose(&app).unwrap();
             let visible = dump_buffer(live.backend().buffer());
-            assert_eq!(
-                visible.matches("home correction").count(),
-                if success { 1 } else { 2 }
-            );
+            if success {
+                assert_eq!(visible.matches("> home correction").count(), 1, "{visible}");
+            } else {
+                assert_eq!(
+                    visible.matches("correction: home correction").count(),
+                    1,
+                    "{visible}"
+                );
+            }
             assert_eq!(visible.contains("delivery uncertain"), !success);
         }
+    }
+
+    #[test]
+    fn target_transcripts_isolate_background_updates_across_switches() {
+        use crate::tui::app::Target;
+
+        let mut live = new_live(90, 24);
+        let mut app = App::new();
+        let stage = Target::StageExecution {
+            run_id: "pipeline".into(),
+            stage: "review".into(),
+        };
+        live.submit_prompt("home prompt".into());
+        live.replace_response("home response");
+        live.select_conversation(&mut app, stage.clone());
+        live.submit_prompt("stage prompt".into());
+        live.replace_response("stage response");
+
+        live.with_target_transcript(&Target::Home, |transcript, _| {
+            transcript.push_transcript_block(vec!["home background update".into()]);
+        });
+        live.compose(&app).unwrap();
+        let visible = dump_buffer(live.backend().buffer());
+        assert!(visible.contains("stage response"));
+        assert!(!visible.contains("home response"));
+        assert!(!visible.contains("home background update"));
+
+        live.select_conversation(&mut app, Target::Home);
+        live.compose(&app).unwrap();
+        let visible = dump_buffer(live.backend().buffer());
+        assert!(visible.contains("home response"));
+        assert!(visible.contains("home background update"));
+        assert!(!visible.contains("stage response"));
+
+        live.select_conversation(&mut app, stage);
+        live.compose(&app).unwrap();
+        let visible = dump_buffer(live.backend().buffer());
+        assert!(visible.contains("stage response"));
+        assert!(!visible.contains("home background update"));
     }
 
     #[test]
@@ -3665,58 +3651,6 @@ Buffer:
     }
 
     #[test]
-    fn debug_screen_occludes_chat_and_keeps_prompt() {
-        let mut live = new_live(80, 24);
-        let mut app = App::new();
-        app.project_name = "gremlins".to_string();
-
-        live.push_transcript_line("some transcript line".to_string());
-        live.submit_prompt("hi".to_string());
-        live.replace_response("a response");
-
-        app.screen = Screen::Debug {
-            id: "g1".to_string(),
-        };
-        live.show_debug("g1".to_string());
-        live.push_debug_output("connected to gremlin g1".to_string());
-        live.debug_prompt_mut().unwrap().push_str("hello");
-
-        live.compose(&app).unwrap();
-
-        let visible = dump_buffer(live.backend().buffer());
-        assert!(
-            visible.contains("debug: g1"),
-            "Debug header should be visible.\nBuffer:\n{visible}"
-        );
-        assert!(
-            visible.contains("connected to gremlin g1"),
-            "Debug output should be visible.\nBuffer:\n{visible}"
-        );
-        assert!(
-            visible.contains("hello"),
-            "Debug prompt should be visible.\nBuffer:\n{visible}"
-        );
-        assert!(
-            !visible.contains("a response"),
-            "Chat transcript must be occluded by the debug screen.\nBuffer:\n{visible}"
-        );
-
-        // Esc returns to chat and drops the view-local prompt.
-        assert!(app.exit_screen());
-        live.exit_screen_view();
-        live.compose(&app).unwrap();
-        let visible = dump_buffer(live.backend().buffer());
-        assert!(
-            visible.contains("a response"),
-            "Transcript should be restored after leaving debug.\nBuffer:\n{visible}"
-        );
-        assert!(
-            !visible.contains("debug: g1"),
-            "Debug view text must not survive the switch back to chat.\nBuffer:\n{visible}"
-        );
-    }
-
-    #[test]
     fn screen_mutation_methods_feed_views() {
         let mut live = new_live(80, 24);
 
@@ -3726,23 +3660,7 @@ Buffer:
         live.push_watch_line("watch line two".to_string());
         live.clear_watch_stream();
 
-        // Full-screen debug view.
-        live.show_debug("g1".to_string());
-        assert!(live.debug_connecting());
-        assert!(!live.debug_connected());
-
-        live.push_debug_output("hello".to_string());
-        live.mark_debug_ready();
-        assert!(!live.debug_connecting());
-        assert!(live.debug_connected());
-
-        live.debug_prompt_mut().unwrap().push_str("abc");
-        assert_eq!(live.take_debug_prompt().as_deref(), Some("abc"));
-        assert_eq!(live.take_debug_prompt().as_deref(), Some(""));
-
-        live.set_debug_connected(false);
-        assert!(!live.debug_connected());
-        assert!(!live.debug_connecting());
+        assert!(live.runs_view_mut().unwrap().stream_lines.is_empty());
     }
 
     #[test]

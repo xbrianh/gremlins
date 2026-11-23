@@ -192,6 +192,7 @@ pub(super) async fn handle_done_decision(
                 if state.interactive.is_attached() {
                     state.interactive.finish_attachment(DebugOutcome::Done {
                         text: result_text,
+                        summary: done_summary.clone(),
                         usage: usage.clone(),
                     });
                 }

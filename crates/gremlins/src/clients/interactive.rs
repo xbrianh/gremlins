@@ -15,8 +15,14 @@ use tokio::sync::{mpsc, oneshot, Notify};
 #[derive(Debug, serde::Serialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub(crate) enum DebugOutcome {
-    Done { text: String, usage: UsageStats },
-    Ended { reason: String },
+    Done {
+        text: String,
+        summary: String,
+        usage: UsageStats,
+    },
+    Ended {
+        reason: String,
+    },
 }
 
 /// Reason string for [`DebugOutcome::Ended`] when a [`InteractiveCommand::Message`]
@@ -1156,6 +1162,39 @@ impl InteractiveSession {
 mod tests {
     use super::*;
     use futures::FutureExt;
+
+    #[test]
+    fn done_serialization_preserves_distinct_text_summary_and_usage() {
+        let outcome = DebugOutcome::Done {
+            text: "Full assistant response".into(),
+            summary: "Concise completion summary".into(),
+            usage: UsageStats {
+                prompt_tokens: Some(101),
+                completion_tokens: Some(37),
+                cached_input_tokens: Some(23),
+                cache_creation_input_tokens: Some(11),
+                reasoning_tokens: Some(7),
+                turns: 3,
+            },
+        };
+
+        assert_eq!(
+            serde_json::to_value(outcome).unwrap(),
+            serde_json::json!({
+                "type": "done",
+                "text": "Full assistant response",
+                "summary": "Concise completion summary",
+                "usage": {
+                    "prompt_tokens": 101,
+                    "completion_tokens": 37,
+                    "cached_input_tokens": 23,
+                    "cache_creation_input_tokens": 11,
+                    "reasoning_tokens": 7,
+                    "turns": 3,
+                },
+            })
+        );
+    }
 
     #[tokio::test]
     async fn static_pause_expires_with_the_leaf_that_was_validated() {

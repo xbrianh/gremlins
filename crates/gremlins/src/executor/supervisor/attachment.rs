@@ -329,7 +329,10 @@ pub(crate) async fn handle_conversation_attach(
     }
 
     // Between-turn chat reservations have no live stage to validate yet.
-    if mode == "debugger" && (!between_turn || store.state_tree()["kind"] != "chat") {
+    if mode == "debugger"
+        && (between_turn || target.accepts_commands())
+        && (!between_turn || store.state_tree()["kind"] != "chat")
+    {
         let checked_store = store.clone();
         let checked = tokio::task::spawn_blocking(move || check_agent_stage(&checked_store))
             .await
@@ -389,7 +392,11 @@ pub(crate) async fn handle_conversation_attach(
     #[cfg(test)]
     receiver_gate::wait(id).await;
 
-    if mode == "passive" {
+    // Backend capability is authoritative: debugger intent cannot turn a
+    // noninteractive execution into a controller. Stream its captured target
+    // without acquiring a lease, requesting a pause, or reporting lease end.
+    // Preserve explicit reservations across chat registration gaps.
+    if mode == "passive" || (!between_turn && !target.accepts_commands()) {
         handle_passive_conversation(
             execution_id.as_deref(),
             &mut reader,
@@ -511,13 +518,31 @@ pub(crate) async fn handle_conversation_attach(
                     }
                 }
             }
-            _ = end_signal.wait(), if attachment.is_none() => break,
+            _ = end_signal.wait(), if attachment.is_none() => {
+                drain_display(&mut evt_rx, execution_id.as_deref(), writer).await;
+                break;
+            }
             result = evt_rx.recv(), if !end_signal.is_ended() => {
                 match result {
                     Recv::Event(dispatch) => {
+                        if attachment.is_some() && matches!(dispatch.kind(), EventKind::Done { .. }) {
+                            // The lease carries the reliable completion, including summary.
+                            continue;
+                        }
                         if let Some(p) = matching_display(&dispatch, execution_id.as_deref()) {
-                            if !write_view(writer, &p, Some(&end_signal)).await
-                                && !(end_signal.is_ended() && attachment.is_some()) { break; }
+                            let done = p["type"] == "done";
+                            let written = if done {
+                                write_terminal_view(writer, &p).await
+                            } else {
+                                write_view(writer, &p, Some(&end_signal)).await
+                            };
+                            if done { break; }
+                            if !written && !(end_signal.is_ended() && attachment.is_some()) {
+                                if end_signal.is_ended() {
+                                    drain_display(&mut evt_rx, execution_id.as_deref(), writer).await;
+                                }
+                                break;
+                            }
                         }
                     }
                     Recv::Lagged(skipped) => {
@@ -527,7 +552,12 @@ pub(crate) async fn handle_conversation_attach(
                             "skipped": skipped,
                         });
                         if !write_view(writer, &payload, Some(&end_signal)).await
-                            && !(end_signal.is_ended() && attachment.is_some()) { break; }
+                            && !(end_signal.is_ended() && attachment.is_some()) {
+                            if end_signal.is_ended() {
+                                drain_display(&mut evt_rx, execution_id.as_deref(), writer).await;
+                            }
+                            break;
+                        }
                     }
                     Recv::Closed => break,
                 }
@@ -550,6 +580,10 @@ pub(crate) async fn handle_conversation_attach(
                         "reason": "agent exited",
                     }),
                 };
+                let resumed = frame["type"] == "ended" && frame["reason"] == "resumed";
+                if resumed {
+                    attachment.take();
+                }
                 if let Some(obj) = frame.as_object_mut() {
                     obj.insert("scope".into(), "conversation".into());
                     obj.entry("id").or_insert_with(|| serde_json::Value::String(id.into()));
@@ -557,12 +591,18 @@ pub(crate) async fn handle_conversation_attach(
                 // Classification may follow the execution's end signal. Give
                 // its final control reply a bounded flush, without reopening
                 // observation or waiting indefinitely for a stalled viewer.
-                tokio::select! {
-                    _ = writer.write_json_line(&frame) => {},
-                    _ = socket::read_json_line(&mut reader) => {},
-                    _ = tokio::time::sleep(std::time::Duration::from_secs(1)) => {},
+                if resumed {
+                    if !write_terminal_view(writer, &frame).await {
+                        break;
+                    }
+                } else {
+                    tokio::select! {
+                        _ = writer.write_json_line(&frame) => {},
+                        _ = socket::read_json_line(&mut reader) => {},
+                        _ = tokio::time::sleep(std::time::Duration::from_secs(1)) => {},
+                    }
+                    break;
                 }
-                break;
             }
         }
     }
@@ -780,6 +820,7 @@ enum ReadinessFailure {
     Closed,
     Ended,
     Error(Value),
+    Completed(Value),
 }
 
 async fn report_readiness_failure(
@@ -792,9 +833,74 @@ async fn report_readiness_failure(
         ReadinessFailure::Ended => {
             dropped.unwrap_or_else(|| error_response("agent exited before accepting pause"))
         }
+        ReadinessFailure::Completed(frame) => {
+            let _ = write_terminal_view(writer, &frame).await;
+            return;
+        }
         ReadinessFailure::Error(frame) => frame,
     };
     let _ = writer.write_json_line(&frame).await;
+}
+
+async fn readiness_completion(
+    lease: &mut DebugAttachment,
+    display: &mut Option<(
+        &mut gremlins_magic_bus::ReceiverHalf<EventKind>,
+        Option<&str>,
+    )>,
+    writer: &SharedWriter,
+) -> ReadinessFailure {
+    let completion = match lease.ended.try_recv() {
+        Ok(outcome @ crate::clients::interactive::DebugOutcome::Done { .. }) => {
+            let mut frame = serde_json::to_value(outcome).unwrap();
+            frame["scope"] = serde_json::json!("conversation");
+            ReadinessFailure::Completed(frame)
+        }
+        _ => ReadinessFailure::Ended,
+    };
+    readiness_display_completion(display, writer, completion).await
+}
+
+async fn readiness_display_completion(
+    display: &mut Option<(
+        &mut gremlins_magic_bus::ReceiverHalf<EventKind>,
+        Option<&str>,
+    )>,
+    writer: &SharedWriter,
+    completion: ReadinessFailure,
+) -> ReadinessFailure {
+    // End has latched. Flush queued output in order without its end fence,
+    // bounding the whole scan rather than giving each frame a fresh timeout.
+    let scanned = tokio::time::timeout(std::time::Duration::from_secs(1), async {
+        if let Some((events, execution_id)) = display {
+            for _ in 0..256 {
+                let frame = match events.try_recv() {
+                    Ok(dispatch) => matching_display(&dispatch, *execution_id),
+                    Err(gremlins_magic_bus::TryRecvError::Lagged(skipped)) => {
+                        Some(serde_json::json!({
+                            "type": "lagged", "scope": "conversation", "skipped": skipped,
+                        }))
+                    }
+                    Err(_) => break,
+                };
+                if let Some(frame) = frame {
+                    if frame["type"] == "done" {
+                        return Some(ReadinessFailure::Completed(frame));
+                    }
+                    if !write_view(writer, &frame, None).await {
+                        return Some(ReadinessFailure::Closed);
+                    }
+                }
+            }
+        }
+        None
+    })
+    .await;
+    match scanned {
+        Ok(Some(failure)) => failure,
+        Ok(None) => completion,
+        Err(_) => ReadinessFailure::Closed,
+    }
 }
 
 /// Readiness owns its run-stop future; whichever branch loses is dropped.
@@ -825,7 +931,7 @@ async fn wait_for_ready_view(
     )>,
 ) -> Result<crate::clients::interactive::DebugTarget, ReadinessFailure> {
     if end.is_some_and(EndSignal::is_ended) {
-        return Err(ReadinessFailure::Ended);
+        return Err(readiness_completion(lease, &mut display, writer).await);
     }
     let status_written = tokio::select! {
         _ = send_debug_status(writer, "waiting_for_ready") => true,
@@ -838,7 +944,7 @@ async fn wait_for_ready_view(
     };
     if !status_written {
         return Err(if end.is_some_and(EndSignal::is_ended) {
-            ReadinessFailure::Ended
+            readiness_completion(lease, &mut display, writer).await
         } else {
             ReadinessFailure::Closed
         });
@@ -861,7 +967,17 @@ async fn wait_for_ready_view(
                     None => std::future::pending().await,
                 }
             } => false,
-            _ = &mut lease.ended => false,
+            outcome = &mut lease.ended => {
+                let completion = match outcome {
+                    Ok(outcome @ crate::clients::interactive::DebugOutcome::Done { .. }) => {
+                        let mut frame = serde_json::to_value(outcome).unwrap();
+                        frame["scope"] = serde_json::json!("conversation");
+                        ReadinessFailure::Completed(frame)
+                    }
+                    _ => ReadinessFailure::Ended,
+                };
+                return Err(readiness_display_completion(&mut display, writer, completion).await);
+            }
             result = &mut lease.ready => result.is_ok(),
             event = async {
                 match display.as_mut() {
@@ -870,9 +986,19 @@ async fn wait_for_ready_view(
                 }
             } => {
                 let execution_id = display.as_ref().and_then(|(_, id)| *id);
-                if !forward_display(event, execution_id, writer, end).await {
+                let forwarded = match event {
+                    Recv::Event(dispatch) => match matching_display(&dispatch, execution_id) {
+                        Some(frame) if frame["type"] == "done" => {
+                            return Err(ReadinessFailure::Completed(frame));
+                        }
+                        Some(frame) => write_view(writer, &frame, end).await,
+                        None => true,
+                    },
+                    event => forward_display(event, execution_id, writer, end).await,
+                };
+                if !forwarded {
                     return Err(if end.is_some_and(EndSignal::is_ended) {
-                        ReadinessFailure::Ended
+                        readiness_completion(lease, &mut display, writer).await
                     } else {
                         ReadinessFailure::Closed
                     });
@@ -883,7 +1009,7 @@ async fn wait_for_ready_view(
         break ready;
     };
     if !ready {
-        return Err(ReadinessFailure::Ended);
+        return Err(readiness_completion(lease, &mut display, writer).await);
     }
     let target = match lease.bound_target() {
         Ok(target) => target,
@@ -903,7 +1029,7 @@ async fn wait_for_ready_view(
     .await
     {
         return Err(if end.is_some_and(EndSignal::is_ended) {
-            ReadinessFailure::Ended
+            readiness_completion(lease, &mut display, writer).await
         } else {
             ReadinessFailure::Closed
         });
@@ -932,10 +1058,19 @@ async fn handle_passive_conversation(
     loop {
         tokio::select! {
             biased;
-            _ = &mut end => break,
+            _ = &mut end => {
+                drain_display(evt_rx, execution_id, writer).await;
+                break;
+            }
             _ = socket::read_json_line(reader) => break,
             result = evt_rx.recv() => {
-                if !forward_display(result, execution_id, writer, Some(&end_signal)).await {
+                let done = matches!(&result, Recv::Event(dispatch)
+                    if dispatch.corr_id().execution_id() == execution_id
+                        && matches!(dispatch.kind(), EventKind::Done { .. }));
+                if !forward_display(result, execution_id, writer, Some(&end_signal)).await || done {
+                    if !done && end_signal.is_ended() {
+                        drain_display(evt_rx, execution_id, writer).await;
+                    }
                     break;
                 }
             }
@@ -994,9 +1129,45 @@ async fn forward_display(
         Recv::Closed => return false,
     };
     match frame {
+        Some(frame) if frame["type"] == "done" => write_terminal_view(writer, &frame).await,
         Some(frame) => write_view(writer, &frame, end).await,
         None => true,
     }
+}
+
+async fn write_terminal_view(writer: &SharedWriter, frame: &Value) -> bool {
+    tokio::time::timeout(
+        std::time::Duration::from_secs(1),
+        write_view(writer, frame, None),
+    )
+    .await
+    .unwrap_or(false)
+}
+
+// Done is published before the execution end signal. Drain already queued
+// display after that signal, without following a successor or blocking forever.
+async fn drain_display(
+    events: &mut gremlins_magic_bus::ReceiverHalf<EventKind>,
+    execution_id: Option<&str>,
+    writer: &SharedWriter,
+) {
+    let _ = tokio::time::timeout(std::time::Duration::from_secs(1), async {
+        for _ in 0..256 {
+            match events.try_recv() {
+                Ok(dispatch) => {
+                    if let Some(frame) = matching_display(&dispatch, execution_id) {
+                        let done = frame["type"] == "done";
+                        if !write_view(writer, &frame, None).await || done {
+                            break;
+                        }
+                    }
+                }
+                Err(gremlins_magic_bus::TryRecvError::Lagged(_)) => continue,
+                Err(_) => break,
+            }
+        }
+    })
+    .await;
 }
 
 /// Convert a conversation-relevant [`EventKind`] into a display frame.
@@ -1008,6 +1179,7 @@ fn conversation_display_event(kind: &EventKind) -> Option<Value> {
         EventKind::ReasoningChunk { text } => {
             Some(serde_json::json!({"type":"reasoning_chunk","text": text}))
         }
+        EventKind::TaskProgress { .. } => serde_json::to_value(kind).ok(),
         EventKind::TurnComplete {
             turn,
             text,
@@ -1064,6 +1236,15 @@ fn conversation_display_event(kind: &EventKind) -> Option<Value> {
             "summary": summary,
             "usage": usage,
         })),
+        // Debugger release/correction resumes execution rather than ending it.
+        EventKind::Ended { reason }
+            if matches!(
+                reason.as_str(),
+                "resumed" | "disconnect" | crate::clients::interactive::MESSAGE_DELIVERED_REASON
+            ) =>
+        {
+            None
+        }
         EventKind::Ended { reason } => Some(serde_json::json!({"type": "ended", "reason": reason})),
         EventKind::Error { message, turn } => Some(serde_json::json!({
             "type": "error",
@@ -1291,6 +1472,106 @@ mod routing_tests {
     }
 
     #[tokio::test]
+    async fn readiness_completion_preserves_buffered_output_with_and_without_done() {
+        use gremlins_magic_bus::{emit_corr_event, CorrId};
+
+        for with_done in [false, true] {
+            let run = format!("readiness-ordered-{with_done}");
+            let (sub, mut events) = subscribe_run_lag_tolerant(&run, 256);
+            let _guard = BusSubGuard::new(sub);
+            let corr = CorrId::new().with_run(&run).with_execution_id("target");
+            emit_corr_event(
+                &CorrId::new().with_run(&run).with_execution_id("foreign"),
+                EventKind::StreamChunk {
+                    text: "foreign".into(),
+                },
+            );
+            emit_corr_event(
+                &corr,
+                EventKind::ReasoningChunk {
+                    text: "reason".into(),
+                },
+            );
+            emit_corr_event(
+                &corr,
+                EventKind::StreamChunk {
+                    text: "answer".into(),
+                },
+            );
+            if with_done {
+                emit_corr_event(
+                    &corr,
+                    EventKind::Done {
+                        text: "answer".into(),
+                        summary: "summary".into(),
+                        usage: None,
+                    },
+                );
+            }
+            let (client, server) = tokio::net::UnixStream::pair().unwrap();
+            let (_, write) = server.into_split();
+            let writer = SharedWriter::new(write);
+            let failure = readiness_display_completion(
+                &mut Some((&mut events, Some("target"))),
+                &writer,
+                ReadinessFailure::Ended,
+            )
+            .await;
+            assert_eq!(
+                matches!(&failure, ReadinessFailure::Completed(_)),
+                with_done
+            );
+            report_readiness_failure(&writer, failure, None).await;
+            let mut reader = BufReader::new(client);
+            for expected in [
+                "reasoning_chunk",
+                "stream_chunk",
+                if with_done { "done" } else { "error" },
+            ] {
+                let frame = tokio::time::timeout(
+                    std::time::Duration::from_secs(1),
+                    socket::read_json_line(&mut reader),
+                )
+                .await
+                .unwrap()
+                .unwrap()
+                .unwrap();
+                assert_eq!(frame["type"], expected);
+            }
+            assert!(events.try_recv().is_err());
+        }
+    }
+
+    #[tokio::test]
+    async fn readiness_completion_bounds_stalled_output_flush() {
+        let run = "readiness-stalled-flush";
+        let (sub, mut events) = subscribe_run_lag_tolerant(run, 256);
+        let _guard = BusSubGuard::new(sub);
+        gremlins_magic_bus::emit_corr_event(
+            &gremlins_magic_bus::CorrId::new()
+                .with_run(run)
+                .with_execution_id("target"),
+            EventKind::StreamChunk {
+                text: "x".repeat(8 * 1024 * 1024),
+            },
+        );
+        let (_client, server) = tokio::net::UnixStream::pair().unwrap();
+        let (_, write) = server.into_split();
+        let writer = SharedWriter::new(write);
+        let result = tokio::time::timeout(
+            std::time::Duration::from_secs(3),
+            readiness_display_completion(
+                &mut Some((&mut events, Some("target"))),
+                &writer,
+                ReadinessFailure::Ended,
+            ),
+        )
+        .await
+        .unwrap();
+        assert!(matches!(result, ReadinessFailure::Closed));
+    }
+
+    #[tokio::test]
     async fn ready_lease_precedes_queued_foreign_display() {
         let (mut factory, handle) = InteractiveSessionFactory::for_chat();
         let mut session = factory.next_session();
@@ -1374,5 +1655,88 @@ mod routing_tests {
             Err(AttachError::Busy)
         ));
         assert!(!turn.accept_pause());
+    }
+
+    #[test]
+    fn task_progress_preserves_streamed_text_and_reasoning() {
+        for (text, reasoning) in [("task output", ""), ("", "task reasoning")] {
+            let event = EventKind::TaskProgress {
+                parent_id: "parent-tool".into(),
+                chain: "parent.child".into(),
+                kind: "Scout".into(),
+                call: "Task(kind=\"Scout\")".into(),
+                reasoning: reasoning.into(),
+                text: text.into(),
+                stats: None,
+                totals: None,
+            };
+            let frame = conversation_display_event(&event).expect("task progress is displayed");
+            assert_eq!(frame, serde_json::to_value(&event).unwrap());
+            assert_eq!(frame["type"], "task_progress");
+            assert_eq!(frame["text"], text);
+            assert_eq!(frame["reasoning"], reasoning);
+        }
+    }
+
+    #[tokio::test]
+    async fn nonterminal_ended_keeps_observer_open_for_subsequent_output() {
+        use crate::clients::interactive::MESSAGE_DELIVERED_REASON;
+        use gremlins_magic_bus::CorrId;
+
+        let (client, server) = tokio::net::UnixStream::pair().unwrap();
+        let (_, write) = server.into_split();
+        let writer = SharedWriter::new(write);
+        let mut reader = BufReader::new(client);
+        let run_id = "nonterminal-ended-observer";
+        let (sub, mut events) = subscribe_run_lag_tolerant(run_id, 256);
+        let _guard = BusSubGuard::new(sub);
+        let corr = CorrId::new()
+            .with_run(run_id)
+            .with_execution_id("execution");
+
+        for reason in ["resumed", "disconnect", MESSAGE_DELIVERED_REASON] {
+            let ended = EventKind::Ended {
+                reason: reason.into(),
+            };
+            assert_eq!(conversation_display_event(&ended), None);
+            gremlins_magic_bus::emit_corr_event(&corr, ended);
+            assert!(forward_display(events.recv().await, Some("execution"), &writer, None).await);
+
+            for event in [
+                EventKind::StreamChunk {
+                    text: reason.into(),
+                },
+                EventKind::ReasoningChunk {
+                    text: "still reasoning".into(),
+                },
+            ] {
+                let mut expected = serde_json::to_value(&event).unwrap();
+                expected["scope"] = serde_json::json!("conversation");
+                gremlins_magic_bus::emit_corr_event(&corr, event);
+                assert!(
+                    forward_display(events.recv().await, Some("execution"), &writer, None).await
+                );
+                let frame = tokio::time::timeout(
+                    std::time::Duration::from_secs(1),
+                    socket::read_json_line(&mut reader),
+                )
+                .await
+                .unwrap()
+                .unwrap()
+                .unwrap();
+                assert_eq!(frame, expected);
+            }
+        }
+    }
+
+    #[test]
+    fn terminal_ended_is_still_displayed() {
+        let event = EventKind::Ended {
+            reason: "stopped".into(),
+        };
+        assert_eq!(
+            conversation_display_event(&event),
+            Some(serde_json::json!({"type": "ended", "reason": "stopped"}))
+        );
     }
 }

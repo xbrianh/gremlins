@@ -23,6 +23,7 @@ impl Execution {
 }
 
 pub(super) enum Selector<'a> {
+    Run { run: &'a str },
     Stage { run: &'a str, stage: &'a str },
     Exact(&'a Execution),
 }
@@ -32,6 +33,7 @@ impl Selector<'_> {
         let mut req =
             json!({"op":"attach", "scope":"conversation", "mode":"control", "session_id":session});
         match self {
+            Self::Run { run } => req["id"] = json!(run),
             Self::Stage { run, stage } => {
                 req["id"] = json!(run);
                 req["stage"] = json!(stage);
@@ -46,6 +48,17 @@ impl Selector<'_> {
     }
 
     pub(super) fn binding(&self, ack: &Value) -> Result<Execution, String> {
+        let execution = self.observed_binding(ack)?;
+        if !ack["capabilities"]
+            .as_array()
+            .is_some_and(|caps| caps.iter().any(|cap| cap == "message"))
+        {
+            return Err("addressed execution is read-only".into());
+        }
+        Ok(execution)
+    }
+
+    pub(super) fn observed_binding(&self, ack: &Value) -> Result<Execution, String> {
         if ack["type"] == "error" {
             return Err(ack["message"]
                 .as_str()
@@ -57,17 +70,12 @@ impl Selector<'_> {
         }
         let execution = Execution::from_frame(ack).ok_or("attachment has no execution identity")?;
         let matches = match self {
+            Self::Run { run } => execution.run_id == *run,
             Self::Stage { run, stage } => execution.run_id == *run && ack["stage"] == *stage,
             Self::Exact(expected) => &execution == *expected,
         };
         if !matches {
             return Err("not attached to the addressed execution".into());
-        }
-        if !ack["capabilities"]
-            .as_array()
-            .is_some_and(|caps| caps.iter().any(|cap| cap == "message"))
-        {
-            return Err("addressed execution is read-only".into());
         }
         Ok(execution)
     }

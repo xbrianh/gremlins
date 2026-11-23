@@ -564,7 +564,7 @@ pub(crate) async fn handle_chat(
 /// On failure returns the already-formatted error response (the caller
 /// is responsible for writing it).
 #[allow(clippy::too_many_arguments)]
-async fn resolve_chat_handle(
+pub(super) async fn resolve_chat_handle(
     registry: &Arc<RunRegistry>,
     session_task: &SessionTaskHandle,
     chat_model: &ModelURI,
@@ -644,9 +644,15 @@ async fn spawn_fresh_chat_gremlin(
     project_root: &Path,
     env: &HashMap<String, String>,
 ) -> Result<ChatGremlinHandle, Value> {
-    let id = registry.reserve_chat_id().await;
+    let home_run_id = session_task.get_home_run_id().await;
+    let id = match &home_run_id {
+        Some(id) => id.clone(),
+        None => registry.reserve_chat_id().await,
+    };
+    // Parking commits the reservation atomically; every setup failure leaves
+    // the advertised identity owned by the session until retry or teardown.
     let gremlin = create_chat_gremlin(&id, chat_model, system_prompt, project_root, env)
-        .map_err(|e| error_response(&e))?;
+        .map_err(|error| error_response(&error))?;
     if session_task.is_closed().await {
         return Err(error_response("session closed"));
     }

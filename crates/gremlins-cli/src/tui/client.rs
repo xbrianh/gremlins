@@ -12,6 +12,8 @@
 //! stream events over the session socket, so each connection owns its own
 //! response FIFO and its own background read task.
 
+pub(crate) mod attachment;
+
 use std::collections::VecDeque;
 use std::sync::Arc;
 
@@ -58,6 +60,8 @@ struct WriteState {
     write_half: OwnedWriteHalf,
     /// `Some` for the session connection; `None` for the control socket.
     session_id: Option<String>,
+    /// Registry-reserved home identity belonging to the same session socket.
+    home_run_id: Option<String>,
     /// Monotonic generation of the installed session. Incremented each time
     /// [`Connection::restart`] swaps in a replacement session socket.
     generation: u64,
@@ -69,22 +73,24 @@ impl Connection {
         write_half: OwnedWriteHalf,
         out: Arc<OutState>,
     ) -> Self {
-        Self::new(reader, write_half, None, out)
+        Self::new(reader, write_half, None, None, out)
     }
 
     fn new_session(
         reader: BufReader<OwnedReadHalf>,
         write_half: OwnedWriteHalf,
         session_id: String,
+        home_run_id: String,
         out: Arc<OutState>,
     ) -> Self {
-        Self::new(reader, write_half, Some(session_id), out)
+        Self::new(reader, write_half, Some(session_id), Some(home_run_id), out)
     }
 
     fn new(
         reader: BufReader<OwnedReadHalf>,
         write_half: OwnedWriteHalf,
         session_id: Option<String>,
+        home_run_id: Option<String>,
         out: Arc<OutState>,
     ) -> Self {
         let responses: Arc<Mutex<VecDeque<oneshot::Sender<Value>>>> =
@@ -99,6 +105,7 @@ impl Connection {
             write: Mutex::new(WriteState {
                 write_half,
                 session_id,
+                home_run_id,
                 generation: 0,
             }),
             responses,
@@ -187,6 +194,7 @@ impl Connection {
         reader: BufReader<OwnedReadHalf>,
         write_half: OwnedWriteHalf,
         new_session_id: String,
+        new_home_run_id: String,
     ) {
         // Abort and await the old reader first. Awaiting guarantees its
         // terminal queue clear can no longer race the new connection's
@@ -203,6 +211,7 @@ impl Connection {
         let mut write = self.write.lock().await;
         write.write_half = write_half;
         write.session_id = Some(new_session_id);
+        write.home_run_id = Some(new_home_run_id);
         write.generation += 1;
         self.responses.lock().await.clear();
 
@@ -255,10 +264,55 @@ pub struct DaemonClient {
 }
 
 impl DaemonClient {
+    /// Build a fake from the same authoritative setup response as a real connection.
+    #[cfg(test)]
+    pub(super) fn fake_with_identity(response: Value) -> (Self, [tokio::net::UnixStream; 2]) {
+        let (session_id, home_run_id) = parse_session_setup(&response).unwrap();
+        let (control, control_peer) = tokio::net::UnixStream::pair().unwrap();
+        let (session, session_peer) = tokio::net::UnixStream::pair().unwrap();
+        let out = Arc::new(OutState {
+            event_tx: mpsc::unbounded_channel().0,
+            chat_tx: mpsc::unbounded_channel().0,
+            raw_tx: mpsc::unbounded_channel().0,
+        });
+        let (control_read, control_write) = control.into_split();
+        let (session_read, session_write) = session.into_split();
+        (
+            Self {
+                control: Connection::new_control(
+                    BufReader::new(control_read),
+                    control_write,
+                    Arc::clone(&out),
+                ),
+                session: Connection::new_session(
+                    BufReader::new(session_read),
+                    session_write,
+                    session_id,
+                    home_run_id,
+                    Arc::clone(&out),
+                ),
+                out,
+                session_recreate: Mutex::new(()),
+            },
+            [control_peer, session_peer],
+        )
+    }
+
     /// The current session id, atomically paired with the session socket in
     /// [`Connection::write`].
     pub async fn session_id(&self) -> String {
         self.session.current_session_id().await
+    }
+
+    /// The registry-reserved home run id paired with the current session socket.
+    pub async fn home_run_id(&self) -> String {
+        self.session
+            .write
+            .lock()
+            .await
+            .home_run_id
+            .clone()
+            .expect("session connection has a home run id")
     }
 
     /// The generation of the current session socket. Callers capture this
@@ -324,14 +378,6 @@ impl DaemonClient {
         let stream =
             socket::connect_session_socket(&gremlins::config::state_root(), &session).await?;
         attach_conversation(stream, &session, selector).await
-    }
-
-    /// Resolve the named stage once. Subsequent messages use only its pinned identity.
-    pub async fn bind_stage(&self, run: &str, stage: &str) -> Result<Execution, String> {
-        let (_, execution) = self
-            .attach_conversation(Selector::Stage { run, stage })
-            .await?;
-        Ok(execution)
     }
 
     /// Send exactly one correction on a socket pinned to the operator's execution.
@@ -461,25 +507,14 @@ impl DaemonClient {
 
         let create_request = serde_json::json!({"op": "create_session"});
         let resp = self.control.send(create_request).await?;
-        if resp.get("type").and_then(|v| v.as_str()) == Some("error") {
-            return Err(resp
-                .get("message")
-                .and_then(|v| v.as_str())
-                .unwrap_or("unknown error")
-                .to_string());
-        }
-        let new_session_id = resp
-            .get("session_id")
-            .and_then(|v| v.as_str())
-            .ok_or("create_session response missing 'session_id'")?
-            .to_string();
+        let (new_session_id, new_home_run_id) = parse_session_setup(&resp)?;
 
         let state_root = gremlins::config::state_root();
         let stream = socket::connect_session_socket(&state_root, &new_session_id).await?;
         let (read_half, write_half) = stream.into_split();
         let reader = BufReader::new(read_half);
         self.session
-            .restart(reader, write_half, new_session_id.clone())
+            .restart(reader, write_half, new_session_id, new_home_run_id)
             .await;
         Ok(())
     }
@@ -505,9 +540,7 @@ async fn attach_conversation(
 ) -> Result<(BufReader<tokio::net::UnixStream>, Execution), String> {
     let mut stream = BufReader::new(stream);
     socket::write_json_line(stream.get_mut(), &selector.request(session)).await?;
-    let ack = socket::read_json_line(&mut stream)
-        .await?
-        .ok_or("execution ended before attachment")?;
+    let ack = attachment::read_ack(&mut stream).await?;
     Ok((stream, selector.binding(&ack)?))
 }
 
@@ -557,6 +590,24 @@ async fn send_correction(
     ))
 }
 
+fn parse_session_setup(response: &Value) -> Result<(String, String), String> {
+    if response.get("type").and_then(Value::as_str) == Some("error") {
+        return Err(response
+            .get("message")
+            .and_then(Value::as_str)
+            .unwrap_or("unknown error")
+            .to_owned());
+    }
+    let required = |field: &str| {
+        response
+            .get(field)
+            .and_then(Value::as_str)
+            .map(str::to_owned)
+            .ok_or_else(|| format!("create_session response missing '{field}'"))
+    };
+    Ok((required("session_id")?, required("home_run_id")?))
+}
+
 /// Connect to the executor daemon, create a session, and return the client
 /// handle plus receivers for unsolicited [`EventKind`] values (lifecycle events),
 /// chat events tagged with the client turn id, and raw JSON lines.
@@ -595,18 +646,7 @@ pub async fn connect() -> Result<
         Some(v) => v,
         None => return Err("executor closed connection during create_session".to_string()),
     };
-    if create_resp.get("type").and_then(|v| v.as_str()) == Some("error") {
-        return Err(create_resp
-            .get("message")
-            .and_then(|v| v.as_str())
-            .unwrap_or("unknown error")
-            .to_string());
-    }
-    let session_id = create_resp
-        .get("session_id")
-        .and_then(|v| v.as_str())
-        .ok_or("create_session response missing 'session_id'")?
-        .to_string();
+    let (session_id, home_run_id) = parse_session_setup(&create_resp)?;
 
     let control = Connection::new_control(control_reader, control_write_half, Arc::clone(&out));
 
@@ -618,7 +658,8 @@ pub async fn connect() -> Result<
     let session = Connection::new_session(
         session_reader,
         session_write_half,
-        session_id.clone(),
+        session_id,
+        home_run_id,
         Arc::clone(&out),
     );
 
@@ -727,6 +768,70 @@ async fn read_loop(
     // Drop all pending response senders so waiters see "connection
     // closed" instead of hanging forever.
     responses.lock().await.clear();
+}
+
+#[cfg(test)]
+mod session_identity_tests {
+    use super::*;
+
+    #[test]
+    fn setup_requires_authoritative_home_identity() {
+        assert_eq!(
+            parse_session_setup(&json!({"session_id": "s", "home_run_id": "reserved-42"})),
+            Ok(("s".into(), "reserved-42".into()))
+        );
+        for home in [Value::Null, json!(42)] {
+            assert_eq!(
+                parse_session_setup(&json!({"session_id": "s", "home_run_id": home})),
+                Err("create_session response missing 'home_run_id'".into())
+            );
+        }
+        assert!(parse_session_setup(&json!({"session_id": "s"})).is_err());
+        assert!(parse_session_setup(&json!({"home_run_id": "reserved-42"})).is_err());
+        assert_eq!(
+            parse_session_setup(&json!({"type": "error", "message": "reservation failed"})),
+            Err("reservation failed".into())
+        );
+    }
+
+    #[tokio::test]
+    async fn restart_replaces_socket_and_both_identities() {
+        let (client, _peers) = DaemonClient::fake_with_identity(json!({
+            "session_id": "old-session", "home_run_id": "reserved-old"
+        }));
+        assert_eq!(client.session_id().await, "old-session");
+        assert_eq!(client.home_run_id().await, "reserved-old");
+        let (stream, peer) = tokio::net::UnixStream::pair().unwrap();
+        let (read, write) = stream.into_split();
+        let (session_id, home_run_id) = parse_session_setup(&json!({
+            "session_id": "new-session", "home_run_id": "registry-new"
+        }))
+        .unwrap();
+        client
+            .session
+            .restart(BufReader::new(read), write, session_id, home_run_id)
+            .await;
+        assert_eq!(client.session_id().await, "new-session");
+        assert_eq!(client.home_run_id().await, "registry-new");
+        assert_eq!(client.session_generation().await, 1);
+        assert!(client
+            .send_session_request_for_generation(json!({"op": "status"}), 0)
+            .await
+            .is_err());
+
+        let server = async move {
+            let mut peer = BufReader::new(peer);
+            let request = socket::read_json_line(&mut peer).await.unwrap().unwrap();
+            assert_eq!(request["session_id"], "new-session");
+            socket::write_json_line(peer.get_mut(), &json!({"ok": true}))
+                .await
+                .unwrap();
+        };
+        let (response, ()) =
+            tokio::join!(client.send_session_request(json!({"op": "status"})), server);
+        assert_eq!(response.unwrap(), json!({"ok": true}));
+        client.shutdown().await;
+    }
 }
 
 #[cfg(test)]

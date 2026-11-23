@@ -2,7 +2,7 @@
 //!
 //! The LiveArea screen is composed of a transcript widget (the single
 //! styled FIFO with embedded live-tool slots), a top-level reasoning band,
-//! an input bar, an info bar, and the full-screen debug view widget. Each
+//! an input bar, and an info bar. Each
 //! widget is behind the [`LiveAreaWidget`] trait, owns its own rendering
 //! buffers, and knows how to lay itself out (via
 //! [`LiveAreaWidget::min_height`] and [`LiveAreaWidget::flexible`]) and paint
@@ -26,7 +26,7 @@ use ratatui::{
     widgets::{Paragraph, Widget, Wrap},
 };
 
-use crate::tui::app::ActiveRun;
+use crate::tui::app::{ActiveRun, ConversationStatus};
 use crate::tui::buffer::{line_wrapped_height, tail_window, wrapped_height, LineBuffer};
 use crate::tui::markdown;
 use crate::tui::motif::{self, glyph};
@@ -56,6 +56,7 @@ pub struct RenderContext<'a> {
     /// info bar shows the target label instead of presenting the home chat
     /// model as if it belonged to the pipeline agent.
     pub target_is_home: bool,
+    pub conversation_status: ConversationStatus,
     /// The daemon-derived run table (source of truth for the runs view).
     pub active_runs: &'a HashMap<String, ActiveRun>,
     /// Highlighted gremlin id on the `/watch` screen.
@@ -350,7 +351,7 @@ impl TranscriptWidget {
     /// with an empty body commit a title-only block. Each tool commits at
     /// most once, even if a completion event is repeated.
     pub fn commit_tool_result(&mut self, id: &str, call: &str) {
-        if self.turn_start.is_none() || (id.is_empty() && call.is_empty()) {
+        if id.is_empty() && call.is_empty() {
             return;
         }
         if self.committed_tool_ids.contains(id) {
@@ -381,9 +382,6 @@ impl TranscriptWidget {
     /// so exactly-once holds regardless of whether the result or the
     /// completion event arrived first.
     pub fn reconcile_tool_calls(&mut self, calls: &[String]) {
-        if self.turn_start.is_none() {
-            return;
-        }
         for call in calls {
             if let Some(count) = self.committed_unmatched.get_mut(call) {
                 if *count > 0 {
@@ -436,9 +434,6 @@ impl TranscriptWidget {
     /// events normally commit each call as it completes; this safety net keeps
     /// a bounded-event-channel drop from silently losing a permanent entry.
     fn reconcile_pending_tools(&mut self) {
-        if self.turn_start.is_none() {
-            return;
-        }
         let pending = std::mem::take(&mut self.pending_tool_calls);
         for call in pending {
             let stream_id = self.tools.iter().find_map(|(stream_id, _)| {
@@ -597,7 +592,7 @@ impl TranscriptWidget {
     /// text that arrived before them and the sealed prefix is never
     /// duplicated by a later [`reconcile_response`].
     fn seal_response(&mut self) {
-        if self.turn_start.is_none() || self.response_accumulator.is_empty() {
+        if self.response_accumulator.is_empty() {
             return;
         }
         self.sealed_response_len = self
@@ -626,10 +621,10 @@ impl TranscriptWidget {
         self.scrollable.push(title);
     }
 
-    /// Insert a contiguous run of styled lines into the active turn directly
-    /// above the streaming response region, advancing the response boundary.
+    /// Insert tool lines above the streaming response region, even when an
+    /// observed execution has no operator prompt or pinned turn boundary.
     fn insert_tool_lines(&mut self, lines: Vec<Line<'static>>) {
-        if lines.is_empty() || self.turn_start.is_none() {
+        if lines.is_empty() {
             return;
         }
         self.invalidate_desired_cache();
@@ -687,6 +682,9 @@ impl TranscriptWidget {
                     *r += inserted;
                 }
             }
+            // Observed streams can have a response without an operator prompt.
+            // Keep system notices outside the region replaced by response rebuilds.
+            None if self.response_start.is_some() => self.insert_tool_lines(block),
             None => {
                 if !self.scrollable.is_empty() {
                     self.scrollable.push(Line::from(""));
@@ -2759,6 +2757,16 @@ impl LiveAreaWidget for InfoBarWidget {
             Span::styled(ctx.project_name.to_string(), chrome),
         ];
 
+        spans.push(Span::styled("  status: ", nickel));
+        let status_style = match ctx.conversation_status {
+            ConversationStatus::Running => malachite,
+            ConversationStatus::Paused => gold,
+            ConversationStatus::Ended | ConversationStatus::ReadOnly | ConversationStatus::Idle => {
+                nickel
+            }
+        };
+        spans.push(Span::styled(ctx.conversation_status.label(), status_style));
+
         // The selected conversation target. A non-home target is shown
         // prominently and the home chat model is not presented as if it
         // belonged to the pipeline agent.
@@ -2799,169 +2807,6 @@ impl LiveAreaWidget for InfoBarWidget {
 
         let paragraph = Paragraph::new(Line::from(spans)).style(band);
         paragraph.render(area, buf);
-    }
-}
-
-/// The full-screen interactive debug session view.
-///
-/// Owns the target id, prompt text, output scrollback, and connection state
-/// (`connecting`/`connected`). Renders a header, output scrollback, and its
-/// own prompt. It fills the whole screen and returns no overflow.
-pub struct DebugWidget {
-    id: String,
-    input: String,
-    history: Vec<String>,
-    connecting: bool,
-    connected: bool,
-}
-
-impl DebugWidget {
-    pub fn new(id: String) -> Self {
-        Self {
-            id,
-            input: String::new(),
-            history: Vec::new(),
-            connecting: true,
-            connected: false,
-        }
-    }
-
-    /// Mutable debug-prompt input.
-    pub fn prompt_mut(&mut self) -> &mut String {
-        &mut self.input
-    }
-
-    /// Take the debug prompt for submission.
-    pub fn take_prompt(&mut self) -> String {
-        std::mem::take(&mut self.input)
-    }
-
-    /// Append a line to the debug output scrollback.
-    pub fn push_output(&mut self, line: String) {
-        self.history.push(line);
-    }
-
-    /// Whether the debug socket is open but `ready` has not arrived yet.
-    pub fn connecting(&self) -> bool {
-        self.connecting
-    }
-
-    /// Whether the debug socket session is still connected.
-    pub fn connected(&self) -> bool {
-        self.connected
-    }
-
-    /// Set the connected flag. Setting `false` also clears the connecting
-    /// flag so a session that never became ready is reported as ended.
-    pub fn set_connected(&mut self, connected: bool) {
-        self.connected = connected;
-        if !connected {
-            self.connecting = false;
-        }
-    }
-
-    /// Mark the session as connected (clears the connecting flag).
-    pub fn mark_ready(&mut self) {
-        self.connecting = false;
-        self.connected = true;
-    }
-}
-
-impl LiveAreaWidget for DebugWidget {
-    #[cfg(feature = "telemetry")]
-    fn name(&self) -> &'static str {
-        "debug"
-    }
-
-    fn size_priority(&self) -> i32 {
-        50
-    }
-
-    fn min_height(&self, _width: u16, _ctx: &RenderContext) -> u16 {
-        // Fills the whole terminal while active.
-        0
-    }
-
-    fn flexible(&self, _ctx: &RenderContext) -> bool {
-        true
-    }
-
-    fn render(&mut self, area: Rect, buf: &mut Buffer, _ctx: &RenderContext) {
-        // Clear the full-screen region first so a shorter frame never leaves
-        // stale cells behind.
-        for y in 0..area.height {
-            for x in 0..area.width {
-                buf[(area.x + x, area.y + y)].reset();
-            }
-        }
-
-        let status = if self.connecting {
-            "connecting…"
-        } else if self.connected {
-            "connected"
-        } else {
-            "ended"
-        };
-        let status_style = if self.connecting {
-            Style::default().fg(DEFAULT_THEME.accent_secondary)
-        } else if self.connected {
-            Style::default().fg(DEFAULT_THEME.success)
-        } else {
-            Style::default().fg(DEFAULT_THEME.danger)
-        };
-
-        let header = Line::from(vec![
-            Span::styled(
-                "◆ debug: ",
-                Style::default()
-                    .fg(DEFAULT_THEME.heading_primary)
-                    .add_modifier(Modifier::BOLD),
-            ),
-            Span::styled(
-                self.id.clone(),
-                Style::default()
-                    .fg(DEFAULT_THEME.danger)
-                    .add_modifier(Modifier::BOLD),
-            ),
-            Span::styled(
-                " ◆",
-                Style::default()
-                    .fg(DEFAULT_THEME.heading_primary)
-                    .add_modifier(Modifier::BOLD),
-            ),
-            Span::raw("  "),
-            Span::styled(status, status_style),
-        ]);
-
-        let mut lines: Vec<Line<'static>> = vec![header];
-        lines.push(Line::from(""));
-
-        // Output scrollback, tail-anchored. Reserve 2 rows for the prompt
-        // line at the bottom.
-        let prompt_rows = 2u16;
-        let body_rows = area.height.saturating_sub(2 + prompt_rows) as usize;
-        let start = self.history.len().saturating_sub(body_rows);
-        for line in &self.history[start..] {
-            lines.push(Line::from(Span::styled(
-                line.clone(),
-                Style::default().fg(DEFAULT_THEME.text),
-            )));
-        }
-
-        // Debug prompt line.
-        lines.push(Line::from(""));
-        lines.push(Line::from(vec![
-            Span::styled(
-                "debug» ",
-                Style::default().fg(DEFAULT_THEME.heading_primary),
-            ),
-            Span::styled(self.input.clone(), Style::default().fg(DEFAULT_THEME.text)),
-        ]));
-
-        if !lines.is_empty() {
-            let paragraph = Paragraph::new(lines).wrap(Wrap { trim: false });
-            paragraph.render(area, buf);
-        }
     }
 }
 
@@ -4133,6 +3978,73 @@ mod tests {
     }
 
     #[test]
+    fn autonomous_tool_result_retains_tail_and_response_order_without_prompt() {
+        let mut transcript = TranscriptWidget::new();
+        transcript.push_response("before");
+        for i in 0..8 {
+            transcript.push_tool_output_chunk("c1", "Bash(run)", &format!("line {i}\n"));
+        }
+        transcript.commit_tool_result("c1", "Bash(run)");
+        transcript.commit_tool_result("c1", "Bash(run)");
+        transcript.reconcile_tool_calls(&["Bash(run)".into()]);
+        transcript.push_response("after");
+        assert!(!transcript.has_current_turn());
+        assert!(transcript.tools.is_empty());
+        transcript.finish_turn();
+
+        let lines: Vec<String> = transcript
+            .scrollable
+            .visible_lines()
+            .iter()
+            .map(|line| line.to_string())
+            .collect();
+        assert_eq!(
+            lines,
+            vec![
+                "before",
+                "◆ Bash(run)",
+                "    line 3",
+                "    line 4",
+                "    line 5",
+                "    line 6",
+                "    line 7",
+                "after"
+            ]
+        );
+        transcript.submit_prompt("later correction".into());
+        transcript.clear_current_turn();
+        assert_eq!(
+            transcript
+                .scrollable
+                .visible_lines()
+                .iter()
+                .map(|line| line.to_string())
+                .collect::<Vec<_>>(),
+            lines
+        );
+    }
+
+    #[test]
+    fn autonomous_pending_tools_reconcile_without_prompt() {
+        let mut transcript = TranscriptWidget::new();
+        transcript.push_tool_output_chunk("c1", "Bash(run)", "retained output");
+        transcript.reconcile_tool_calls(&["Bash(run)".into(), "Read(file)".into()]);
+        assert!(!transcript.has_current_turn());
+        transcript.finish_turn();
+        let lines: Vec<String> = transcript
+            .scrollable
+            .visible_lines()
+            .iter()
+            .map(|line| line.to_string())
+            .collect();
+        assert_eq!(
+            lines,
+            vec!["◆ Bash(run)", "    retained output", "◆ Read(file)"]
+        );
+        assert!(transcript.tools.is_empty());
+    }
+
+    #[test]
     fn committed_stream_tool_uses_title_plus_five_row_tail_exactly_once() {
         let mut transcript = TranscriptWidget::new();
         transcript.submit_prompt("hi".to_string());
@@ -4733,6 +4645,7 @@ mod tests {
             chat_model: None,
             target_label: String::new(),
             target_is_home: true,
+            conversation_status: ConversationStatus::Idle,
             active_runs: EMPTY.get_or_init(HashMap::new),
             watch_selection: None,
             watch_following: None,
@@ -4762,6 +4675,33 @@ mod tests {
             .wrap(Wrap { trim: false })
             .render(area, &mut buf);
         rendered_rows(&buf, width, height)
+    }
+
+    #[test]
+    fn info_bar_renders_each_selected_conversation_status() {
+        let area = Rect::new(0, 0, 160, 1);
+        let mut ctx = input_ctx("", 0);
+        ctx.target_is_home = false;
+        ctx.target_label = "run:agent".into();
+        ctx.chat_model = Some("home-only-model");
+        let mut buf = Buffer::empty(area);
+        for status in [
+            ConversationStatus::ReadOnly,
+            ConversationStatus::Running,
+            ConversationStatus::Paused,
+            ConversationStatus::Ended,
+            ConversationStatus::Idle,
+        ] {
+            ctx.conversation_status = status;
+            InfoBarWidget.render(area, &mut buf, &ctx);
+            let row = &rendered_rows(&buf, area.width, 1)[0];
+            assert!(
+                row.contains(&format!("status: {}", status.label())),
+                "{row}"
+            );
+            assert!(row.contains("target: run:agent"), "{row}");
+            assert!(!row.contains("home-only-model"), "{row}");
+        }
     }
 
     #[test]

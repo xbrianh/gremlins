@@ -11,9 +11,8 @@ pub(super) enum InteractiveLoopResult {
     Resumed,
     /// Run one turn, then re-enter interactive_loop (Inject or RunTurn).
     RunOneTurn,
-    /// A correction was injected and the pause slot released.
-    /// The agent loop continues without re-entering interactive mode;
-    /// the `pending_run_one_turn` flag is not set.
+    /// A correction was injected. Grant the next model turn even if the
+    /// debugger lease is retained; one-shot message leases are released.
     MessageDelivered,
 }
 

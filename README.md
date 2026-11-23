@@ -130,6 +130,25 @@ cargo build
 | `make rust-clippy` | `cargo clippy --all-targets -- -D warnings` |
 | `make check` | rust-fmt-check + rust-clippy |
 
+## TUI selected conversation
+
+In `/watch`, select a run with `j`/`k` or the arrow keys and press `Enter`
+to observe its conversation. The execution keeps running unaided; selecting
+it does not pause it. `/attach <id> [stage]` selects a stage directly.
+`/debug <id>` opens that same chat with pause-on-entry for interactive agent
+stages only, not a separate debug screen. Exec stages are read-only.
+
+Ordinary text in the selected chat corrects the **same execution** and resumes
+it; it does not launch a replacement or a separate chat turn. Explicit run
+controls remain `/stop <id>` and `/resume <id>` (or `s`/`r` in watch).
+`/attach home` returns home; `Ctrl+T` switches between home and the last stage,
+preserving drafts. Leaving a stage detaches, not cancels. The home conversation
+continues streaming in the background while another conversation is selected.
+
+The inline watch log pane remains separate: `Ctrl+W` (or `Ctrl+O`) toggles it
+inside `/watch`; `Ctrl+W` from chat enters watch. `Esc` closes the pane first,
+then returns to chat.
+
 ## CLI subcommands
 
 Invoked as `gremlins <subcommand>`. The authoritative list and per-subcommand

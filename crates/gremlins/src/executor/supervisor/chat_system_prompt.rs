@@ -219,9 +219,30 @@ mod tests {
             prompt.contains("`Ctrl+O`") && prompt.contains("j/k/arrow keys"),
             "must document watch selection and live-log toggling"
         );
+        let esc = prompt
+            .lines()
+            .find(|line| line.starts_with("- `Esc` —"))
+            .expect("must document the Esc keybinding");
         assert!(
-            prompt.contains("`Esc`") && prompt.contains("cancel an in-flight chat turn"),
-            "must document Esc's clear/cancel behavior"
+            esc.contains("in `/watch`, close an open live log first, then return to chat"),
+            "Esc must dismiss watch layers in order"
+        );
+        assert!(
+            esc.contains("in chat, dismiss a correction draft without interrupting its execution"),
+            "Esc must dismiss the correction draft without cancelling or interrupting execution"
+        );
+        let ctrl_c = prompt
+            .lines()
+            .find(|line| line.starts_with("- `Ctrl+C` —"))
+            .expect("must document the home interrupt keybinding");
+        assert!(
+            ctrl_c.contains("during an active home request, soft interrupt first and hard cancel on a repeat within one second"),
+            "home interruption must be soft first, escalating to hard cancel only on a timely repeat"
+        );
+        let interaction = prompt.split_whitespace().collect::<Vec<_>>().join(" ");
+        assert!(
+            interaction.contains("`/attach home` or switching away detaches, not cancels; home keeps streaming in the background while a stage is selected"),
+            "leaving a selected stage must detach rather than cancel, without stopping the home stream"
         );
     }
 }

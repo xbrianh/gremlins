@@ -2,6 +2,7 @@
 
 mod attachment;
 mod correction_chat;
+mod home_identity;
 mod paused_chat;
 mod resume_context;
 mod resume_dispatch;

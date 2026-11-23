@@ -6,13 +6,15 @@ Terminal UI for the `gremlins` CLI. Built on **ratatui** with **crossterm** for 
 
 | File | Role |
 |------|------|
-| `mod.rs` | Module root. `run()` entry point, `run_app()` event loop, debug-session plumbing (`DebugEvent`, `start_debug_session`), `format_socket_response()`. |
+| `mod.rs` | Module root. `run()` entry point, `run_app()` event loop, selected-conversation UI routing (`Attachment`, `AttachmentFrame`, `select_attachment`, `apply_attachment_frame`), `format_socket_response()`. |
 | `app.rs` | Pure state (`App`). Active runs, chat id, full-screen marker (`Screen`), input history, cursor state. No I/O, no widget ownership. |
 | `buffer.rs` | Display buffer: `LineBuffer` (styled FIFO, with drain-head and wrapping helpers). Plus `wrapped_height` and `line_wrapped_height` utilities. |
 | `markdown.rs` | Markdown-to-ratatui renderer. Turns a markdown string into `Vec<Line<'static>>` of styled spans via `pulldown-cmark` (tables, strikethrough, task lists). |
 | `screen.rs` | `LiveArea` — owns the main terminal screen, the typed widget `Scene` (`transcript`/`reasoning`/`input_bar`/`info_bar` fields plus a typed `ScreenView` enum), diff-driven double buffering, `commit_scrollback()` (renders overflow + `scroll_region_up`), raw-mode/cursor lifecycle. Also defines the full-screen `RunsView` body with its inline watch stream pane. |
-| `widgets.rs` | `LiveAreaWidget` trait + the shared recursive layout engine + concrete widgets: composite transcript (single styled FIFO + current-turn draft state + one embedded tool `StreamingWidget` child), the `StreamingWidget` primitive, input bar, info bar, and the full-screen `DebugWidget`. |
+| `widgets.rs` | `LiveAreaWidget` trait + the shared recursive layout engine + concrete widgets: composite transcript (single styled FIFO + current-turn draft state + one embedded tool `StreamingWidget` child), the `StreamingWidget` primitive, input bar, info bar. Selected conversations share these widgets. |
 | `client.rs` | Persistent `DaemonClient`. Long-lived socket for request/response + unsolicited `DaemonEvent` broadcast. Also `follow_log()` on a dedicated connection. |
+| `client/attachment.rs` | Persistent attachment transport: socket handshake, ack validation, execution/nonce pinning, command writes, terminal/disconnect frames, and abort-on-drop lifetime. Exposes execution/value frames, never UI targets or generations. |
+| `protocol.rs` | Shared wire selectors and execution identities. `observed_binding()` allows read-only streams; `binding()` additionally requires correction capability. |
 | `commands.rs` | Slash-command dispatch. Returns `CommandResult` — the event loop handles each variant. |
 | `editor.rs` | Stub wired to `Ctrl+G`. Appends placeholder to transcript. |
 
@@ -31,16 +33,18 @@ run()
       ├─ Initial "ls" snapshot → populates app.active_runs
       ├─ Crossterm event channel (poll 20ms → mpsc)
       ├─ Per-frame: live_area.compose(&app) → render widgets → commit overflow → draw
-      ├─ tokio::select! over 8 channels:
+      ├─ tokio::select! over input, daemon, and operation channels:
       │    1. ct_rx        — crossterm events (keys, resize)
       │    2. event_rx     — DaemonEvent broadcasts
       │    3. raw_rx       — non-event JSON from main socket
-      │    4. snapshot_rx  — run-snapshot refresh (after event_lagged)
+      │    4. status_rx    — run-status refresh
       │    5. log_rx       — log-follow lines (dedicated connections)
       │    6. result_rx    — socket-op results
-      │    7. chat_rx      — (EventKind, Option<String>) stream (chat events with turn tags)
-      │    8. debug_evt_rx — DebugEvent stream (recv_debug, pending when idle)
-      └─ Exit: commit in-flight turn to history, abort log/debug tasks, client.shutdown()
+      │    7. chat_rx      — home chat events with turn/execution identity
+      │    8. attach_rx    — selected stage's AttachmentFrame stream
+      │    9. delivery_rx  — correction delivery receipts
+      │   10. reset_rx / model_rx — session reset and model-query results
+      └─ Exit: commit in-flight turn to history, close attachment/log tasks, client.shutdown()
 
 On a fatal `run_app()` error after the stderr redirect, `run()` restores the
 terminal and the saved stderr, writes the `gremlins: `-prefixed error to
@@ -52,16 +56,16 @@ returns `RunError::Reported` so the CLI exits nonzero without printing it again.
 
 - **Main screen, not alternate screen.** `LiveArea` owns the primary terminal screen. On exit nothing is restored from an alternate buffer — content stays in terminal scrollback, matching normal CLI behavior.
 - **Diff-driven double buffering.** `LiveArea` keeps `curr`/`prev` screen-sized `Buffer`s and flushes only changed cells each frame (`prev.diff_iter(&curr)`). `invalidate()` forces a full repaint.
-- **One recursive layout engine.** Both the top-level compose and the debug widget call the same engine over an ordered slice of `&mut dyn LiveAreaWidget` (`finalize → measure → allocate → drain overflow → paint`). Width travels down as an argument and height travels up; a container sums its children's heights, then re-runs allocation on its children constrained to its allocated row budget. The transcript no longer uses the recursive engine for its tool children — it flat-sums their desired heights and allocates them directly.
+- **One recursive layout engine.** Top-level compose uses the shared engine over an ordered slice of `&mut dyn LiveAreaWidget` (`finalize → measure → allocate → drain overflow → paint`). Width travels down as an argument and height travels up; a container sums its children's heights, then re-runs allocation on its children constrained to its allocated row budget. The transcript no longer uses the recursive engine for its tool children — it flat-sums their desired heights and allocates them directly.
 - **Typed scene, per-frame type erasure.** `LiveArea` stores `Scene` (concrete `TranscriptWidget`, `InputBarWidget`, `InfoBarWidget`, and an `Option<ScreenView>`). Each frame takes the scene out, erases the selected fields to `&mut dyn LiveAreaWidget` for the layout engine, and puts it back. There is no concrete type reification or long-lived boxed-widget owner.
 - **Terminal scrollback promotion.** When the transcript FIFO exceeds its allocated rows, `TranscriptWidget::take_overflow()` drains the head and returns the overflow lines; `commit_scrollback()` renders them and calls `scroll_region_up` to push them into terminal scrollback. The pin-to-screen rows are the input and info bars only; while streaming, the top-level reasoning band and the transcript's embedded tool `StreamingWidget` slots are display-only and never reach scrollback. The FIFO is the sole overflow producer.
 - **Single styled FIFO + top-level reasoning band.** The transcript is one styled FIFO and is the only render source for the transcript region. Prompt, response, tool-call, and system lines are pushed into it as styled lines as they arrive. Prompt and response text are markdown-rendered; committed tool blocks (`◆` title + tail) are inserted at the response boundary via the uniform [`commit_tool_stream_block`] path. Live tool output renders as `StreamingWidget` children **below** the FIFO — not embedded between bands within it. When a tool arrives and the response accumulator has accumulated text, that text is **sealed** into the FIFO before the tool widget is created, so model text that arrived before the tool call always appears before the tool's `◆` line. Live reasoning stays out of the FIFO as a top-level bottom band pinned directly above the input bar (a fixed-height, tail-anchored `StreamingWidget` that collapses to zero when idle). At `finish_turn`, the transcript first flushes any uncommitted tool-call entries and rebuilds the response, then the scene commits only the reasoning title line as the final FIFO line of the turn; the reasoning body is display-only and cleared with the live band. Finished history reads prompt → sealed text blocks → committed tool blocks → response → reasoning title. In-progress streams stay display-only and never enter the FIFO or terminal scrollback; only the committed tool tails and the final reasoning title become permanent transcript history.
-- **Screen switch, not overlays.** `App` owns a `Screen` enum (`Chat`, `Runs`, `Debug { id }`). `LiveArea` mirrors that in a typed `ScreenView` enum. `LiveArea::compose()` composes the chat scene for `Screen::Chat`, or the single active full-screen view body for any other screen. Full-screen views never commit their content to chat scrollback, and `Esc` (or the first `Ctrl+C` press) exits back to chat.
-- **Full-screen views.** `RunsView` renders the running-gremlin watch table and owns an optional inline live-log pane, and `DebugWidget` renders the interactive debug screen while owning its prompt/history/connection state. Each full-screen view is flexible and fills the whole terminal.
+- **Selected conversation, not a debug screen.** `Screen::Chat` displays the selected `Target::Home` or `Target::StageExecution { run_id, stage }` through the shared chat scene and composer. `LiveArea::select_conversation()` switches per-target render state; home continues streaming in the background while a stage is selected.
+- **Watch is a screen, inline logs remain.** `Screen::Runs` / `RunsView` renders the watch table with an optional inline live-log pane. `Ctrl+W` enters watch and opens/closes that pane; `Ctrl+O` remains its inline-pane alias. Enter selects the row's conversation in chat. Watch content never commits to chat scrollback.
 - **Uniform tool path.** Every tool — streaming or not — creates a `StreamingWidget` and commits via [`commit_tool_stream_block`]. Tools with an empty body commit a title-only block (functionally identical to the old diamond-line behavior); streaming tools commit their title plus the retained 5-row tail. `Read`/`Edit`/`Write`/`Glob`/`Grep` are no longer filtered — all tools participate uniformly. Live tool slots are `STREAM_MAX_ROWS`-capped, tail-anchored, lossy head-trimmed, ANSI-stripped, collapse to zero when idle, and never enter the transcript FIFO or terminal scrollback while streaming. The three-slice FIFO split (pre/events/tail) is gone; the FIFO renders as one contiguous tail-anchored block, with its rendered height tight to its content so live tool widgets sit directly beneath with no gap. **Sub-agent (`Task`) tool output is not forwarded:** nested loops run with `stream_events = None`, so their events never reach the parent TUI; `make_task_runner` therefore clears the inherited live-output sender (`child_ctx.tool_output = None`) so a sub-agent's chunks can't create a tool slot with no matching close event.
 - **Chat uses a fresh socket per message.** The daemon processes chat as an ephemeral stage. The persistent `DaemonClient` stays free for commands during chat.
 - **Log follow uses a dedicated socket.** The `log` op with `follow:true` monopolizes its connection, so it gets its own (`client::follow_log`).
-- **Debug sessions use a dedicated socket.** `/debug <id>` opens a fresh socket with its own reader task and command channel (`talk`/`quit`/`bail`/`continue`).
+- **Client owns attachment transport; UI owns selection.** `select_attachment()` selects the shared chat target, starts `DaemonClient::start_attachment()` in `control` (watch Enter) or `debugger` (`/debug <id>`) mode, and forwards execution/value frames tagged with UI target/generation. Socket I/O, handshake/ack validation, execution pinning, command transport, and disconnect reporting live in `client/attachment.rs`. Dropping the forwarding task drops/aborts transport; leaving a selected stage never cancels execution. A run-only selector adopts the acknowledged stage in the UI, while subsequent frames remain tagged with the original selection.
 - **Request/response ordering is FIFO.** `DaemonClient::send_request` holds a write lock across enqueue + write so concurrent callers can't interleave.
 
 ## Event Loop Patterns
@@ -74,9 +78,15 @@ returns `RunError::Reported` so the CLI exits nonzero without printing it again.
 - `Quit` → break loop
 - `ShowHistory` / `TruncateHistory` → operate on `app.conversation_history`
 - `ShowRuns` → enter `Screen::Runs`
-- `Debug(id)` → enter `Screen::Debug { id }` + `start_debug_session()`
+- `Debug(id)` → `attachment_target()` + `select_attachment(..., "debugger", ...)` in `Screen::Chat`
 
-### Chat flow
+### Home chat flow
+Session creation/recreation returns a registry-reserved `home_run_id`, distinct from
+`sess-*`. The client installs it before processing watch rows, without waiting for
+`TurnStarted`; first chat creation consumes the reservation. A stopped run that is
+replaced within the same session can still change identity until `TurnStarted`.
+These steps apply to a new prompt on `Target::Home`; selected-stage text uses the correction path below.
+
 1. User types plain text → Enter
 2. `live_area.submit_prompt()` pushes a separator and the markdown-rendered prompt into the FIFO, then pins the turn start; the top-level reasoning band and the embedded tool slots are cleared with the new prompt
 3. Force an immediate frame so the pinned prompt appears before the first daemon event
@@ -95,12 +105,12 @@ returns `RunError::Reported` so the CLI exits nonzero without printing it again.
 - `LogLine` → push to transcript if `app.following_log` matches (independent `/log <id>` following)
 - `Bail` → log only
 
-### Debug sessions
-`DebugEvent` variants arrive on `debug_evt_rx` (via `recv_debug`, which pends forever when no session is active):
-- `Attached` → log/announce the attachment acknowledgment (first frame of an `attach` conversation scope); `Ready` → `live_area.mark_debug_ready()`
-- `TurnComplete` / `Done` / `Ended` / `StreamChunk` / `ReasoningChunk` / `ToolResult` / `Error` / `Disconnected` → `live_area.push_debug_output()`, update connection state via `live_area.set_debug_connected()`
-- `ToolOutputChunk` is **ignored** — debug tool output is never routed into the chat transcript's live tool slot (the two sockets are independent, and a background chat turn must not commit a debug call into its tool segment). Debug shows final results via `ToolResult`.
-- `Ignored` covers conversation display frames the debug view does not surface (`stream_reset`, `lagged`, `operator_message`, `system_warning`, `command_ack`, `detached`)
+### Selected stage conversations
+- Watch Enter observes the selected conversation without pausing or otherwise intervening. `/debug <id>` selects the same chat with pause-on-entry for an interactive agent only; exec stages remain read-only.
+- Ordinary composer text becomes a correction for the attached interactive execution (`Submission::Correction` → `deliver_correction()` → `delivery_rx`). It resumes the same execution, not a new chat or replacement run. No separate debug prompt or command channel exists.
+- `AttachmentFrame` arrives on `attach_rx`; `apply_attachment_frame()` routes response, reasoning, tool output/results, operator messages, and terminal frames into the target's shared transcript via `with_target_transcript()`.
+- The attachment pins execution identity and nonce; generation/target checks reject stale frames. Only an `attached` acknowledgment advertising `message` grants a correction address. Read-only stages still stream.
+- `done` / `ended` / `detached` clear the correction address and finish the target's turn. Detaching or switching away does not cancel execution. Home `chat_rx` events always update `Target::Home`, even while another target is displayed.
 
 ## Rendering
 
@@ -146,8 +156,8 @@ typed `ScreenView` body across the whole terminal; the chat scene
 ## Adding a New Keybinding
 
 1. Add a `KeyCode` match arm in the `ct_rx` handler in `mod.rs` `run_app()`
-2. Mirror the guard logic from existing chords: inert during history search,
-   inert when a debug prompt owns input, screen-gated to Chat and/or Runs.
+2. Mirror the guard logic from existing chords: respect history search,
+   selected-target/composer state, and Chat/Runs screen gates.
 3. Add the chord to the keybindings section of `help_text()` in `commands.rs`
 4. Update the keybindings table in `crates/gremlins/prompts/chat_system.md`
 5. Update `DESIGN.md` if the binding changes screen-level behaviour
@@ -158,12 +168,6 @@ typed `ScreenView` body across the whole terminal; the chat scene
 2. Add the variant to `is_chat_event()` and `is_stream_event()` helpers
 3. Add a match arm in the chat forwarding loop in `gremlins/src/executor/supervisor/chat/mod.rs`
 4. Add a match arm in the `chat_rx` handler in `tui/mod.rs`
-
-## Adding a New DebugEvent
-
-1. Add variant to `DebugEvent` in `mod.rs`
-2. Add parsing in `parse_debug_event()`
-3. Add match arm in the `debug_evt_rx` handler in `mod.rs`
 
 ## Dependencies
 
