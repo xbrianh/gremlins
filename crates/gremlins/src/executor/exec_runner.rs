@@ -287,21 +287,24 @@ pub async fn run_shell(
     // mpsc channel feeds a task that re-emits each line as an ExecOutput
     // event for the live watch pane.
     let gremlin_id = prepared.gremlin_id.clone();
-    let line_tx: Option<mpsc::UnboundedSender<LineEvent>> = gremlin_id.map(|gid| {
+    let (line_tx, output_task) = if let Some(gid) = gremlin_id {
         let (tx, mut rx) = mpsc::unbounded_channel::<LineEvent>();
-        tokio::spawn(async move {
+        let task = tokio::spawn(async move {
             while let Some(ev) = rx.recv().await {
                 let ts = state::now_stamp_millis();
-                emit_event(gremlins_magic_bus::EventKind::ExecOutput {
+                let event = gremlins_magic_bus::EventKind::ExecOutput {
                     id: gid.clone(),
                     is_stderr: ev.is_stderr,
                     text: ev.text,
                     ts,
-                });
+                };
+                emit_event(event);
             }
         });
-        tx
-    });
+        (Some(tx), Some(task))
+    } else {
+        (None, None)
+    };
 
     let result = run_logged_commands(
         &log_name,
@@ -314,6 +317,15 @@ pub async fn run_shell(
         line_tx,
     )
     .await;
+
+    // The runner has dropped its senders. Publish every queued line before
+    // callers can emit a closing stage boundary or run terminal event.
+    if let Some(task) = output_task {
+        task.await.map_err(|e| ExecError::Generic {
+            name: prepared.name.clone(),
+            detail: format!("output task failed: {e}"),
+        })?;
+    }
 
     match result {
         Ok(r) => {
@@ -574,6 +586,89 @@ mod tests {
             base_env: HashMap::new(),
             substitution_env: HashMap::new(),
             gremlin_id: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn run_shell_drains_output_before_success_return() {
+        assert_output_drained(0).await;
+    }
+
+    #[tokio::test]
+    async fn run_shell_drains_output_before_nonzero_return() {
+        assert_output_drained(42).await;
+    }
+
+    async fn assert_output_drained(rc: i32) {
+        use gremlins_magic_bus::connection::BusSubGuard;
+        use gremlins_magic_bus::{subscribe_run, EventKind};
+
+        let tmp = tempfile::tempdir().unwrap();
+        let id = format!("exec-drain-{}", tmp.path().display());
+        let (sub, mut rx) = subscribe_run(&id);
+        let _guard = BusSubGuard::new(sub);
+        let command = format!(
+            "for ((i=0; i<4096; i++)); do printf 'out-%s\\n' \"$i\"; done; \
+             printf 'stderr-tail' >&2; exit {rc}"
+        );
+        let mut prepared = make_prepared("drain", vec![&command], tmp.path());
+        prepared.gremlin_id = Some(id.clone());
+        let state = StateData::with_state_dir(tmp.path());
+        let result = run_shell(&prepared, &state).await;
+        if rc == 0 {
+            assert_eq!(result.unwrap().rc, 0);
+        } else {
+            assert!(matches!(result, Err(ExecError::NonZeroExit { rc: 42, .. })));
+        }
+
+        // Model the caller's immediate stage-close/terminal emissions without
+        // yielding to the bridge: all real process output must already be queued.
+        emit_event(EventKind::StageBoundary {
+            id: id.clone(),
+            stage: prepared.name.clone(),
+            stage_type: "exec".into(),
+            active: false,
+        });
+        emit_event(EventKind::RunCompleted { id, exit_code: rc });
+
+        assert!(!tmp
+            .path()
+            .join("command_logs/exec-drain.log.events")
+            .exists());
+        let raw = read_log(tmp.path(), "drain");
+        assert!(raw.contains("out-4095"));
+        assert!(raw.contains("stderr-tail"));
+        let mut stdout_lines = Vec::new();
+        let mut stderr_tail = false;
+        let mut closed = false;
+        let mut terminal = false;
+        while let Ok(event) = rx.try_recv() {
+            match event.into_kind() {
+                EventKind::ExecOutput {
+                    text, is_stderr, ..
+                } => {
+                    assert!(!closed && !terminal, "output arrived after stage close");
+                    if is_stderr {
+                        stderr_tail |= text == "stderr-tail";
+                    } else if text.starts_with("out-") {
+                        stdout_lines.push(text);
+                    }
+                }
+                EventKind::StageBoundary { active: false, .. } => {
+                    assert_eq!(stdout_lines.len(), 4096, "stdout not drained at close");
+                    assert!(stderr_tail, "unterminated stderr not drained at close");
+                    closed = true;
+                }
+                EventKind::RunCompleted { .. } => {
+                    assert!(closed);
+                    terminal = true;
+                }
+                _ => {}
+            }
+        }
+        assert!(terminal);
+        for (i, line) in stdout_lines.iter().enumerate() {
+            assert_eq!(line, &format!("out-{i}"));
         }
     }
 

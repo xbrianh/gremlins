@@ -22,7 +22,7 @@ use crate::executor::gremlin::Gremlin;
 use crate::executor::gremlin::{GremlinConfig, WorkDir};
 use crate::executor::parallel::run_parallel;
 
-use crate::executor::stage_stream::send_stage_boundary;
+use crate::executor::stage_boundary::send_stage_boundary;
 use crate::executor::state;
 use crate::executor::state::StateStore;
 use crate::executor::vars;

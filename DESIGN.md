@@ -1114,7 +1114,50 @@ gremlins `EventKind`:
 - `subscribe_run_backpressured(id, bound)` — the chat supervisor's
   per-run subscription for live stream forwarding.
 
-### 9.6 Relationship to the chat backend
+### 9.6 Passive run attachment and watch replay
+
+Watch uses `attach` with `scope: run` on a dedicated connection. After an
+`attached` acknowledgment, the server forwards native display records alongside
+stage boundaries/transitions and run-terminal lifecycle frames. Agent display,
+exec output, and log lines share this path. Run attachment is passive and
+lag-tolerant: gaps are explicit `lagged` records, not producer backpressure.
+Although bus subscriptions include descendant runs, attachment filters both
+correlation and payload ids to the exact selected run.
+
+The server `stage_stream` operation/module and CLI legacy stage-stream client
+are retired. The producer-side `executor/stage_boundary.rs` remains. The CLI
+`follow_run` requests replay and requires the negotiated `replay_checkpoint`
+acknowledgment capability, then receives an exact atomic native snapshot/live
+cut ending in `replay_checkpoint`. Historical and live native frames carry
+process-local emission sequences, not durable cross-restart cursors. The journal
+holds at most 16,384 records per exact run and 65,536 globally; prompt requests are not
+retained. Eviction/omission produces explicit `history_gap` and conservative
+checkpoint completeness/sequence watermarks, with no unbounded tombstones.
+The CLI bounds snapshot collection to 65,536 frames and its socket queue to 256.
+Incomplete/unavailable replay falls back to a persisted 500-line tail, preserving
+restart replay. Active fallback keeps the original live subscription and warns
+of discontinuity/possible overlap. There is no content matching or duplicate
+suppression, no replacement attachment, and no second live log follow. Every
+collected original native frame is preserved alongside disk history. Stage
+transcripts may contain other executions: exact execution-scoped agent merging
+is deferred, and incomplete fallback is not an exact merge.
+
+Exec fallback reads raw logs with preamble/footer metadata preserved; legacy
+`.events` sidecars are ignored and no new sidecars are written, avoiding sequence
+identity collisions across daemon epochs. Bounded blob/run-log tails assert no
+sequence coverage. Ordinary full log follow still uses its persisted log-line
+cut, a separate contract not applied to watch tails. Bus journal insertion and
+snapshot/subscription registration are atomic under its mutex, but persistence
+callbacks and disk reads run outside it; no disk I/O is performed under that lock.
+
+The standalone debug CLI already uses conversation-scope attachment in
+`debugger` mode; it is not a run-watch client. See the
+[protocol reference](docs/attachment-protocol.md) and
+[actor-removal tracker](docs/actor-removal.md) for details, targeted test scope,
+and deferred work. No full-suite results, completed rollout, or manual
+watch/debug verification are claimed.
+
+### 9.7 Relationship to the chat backend
 
 The bus is the transport layer that makes the chat backend (§10) thin. The
 agent loop emits stream events at their origin; the chat supervisor

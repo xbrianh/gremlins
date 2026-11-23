@@ -1,5 +1,5 @@
 //! The single `EventKind` enum that subsumes `DaemonEvent`, `InteractiveEvent`,
-//! and the stage-stream JSON-string protocol.
+//! and native attachment display records.
 //!
 //! The bus routes `DispatchEvent<EventKind>` values to subscribers based on
 //! segment-aware `CorrId` prefix matching.

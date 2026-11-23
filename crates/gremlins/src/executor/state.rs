@@ -2386,8 +2386,8 @@ impl StateData {
         }
     }
 
-    /// Set the gremlin's current stage identity for `ls`, `info`, and stage-stream
-    /// routing.
+    /// Set the gremlin's current stage identity for `ls`, `info`, and watch
+    /// history selection.
     ///
     /// `leaf_name` is the name of the active leaf stage (agent or exec).
     /// `display_stage` is the human-readable enclosing composite name (or empty

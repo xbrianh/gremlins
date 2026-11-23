@@ -42,10 +42,8 @@ pub(crate) struct RunHandle {
     /// can read state directly for live gremlins whose state may be in a
     /// TempDir (ephemeral runs) rather than under config::state_root().
     pub store: Arc<dyn state::StateStore + Send + Sync>,
-    /// Flush barrier for the log writer: a follower that wants to read
-    /// persisted history can request a flush and wait for the ack before
-    /// opening the log blob, so that pre-subscription events are visible.
-    pub log_flush: Option<tokio::sync::mpsc::UnboundedSender<tokio::sync::oneshot::Sender<()>>>,
+    /// Requests an atomic persisted-log snapshot and its bus watermark.
+    pub log_flush: Option<LogFlushHandle>,
     /// Bus subscriber for the run's lossless log-writer subscription.
     /// Held so finish and stop paths can unregister it, preventing the run's
     /// log task, blocking writer, and state store from living until daemon exit.
@@ -65,8 +63,53 @@ pub(crate) struct RunState {
 /// The state store handle a live run exposes to the query ops.
 pub(crate) type StoreHandle = Arc<dyn state::StateStore + Send + Sync>;
 
-/// Flush barrier for a run's log writer.
-pub(crate) type LogFlushHandle = mpsc::UnboundedSender<oneshot::Sender<()>>;
+/// Content and bus watermark captured together by the blocking log writer.
+/// For full snapshots, the watermark covers only fully persisted operational
+/// LogLine events for this run. Tail snapshots use zero: partial history cannot
+/// cover earlier events, even when the final event was fully persisted.
+pub(crate) struct LogSnapshot {
+    pub content: String,
+    pub through_sequence: u64,
+}
+
+impl LogSnapshot {
+    pub(crate) async fn request(flush: &LogFlushHandle) -> Option<Self> {
+        let (tx, rx) = oneshot::channel();
+        flush
+            .send(LogSnapshotRequest {
+                max_lines: None,
+                ack: tx,
+            })
+            .ok()?;
+        rx.await.ok()
+    }
+
+    async fn request_tail(flush: &LogFlushHandle, max_lines: usize) -> Option<Self> {
+        let (tx, rx) = oneshot::channel();
+        flush
+            .send(LogSnapshotRequest {
+                max_lines: Some(max_lines),
+                ack: tx,
+            })
+            .ok()?;
+        rx.await.ok()
+    }
+
+    pub(crate) fn tail(&self, max_lines: usize) -> Vec<String> {
+        let lines: Vec<_> = self.content.lines().collect();
+        lines[lines.len().saturating_sub(max_lines)..]
+            .iter()
+            .map(|line| (*line).to_owned())
+            .collect()
+    }
+}
+
+pub(crate) struct LogSnapshotRequest {
+    pub max_lines: Option<usize>,
+    pub ack: oneshot::Sender<LogSnapshot>,
+}
+
+pub(crate) type LogFlushHandle = mpsc::UnboundedSender<LogSnapshotRequest>;
 
 /// What `stop_run` hands back when the id was live: the run's state
 /// broadcaster so the caller can finish `terminate_and_reap`.
@@ -234,6 +277,25 @@ impl RunRegistry {
                 run.state_tx.subscribe(),
             )
         })
+    }
+
+    /// Capture completed operational-log writes, without holding the registry
+    /// lock while waiting for disk I/O. None means no usable writer checkpoint;
+    /// callers may read persisted history but must not invent a bus watermark.
+    pub(crate) async fn get_run_log_snapshot(&self, id: &str) -> Option<LogSnapshot> {
+        let flush = self.runs.read().await.get(id)?.log_flush.clone()?;
+        LogSnapshot::request(&flush).await
+    }
+
+    /// Read only the requested tail at the writer's committed cut. Tail snapshots
+    /// carry no full-history coverage and must not suppress live bus events.
+    pub(crate) async fn get_run_log_tail_snapshot(
+        &self,
+        id: &str,
+        max_lines: usize,
+    ) -> Option<LogSnapshot> {
+        let flush = self.runs.read().await.get(id)?.log_flush.clone()?;
+        LogSnapshot::request_tail(&flush, max_lines).await
     }
 
     /// Combined liveness check + bus subscribe under one lock guard.

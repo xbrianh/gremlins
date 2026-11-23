@@ -85,7 +85,7 @@ pub mod run;
 pub mod run_agent;
 pub mod run_exec;
 pub mod socket;
-pub mod stage_stream;
+pub(crate) mod stage_boundary;
 pub mod state;
 pub mod supervisor;
 pub mod vars;

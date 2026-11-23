@@ -75,6 +75,27 @@ impl Fixture {
         apply_attachment_frame(&mut self.app, &mut self.live, &mut self.attachment, frame);
     }
 
+    async fn attach_watch(
+        &mut self,
+        listener: &tokio::net::UnixListener,
+        execution: &str,
+    ) -> BufReader<UnixStream> {
+        self.app
+            .upsert_run_from_ls(&json!({"id":"run", "stage":"review", "status":"running"}));
+        self.watch("run");
+        let (stream, _) = tokio::time::timeout(Duration::from_secs(2), listener.accept())
+            .await
+            .unwrap()
+            .unwrap();
+        let mut peer = BufReader::new(stream);
+        assert_eq!(
+            read(&mut peer).await,
+            json!({"op":"attach", "scope":"conversation", "id":"run", "stage":"review", "session_id":"test", "mode":"control"})
+        );
+        self.receive(&mut peer, json!({"type":"attached", "scope":"conversation", "id":"run", "stage":"review", "execution_id":execution, "nonce":9, "capabilities":["message"]})).await;
+        peer
+    }
+
     async fn attach_debug(&mut self, listener: &tokio::net::UnixListener) -> BufReader<UnixStream> {
         self.app
             .upsert_run_from_ls(&json!({"id":"run", "stage":"review", "status":"running"}));
@@ -135,6 +156,69 @@ impl Fixture {
             );
         }
     }
+}
+
+#[tokio::test]
+async fn inline_watch_switch_away_back_rejects_buffered_output_for_same_run() {
+    let mut f = Fixture::new();
+    f.app.show_runs();
+    f.live.show_runs();
+    for id in ["run-a", "run-b"] {
+        f.app
+            .upsert_run_from_ls(&json!({"id":id, "status":"running"}));
+    }
+    let (tx, mut rx) = mpsc::unbounded_channel();
+    let mut generation = 0;
+    let mut old_generations = Vec::new();
+    for id in ["run-a", "run-b", "run-a"] {
+        f.app.watch_selection = Some(id.into());
+        start_watch_follow(
+            &mut f.app,
+            &mut f.live,
+            &f.client,
+            id.into(),
+            &tx,
+            &mut f.follow,
+            &mut generation,
+        );
+        assert!(old_generations.iter().all(|old| *old != generation));
+        old_generations.push(generation);
+        let line = json!({"type":"view_log", "id":id, "generation":generation,
+            "line":format!("visible-{generation}\n")});
+        apply_watch_frame(&mut f.app, &mut f.live, &line, generation, &mut f.follow);
+        let rendered = f.rendered();
+        assert!(
+            rendered.contains(&format!("visible-{generation}")),
+            "{rendered}"
+        );
+        for old in &old_generations[..old_generations.len() - 1] {
+            assert!(!rendered.contains(&format!("visible-{old}")), "{rendered}");
+        }
+        if old_generations.len() < 3 {
+            tx.send(json!({"type":"view_log", "id":id, "generation":generation,
+                "line":"stale-buffered-output\n"}))
+                .unwrap();
+            tx.send(
+                json!({"type":"view_error", "id":id, "generation":generation,
+                "message":"stale-buffered-error"}),
+            )
+            .unwrap();
+        }
+    }
+    // Drain only after A -> B -> A: run-id filtering alone would accept old A.
+    while let Ok(frame) = rx.try_recv() {
+        apply_watch_frame(&mut f.app, &mut f.live, &frame, generation, &mut f.follow);
+    }
+    let rendered = f.rendered();
+    assert!(rendered.contains("visible-3"), "{rendered}");
+    assert!(!rendered.contains("stale-buffered"), "{rendered}");
+    assert_eq!(f.app.watch_follow_error, None);
+    assert!(
+        f.follow.is_some(),
+        "stale errors must not abort the new follow"
+    );
+    close_watch_follow(&mut f.app, &mut f.live, &mut f.follow);
+    f.assert_unsent();
 }
 
 #[tokio::test]
@@ -369,6 +453,170 @@ async fn home_debug_done_defers_summary_and_lifecycle_to_owner() {
     assert_eq!(f.live.response_text(), "owner response");
     assert!(f.live.has_current_turn());
     assert!(!f.rendered().contains("debug summary"));
+    f.client.shutdown().await;
+}
+
+#[tokio::test]
+async fn watch_partial_correction_then_home_run_completes_without_execution_control() {
+    let _sandbox = Sandbox::new();
+    let listener = socket::bind_session_socket(&gremlins::config::state_root(), "test").unwrap();
+    let mut f = Fixture::new();
+    install_home_session(&mut f.app, &f.client).await;
+    f.app.replace_input("home draft");
+    let mut peer = f.attach_watch(&listener, "original").await;
+    let target = f.app.selected_target.clone();
+    assert_eq!(
+        f.app.conversation_status(&target),
+        ConversationStatus::Running
+    );
+    f.receive(
+        &mut peer,
+        json!({"type":"stream_chunk", "text":"partial answer"}),
+    )
+    .await;
+    assert_eq!(f.live.response_text(), "partial answer");
+    assert_eq!(f.rendered().matches("partial answer").count(), 1);
+    assert!(
+        tokio::time::timeout(Duration::from_millis(30), socket::read_json_line(&mut peer))
+            .await
+            .is_err()
+    );
+    f.app.replace_input("use another approach");
+    let Submission::Correction {
+        id,
+        text,
+        execution,
+    } = f.app.conversations.submit(&target, &f.app.input, false)
+    else {
+        panic!("expected correction")
+    };
+    assert_eq!(execution.execution_id, "original");
+    send_attachment_correction(&mut f.app, &mut f.live, &f.attachment, id, &text);
+    assert_eq!(
+        read(&mut peer).await,
+        json!({"op":"message", "req_id":id.to_string(), "text":"use another approach"})
+    );
+    f.receive(
+        &mut peer,
+        json!({"type":"operator_message", "text":"use another approach"}),
+    )
+    .await;
+    f.receive(
+        &mut peer,
+        json!({"type":"delivered", "req_id":id.to_string()}),
+    )
+    .await;
+    assert!(f.app.input.is_empty());
+    f.receive(
+        &mut peer,
+        json!({"type":"stream_chunk", "text":"corrected answer"}),
+    )
+    .await;
+    assert_eq!(
+        f.app.conversation_status(&target),
+        ConversationStatus::Running
+    );
+    let rendered = f.rendered();
+    for text in ["use another approach", "corrected answer"] {
+        assert_eq!(rendered.matches(text).count(), 1, "{rendered}");
+    }
+    assert!(f.control("/exit"));
+    assert_eq!(f.app.selected_target, Target::Home);
+    assert_eq!(f.app.input.text(), "home draft");
+    // The fixture finishes after the observer leaves, without receiving a
+    // cancel/continue/quit (or any other command) on the attachment socket.
+    let run = tokio::spawn(async move {
+        assert!(socket::read_json_line(&mut peer).await.unwrap().is_none());
+        json!({"type":"run_completed", "id":"run"})
+    });
+    assert_eq!(
+        f.app.conversation_status(&target),
+        ConversationStatus::Running
+    );
+    let completed = tokio::time::timeout(Duration::from_secs(2), run)
+        .await
+        .expect("detached fixture run did not complete autonomously")
+        .unwrap();
+    assert_eq!(completed["type"], "run_completed");
+    f.app
+        .on_run_completed(completed["id"].as_str().unwrap().into());
+    assert_eq!(f.app.active_runs["run"].status, "done");
+    assert_eq!(f.app.selected_target, Target::Home);
+    assert_eq!(f.app.screen, Screen::Chat);
+    assert_eq!(f.app.input.text(), "home draft");
+    assert!(f.attachment.target.is_none());
+    f.assert_unsent();
+    f.client.shutdown().await;
+}
+
+#[tokio::test]
+async fn ended_watch_draft_survives_same_nonce_successor_without_sending() {
+    let _sandbox = Sandbox::new();
+    let listener = socket::bind_session_socket(&gremlins::config::state_root(), "test").unwrap();
+    let mut f = Fixture::new();
+    let mut original = f.attach_watch(&listener, "original").await;
+    f.app.replace_input("unsent correction");
+    f.receive(
+        &mut original,
+        json!({"type":"done", "text":"original complete"}),
+    )
+    .await;
+    assert_eq!(f.app.input.text(), "unsent correction");
+    let mut successor = f.attach_watch(&listener, "successor").await;
+    assert_eq!(f.app.input.text(), "unsent correction");
+    assert!(matches!(
+        f.app
+            .conversations
+            .submit(&f.app.selected_target, &f.app.input, false),
+        Submission::Blocked(
+            "the addressed execution has changed; dismiss this draft to start another"
+        )
+    ));
+    assert!(tokio::time::timeout(
+        Duration::from_millis(30),
+        socket::read_json_line(&mut successor)
+    )
+    .await
+    .is_err());
+    assert_eq!(f.app.input.text(), "unsent correction");
+    f.assert_unsent();
+    f.attachment.invalidate(&mut f.app);
+    f.client.shutdown().await;
+}
+
+#[tokio::test]
+async fn rapid_watch_home_watch_rejects_buffered_old_generation_for_same_execution() {
+    let _sandbox = Sandbox::new();
+    let listener = socket::bind_session_socket(&gremlins::config::state_root(), "test").unwrap();
+    let mut f = Fixture::new();
+    install_home_session(&mut f.app, &f.client).await;
+    let mut first = f.attach_watch(&listener, "same-execution").await;
+    socket::write_json_line(
+        first.get_mut(),
+        &json!({"type":"stream_chunk", "text":"stale buffered output"}),
+    )
+    .await
+    .unwrap();
+    let buffered = tokio::time::timeout(Duration::from_secs(2), f.rx.recv())
+        .await
+        .unwrap()
+        .unwrap();
+    f.watch("home");
+    let mut current = f.attach_watch(&listener, "same-execution").await;
+    assert_ne!(buffered.generation, f.attachment.generation);
+    assert_eq!(buffered.execution, f.attachment.execution);
+    apply_attachment_frame(&mut f.app, &mut f.live, &mut f.attachment, buffered);
+    f.receive(
+        &mut current,
+        json!({"type":"stream_chunk", "text":"current output"}),
+    )
+    .await;
+    assert_eq!(f.live.response_text(), "current output");
+    let rendered = f.rendered();
+    assert!(!rendered.contains("stale buffered output"), "{rendered}");
+    assert_eq!(rendered.matches("current output").count(), 1, "{rendered}");
+    f.assert_unsent();
+    f.attachment.invalidate(&mut f.app);
     f.client.shutdown().await;
 }
 

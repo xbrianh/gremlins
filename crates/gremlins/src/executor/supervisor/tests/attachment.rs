@@ -164,6 +164,257 @@ async fn synthetic_run(id: &str) -> (Arc<RunRegistry>, Gremlin, tempfile::TempDi
     (registry, gremlin, dir)
 }
 
+fn run_connection(
+    registry: &Arc<RunRegistry>,
+    id: &str,
+) -> (BufReader<UnixStream>, tokio::task::JoinHandle<()>) {
+    run_connection_replay(registry, id, false)
+}
+
+fn run_connection_replay(
+    registry: &Arc<RunRegistry>,
+    id: &str,
+    replay: bool,
+) -> (BufReader<UnixStream>, tokio::task::JoinHandle<()>) {
+    let (client, server) = UnixStream::pair().unwrap();
+    let registry = registry.clone();
+    let request = json!({"op":"attach", "scope":"run", "id":id, "replay":replay});
+    let task = tokio::spawn(async move {
+        let (read, write) = server.into_split();
+        crate::executor::supervisor::attachment::handle_attach(
+            &request,
+            &registry,
+            BufReader::new(read),
+            &SharedWriter::new(write),
+        )
+        .await;
+    });
+    (BufReader::new(client), task)
+}
+
+async fn run_frame(client: &mut BufReader<UnixStream>) -> Value {
+    timeout(Duration::from_secs(5), socket::read_json_line(client))
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap()
+}
+
+#[tokio::test]
+async fn run_attachment_follows_agent_to_exec_with_exact_scope_and_bus_display_schema() {
+    use gremlins_magic_bus::{emit_corr_event, CorrId};
+    let id = "run-display-scope";
+    let (registry, mut gremlin, _dir) = synthetic_run(id).await;
+    let mut session = gremlin.next_interactive_session();
+    let (mut client, task) = run_connection(&registry, id);
+    let attached = run_frame(&mut client).await;
+    assert_eq!(attached["capabilities"], json!(["observe"]));
+    let corr = CorrId::new().with_run(id).with_execution_id("agent-one");
+    let child = format!("{id}:child");
+    emit_corr_event(
+        &CorrId::new().with_run(&child),
+        EventKind::StreamChunk {
+            text: "child secret".into(),
+        },
+    );
+    emit_corr_event(
+        &CorrId::new().with_run(&child),
+        EventKind::RunStopped { id: child.clone() },
+    );
+    emit_corr_event(
+        &CorrId::new().with_run("unrelated-run"),
+        EventKind::StreamChunk {
+            text: "unrelated secret".into(),
+        },
+    );
+    emit_corr_event(
+        &corr,
+        EventKind::PromptRequest {
+            id: id.into(),
+            json: "private prompt".into(),
+        },
+    );
+    let events = vec![
+        EventKind::StreamChunk {
+            text: "agent answer".into(),
+        },
+        EventKind::ToolResult {
+            id: "tool-call".into(),
+            name: "Bash".into(),
+            call: "pwd".into(),
+            output: "/work".into(),
+        },
+        EventKind::TurnComplete {
+            turn: 1,
+            text: "answer".into(),
+            tool_calls: vec![],
+            stats: None,
+            totals: None,
+        },
+        EventKind::Done {
+            text: "done".into(),
+            summary: "summary".into(),
+            usage: None,
+        },
+        EventKind::StageBoundary {
+            id: id.into(),
+            stage: "exec".into(),
+            stage_type: "exec".into(),
+            active: true,
+        },
+        EventKind::ExecOutput {
+            id: id.into(),
+            is_stderr: true,
+            text: "exec stderr".into(),
+            ts: "now".into(),
+        },
+        EventKind::LogLine {
+            id: id.into(),
+            line: "ordinary log".into(),
+        },
+    ];
+    let mut previous_sequence = 0;
+    for kind in events {
+        let expected = serde_json::to_value(&kind).unwrap();
+        emit_corr_event(&corr, kind);
+        let mut frame = run_frame(&mut client).await;
+        let sequence = frame["sequence"].as_u64().expect("live frame sequence");
+        assert!(sequence > previous_sequence);
+        previous_sequence = sequence;
+        frame.as_object_mut().unwrap().remove("sequence");
+        assert_eq!(frame, expected);
+    }
+    assert!(!session.accept_pause(), "run attachment acquired a pause");
+    emit_corr_event(&corr, EventKind::RunStopped { id: id.into() });
+    let terminal = run_frame(&mut client).await;
+    assert_eq!(terminal["type"], "run_stopped");
+    assert!(terminal["sequence"].as_u64().unwrap() > previous_sequence);
+    timeout(Duration::from_secs(5), task)
+        .await
+        .unwrap()
+        .unwrap();
+}
+
+#[tokio::test]
+async fn run_attachment_replay_resumed_run_keeps_following_with_sequences() {
+    use gremlins_magic_bus::{emit_corr_event, CorrId};
+
+    for (suffix, terminal) in [("completed", 0), ("failed", 1), ("stopped", 2)] {
+        let id = format!("run-replay-resumed-{suffix}");
+        let (registry, _gremlin, _dir) = synthetic_run(&id).await;
+        let corr = CorrId::new().with_run(&id);
+        let terminal = match terminal {
+            0 => EventKind::RunCompleted {
+                id: id.clone(),
+                exit_code: 0,
+            },
+            1 => EventKind::RunFailed {
+                id: id.clone(),
+                exit_code: 1,
+                error: None,
+            },
+            _ => EventKind::RunStopped { id: id.clone() },
+        };
+        emit_corr_event(&corr, terminal);
+        emit_corr_event(
+            &corr,
+            EventKind::RunStarted {
+                id: id.clone(),
+                definition: "test".into(),
+                stage: "resumed".into(),
+            },
+        );
+        emit_corr_event(
+            &corr,
+            EventKind::StreamChunk {
+                text: "identical".into(),
+            },
+        );
+        let (mut client, task) = run_connection_replay(&registry, &id, true);
+        let attached = run_frame(&mut client).await;
+        assert_eq!(
+            attached["capabilities"],
+            json!(["observe", "replay_checkpoint"])
+        );
+        let old_terminal = timeout(
+            Duration::from_secs(5),
+            wait_for(&mut client, |frame| {
+                matches!(
+                    frame["type"].as_str(),
+                    Some("run_completed" | "run_failed" | "run_stopped")
+                )
+            }),
+        )
+        .await
+        .unwrap();
+        let historical = run_frame(&mut client).await;
+        assert_eq!(historical["text"], "identical");
+        assert!(
+            historical["sequence"].as_u64().unwrap() > old_terminal["sequence"].as_u64().unwrap()
+        );
+        let checkpoint = run_frame(&mut client).await;
+        assert_eq!(checkpoint["type"], "replay_checkpoint");
+        assert!(
+            checkpoint["through_sequence"].as_u64().unwrap()
+                >= historical["sequence"].as_u64().unwrap()
+        );
+        emit_corr_event(
+            &corr,
+            EventKind::StreamChunk {
+                text: "identical".into(),
+            },
+        );
+        let live = run_frame(&mut client).await;
+        assert_eq!(live["text"], historical["text"]);
+        assert!(
+            live["sequence"].as_u64().unwrap() > checkpoint["through_sequence"].as_u64().unwrap()
+        );
+        emit_corr_event(&corr, EventKind::RunStopped { id: id.clone() });
+        let stopped = run_frame(&mut client).await;
+        assert_eq!(stopped["type"], "run_stopped");
+        assert!(stopped["sequence"].as_u64().unwrap() > live["sequence"].as_u64().unwrap());
+        timeout(Duration::from_secs(5), task)
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(socket::read_json_line(&mut client).await.unwrap().is_none());
+    }
+}
+
+#[tokio::test]
+async fn run_attachment_reports_lag_without_backpressuring_producer() {
+    use gremlins_magic_bus::{emit_corr_event_async, CorrId};
+    let id = "run-display-lag";
+    let (registry, _gremlin, _dir) = synthetic_run(id).await;
+    let (entered, release) = crate::executor::supervisor::attachment::receiver_gate::install(id);
+    let (mut client, task) = run_connection(&registry, id);
+    assert_eq!(run_frame(&mut client).await["type"], "attached");
+    entered.await.unwrap();
+    timeout(Duration::from_secs(5), async {
+        for n in 0..1024 {
+            emit_corr_event_async(
+                &CorrId::new().with_run(id),
+                EventKind::StreamChunk {
+                    text: n.to_string(),
+                },
+            )
+            .await;
+        }
+    })
+    .await
+    .expect("passive run viewer blocked producer");
+    release.send(()).unwrap();
+    let gap = run_frame(&mut client).await;
+    assert_eq!(gap["type"], "lagged");
+    assert!(gap["skipped"].as_u64().unwrap() > 0);
+    assert_eq!(run_frame(&mut client).await["type"], "stream_chunk");
+    drop(client);
+    timeout(Duration::from_secs(5), task)
+        .await
+        .unwrap()
+        .unwrap();
+}
+
 /// POSIX FIFO handshake: opening the writer proves the child reached its
 /// blocking read. No shell-specific networking or timing window is needed.
 struct ChildGate {
@@ -1282,8 +1533,20 @@ async fn default_attach_during_live_request_only_pauses_for_immediate_correction
             _ = wait_for(&mut client, |f| f["type"] == "stream_chunk" && f["text"] == "corrected output continues") => {}
         }
         detach_after_delivery(&mut client, &mut handler, "live-correction").await;
-        cancel.cancel();
-        assert!(matches!(agent.await, Err(ClientError::Cancelled)));
+        // Finish only after detach. No control command or cancellation may be
+        // needed to let the corrected request complete.
+        let done = json!({"choices":[{"index":0,"delta":{"tool_calls":[{
+            "index":0,"id":"done-corrected","type":"function",
+            "function":{"name":"Done","arguments":"{\"summary\":\"corrected task complete\"}"}
+        }]},"finish_reason":"tool_calls"}]});
+        corrected_stream
+            .write_all(format!("data: {done}\n\ndata: [DONE]\n\n").as_bytes())
+            .await
+            .unwrap();
+        corrected_stream.shutdown().await.unwrap();
+        let completed = agent.await.expect("corrected agent must finish after detach");
+        assert!(!cancel.is_cancelled());
+        assert_eq!(completed.summary.as_deref(), Some("corrected task complete"));
         registry.stop_run(id).await.unwrap();
     })
     .await

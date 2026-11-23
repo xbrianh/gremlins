@@ -40,7 +40,10 @@ use crate::clients::interactive::{AttachError, DebugAttachment, EndSignal, Inter
 use crate::executor::gremlin::validate_gremlin_id;
 use crate::executor::socket;
 use gremlins_magic_bus::connection::{BusSubGuard, SharedWriter};
-use gremlins_magic_bus::{subscribe_run_lag_tolerant, EventKind, Recv};
+use gremlins_magic_bus::{
+    subscribe_run_lag_tolerant, subscribe_run_with_history, DispatchEvent, EventKind,
+    HistorySnapshot, Recv,
+};
 use tokio::net::unix::OwnedReadHalf;
 use tokio::sync::watch;
 
@@ -125,6 +128,77 @@ impl RunEvent {
     }
 }
 
+/// Display frames retain the bus wire schema; lifecycle frames remain RunEvent.
+fn run_display_kind(kind: &EventKind) -> bool {
+    kind.is_chat_event()
+        || matches!(
+            kind,
+            EventKind::Ready { .. }
+                | EventKind::StreamReset
+                | EventKind::SkillLoaded { .. }
+                | EventKind::ExecOutput { .. }
+                | EventKind::LogLine { .. }
+        )
+}
+
+fn run_kind_frame(kind: &EventKind) -> Option<Value> {
+    if run_display_kind(kind) {
+        serde_json::to_value(kind).ok()
+    } else {
+        RunEvent::from_kind(kind).and_then(|event| serde_json::to_value(event).ok())
+    }
+}
+
+fn run_display_frame(dispatch: &DispatchEvent<EventKind>, id: &str) -> Option<Value> {
+    if dispatch.corr_id().run() != Some(id) || !event_run_id_matches(dispatch.kind(), id) {
+        return None;
+    }
+    let mut frame = run_kind_frame(dispatch.kind())?;
+    frame["sequence"] = serde_json::json!(dispatch.sequence());
+    Some(frame)
+}
+
+async fn write_run_history(
+    writer: &SharedWriter,
+    id: &str,
+    history: HistorySnapshot<EventKind>,
+) -> Result<bool, String> {
+    if !history.complete {
+        writer
+            .write_json_line(&serde_json::json!({
+                "type": "history_gap",
+                "reason": "history_incomplete",
+                "through_sequence": history.through_sequence,
+                "evicted_through_sequence": history.evicted_through_sequence,
+            }))
+            .await?;
+    }
+    let mut terminal = false;
+    for dispatch in history.events {
+        if dispatch.corr_id().run() == Some(id) && event_run_id_matches(dispatch.kind(), id) {
+            match dispatch.kind() {
+                EventKind::RunStarted { .. } => terminal = false,
+                EventKind::RunCompleted { .. }
+                | EventKind::RunFailed { .. }
+                | EventKind::RunStopped { .. } => terminal = true,
+                _ => {}
+            }
+        }
+        if let Some(value) = run_display_frame(&dispatch, id) {
+            writer.write_json_line(&value).await?;
+        }
+    }
+    writer
+        .write_json_line(&serde_json::json!({
+            "type": "replay_checkpoint", "id": id, "scope": "run",
+            "complete": history.complete,
+            "through_sequence": history.through_sequence,
+            "evicted_through_sequence": history.evicted_through_sequence,
+        }))
+        .await?;
+    Ok(terminal)
+}
+
 // ── Entry points ───────────────────────────────────────────────────────
 
 /// Read the first request from an attachment stream and dispatch based on
@@ -161,7 +235,7 @@ pub(crate) async fn handle_attach(
 // ── Run-scope (passive, stage-boundary follow) ──────────────────────────
 
 async fn handle_run_attach(
-    _request: &Value,
+    request: &Value,
     id: &str,
     registry: &Arc<RunRegistry>,
     mut reader: BufReader<tokio::net::unix::OwnedReadHalf>,
@@ -176,7 +250,14 @@ async fn handle_run_attach(
         return;
     }
 
-    let (sub, mut bus_rx) = subscribe_run_lag_tolerant(id, 256);
+    let replay = request.get("replay").and_then(Value::as_bool) == Some(true);
+    let (sub, mut bus_rx, history) = if replay {
+        let (sub, rx, history) = subscribe_run_with_history(id, 256);
+        (sub, rx, Some(history))
+    } else {
+        let (sub, rx) = subscribe_run_lag_tolerant(id, 256);
+        (sub, rx, None)
+    };
     let _stream_guard = BusSubGuard::new(sub);
 
     // Emit a status frame so the caller knows the attachment is live.
@@ -184,28 +265,39 @@ async fn handle_run_attach(
         "type": "attached",
         "id": id,
         "scope": "run",
-        "capabilities": ["observe"],
+        "capabilities": if replay { vec!["observe", "replay_checkpoint"] } else { vec!["observe"] },
     });
     if writer.write_json_line(&status).await.is_err() {
         return;
     }
+
+    if let Some(history) = history {
+        match write_run_history(writer, id, history).await {
+            Ok(false) => {}
+            Ok(true) | Err(_) => return,
+        }
+    }
+
+    #[cfg(test)]
+    receiver_gate::wait(id).await;
 
     loop {
         tokio::select! {
             result = bus_rx.recv() => {
                 match result {
                     Recv::Event(dispatch) => {
-                        let kind = dispatch.into_kind();
-                        // Filter: only run-lifecycle events for this id.
-                        if event_run_id_matches(&kind, id) {
-                            if let Some(evt) = RunEvent::from_kind(&kind) {
-                                let value = match serde_json::to_value(&evt) {
-                                    Ok(v) => v,
-                                    Err(_) => continue,
-                                };
-                                if writer.write_json_line(&value).await.is_err() {
-                                    break;
-                                }
+                        // Bus run subscriptions also receive descendants. Never
+                        // display or terminate on another run's events.
+                        if dispatch.corr_id().run() != Some(id) {
+                            continue;
+                        }
+                        let kind = dispatch.kind();
+                        if !event_run_id_matches(kind, id) {
+                            continue;
+                        }
+                        if let Some(value) = run_display_frame(&dispatch, id) {
+                            if writer.write_json_line(&value).await.is_err() {
+                                break;
                             }
                         }
                         // RunCompleted, RunFailed, RunStopped → terminal.
@@ -1403,6 +1495,273 @@ pub(crate) mod delivery_busy_gate {
 mod routing_tests {
     use super::*;
     use crate::clients::interactive::{AttachError, InteractiveSessionFactory};
+
+    #[tokio::test]
+    async fn run_replay_is_native_filtered_and_checkpointed_before_future() {
+        use gremlins_magic_bus::{Bus, CorrId, SubscriberRegistration, TryRecvError};
+
+        let bus = Bus::new();
+        let id = "replay-test";
+        let chunk = EventKind::StreamChunk {
+            text: "before".into(),
+        };
+        let event = DispatchEvent::new(CorrId::new().with_run(id), chunk.clone());
+        bus.emit(event.clone());
+        bus.emit(DispatchEvent::new(
+            CorrId::new().with_run(format!("{id}:child")),
+            chunk.clone(),
+        ));
+        bus.emit(DispatchEvent::new(
+            CorrId::new().with_run(id),
+            EventKind::RunStopped { id: "other".into() },
+        ));
+        let (_, mut rx, history) = bus
+            .subscribe_with_history(SubscriberRegistration::lag_tolerant(
+                CorrId::new().with_run(id),
+                256,
+            ))
+            .unwrap();
+        assert!(matches!(rx.try_recv(), Err(TryRecvError::Empty)));
+        let future = EventKind::StreamChunk {
+            text: "after".into(),
+        };
+        bus.emit_async(DispatchEvent::new(
+            CorrId::new().with_run(id),
+            future.clone(),
+        ))
+        .await;
+
+        let (client, server) = tokio::net::UnixStream::pair().unwrap();
+        let (_, write) = server.into_split();
+        let writer = SharedWriter::new(write);
+        let mut reader = BufReader::new(client);
+        writer
+            .write_json_line(&serde_json::json!({"type": "attached"}))
+            .await
+            .unwrap();
+        write_run_history(&writer, id, history).await.unwrap();
+        let live = rx.try_recv().unwrap();
+        writer
+            .write_json_line(&run_display_frame(&live, id).unwrap())
+            .await
+            .unwrap();
+        for expected in [
+            serde_json::json!({"type": "attached"}),
+            serde_json::json!({"type": "stream_chunk", "text": "before", "sequence": 1}),
+            serde_json::json!({"type": "replay_checkpoint", "id": id, "scope": "run",
+                "complete": true, "through_sequence": 3, "evicted_through_sequence": 0}),
+            serde_json::json!({"type": "stream_chunk", "text": "after", "sequence": 4}),
+        ] {
+            assert_eq!(
+                socket::read_json_line(&mut reader).await.unwrap().unwrap(),
+                expected
+            );
+        }
+        assert!(matches!(rx.try_recv(), Err(TryRecvError::Empty)));
+    }
+
+    #[tokio::test]
+    async fn run_replay_delayed_socket_is_independent_of_disk_append_order() {
+        use gremlins_magic_bus::{Bus, CorrId, SubscriberRegistration, TryRecvError};
+        use std::io::Write;
+        use std::time::Duration;
+
+        for disk_first in [false, true] {
+            let id = format!("replay-delayed-disk-first-{disk_first}");
+            let corr = CorrId::new().with_run(&id);
+            let chunk = EventKind::StreamChunk {
+                text: "identical before and after cut".into(),
+            };
+            let mut artifact = tempfile::NamedTempFile::new().unwrap();
+            let bytes = serde_json::to_vec(&chunk).unwrap();
+            if disk_first {
+                artifact.write_all(&bytes).unwrap();
+                artifact.write_all(b"\n").unwrap();
+            }
+            let bus = Bus::new();
+            let event = DispatchEvent::new(corr.clone(), chunk.clone());
+            bus.emit(event.clone());
+            let (_, mut rx, history) = bus
+                .subscribe_with_history(SubscriberRegistration::lag_tolerant(corr, 256))
+                .unwrap();
+            assert!(matches!(rx.try_recv(), Err(TryRecvError::Empty)));
+            // Same payload on either side of the atomic cut is not a duplicate.
+            bus.emit(event.clone());
+            if !disk_first {
+                artifact.write_all(&bytes).unwrap();
+                artifact.write_all(b"\n").unwrap();
+            }
+            artifact.write_all(&bytes).unwrap();
+            artifact.write_all(b"\n").unwrap();
+            artifact.flush().unwrap();
+            let original = std::fs::read(artifact.path()).unwrap();
+
+            let (client, server) = tokio::net::UnixStream::pair().unwrap();
+            let (_, write) = server.into_split();
+            let writer = SharedWriter::new(write);
+            let replay_id = id.clone();
+            let started = tokio::time::Instant::now();
+            let send = tokio::spawn(async move {
+                // Exceed the old 50ms replay/drain window before any socket output.
+                tokio::time::sleep(Duration::from_millis(100)).await;
+                writer
+                    .write_json_line(&serde_json::json!({"type": "attached"}))
+                    .await
+                    .unwrap();
+                assert!(!write_run_history(&writer, &replay_id, history)
+                    .await
+                    .unwrap());
+                let live = rx.try_recv().unwrap();
+                writer
+                    .write_json_line(&run_display_frame(&live, &replay_id).unwrap())
+                    .await
+                    .unwrap();
+                assert!(matches!(rx.try_recv(), Err(TryRecvError::Empty)));
+            });
+            let mut reader = BufReader::new(client);
+            for (index, expected) in [
+                serde_json::json!({"type": "attached"}),
+                serde_json::json!({"type": "stream_chunk",
+                    "text": "identical before and after cut", "sequence": 1}),
+                serde_json::json!({"type": "replay_checkpoint", "id": id, "scope": "run",
+                    "complete": true, "through_sequence": 1, "evicted_through_sequence": 0}),
+                serde_json::json!({"type": "stream_chunk",
+                    "text": "identical before and after cut", "sequence": 2}),
+            ]
+            .into_iter()
+            .enumerate()
+            {
+                let frame = tokio::time::timeout(
+                    Duration::from_secs(2),
+                    socket::read_json_line(&mut reader),
+                )
+                .await
+                .unwrap()
+                .unwrap()
+                .unwrap();
+                if index == 0 {
+                    assert!(started.elapsed() > Duration::from_millis(50));
+                }
+                assert_eq!(frame, expected);
+            }
+            send.await.unwrap();
+            assert!(socket::read_json_line(&mut reader).await.unwrap().is_none());
+            assert_eq!(std::fs::read(artifact.path()).unwrap(), original);
+        }
+    }
+
+    #[tokio::test]
+    async fn run_replay_eviction_gap_precedes_retained_history_and_incomplete_checkpoint() {
+        use gremlins_magic_bus::CorrId;
+
+        for retained in [false, true] {
+            let id = "evicted-replay";
+            let chunk = EventKind::StreamChunk {
+                text: "retained".into(),
+            };
+            let dispatch = DispatchEvent::new(CorrId::new().with_run(id), chunk.clone());
+            let mut expected = serde_json::to_value(&chunk).unwrap();
+            expected["sequence"] = serde_json::json!(dispatch.sequence());
+            let history = HistorySnapshot {
+                events: if retained { vec![dispatch] } else { vec![] },
+                complete: false,
+                through_sequence: 42,
+                evicted_through_sequence: 39,
+            };
+            let (client, server) = tokio::net::UnixStream::pair().unwrap();
+            let (_, write) = server.into_split();
+            let writer = SharedWriter::new(write);
+            assert!(!write_run_history(&writer, id, history).await.unwrap());
+            drop(writer);
+            let mut reader = BufReader::new(client);
+            assert_eq!(
+                socket::read_json_line(&mut reader).await.unwrap().unwrap(),
+                serde_json::json!({
+                    "type": "history_gap", "reason": "history_incomplete",
+                    "through_sequence": 42, "evicted_through_sequence": 39,
+                })
+            );
+            if retained {
+                assert_eq!(
+                    socket::read_json_line(&mut reader).await.unwrap().unwrap(),
+                    expected
+                );
+            }
+            assert_eq!(
+                socket::read_json_line(&mut reader).await.unwrap().unwrap(),
+                serde_json::json!({
+                    "type": "replay_checkpoint", "id": id, "scope": "run",
+                    "complete": false, "through_sequence": 42,
+                    "evicted_through_sequence": 39,
+                })
+            );
+            assert!(socket::read_json_line(&mut reader).await.unwrap().is_none());
+        }
+    }
+
+    #[tokio::test]
+    async fn run_replay_reports_terminal_only_for_matching_history() {
+        use gremlins_magic_bus::CorrId;
+
+        for kind in [
+            EventKind::RunCompleted {
+                id: "terminal-replay".into(),
+                exit_code: 0,
+            },
+            EventKind::RunFailed {
+                id: "terminal-replay".into(),
+                exit_code: 1,
+                error: None,
+            },
+            EventKind::RunStopped {
+                id: "terminal-replay".into(),
+            },
+        ] {
+            for matching in [false, true] {
+                let (client, server) = tokio::net::UnixStream::pair().unwrap();
+                let (_, write) = server.into_split();
+                let writer = SharedWriter::new(write);
+                let history = vec![DispatchEvent::new(
+                    CorrId::new().with_run(if matching {
+                        "terminal-replay"
+                    } else {
+                        "terminal-replay:child"
+                    }),
+                    kind.clone(),
+                )];
+                let mut expected = run_kind_frame(&kind).unwrap();
+                expected["sequence"] = serde_json::json!(history[0].sequence());
+                assert_eq!(
+                    write_run_history(
+                        &writer,
+                        "terminal-replay",
+                        HistorySnapshot {
+                            events: history,
+                            complete: true,
+                            through_sequence: 1,
+                            evicted_through_sequence: 0,
+                        }
+                    )
+                    .await
+                    .unwrap(),
+                    matching
+                );
+                drop(writer);
+                let mut reader = BufReader::new(client);
+                if matching {
+                    assert_eq!(
+                        socket::read_json_line(&mut reader).await.unwrap().unwrap(),
+                        expected
+                    );
+                }
+                assert_eq!(
+                    socket::read_json_line(&mut reader).await.unwrap().unwrap()["type"],
+                    "replay_checkpoint"
+                );
+                assert!(socket::read_json_line(&mut reader).await.unwrap().is_none());
+            }
+        }
+    }
 
     #[tokio::test]
     async fn pipelined_continue_and_detach_are_both_acknowledged() {

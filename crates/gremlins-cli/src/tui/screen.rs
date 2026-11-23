@@ -1077,16 +1077,8 @@ fn pad_to_display_width(s: &str, target: usize) -> String {
     out
 }
 
-/// Normalize a stage-stream JSON line (old envelope or new EventKind) to a
-/// canonical `kind` string for display routing.
+/// Classify native replay/live events and transport discontinuity frames.
 pub(crate) fn classify_stream_value(value: &serde_json::Value) -> Option<String> {
-    // Old `stage_stream_line` envelope: "type" == "stage_stream_line",
-    // display kind lives in "kind".
-    if value.get("type").and_then(|v| v.as_str()) == Some("stage_stream_line") {
-        return value.get("kind").and_then(|v| v.as_str()).map(String::from);
-    }
-
-    // New EventKind: map serde "type" tag to canonical display kind.
     match value.get("type").and_then(|v| v.as_str()) {
         Some("stream_chunk") => Some("text".to_string()),
         Some("reasoning_chunk") => Some("reasoning".to_string()),
@@ -1108,7 +1100,19 @@ pub(crate) fn classify_stream_value(value: &serde_json::Value) -> Option<String>
             }
         }
         Some("log_line") => Some("log".to_string()),
-        _ => value.get("kind").and_then(|v| v.as_str()).map(String::from),
+        Some("lagged") => Some("lagged".to_string()),
+        _ => None,
+    }
+}
+
+fn stream_text_value(kind: &str, text: &str) -> serde_json::Value {
+    match kind {
+        "reasoning" => serde_json::json!({"type": "reasoning_chunk", "text": text}),
+        "stdout" | "stderr" => serde_json::json!({
+            "type": "exec_output", "id": "", "ts": "",
+            "is_stderr": kind == "stderr", "text": text
+        }),
+        _ => serde_json::json!({"type": "stream_chunk", "text": text}),
     }
 }
 
@@ -1285,7 +1289,7 @@ impl RunsView {
                 }
                 Some("tool_output")
                 | Some("tool_result")
-                | Some("tool_call")
+                | Some("lagged")
                 | Some("turn_complete")
                 | Some("stage_boundary") => {
                     self.stream_tail_kind = None;
@@ -1378,7 +1382,7 @@ impl RunsView {
                     self.append_to_last_line(kind, part);
                 } else {
                     self.stream_lines
-                        .push_back(serde_json::json!({"kind": kind, "text": part}).to_string());
+                        .push_back(stream_text_value(kind, part).to_string());
                 }
 
                 self.stream_tail_kind = Some(kind.to_string());
@@ -1387,22 +1391,16 @@ impl RunsView {
                 self.stream_tail_kind = None;
                 self.stream_tail_open = false;
                 self.stream_lines
-                    .push_back(serde_json::json!({"kind": kind, "text": part}).to_string());
+                    .push_back(stream_text_value(kind, part).to_string());
             }
         }
     }
 
-    /// Append `text` to the last stream line when its kind matches.
-    ///
-    /// The inner kind check is load-bearing: the event arms for `log`,
-    /// `tool_call`, `turn_complete`, and `stage_boundary` do not reset
-    /// `stream_tail_kind` / `stream_tail_open`, so a stale tail may point
-    /// at a non-text entry.  Re-checking the last entry's actual kind
-    /// prevents coalescing text into e.g. a `log` line.
+    /// Append `text` only when the last native event has the matching kind.
     fn append_to_last_line(&mut self, kind: &str, text: &str) {
         if let Some(last) = self.stream_lines.back_mut() {
             if let Ok(mut obj) = serde_json::from_str::<serde_json::Value>(last) {
-                if obj.get("kind").and_then(|v| v.as_str()) == Some(kind) {
+                if classify_stream_value(&obj).as_deref() == Some(kind) {
                     let combined = format!(
                         "{}{}",
                         obj.get("text").and_then(|v| v.as_str()).unwrap_or(""),
@@ -1421,7 +1419,7 @@ impl RunsView {
         }
         // Fall through: push a new line.
         self.stream_lines
-            .push_back(serde_json::json!({"kind": kind, "text": text}).to_string());
+            .push_back(stream_text_value(kind, text).to_string());
     }
 
     fn push_done_line(&mut self, obj: &serde_json::Value, raw: String) {
@@ -1443,7 +1441,7 @@ impl RunsView {
             self.stream_tail_kind = None;
             self.stream_tail_open = false;
             self.stream_lines.push_back(
-                serde_json::json!({ "kind": "done_summary", "text": summary }).to_string(),
+                serde_json::json!({ "type": "log_line", "id": "", "line": format!("── summary: {summary}") }).to_string(),
             );
         }
 
@@ -1815,7 +1813,7 @@ impl RunsView {
             .stream_lines
             .iter()
             .map(|line| {
-                // Try to parse as a stage-stream JSON line
+                // Parse native replay/live JSON.
                 if let Ok(obj) = serde_json::from_str::<serde_json::Value>(line) {
                     // Normalize: use the shared helper to get a canonical kind.
                     let kind = classify_stream_value(&obj);
@@ -1837,28 +1835,22 @@ impl RunsView {
                             ))
                         }
                         Some("log") => {
-                            // Operational-log fallback line — render the text
-                            // field, falling back to `line` for EventKind.
-                            let text = obj
-                                .get("text")
-                                .or(obj.get("line"))
-                                .and_then(|v| v.as_str())
-                                .unwrap_or("");
+                            let text = obj.get("line").and_then(|v| v.as_str()).unwrap_or("");
                             Line::from(Span::styled(
                                 text.to_string(),
                                 Style::default().fg(DEFAULT_THEME.text),
                             ))
                         }
                         Some("lagged") => {
-                            let skipped = obj.get("skipped").and_then(|v| v.as_i64()).unwrap_or(0);
+                            let skipped = obj.get("skipped").and_then(|v| v.as_u64()).unwrap_or(0);
                             Line::from(Span::styled(
-                                format!("[skipped {skipped} lines]"),
+                                format!("[stream discontinuity: skipped {skipped} events]"),
                                 Style::default()
                                     .fg(DEFAULT_THEME.subtle)
                                     .add_modifier(Modifier::DIM),
                             ))
                         }
-                        Some("tool_output") | Some("tool_result") | Some("tool_call") => {
+                        Some("tool_output") | Some("tool_result") => {
                             let name = obj.get("name").and_then(|v| v.as_str()).unwrap_or("");
                             let text = obj
                                 .get("text")
@@ -1871,15 +1863,6 @@ impl RunsView {
                             Line::from(Span::styled(
                                 format!("◆ {} {}", name, first_line),
                                 Style::default().fg(DEFAULT_THEME.subtle),
-                            ))
-                        }
-                        Some("done_summary") => {
-                            let text = obj.get("text").and_then(|v| v.as_str()).unwrap_or("");
-                            Line::from(Span::styled(
-                                format!("── summary: {text}"),
-                                Style::default()
-                                    .fg(DEFAULT_THEME.chrome)
-                                    .add_modifier(Modifier::ITALIC),
                             ))
                         }
                         Some("turn_complete") => {
@@ -3411,37 +3394,79 @@ mod tests {
     }
 
     #[test]
+    fn watch_pane_lagged_frame_marks_discontinuity_and_breaks_coalescing() {
+        let (mut live, app) = setup_watch_test(90, 16);
+        live.show_runs();
+        live.push_watch_line(
+            serde_json::json!({"type":"stream_chunk","text":"before"}).to_string(),
+        );
+        live.push_watch_line(serde_json::json!({"type":"lagged","skipped":7}).to_string());
+        live.push_watch_line(serde_json::json!({"type":"stream_chunk","text":"after"}).to_string());
+        assert_eq!(
+            stream_texts(live.runs_view_mut().unwrap()),
+            vec!["before", "after"]
+        );
+        live.compose(&app).unwrap();
+        let rendered = dump_buffer(live.backend().buffer());
+        assert!(
+            rendered.contains("stream discontinuity: skipped 7 events"),
+            "{rendered}"
+        );
+    }
+
+    #[test]
+    fn watch_pane_replays_native_tool_events() {
+        use gremlins_magic_bus::EventKind;
+        let (mut live, app) = setup_watch_test(90, 16);
+        live.show_runs();
+        for event in [
+            EventKind::ToolOutputChunk {
+                id: "t1".into(),
+                name: "Bash".into(),
+                call: "Bash(command=ls)".into(),
+                text: "partial output\nsecond line".into(),
+            },
+            EventKind::ToolResult {
+                id: "t1".into(),
+                name: "Bash".into(),
+                call: "Bash(command=ls)".into(),
+                output: "final output\nsecond line".into(),
+            },
+        ] {
+            live.push_watch_line(serde_json::to_string(&event).unwrap());
+        }
+        live.compose(&app).unwrap();
+        let rendered = dump_buffer(live.backend().buffer());
+        assert!(rendered.contains("◆ Bash partial output"), "{rendered}");
+        assert!(rendered.contains("◆ Bash final output"), "{rendered}");
+        assert!(!rendered.contains("second line"), "{rendered}");
+        assert!(!rendered.contains("tool_output_chunk"), "{rendered}");
+    }
+
+    #[test]
     fn watch_pane_suppresses_whitespace_only_entries() {
         let (mut live, app) = setup_watch_test(50, 12);
         live.show_runs();
 
         // Push two visible messages separated by blank entries.
         live.push_watch_line(
-            serde_json::json!({"type":"stage_stream_line","kind":"text","text":"first visible\n"})
-                .to_string(),
+            serde_json::json!({"type":"stream_chunk","text":"first visible\n"}).to_string(),
         );
         // Whitespace-only text line (spaces).
-        live.push_watch_line(
-            serde_json::json!({"type":"stage_stream_line","kind":"text","text":"   \n"})
-                .to_string(),
-        );
+        live.push_watch_line(serde_json::json!({"type":"stream_chunk","text":"   \n"}).to_string());
         // Whitespace-only text line (tabs).
         live.push_watch_line(
-            serde_json::json!({"type":"stage_stream_line","kind":"text","text":"\t\t\n"})
-                .to_string(),
+            serde_json::json!({"type":"stream_chunk","text":"\t\t\n"}).to_string(),
         );
         // Blank operational log entry.
         live.push_watch_line(
-            serde_json::json!({"type":"stage_stream_line","kind":"log","text":"  "}).to_string(),
+            serde_json::json!({"type":"log_line","id":"g1","line":"  "}).to_string(),
         );
         // A done event — must still be visible.
-        live.push_watch_line(
-            serde_json::json!({"type":"stage_stream_line","kind":"done"}).to_string(),
-        );
+        live.push_watch_line(serde_json::json!({"type":"done","text":"","summary":""}).to_string());
         // Second message.
         live.push_watch_line(
-            serde_json::json!({"type":"stage_stream_line","kind":"text","text":"last visible"})
-                .to_string(),
+            serde_json::json!({"type":"stream_chunk","text":"last visible"}).to_string(),
         );
 
         live.compose(&app).unwrap();
@@ -3488,17 +3513,9 @@ mod tests {
         let (mut live, app) = setup_watch_test(50, 12);
         live.show_runs();
 
-        live.push_watch_line(
-            serde_json::json!({"type":"stage_stream_line","kind":"text","text":"hello"})
-                .to_string(),
-        );
-        live.push_watch_line(
-            serde_json::json!({"type":"stage_stream_line","kind":"text","text":" "}).to_string(),
-        );
-        live.push_watch_line(
-            serde_json::json!({"type":"stage_stream_line","kind":"text","text":"world"})
-                .to_string(),
-        );
+        live.push_watch_line(serde_json::json!({"type":"stream_chunk","text":"hello"}).to_string());
+        live.push_watch_line(serde_json::json!({"type":"stream_chunk","text":" "}).to_string());
+        live.push_watch_line(serde_json::json!({"type":"stream_chunk","text":"world"}).to_string());
 
         live.compose(&app).unwrap();
 
@@ -3523,20 +3540,17 @@ mod tests {
         // without the filter but leave it visible with the filter.
         for i in 0..8 {
             live.push_watch_line(
-                serde_json::json!({"type":"stage_stream_line","kind":"text","text":format!("line {i}\n")}).to_string(),
+                serde_json::json!({"type":"stream_chunk","text":format!("line {i}\n")}).to_string(),
             );
         }
         let anchor = "ANCHOR_TAIL_LINE";
-        live.push_watch_line(
-            serde_json::json!({"type":"stage_stream_line","kind":"text","text":anchor}).to_string(),
-        );
+        live.push_watch_line(serde_json::json!({"type":"stream_chunk","text":anchor}).to_string());
         // Push enough trailing whitespace-only entries that, without
         // the filter, the combined row count exceeds body_rows and the
         // anchor scrolls out of the rendered tail.
         for _ in 0..12 {
             live.push_watch_line(
-                serde_json::json!({"type":"stage_stream_line","kind":"log","text":"   "})
-                    .to_string(),
+                serde_json::json!({"type":"log_line","id":"g1","line":"   "}).to_string(),
             );
         }
 
@@ -3973,8 +3987,8 @@ Buffer:
             .iter()
             .filter_map(|line| {
                 let obj = serde_json::from_str::<serde_json::Value>(line).ok()?;
-                let kind = obj.get("kind")?.as_str()?;
-                match kind {
+                let kind = classify_stream_value(&obj)?;
+                match kind.as_str() {
                     "text" | "reasoning" | "stdout" | "stderr" => {
                         Some(obj.get("text")?.as_str()?.to_string())
                     }
@@ -3993,7 +4007,7 @@ Buffer:
         assert_eq!(v.stream_lines.len(), 2);
         assert_eq!(stream_texts(&v), vec!["a", "b"]);
         let obj = serde_json::from_str::<serde_json::Value>(&v.stream_lines[0]).unwrap();
-        assert_eq!(obj["kind"].as_str(), Some("stdout"));
+        assert_eq!(classify_stream_value(&obj).as_deref(), Some("stdout"));
     }
 
     #[test]
@@ -4061,8 +4075,7 @@ Buffer:
         let mut v = RunsView::new();
         v.push_stream_line(
             serde_json::json!({
-                "type": "stage_stream_line",
-                "kind": "done",
+                "type": "done",
                 "text": "result without streaming",
                 "summary": "finished"
             })
@@ -4075,7 +4088,7 @@ Buffer:
         assert_eq!(v.stream_lines.len(), 3);
         assert_eq!(stream_texts(&v), vec!["result without streaming"]);
         assert!(
-            v.stream_lines[1].contains("\"done_summary\""),
+            v.stream_lines[1].contains("── summary:"),
             "expected done_summary: {}",
             v.stream_lines[1]
         );
@@ -4090,8 +4103,7 @@ Buffer:
 
         v.push_stream_line(
             serde_json::json!({
-                "type": "stage_stream_line",
-                "kind": "done",
+                "type": "done",
                 "text": "streamed result",
                 "summary": "did it"
             })
@@ -4107,7 +4119,7 @@ Buffer:
             Some("streamed result")
         );
         assert!(
-            v.stream_lines[1].contains("\"done_summary\""),
+            v.stream_lines[1].contains("── summary:"),
             "expected done_summary: {}",
             v.stream_lines[1]
         );
@@ -4121,9 +4133,7 @@ Buffer:
         );
         assert_eq!(v.streamed_agent_text, "some agent text");
 
-        v.push_stream_line(
-            serde_json::json!({"type":"stage_stream_line","kind":"stream_reset"}).to_string(),
-        );
+        v.push_stream_line(serde_json::json!({"type":"stream_reset"}).to_string());
         assert_eq!(v.streamed_agent_text, "");
 
         // The stream_reset line itself is retained in the buffer.
@@ -4179,16 +4189,6 @@ Buffer:
     }
 
     // ── classify_stream_value tests ─────────────────────────────
-
-    #[test]
-    fn classify_old_stage_stream_line_envelope() {
-        let v = serde_json::json!({
-            "type": "stage_stream_line",
-            "kind": "text",
-            "text": "hello",
-        });
-        assert_eq!(classify_stream_value(&v).as_deref(), Some("text"));
-    }
 
     #[test]
     fn classify_event_kind_stream_chunk() {
@@ -4295,12 +4295,12 @@ Buffer:
     }
 
     #[test]
-    fn classify_unknown_type_falls_back_to_kind_field() {
+    fn classify_unknown_type_ignores_kind_field() {
         let v = serde_json::json!({
             "type": "something_new",
             "kind": "custom",
         });
-        assert_eq!(classify_stream_value(&v).as_deref(), Some("custom"));
+        assert_eq!(classify_stream_value(&v), None);
     }
 
     #[test]

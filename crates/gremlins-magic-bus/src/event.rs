@@ -48,6 +48,7 @@ pub struct DispatchEvent<P> {
     corr_id: CorrId,
     kind: P,
     ts: Timestamp,
+    sequence: u64,
 }
 
 impl<P> DispatchEvent<P> {
@@ -56,12 +57,30 @@ impl<P> DispatchEvent<P> {
             corr_id,
             kind,
             ts: Timestamp::now(),
+            sequence: 0,
         }
     }
 
     /// Build an event with an explicit timestamp (useful for tests and replay).
     pub fn with_timestamp(corr_id: CorrId, kind: P, ts: Timestamp) -> Self {
-        Self { corr_id, kind, ts }
+        Self {
+            corr_id,
+            kind,
+            ts,
+            sequence: 0,
+        }
+    }
+
+    /// Bus-global emission sequence for a run-scoped event.
+    ///
+    /// Zero for directly constructed or non-run events. Each run-scoped bus emission
+    /// assigns a fresh sequence, shared by live and history envelopes and their clones.
+    pub fn sequence(&self) -> u64 {
+        self.sequence
+    }
+
+    pub(crate) fn set_sequence(&mut self, sequence: u64) {
+        self.sequence = sequence;
     }
 
     pub fn corr_id(&self) -> &CorrId {
@@ -93,5 +112,11 @@ mod tests {
 
         assert_eq!(event.corr_id(), &corr_id);
         assert_eq!(event.kind(), &"payload");
+        assert_eq!(event.sequence(), 0);
+        assert_eq!(event.clone().sequence(), 0);
+        assert_eq!(
+            DispatchEvent::with_timestamp(corr_id, "payload", event.ts()).sequence(),
+            0
+        );
     }
 }

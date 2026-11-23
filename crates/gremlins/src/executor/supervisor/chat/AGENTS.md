@@ -11,8 +11,8 @@ bounded(1) prompt queue.
 |---|---|
 | `mod.rs` | Chat request handling and gremlin lifecycle: `handle_chat` (the op handler), gremlin lifecycle (`create_chat_gremlin`, `reusable_chat_gremlin_id`, `spawn_fresh_chat_gremlin`), and env resolution (`base_process_env`, `resolve_chat_env`). |
 | `turn.rs` | Chat turn execution: the persistent `chat_gremlin_task` / `run_turn` loop, the shared `TurnRunner` terminal-path helper, and `handle_cancel_chat`. |
-| `../chat_handle.rs` | State-layer-neutral type shared by the actor and the turn loop: `ChatGremlinHandle` (prompt channel + persistent cancel token + finished flag). |
-| `payload.rs` | Leaf module shared by the request handler and the turn loop: the per-turn `PromptMsg` queue item plus the `chat_payload`, `usage_stats_from_state`, `add_usage_stats` helpers. |
+| `../chat_handle.rs` | State-layer-neutral type shared by the session task and the turn loop: `ChatGremlinHandle` (prompt channel + persistent cancel token + finished flag). |
+| `payload.rs` | Leaf module shared by the request handler and the turn loop: `chat_payload`, `usage_stats_from_state`, and `add_usage_stats` helpers. The per-turn `PromptMsg` queue item lives in `../prompt_msg.rs`. |
 
 ## Architecture
 
@@ -20,8 +20,8 @@ bounded(1) prompt queue.
 
 A session's chat gremlin is owned by a single long-lived task
 (`turn::spawn_chat_gremlin` → `chat_gremlin_task`). The session stores a
-`ChatGremlinHandle { id, prompt_tx, cancel, finished }` on its actor-owned
-`SessionState`:
+`ChatGremlinHandle { id, prompt_tx, cancel, finished }` in its task-owned
+`session_task.rs::SessionState`, accessed through `SessionTaskHandle`:
 
 - `handle_chat` builds a `PromptMsg` (raw text, repo context, model, system
   prompt, project root, env, requested + discovered skills, and the connection

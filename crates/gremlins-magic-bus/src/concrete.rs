@@ -3,7 +3,9 @@
 use std::sync::OnceLock;
 
 use crate::event_kind::EventKind;
-use crate::{Bus, CorrId, DispatchEvent, ReceiverHalf, Subscriber, SubscriberRegistration};
+use crate::{
+    Bus, CorrId, DispatchEvent, HistorySnapshot, ReceiverHalf, Subscriber, SubscriberRegistration,
+};
 
 // ---------------------------------------------------------------------------
 // Global event bus
@@ -13,7 +15,9 @@ static BUS: OnceLock<Bus<EventKind>> = OnceLock::new();
 
 pub fn init_bus() -> &'static Bus<EventKind> {
     BUS.get_or_init(|| {
-        let bus = Bus::new();
+        let bus = Bus::with_history_limits_and_retention(16_384, 65_536, |kind| {
+            !matches!(kind, EventKind::PromptRequest { .. })
+        });
         // One-time registration: log every LogLine event via the log crate so
         // call sites only need `emit_event(EventKind::LogLine { … })` — the bus
         // subscriber handles the `log::info!()` side automatically.
@@ -45,6 +49,16 @@ pub fn init_bus() -> &'static Bus<EventKind> {
     })
 }
 
+/// Read replay data without holding the global bus mutex.
+///
+/// The compatibility watermark is always zero: no persisted replay cut is
+/// asserted. In particular, callers wrapping it in `Some` must not treat it as
+/// coverage of any positive live sequence. The closure may re-enter the bus;
+/// persistence and publication are not synchronized.
+pub fn with_run_replay_cut<T>(read: impl FnOnce() -> T) -> (T, u64) {
+    init_bus().with_sequence_snapshot(read)
+}
+
 /// Subscribe to all events on the bus with lag-tolerant delivery (replaces
 /// the old broadcast-channel subscribe for the connection forwarder).
 pub fn subscribe_all() -> (Subscriber<EventKind>, ReceiverHalf<EventKind>) {
@@ -60,10 +74,30 @@ pub fn subscribe_run(id: &str) -> (Subscriber<EventKind>, ReceiverHalf<EventKind
         .expect("lossless subscription cannot fail")
 }
 
+/// Atomically snapshot run history (including descendants) and subscribe live.
+/// History is bounded and omits `PromptRequest`; see [`HistorySnapshot`] for
+/// conservative completeness and global sequence watermarks.
+/// A zero capacity panics, as with `subscribe_run_lag_tolerant`.
+pub fn subscribe_run_with_history(
+    id: &str,
+    capacity: usize,
+) -> (
+    Subscriber<EventKind>,
+    ReceiverHalf<EventKind>,
+    HistorySnapshot<EventKind>,
+) {
+    init_bus()
+        .subscribe_with_history(SubscriberRegistration::lag_tolerant(
+            CorrId::new().with_run(id),
+            capacity,
+        ))
+        .expect("lag-tolerant subscription cannot fail")
+}
+
 /// Subscribe to a single gremlin's run-scoped stream events with lag-tolerant
 /// (broadcast) delivery. Drops events on overflow instead of buffering
-/// unboundedly — the right choice for debug consumers and the stage-stream
-/// forwarder where a slow consumer should not grow daemon memory.
+/// unboundedly — appropriate for passive attachment viewers where a slow
+/// consumer should not grow daemon memory.
 pub fn subscribe_run_lag_tolerant(
     id: &str,
     capacity: usize,
@@ -123,24 +157,19 @@ pub fn emit_event(event: EventKind) {
         }
         _ => CorrId::new(),
     };
-    if let Some(bus) = BUS.get() {
-        bus.emit(DispatchEvent::new(corr_id, event));
-    }
+    init_bus().emit(DispatchEvent::new(corr_id, event));
 }
 
 /// Emit at the producer with its captured correlation identity.
 pub fn emit_corr_event(corr_id: &CorrId, event: EventKind) {
-    if let Some(bus) = BUS.get() {
-        bus.emit(DispatchEvent::new(corr_id.clone(), event));
-    }
+    init_bus().emit(DispatchEvent::new(corr_id.clone(), event));
 }
 
 /// Await delivery using the producer's captured correlation identity.
 pub async fn emit_corr_event_async(corr_id: &CorrId, event: EventKind) {
-    if let Some(bus) = BUS.get() {
-        bus.emit_async(DispatchEvent::new(corr_id.clone(), event))
-            .await;
-    }
+    init_bus()
+        .emit_async(DispatchEvent::new(corr_id.clone(), event))
+        .await;
 }
 
 /// Emit an event tagged with a specific run id so per-run subscribers
@@ -161,7 +190,7 @@ pub async fn emit_run_event_async(id: &str, event: EventKind) {
     } else {
         CorrId::new().with_run(id)
     };
-    if let Some(bus) = BUS.get() {
-        bus.emit_async(DispatchEvent::new(corr_id, event)).await;
-    }
+    init_bus()
+        .emit_async(DispatchEvent::new(corr_id, event))
+        .await;
 }

@@ -62,6 +62,7 @@ These values are persisted to `state.json` and read by other writers (the fleet 
 | You want to … | Look at |
 |---|---|
 | Understand the run-time architecture | `DESIGN.md` |
+| Track run-watch retirement / attachment wire behavior | `docs/actor-removal.md` / `docs/attachment-protocol.md` (conservative replay contract, targeted test scope, and deferred exact agent merging) |
 | Add a new stage | `crates/gremlins/src/stages/` and an existing stage as a model |
 | Add a new client provider | `crates/gremlins/src/clients/` |
 | Add a new pipeline | YAMLs in `.gremlins/` |

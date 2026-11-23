@@ -43,7 +43,7 @@ These principles govern every use of the bus in the gremlins codebase:
    wraps emit calls in a helper that batches them, and never inspects the
    event after emitting it.
 
-3. **All aggregation is performed on the receiver side.** Subscribers
+3. **Consumer-specific aggregation is performed on the receiver side.** Subscribers
    join, filter, buffer, and fold events according to their own needs.
    The sender should never batch, debounce, or collect events for a
    specific consumer — that is the subscriber's responsibility.
@@ -64,7 +64,7 @@ is emitted at its origin and the chat layer subscribes independently.
 | File | Contents |
 |---|---|
 | `lib.rs` | Module declarations and the crate's public re-exports |
-| `bus.rs` | `Bus<P>` — the fan-out registry, `subscribe` / `unsubscribe` / `emit` / `emit_async` |
+| `bus.rs` | `Bus<P>` — in-memory run journal, atomic `subscribe_with_history`, fan-out registry |
 | `concrete.rs` | The global `Bus<EventKind>`: `init_bus`, `subscribe_all`, `subscribe_run`, `subscribe_run_lag_tolerant`, `subscribe_run_backpressured`, `emit_event`, `emit_run_event_async` |
 | `connection.rs` | `SharedWriter`, `BusSubGuard`, `ConnectionGuard` |
 | `corr_id.rs` | `CorrId` — segment-aware correlation id, prefix matching, tagged string form + parser |
@@ -72,16 +72,16 @@ is emitted at its origin and the chat layer subscribes independently.
 | `event_kind.rs` | `EventKind` — the concrete payload the gremlins layer publishes |
 | `policy.rs` | `DeliveryPolicy` and `SubscriberRegistration` — delivery semantics |
 | `receiver.rs` | `ReceiverHalf<P>`, `Recv<P>`, `TryRecvError` — the half a subscriber polls |
-| `socket.rs` | Unix-domain socket + daemon lock helpers (`GremlinsDaemonLock`, `bind_socket`, `connect_socket`, JSON-line read/write) |
 | `stats.rs` | `UsageStats`, `TurnStats`, `add_opt` — token accounting |
 | `subscriber.rs` | `Subscriber<P>` handle and `SubscriberMailbox<P>` — producer side + channel construction |
 
 Public surface (re-exported from `lib.rs`): `Bus`, `CorrId`, `ParseCorrIdError`,
-`DispatchEvent`, `Timestamp`, `EventKind`, `DeliveryPolicy`,
+`DispatchEvent`, `HistorySnapshot`, `Timestamp`, `EventKind`, `DeliveryPolicy`,
 `SubscriberRegistration`, `ReceiverHalf`, `Recv`, `TryRecvError`, `Subscriber`,
-`SubscriberError`, `SubscriberMailbox`, `BusSubGuard`, `ConnectionGuard`,
+`SubscriberError`, `BusSubGuard`, `ConnectionGuard`,
 `SharedWriter`, `UsageStats`, `TurnStats`, `add_opt`, the concrete emitter
-functions, and the `socket` module.
+functions. Unix-domain socket and daemon-lock helpers live in
+`gremlins::executor::socket`, not this crate.
 
 ## Key concepts
 
@@ -127,31 +127,77 @@ Bounded and lag-tolerant channels require a non-zero capacity
 
 ### Emit vs emit_async
 
-- `Bus::emit` is synchronous and never blocks. It holds the registry read lock
-  and does only `try_send`-style work under it. This is the path for
-  log-shaped records.
-- `Bus::emit_async` collects matching mailboxes under the read lock, **releases
-  the lock before any `.await`**, and delivers concurrently via `join_all` so a
-  slow backpressured subscriber cannot head-of-line block the others.
+- Both emission paths serialize journal insertion and nonbackpressured mailbox
+  enqueue under one state mutex. The in-memory journal has no disk persistence.
+  `Bus::new()` defaults to **16,384 events per exact run** and **65,536 globally**.
+  Oldest records are evicted to enforce both limits; only runs with retained
+  records are tracked. Descendant runs have separate per-run budgets.
+- `Bus::with_history_limits(per_run, global)` customizes these record limits
+  (including zero). `Bus::with_history_limits_and_retention(per_run, global,
+  predicate)` also accepts `predicate: Fn(&P) -> bool + Send + Sync + 'static`.
+  The predicate runs before taking the state mutex; keep it cheap and nonblocking.
+  Rejected payloads are omitted from history without changing live delivery.
+  The concrete global bus excludes `EventKind::PromptRequest` from history but
+  still delivers it live. This generic journal is not consumer-specific aggregation.
+- `subscribe_with_history(registration)` takes that mutex to snapshot matching
+  run history and register live delivery atomically. It returns
+  `(sub, rx, HistorySnapshot<P>)`; history is separate from the live mailbox.
+  Matching uses the same full prefix (including descendant runs, stage,
+  execution id, etc.) as live routing. The snapshot is an atomic history/live
+  cut, with original envelopes in emission order.
+- `HistorySnapshot` has `events: Vec<DispatchEvent<P>>`, `complete: bool`,
+  `through_sequence: u64`, and `evicted_through_sequence: u64`.
+  The bus-global sequence advances for every run-scoped event, including omitted
+  events; non-run events are live-only and do not advance it. `through_sequence`
+  is the latest sequence at the cut (initially zero).
+  `evicted_through_sequence` is the maximum sequence evicted or omitted anywhere
+  in the bus (zero if none). After **any** global eviction, per-run eviction, or
+  retention omission, `complete` is permanently, conservatively false, even for
+  unrelated filters with no matching lost records.
+- `emit_with_persistence(event, persist)` publishes and assigns the envelope first,
+  then invokes `persist` **outside** the state mutex. Subscribers may observe the
+  event before persistence; concurrent callbacks can finish out of sequence order,
+  and a callback panic does not undo publication. This is not an atomic disk cut.
+- `with_sequence_snapshot(read)` and concrete `with_run_replay_cut(read)` run the
+  read outside the bus mutex and return a compatibility watermark of **zero**.
+  They assert no persisted coverage and must not suppress positive live sequences.
+  Callbacks may re-enter the bus or wait for emissions.
+- Sequences are process-local, not durable identities across daemon restarts.
+  Exact persisted execution-scoped agent history/live merging is deferred; the
+  atomic in-memory history/live cut does not establish that guarantee.
+- `subscribe_run_with_history(id, capacity)` exposes this with lag-tolerant live
+  delivery. Overflow still reports lag. Bounded history introduces no new
+  backpressure and does not change live delivery policies.
+- `emit_async` delivers lossless/broadcast mailboxes under the mutex, first-polls
+  bounded capacity reservations there, then awaits pending reservations concurrently
+  outside the mutex. Slow bounded consumers cannot delay other policies.
+- Reservations enter Tokio's FIFO capacity queue in journal order. Bounded
+  delivery is not an exact journal-order contract: with multiple available permits,
+  task scheduling can reorder the eventual sends. Cancellation drops pending bounded
+  delivery, sync emits drop when capacity is unavailable, and direct subscriber
+  sends bypass the bus. Lossless/broadcast bus delivery has exact journal order
+  (broadcast may report skipped entries on overflow).
+- Concrete emitters initialize the global bus, retaining early run events. If first
+  initialization occurs outside Tokio, the optional log-forwarding task is skipped.
 
 ## Invariants
 
-- **Don't block under the read lock.** Registration is rare, emission is hot.
-  The registry is `RwLock<Vec<(CorrId, SubscriberMailbox<P>)>>`; keep anything
-  that can wait (async sends, allocations in the hot path) out of the read
-  guard.
-- **Poison panics are intentional.** `.expect("subscriber registry poisoned")`
-  is used deliberately: a poisoned registry means a subscriber panicked while
-  holding the write lock, and silently continuing would corrupt routing.
+- **No I/O or awaits under the state mutex.** Journal insertion, history snapshot
+  cloning, subscription registration, routing, and nonblocking enqueue are atomic
+  under that lock. Persistence/read callbacks and capacity waits happen outside;
+  disk persistence is not atomic with publication.
+- **Poison panics are intentional.** `.expect("bus state poisoned")` prevents
+  silently continuing after a panic during journal/routing updates.
 - **Segment matching is exact.** Never replace `matches_prefix` with
   `str::starts_with` — that reintroduces the `r:ab` matching `r:abc` bug the
   segment parser exists to prevent.
 - **Round-trip is a contract.** `CorrId`'s display/parse pair must survive
   `:` and `\` in string segments. Any change to the tag set or escaping must be
   accompanied by round-trip tests.
-- **`ConnectionGuard<M>` does not require `Clone`.** It moves the down message
-  out on drop so callers with non-`Clone` messages (e.g. `ActorMsg`, which
-  carries `oneshot::Sender`) can use it.
+- **`ConnectionGuard` is closure-based.** `new(up, down)` calls `up`
+  immediately and stores a `Send + 'static` `FnOnce` hook to call on drop.
+  It has no actor-message type parameter; callers capture registry handles
+  in the hooks.
 
 ## Usage pattern
 
@@ -183,14 +229,15 @@ connection and exit cleanly.
 
 ## How it's wired into gremlins
 
-See `crates/gremlins/src/executor/supervisor/mod.rs`:
+Global wiring lives in `concrete.rs`; the daemon uses it from
+`crates/gremlins/src/executor/supervisor/mod.rs`:
 
 - `init_bus()` — one-time construction plus a lag-tolerant subscriber that
   routes every `LogLine` event through the `log` crate, so call sites only need
   `emit_event(EventKind::LogLine { … })`.
 - `emit_event(EventKind)` — maps run-bearing event kinds onto a run-scoped
   `CorrId::new().with_run(id)` so per-gremlin subscribers see only their own
-  run; other kinds use the empty `CorrId` and reach everyone.
+  run; other kinds use the empty `CorrId` and reach only wildcard-compatible filters.
 - `subscribe_all()` — the connection-forwarder subscription.
 
 ## Where to look

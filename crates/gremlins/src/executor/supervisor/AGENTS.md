@@ -22,7 +22,9 @@ and re-exports. The `RunHandle`/`RunState` types live in `run_registry.rs`, and
 | `log_handler.rs` | Streaming log handler (`handle_log`) and `LogSource` enum. |
 | `attachment.rs` | Attachment handler (`handle_attach`): `run`-scope stage-boundary follow and `conversation`-scope observe/control. The only op that pins a pause and injects operator text. |
 | `debug.rs` | Shared attachment helpers: `check_agent_stage` (agent-leaf validation) and `send_debug_status` (progress frames). |
-| `session.rs` | Client session IO layer: `SessionOp` enum, `run_session_listener`/`run_session_dispatcher`, `handle_session_main`/`handle_session_op`/`handle_session_aux`, and `verify_session_id`. Session state lives in `actor.rs`; this module only talks to it via `ActorMsg`. |
+| `session.rs` | Client session IO layer: `SessionOp` enum, `run_session_listener`/`run_session_dispatcher`, `handle_session_main`/`handle_session_op`/`handle_session_aux`, and `verify_session_id`. Uses `SessionTaskHandle` for session state and `RunRegistry` for run operations. |
+| `session_task.rs` | Per-session state owner: `SessionState`, `SessionTaskMsg`, `SessionTaskHandle`, `spawn_session_task`/`run_session_task`, and teardown. Owns parked chat gremlins, current turn, reserved home run id, listener and auxiliary tasks. |
+| `prompt_msg.rs` | `PromptMsg` shared by the session and chat turn loop. |
 | `state_view.rs` | `StateView` — a uniform JSON snapshot of a gremlin's state across live (run map) and persisted (disk) sources. Used by the read-only query ops. |
 | `chat/` | TUI chat turn lifecycle. See `chat/AGENTS.md`. |
 | `ops/` | Socket op handlers. See `ops/AGENTS.md`. |
@@ -43,18 +45,22 @@ and re-exports. The `RunHandle`/`RunState` types live in `run_registry.rs`, and
 
 ### Run map
 
-The global `RUN_MAP` (`HashMap<String, RunHandle>`) is the single source of
-truth for running gremlins. Each `RunHandle` carries:
+The shared `RunRegistry` owns a lock-protected `HashMap<String, RunHandle>`
+and is the single source of truth for running gremlins. It also owns the
+connection counter, per-id locks, chat-id sequence, and pending-output scopes.
+Each `RunHandle` carries:
 - A cancel token and abort flag
 - The tokio task handle
 - A `watch::Sender<RunState>` for status broadcasts
-- A log `broadcast::Sender<String>` for streaming logs
+- A log flush handle for persisted-history handoff
 - An `InteractiveHandle` for attach/command injection
 - The gremlin's `StateStore`
-- A bus `Subscriber<EventKind>` for lifecycle events
+- A bus `Subscriber<EventKind>` for the lossless log writer
 
-`RunHandle::finish` removes the entry, publishes the terminal `RunState`,
-and emits the terminal `DaemonEvent`.
+`RunRegistry::handle_run_finished` removes the entry, publishes the terminal
+`RunState`, emits the terminal bus event, and releases the log subscription.
+If a stop already removed the entry, completion is a no-op; stop paths own
+that terminal publication and cleanup.
 
 ### Op dispatch
 
@@ -80,20 +86,48 @@ and emits the terminal `DaemonEvent`.
 | `create_session` | `handle_create_session` | `ops/mod.rs` |
 | `session_stop` | `handle_session_stop` | `ops/control.rs` |
 
+### Conservative run replay
+
+- Run-scope `attach` opts into history with `"replay": true`. Its `attached`
+  acknowledgment advertises `replay_checkpoint` alongside `observe` only when
+  replay is negotiated. Without that capability, do not assume a checkpoint.
+- Replay atomically snapshots the bounded in-memory bus journal and registers
+  live delivery. It sends `history_gap` when history is incomplete, retained
+  display frames with their original `sequence`, then `replay_checkpoint`
+  (`complete`, `through_sequence`, `evicted_through_sequence`) before live frames.
+  Live run display frames carry `sequence` even without replay negotiation.
+- Completeness is conservative and bus-global: any eviction or retention omission
+  makes it false, even for unrelated run filters. This is an in-memory cut, not
+  proof that a disk tail covers live output. Lag-tolerant delivery can still lag.
+- Session `read_blob` preserves raw log/agent/exec lines and metadata, returning
+  `through_sequence: null` and `covered_sequences: null`. Exec `.events` sidecars
+  are neither written nor trusted: process-local sequence values can collide
+  across restarts. Empty/missing tails also assert no coverage.
+- Ordinary full operational `log` follow retains its separate log-writer
+  persistence cut: the serialized writer snapshots persisted content and its
+  sequence for history/live suppression. Bounded tails use zero coverage.
+- Bus journal insertion, snapshotting, and subscription registration are atomic
+  under the bus mutex; persistence/read callbacks run outside it. No disk I/O
+  under that lock, and no atomic publication/persistence guarantee. Compatibility
+  bus read helpers return zero rather than asserting a persisted replay cut.
+- Exact execution-scoped persisted agent history/live merging remains deferred;
+  neither correlation metadata nor replay checkpoints establish that guarantee.
+
 ## Key invariants
 
-- **`RUN_MAP` is the only authority on liveness.** A gremlin is "live" iff
+- **`RunRegistry` is the only authority on liveness.** A gremlin is "live" iff
   it has an entry in the map. `StateView` checks the map first, then falls
   back to persisted state.
-- **`RunHandle::finish` must always be called.** Every exit path — success,
-  bail, error — must call `finish` so the map entry is cleaned, the terminal
-  state is broadcast, and bus subscribers are notified.
+- **Run completion must reach registry cleanup.** Every normal task exit
+  reaches `RunRegistry::handle_run_finished`; stop paths remove and reap
+  the run themselves. Both paths publish terminal state and release log
+  subscriptions.
 - **Session sockets are per-session.** Each TUI session gets a dedicated
   Unix socket (`<session_id>.sock`) for sideline channels (log, attach,
   chat). The session id uses a `sess-` prefix to never collide with gremlin
   ids.
 - **Chat gremlins are session-scoped.** A session owns its chat
-  gremlins (in the actor's `SessionState`); they are parked in
+  gremlins (in `session_task.rs::SessionState`); they are parked in
   `chat_gremlins` between turns. A turn
   removes its gremlin while running and re-inserts it when done.
 - **The event bus is global.** `init_bus` creates a single `Bus<EventKind>`
@@ -106,8 +140,8 @@ and emits the terminal `DaemonEvent`.
 | Add a new op handler | Add a function in the appropriate `ops/` sub-module, wire it in `dispatch_op` (`mod.rs`). |
 | Change child launch/stop | `run_registry.rs::RunRegistry::launch_child` / `stop_and_reap` |
 | Change the event bus | `gremlins_magic_bus::concrete` (`init_bus`, `subscribe_run`, `emit_event`) |
-| Understand session lifecycle | `session.rs::run_session_listener` / `handle_session_main`; state in `actor.rs::SessionState` |
-| Debug a chat turn | `chat/turn.rs::run_turn` + `chat_handle.rs::ChatGremlinHandle` / `chat/payload.rs::PromptMsg` |
+| Understand session lifecycle | `session.rs::run_session_listener` / `handle_session_main`; state in `session_task.rs::SessionState`, accessed through `SessionTaskHandle` |
+| Debug a chat turn | `chat/turn.rs::run_turn` + `chat_handle.rs::ChatGremlinHandle` / `prompt_msg.rs::PromptMsg` |
 | Understand the interactive attach flow | `attachment.rs::handle_conversation_attach` |
 | Read gremlin state for a query | `state_view.rs::state_view_for_id` |
 | Change socket/lock protocol | `supervisor` delegates to `crate::executor::socket` |

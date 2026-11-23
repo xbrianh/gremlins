@@ -1,365 +1,557 @@
-//! Client-side replay and dedup for the `/watch` stream pane.
-//!
-//! When a watch follow starts, this module first subscribes to the live
-//! `stage_stream` socket (so no output is lost), then replays the tail of
-//! the stage-appropriate blob (agent stream, exec log, or operational log)
-//! to backfill history, builds a dedup fingerprint set, and then drains
-//! the buffered live stream. Lines already replayed are skipped so the
-//! watch pane never shows duplicates.
-//!
-//! The dedup checkpoint is cleared on every `stage_boundary` so one stage's
-//! history cannot suppress another stage's identical output.
+//! Native snapshot/live replay, with persisted history for incomplete snapshots.
 
-use std::collections::HashSet;
 use std::sync::Arc;
 
+use serde_json::{json, Value};
 use tokio::sync::mpsc;
 
 use crate::tui::client::DaemonClient;
-use crate::tui::screen::classify_stream_value;
 use crate::tui::AbortOnDrop;
 
-// ── Stage-type classification ──────────────────────────────────
-
-/// Walk a definition's `stages` array looking for `name`; return its `type`.
-fn find_in_tree(stages: &serde_json::Value, name: &str) -> Option<String> {
+fn find_in_tree(stages: &Value, name: &str) -> Option<String> {
     let children = stages.as_array()?;
     for stage in children {
-        if stage.get("name").and_then(|v| v.as_str()) == Some(name) {
-            return stage.get("type").and_then(|v| v.as_str()).map(String::from);
+        if stage.get("name").and_then(Value::as_str) == Some(name) {
+            return stage.get("type").and_then(Value::as_str).map(String::from);
         }
     }
-    for stage in children {
-        if let Some(body) = stage.get("body") {
-            if let Some(found) = find_in_tree(body, name) {
-                return Some(found);
-            }
-        }
-    }
-    None
+    children
+        .iter()
+        .find_map(|stage| find_in_tree(stage.get("body")?, name))
 }
 
-// ── Blob-key helpers ───────────────────────────────────────────
-
-/// Sanitize a stage name for use in a blob key (matches
-/// `core::proc::sanitize_log_filename`).
 fn safe_name(name: &str) -> String {
     name.chars()
-        .map(|c| match c {
-            '/' | '\\' | '\0' => '_',
-            c if c.is_ascii_alphanumeric() || c == '-' || c == '_' || c == '.' => c,
-            _ => '_',
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.') {
+                c
+            } else {
+                '_'
+            }
         })
         .collect::<String>()
         .replace("..", "__")
 }
 
-// ── Dedup fingerprints ─────────────────────────────────────────
-
-/// Compute a dedup fingerprint from a decoded stage_stream_line envelope.
-fn fingerprint(env: &serde_json::Value) -> String {
-    let kind = env.get("kind").and_then(|v| v.as_str()).unwrap_or("");
-    let text = env.get("text").and_then(|v| v.as_str()).unwrap_or("");
-    format!("{kind}:{text}")
-}
-
-/// Compute a dedup fingerprint from a live EventKind JSON value.
-///
-/// Returns `None` for structural events (`done`, `stream_reset`,
-/// `stage_boundary`, `turn_complete`, `tool_output_chunk`, `tool_result`)
-/// — they carry no text content worth deduplicating.
-fn live_fingerprint(raw: &serde_json::Value) -> Option<String> {
-    // Structural events carry no text content worth deduplicating.
-    match raw.get("type").and_then(|v| v.as_str()) {
-        Some("done")
-        | Some("stream_reset")
-        | Some("stage_boundary")
-        | Some("turn_complete")
-        | Some("tool_output_chunk")
-        | Some("tool_result") => return None,
-        _ => {}
-    }
-    // Delegate kind mapping to the canonical classify_stream_value.
-    let kind = classify_stream_value(raw)?;
-    let text = raw
-        .get("text")
-        .or(raw.get("line"))
-        .and_then(|v| v.as_str())
-        .unwrap_or("");
-    Some(format!("{kind}:{text}"))
-}
-
-// ── Agent stream decoding ──────────────────────────────────────
-
-/// Format a `tool_use` content block into the canonical display string
-/// (e.g. `Bash(command="ls")`).
-fn format_tool_use_str(block: &serde_json::Value) -> String {
-    let name = block.get("name").and_then(|v| v.as_str()).unwrap_or("");
+fn format_tool_use_str(block: &Value) -> String {
+    let name = block.get("name").and_then(Value::as_str).unwrap_or("");
     match block.get("input") {
-        Some(serde_json::Value::Object(map)) if !map.is_empty() => {
-            let parts: Vec<String> = map
+        Some(Value::Object(map)) if !map.is_empty() => {
+            let parts: Vec<_> = map
                 .iter()
-                .map(|(key, value)| {
-                    format!("{key}={}", serde_json::to_string(value).unwrap_or_default())
-                })
+                .map(|(key, value)| format!("{key}={value}"))
                 .collect();
             format!("{name}({})", parts.join(", "))
         }
-        Some(serde_json::Value::String(s)) => format!("{name}({s})"),
-        _ => name.to_string(),
+        Some(Value::String(s)) => format!("{name}({s})"),
+        _ => name.to_owned(),
     }
 }
 
-/// Decode one raw line from an `artifacts/stream-*.jsonl` blob into
-/// `stage_stream_line` envelope(s).
-fn decode_agent_stream_line_to_envelopes(line: &str) -> Vec<serde_json::Value> {
-    let parsed = match serde_json::from_str::<serde_json::Value>(line) {
-        Ok(v) => v,
-        Err(_) => {
-            return vec![serde_json::json!({
-                "type": "stage_stream_line",
-                "kind": "log",
-                "text": line,
-            })];
-        }
+fn log_line(id: &str, line: &str) -> Value {
+    json!({"type": "log_line", "id": id, "line": line})
+}
+
+fn decode_agent_stream_line(line: &str, run: &str) -> Vec<Value> {
+    let Ok(parsed) = serde_json::from_str::<Value>(line) else {
+        return vec![log_line(run, line)];
     };
-    match parsed.get("type").and_then(|v| v.as_str()) {
-        // Transcript records (persisted format).
-        Some("assistant") => {
-            if let Some(content) = parsed
-                .pointer("/message/content")
-                .and_then(|v| v.as_array())
-            {
-                return content
-                    .iter()
-                    .filter_map(|block| match block.get("type").and_then(|v| v.as_str()) {
-                        Some("text") => Some(serde_json::json!({
-                            "type": "stage_stream_line",
-                            "kind": "text",
-                            "text": block.get("text").and_then(|v| v.as_str()).unwrap_or(""),
-                        })),
-                        Some("tool_use") => {
-                            let id = block.get("id").and_then(|v| v.as_str()).unwrap_or("");
-                            let name = block.get("name").and_then(|v| v.as_str()).unwrap_or("");
-                            let call = format_tool_use_str(block);
-                            Some(serde_json::json!({
-                                "type": "stage_stream_line",
-                                "kind": "tool_call",
-                                "id": id,
-                                "name": name,
-                                "call": call,
-                                "text": call,
-                            }))
-                        }
-                        _ => None,
-                    })
-                    .collect();
-            }
-            vec![serde_json::json!({
-                "type": "stage_stream_line",
-                "kind": "log",
-                "text": line,
-            })]
+    let kind = parsed.get("type").and_then(Value::as_str).unwrap_or("");
+    if !matches!(kind, "assistant" | "user") {
+        return if matches!(
+            kind,
+            "stream_chunk"
+                | "reasoning_chunk"
+                | "tool_output_chunk"
+                | "tool_result"
+                | "turn_complete"
+                | "done"
+                | "stream_reset"
+                | "task_progress"
+                | "operator_message"
+        ) {
+            vec![parsed]
+        } else {
+            vec![log_line(run, line)]
+        };
+    }
+    let Some(content) = parsed.pointer("/message/content").and_then(Value::as_array) else {
+        return vec![log_line(run, line)];
+    };
+    content.iter().filter_map(|block| {
+        let text = block.get("text").and_then(Value::as_str).unwrap_or("");
+        match block.get("type").and_then(Value::as_str) {
+            Some("text") if kind == "assistant" => Some(json!({"type": "stream_chunk", "text": text})),
+            Some("thinking") if kind == "assistant" => Some(json!({"type": "reasoning_chunk", "text": block.get("thinking").and_then(Value::as_str).unwrap_or("")})),
+            Some("tool_use") if kind == "assistant" => Some(json!({
+                "type": "tool_output_chunk", "id": block.get("id").and_then(Value::as_str).unwrap_or(""),
+                "name": block.get("name").and_then(Value::as_str).unwrap_or(""),
+                "call": format_tool_use_str(block), "text": ""
+            })),
+            Some("tool_result") if kind == "user" => Some(json!({
+                "type": "tool_result", "id": block.get("tool_use_id").and_then(Value::as_str).unwrap_or(""),
+                "name": "", "call": "", "output": block.get("content").and_then(Value::as_str).unwrap_or("")
+            })),
+            _ => None,
         }
-        Some("user") => {
-            if let Some(content) = parsed
-                .pointer("/message/content")
-                .and_then(|v| v.as_array())
-            {
-                return content
-                    .iter()
-                    .filter_map(|block| {
-                        if block.get("type").and_then(|v| v.as_str()) == Some("tool_result") {
-                            let id = block
-                                .get("tool_use_id")
-                                .and_then(|v| v.as_str())
-                                .unwrap_or("");
-                            let text = block.get("content").and_then(|v| v.as_str()).unwrap_or("");
-                            Some(serde_json::json!({
-                                "type": "stage_stream_line",
-                                "kind": "tool_result",
-                                "id": id,
-                                "name": "",
-                                "call": "",
-                                "output": text,
-                                "text": text,
-                            }))
-                        } else {
-                            None
-                        }
-                    })
-                    .collect();
+    }).collect()
+}
+
+pub(super) fn decode_history(lines: Vec<String>, blob: &str, id: &str) -> Vec<Value> {
+    let mut header = false;
+    lines.into_iter().flat_map(|line| {
+        if blob.starts_with("artifacts/stream-") {
+            decode_agent_stream_line(&line, id)
+        } else if blob.starts_with("command_logs/exec-") {
+            // proc writes a structured preamble and footer around raw output.
+            // Keep these visible as log lines.
+            if line.starts_with("=== ") && line.ends_with(" ===") { header = true; }
+            let metadata = header || (line.starts_with("--- exit: ") && line.ends_with(" ---"));
+            if header && !line.starts_with("=== ") && !line.starts_with("cwd: ")
+                && !line.starts_with("timeout: ") && !line.starts_with("cmds: ")
+                && !matches!(line.as_str(), "env:" | "substitution_env:" | "commands:")
+                && !line.starts_with("  ") { header = false; }
+            if metadata && header || line.starts_with("--- exit: ") && line.ends_with(" ---") {
+                vec![json!({"type":"log_line", "id":id, "line":line, "replay_metadata":true})]
+            } else {
+                vec![json!({"type": "exec_output", "id": id, "is_stderr": false, "text": line, "ts": ""})]
             }
-            vec![serde_json::json!({
-                "type": "stage_stream_line",
-                "kind": "log",
-                "text": line,
-            })]
+        } else {
+            vec![log_line(id, line.split_once("] ").map(|(_, msg)| msg).unwrap_or(&line))]
         }
-        Some("reminder") => vec![serde_json::json!({
-            "type": "stage_stream_line",
-            "kind": "log",
-            "text": line,
-        })],
-        _ => vec![serde_json::json!({
-            "type": "stage_stream_line",
-            "kind": "log",
-            "text": line,
-        })],
+    }).collect()
+}
+
+const MAX_SNAPSHOT_RECORDS: usize = 65_536;
+
+pub(super) struct Snapshot {
+    pub(super) values: Vec<Value>,
+    pub(super) fallback: Option<&'static str>,
+}
+
+fn fallback_reason(value: &Value) -> Option<&'static str> {
+    if value["type"] == "history_gap" {
+        Some("history_gap: native replay history is incomplete")
+    } else if value["type"] == "replay_checkpoint" && value["complete"] == false {
+        Some("native replay checkpoint is incomplete")
+    } else {
+        None
     }
 }
 
-// ── Entry point ────────────────────────────────────────────────
+/// Collect the finite native replay, including retained history after a gap.
+pub(super) async fn collect_checkpoint(rx: &mut mpsc::Receiver<Value>) -> Snapshot {
+    let mut values = Vec::new();
+    let mut fallback = None;
+    while let Some(value) = rx.recv().await {
+        fallback = fallback.or_else(|| fallback_reason(&value));
+        let checkpoint = value["type"] == "replay_checkpoint";
+        if !checkpoint {
+            values.push(value);
+        }
+        if checkpoint {
+            return Snapshot { values, fallback };
+        }
+        if values.len() == MAX_SNAPSHOT_RECORDS {
+            return Snapshot {
+                values,
+                fallback: Some("native replay snapshot limit reached"),
+            };
+        }
+    }
+    Snapshot {
+        values,
+        fallback: Some("run stream closed before replay_checkpoint"),
+    }
+}
 
-/// Subscribe to the live stage stream, replay blob history, then drain
-/// the buffered live stream with deduplication.
-///
-/// All output is sent through `log_tx` tagged with `follow_id` and
-/// `generation` so the event loop ignores messages from superseded
-/// follows.
-///
-/// The dedup checkpoint is cleared on `stage_boundary` events so one
-/// stage's output never suppresses another stage's identical output.
+fn send_line(tx: &mpsc::UnboundedSender<Value>, id: &str, generation: u64, value: Value) -> bool {
+    if value["type"] == "replay_checkpoint" {
+        return true;
+    }
+    let value = if value["type"] == "history_gap" {
+        log_line(
+            id,
+            &format!("history_gap: native replay discontinuity ({value})"),
+        )
+    } else {
+        value
+    };
+    tx.send(
+        json!({"type": "view_log", "id": id, "generation": generation, "line": value.to_string()}),
+    )
+    .is_ok()
+}
+
+/// Disk tails have no execution-scoped coverage contract. Preserve every native
+/// frame, even when its content happens to equal persisted history.
+fn send_disk_history(
+    tx: &mpsc::UnboundedSender<Value>,
+    id: &str,
+    generation: u64,
+    history: Vec<Value>,
+    stage: &str,
+) -> bool {
+    let scope = if stage.is_empty() {
+        ""
+    } else {
+        "; stage history is not execution-scoped and may include other executions"
+    };
+    send_line(tx, id, generation, log_line(id, &format!(
+        "history discontinuity: persisted tail and original stream may overlap; possible overlap is preserved, not deduplicated{scope}"
+    ))) && history.into_iter().all(|value| send_line(tx, id, generation, value))
+}
+
 pub(crate) async fn replay_and_dedup(
     client: Arc<DaemonClient>,
     follow_id: String,
     _current_stage: String,
     replay_stage: String,
     generation: u64,
-    log_tx: mpsc::UnboundedSender<serde_json::Value>,
+    log_tx: mpsc::UnboundedSender<Value>,
 ) {
     let send_error = |msg: &str| {
-        let _ = log_tx.send(serde_json::json!({
-            "type": "view_error",
-            "id": follow_id,
-            "generation": generation,
-            "message": msg,
-        }));
+        let _ = log_tx.send(json!({"type": "view_error", "id": follow_id, "generation": generation, "message": msg}));
     };
-
-    // ── Subscribe first so no live output is lost ─────────
-    let stage_result = client.follow_stage_stream(&follow_id).await;
-
-    // ── Blob selection ────────────────────────────────────
-    let blob = if replay_stage.is_empty() {
-        "log".to_string()
-    } else if let Ok(def) = client.read_definition(&follow_id).await {
-        let stage_type = def
-            .get("stages")
-            .and_then(|stages| find_in_tree(stages, &replay_stage));
-        match stage_type.as_deref() {
-            Some("agent") => {
-                format!("artifacts/stream-{}.jsonl", safe_name(&replay_stage))
-            }
-            Some("exec") => {
-                format!("command_logs/exec-{}.log", safe_name(&replay_stage))
-            }
-            _ => "log".to_string(),
-        }
-    } else {
-        "log".to_string()
+    let diagnostic = |msg: &str| {
+        send_line(&log_tx, &follow_id, generation, log_line(&follow_id, msg));
     };
-
-    let mut dedup: HashSet<String> = HashSet::new();
-
-    // ── Replay blob history ───────────────────────────────
-    if let Ok(lines) = client.read_blob(&follow_id, &blob, 500).await {
-        'replay: for line in lines {
-            let envelopes: Vec<serde_json::Value> = if blob.starts_with("artifacts/stream-") {
-                // Agent stream blob — each line is a JSON record.
-                decode_agent_stream_line_to_envelopes(&line)
-            } else if blob.starts_with("command_logs/exec-") {
-                // Exec log — raw text lines.
-                vec![serde_json::json!({
-                    "type": "stage_stream_line",
-                    "kind": "stdout",
-                    "text": line,
-                })]
-            } else {
-                // Operational log — strip "] " timestamp prefix.
-                let text = line.split_once("] ").map(|(_, msg)| msg).unwrap_or(&line);
-                vec![serde_json::json!({
-                    "type": "stage_stream_line",
-                    "kind": "log",
-                    "text": text,
-                })]
-            };
-
-            for env in envelopes {
-                dedup.insert(fingerprint(&env));
-                let tagged = serde_json::json!({
-                    "type": "view_log",
-                    "id": follow_id,
-                    "generation": generation,
-                    "line": env.to_string(),
-                });
-                if log_tx.send(tagged).is_err() {
-                    break 'replay;
-                }
-            }
-        }
-    }
-
-    // ── Drain buffered live stream ────────────────────────
-    match stage_result {
+    match client.follow_run(&follow_id).await {
         Ok((mut rx, handle)) => {
             let _guard = AbortOnDrop(handle);
-            while let Some(raw) = rx.recv().await {
-                // Clear dedup on stage boundaries so one stage's history
-                // cannot suppress another stage's identical output.
-                if raw.get("type").and_then(|v| v.as_str()) == Some("stage_boundary") {
-                    dedup.clear();
-                }
-
-                // Filter unclassified events — lifecycle traffic like
-                // `stage_transition` must not reach the watch pane.
-                if classify_stream_value(&raw).is_none() {
-                    continue;
-                }
-
-                // Skip lines whose fingerprint was already replayed.
-                if let Some(fp) = live_fingerprint(&raw) {
-                    if dedup.contains(&fp) {
-                        continue;
-                    }
-                }
-                let tagged = serde_json::json!({
-                    "type": "view_log",
-                    "id": follow_id,
-                    "generation": generation,
-                    "line": raw.to_string(),
-                });
-                if log_tx.send(tagged).is_err() {
-                    break;
-                }
-            }
-            send_error("stage stream closed");
-        }
-        Err(_) => {
-            // Fall back to operational log.
-            match client.follow_log(&follow_id).await {
-                Ok((mut rx, handle)) => {
-                    let _guard = AbortOnDrop(handle);
-                    while let Some(raw) = rx.recv().await {
-                        let Some(line) = raw.get("line").and_then(|v| v.as_str()) else {
-                            continue;
-                        };
-                        let tagged = serde_json::json!({
-                            "type": "view_log",
-                            "id": follow_id,
-                            "generation": generation,
-                            "line": line,
-                        });
-                        if log_tx.send(tagged).is_err() {
-                            break;
+            let snapshot = collect_checkpoint(&mut rx).await;
+            if let Some(reason) = snapshot.fallback {
+                diagnostic(reason);
+                match read_disk(&client, &follow_id, &replay_stage, false).await {
+                    Ok(history) => {
+                        if !send_disk_history(
+                            &log_tx,
+                            &follow_id,
+                            generation,
+                            history,
+                            &replay_stage,
+                        ) {
+                            return;
                         }
                     }
-                    send_error("log stream closed");
-                }
-                Err(e) => {
-                    send_error(&e);
+                    Err(error) => diagnostic(&error),
                 }
             }
+            for value in snapshot.values {
+                if !send_line(&log_tx, &follow_id, generation, value) {
+                    return;
+                }
+            }
+            while let Some(value) = rx.recv().await {
+                if !send_line(&log_tx, &follow_id, generation, value) {
+                    return;
+                }
+            }
+            send_error("run stream closed");
+            return;
+        }
+        Err(error) => diagnostic(&format!(
+            "native run follow unavailable: {error}; using legacy history/log follow"
+        )),
+    }
+
+    // Subscribe first so output produced during disk replay remains buffered.
+    let follow = client.follow_log(&follow_id).await;
+    let (mut rx, _guard) = match follow {
+        Ok((rx, handle)) => (Some(rx), Some(AbortOnDrop(handle))),
+        Err(error) => {
+            diagnostic(&format!("log follow unavailable: {error}"));
+            (None, None)
+        }
+    };
+    // The log endpoint owns persisted operational history as well as live
+    // delivery. A second read of that same blob would replay it twice.
+    if rx.is_none() || !replay_stage.is_empty() {
+        match read_disk(&client, &follow_id, &replay_stage, rx.is_some()).await {
+            Ok(history) => {
+                if !send_disk_history(&log_tx, &follow_id, generation, history, &replay_stage) {
+                    return;
+                }
+            }
+            Err(error) => diagnostic(&error),
+        }
+    }
+    if let Some(rx) = rx.as_mut() {
+        while let Some(value) = rx.recv().await {
+            if value["type"] == "error" {
+                diagnostic(value["message"].as_str().unwrap_or("log follow failed"));
+                continue;
+            }
+            let values = if value["type"] == "log_line" {
+                decode_history(
+                    vec![value["line"].as_str().unwrap_or("").to_owned()],
+                    "log",
+                    &follow_id,
+                )
+            } else {
+                vec![value]
+            };
+            for value in values {
+                if !send_line(&log_tx, &follow_id, generation, value) {
+                    return;
+                }
+            }
+        }
+        send_error("log stream closed");
+    }
+}
+
+async fn read_disk(
+    client: &DaemonClient,
+    follow_id: &str,
+    replay_stage: &str,
+    log_owned_by_follow: bool,
+) -> Result<Vec<Value>, String> {
+    let blob = if replay_stage.is_empty() {
+        "log".to_owned()
+    } else {
+        let definition = client.read_definition(follow_id).await.ok();
+        match definition
+            .as_ref()
+            .and_then(|d| find_in_tree(d.get("stages")?, replay_stage))
+            .as_deref()
+        {
+            Some("agent") => format!("artifacts/stream-{}.jsonl", safe_name(replay_stage)),
+            Some("exec") => format!("command_logs/exec-{}.log", safe_name(replay_stage)),
+            _ => "log".to_owned(),
+        }
+    };
+    if blob == "log" && log_owned_by_follow {
+        return Ok(Vec::new());
+    }
+    let (lines, _, _) = client
+        .read_blob_checkpoint(follow_id, &blob, 500)
+        .await
+        .map_err(|error| format!("history unavailable ({blob}): {error}"))?;
+    Ok(decode_history(lines, &blob, follow_id))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn text(text: &str) -> Value {
+        json!({"type": "stream_chunk", "text": text})
+    }
+
+    #[tokio::test]
+    async fn checkpoint_preserves_order_duplicates_and_live_frames() {
+        let (tx, mut rx) = mpsc::channel(256);
+        let frames = vec![text("hé"), text("hé"), json!({"type":"stage_boundary"})];
+        for frame in &frames {
+            tx.send(frame.clone()).await.unwrap();
+        }
+        tx.send(json!({"type":"replay_checkpoint"})).await.unwrap();
+        tx.send(text("live")).await.unwrap();
+        let snapshot = collect_checkpoint(&mut rx).await;
+        assert!(snapshot.fallback.is_none());
+        assert_eq!(snapshot.values, frames);
+        assert_eq!(rx.recv().await, Some(text("live")));
+    }
+
+    #[tokio::test]
+    async fn checkpoint_requires_marker() {
+        let (tx, mut rx) = mpsc::channel(256);
+        tx.send(text("history")).await.unwrap();
+        drop(tx);
+        let snapshot = collect_checkpoint(&mut rx).await;
+        assert!(snapshot.fallback.unwrap().contains("closed"));
+        assert_eq!(snapshot.values, vec![text("history")]);
+    }
+
+    #[tokio::test]
+    async fn checkpoint_collection_is_bounded() {
+        let (tx, mut rx) = mpsc::channel(65538);
+        for _ in 0..MAX_SNAPSHOT_RECORDS {
+            tx.send(text("same")).await.unwrap();
+        }
+        tx.send(text("still live")).await.unwrap();
+        let snapshot = collect_checkpoint(&mut rx).await;
+        assert_eq!(snapshot.values.len(), MAX_SNAPSHOT_RECORDS);
+        assert!(snapshot.fallback.unwrap().contains("limit"));
+        assert_eq!(rx.recv().await, Some(text("still live")));
+    }
+
+    #[tokio::test]
+    async fn gap_collects_retained_history_through_checkpoint() {
+        let (tx, mut rx) = mpsc::channel(256);
+        let gap = json!({"type":"history_gap", "evicted_through_sequence":42});
+        tx.send(gap.clone()).await.unwrap();
+        tx.send(text("retained")).await.unwrap();
+        tx.send(json!({"type":"replay_checkpoint", "complete":false}))
+            .await
+            .unwrap();
+        tx.send(text("retained")).await.unwrap();
+        let snapshot = collect_checkpoint(&mut rx).await;
+        assert!(snapshot.fallback.unwrap().contains("history_gap"));
+        assert_eq!(snapshot.values, vec![gap, text("retained")]);
+        assert_eq!(rx.recv().await, Some(text("retained")));
+    }
+
+    #[tokio::test]
+    async fn incomplete_checkpoint_preserves_future_duplicates() {
+        let (tx, mut rx) = mpsc::channel(256);
+        tx.send(text("same")).await.unwrap();
+        tx.send(json!({"type":"replay_checkpoint", "complete":false}))
+            .await
+            .unwrap();
+        tx.send(text("same")).await.unwrap();
+        tx.send(text("same")).await.unwrap();
+        let snapshot = collect_checkpoint(&mut rx).await;
+        assert!(snapshot.fallback.unwrap().contains("incomplete"));
+        assert_eq!(snapshot.values, vec![text("same")]);
+        assert_eq!(rx.recv().await, Some(text("same")));
+        assert_eq!(rx.recv().await, Some(text("same")));
+        assert!(fallback_reason(&json!({"type":"replay_checkpoint", "complete":true})).is_none());
+    }
+
+    #[test]
+    fn gap_is_forwarded_as_visible_log_line() {
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        assert!(send_line(&tx, "r", 7, json!({"type":"history_gap"})));
+        let wrapped = rx.try_recv().unwrap();
+        let line: Value = serde_json::from_str(wrapped["line"].as_str().unwrap()).unwrap();
+        assert_eq!(line["type"], "log_line");
+        assert!(line["line"].as_str().unwrap().contains("history_gap"));
+        assert_eq!(
+            crate::tui::screen::classify_stream_value(&line).as_deref(),
+            Some("log")
+        );
+    }
+
+    #[test]
+    fn forwarding_is_immediate_and_only_ignores_checkpoint() {
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let frames = vec![
+            text("same"),
+            text("same"),
+            json!({"type":"native_future_event", "data":42}),
+        ];
+        for frame in frames {
+            assert!(send_line(&tx, "r", 7, frame.clone()));
+            let wrapped = rx.try_recv().unwrap();
+            assert_eq!(wrapped["id"], "r");
+            assert_eq!(wrapped["generation"], 7);
+            assert_eq!(
+                serde_json::from_str::<Value>(wrapped["line"].as_str().unwrap()).unwrap(),
+                frame
+            );
+        }
+        assert!(send_line(&tx, "r", 7, json!({"type":"replay_checkpoint"})));
+        assert!(rx.try_recv().is_err());
+    }
+
+    #[test]
+    fn decode_exec_metadata_and_output() {
+        let history = decode_history(
+            vec![
+                "=== build ===".into(),
+                "cwd: /tmp".into(),
+                "cmds: 1".into(),
+                "commands:".into(),
+                "  original: cmd".into(),
+                "  resolved: cmd".into(),
+                "error".into(),
+                "--- exit: 1 (duration: 0.1s) ---".into(),
+            ],
+            "command_logs/exec-build.log",
+            "r",
+        );
+        assert_eq!(history.len(), 8);
+        for index in [0, 1, 2, 3, 4, 5, 7] {
+            assert_eq!(history[index]["type"], "log_line");
+            assert_eq!(history[index]["replay_metadata"], true);
+        }
+        assert_eq!(
+            history[6],
+            json!({"type":"exec_output", "id":"r", "is_stderr":false, "text":"error", "ts":""})
+        );
+    }
+
+    #[test]
+    fn decode_stream_transcript_and_log() {
+        let record = json!({"type": "assistant", "message": {"content": [
+            {"type": "text", "text": "hello"},
+            {"type": "thinking", "thinking": "reason"},
+            {"type": "tool_use", "id": "t", "name": "Bash", "input": {"command": "ls"}}
+        ]}});
+        let result = json!({"type": "user", "message": {"content": [{"type": "tool_result", "tool_use_id": "t", "content": "ok"}]}});
+        let decoded = decode_history(
+            vec![
+                text("native").to_string(),
+                record.to_string(),
+                result.to_string(),
+                "raw".into(),
+            ],
+            "artifacts/stream-agent.jsonl",
+            "r",
+        );
+        assert_eq!(decoded[0], text("native"));
+        assert_eq!(decoded[1], text("hello"));
+        assert_eq!(
+            decoded[2],
+            json!({"type":"reasoning_chunk", "text":"reason"})
+        );
+        assert_eq!(decoded[3]["type"], "tool_output_chunk");
+        assert_eq!(decoded[3]["call"], "Bash(command=\"ls\")");
+        assert_eq!(decoded[4]["output"], "ok");
+        assert_eq!(decoded[5], log_line("r", "raw"));
+        assert_eq!(
+            decode_history(vec!["[now] hello".into(), "plain".into()], "log", "r"),
+            vec![log_line("r", "hello"), log_line("r", "plain")]
+        );
+    }
+
+    #[tokio::test]
+    async fn fallback_preserves_disk_snapshot_and_later_identical_frames() {
+        for kind in ["stream_chunk", "reasoning_chunk", "exec_output", "log_line"] {
+            let value = if kind == "log_line" {
+                log_line("r", "same")
+            } else {
+                json!({"type":kind, "text":"hé same"})
+            };
+            let (native_tx, mut native_rx) = mpsc::channel(16);
+            native_tx.send(value.clone()).await.unwrap();
+            native_tx
+                .send(json!({"type":"replay_checkpoint", "complete":false}))
+                .await
+                .unwrap();
+            let snapshot = collect_checkpoint(&mut native_rx).await;
+            assert!(snapshot.fallback.is_some());
+            let (tx, mut rx) = mpsc::unbounded_channel();
+            assert!(send_disk_history(
+                &tx,
+                "r",
+                7,
+                vec![value.clone(), value.clone()],
+                "agent"
+            ));
+            for original in snapshot.values {
+                assert!(send_line(&tx, "r", 7, original));
+            }
+            native_tx.send(value.clone()).await.unwrap();
+            assert!(send_line(&tx, "r", 7, native_rx.recv().await.unwrap()));
+            let warning = rx.try_recv().unwrap();
+            assert_eq!(warning["type"], "view_log");
+            let warning: Value = serde_json::from_str(warning["line"].as_str().unwrap()).unwrap();
+            let warning = warning["line"].as_str().unwrap();
+            assert!(warning.contains("possible overlap"));
+            assert!(warning.contains("not execution-scoped"));
+            assert!(warning.contains("other executions"));
+            for _ in 0..4 {
+                let wrapped = rx.try_recv().unwrap();
+                assert_eq!(wrapped["type"], "view_log");
+                assert_eq!(
+                    serde_json::from_str::<Value>(wrapped["line"].as_str().unwrap()).unwrap(),
+                    value
+                );
+            }
+            assert!(rx.try_recv().is_err());
         }
     }
 }

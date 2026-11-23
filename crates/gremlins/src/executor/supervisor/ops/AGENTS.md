@@ -11,7 +11,7 @@ the coordinating factory that creates a new TUI session.
 
 | File | Role |
 |---|---|
-| `mod.rs` | Re-exports all handlers from sub-modules. Contains `handle_create_session`: binds a per-session Unix socket, registers a `ClientSession` in the session map, and spawns the session listener. |
+| `mod.rs` | Re-exports all handlers from sub-modules. Contains `handle_create_session`: binds a per-session Unix socket, spawns a session task (`SessionState` / `SessionTaskHandle`), reserves the home run id, and starts the session listener. |
 | `control.rs` | Lifecycle-mutating ops: `handle_launch`, `handle_stop`, `handle_resume`, `handle_rm`, `handle_session_stop`, `stop_session_chat_gremlin`. Also launch helpers: `parse_stage_inputs`, `resolve_filepath_source_values`, `validate_launch_inputs`, `load_definition_snapshot`, and `parallel_runtime_keys`. |
 | `query.rs` | Read-only state inspection ops: `handle_ls`, `handle_status`, `handle_info`, `handle_artifact` (read + write path), `handle_snapshot`. Also `resolve_store_for_id` (resolve a state store from live run map or disk) and `extract_token_cost_fields`. |
 | `model.rs` | TUI model configuration ops: `handle_model` (show/set/clear the TUI chat model override), `handle_chat_model` (read the effective chat model for a session), `handle_compact` (compact conversation history). |
@@ -33,8 +33,9 @@ shared writer.
 2. Resolves filepath source values relative to the project root
    (`resolve_filepath_source_values`).
 3. Loads the definition snapshot (`load_definition_snapshot`).
-4. Initializes a `Gremlin` and wires up channels via `spawn_gremlin_runner`.
-5. Registers the run in `RUN_MAP` and emits a lifecycle event.
+4. Initializes a `Gremlin` and delegates to `RunRegistry::launch_run_detached`.
+5. The registry wires up channels, registers the live run, spawns its task,
+   and emits a lifecycle event.
 
 ### Resume flow
 
@@ -49,7 +50,7 @@ present a unified view across live and persisted gremlins.
 
 ## Key invariants
 
-- **Controls mutate; queries inspect.** Control ops change `RUN_MAP` and
+- **Controls mutate; queries inspect.** Control ops change `RunRegistry` and
   gremlin state. Query ops are read-only (except `handle_artifact`'s write
   path, which is gated to live gremlins only).
 - **`handle_session_stop` stops both session-owned and run-map gremlins.**

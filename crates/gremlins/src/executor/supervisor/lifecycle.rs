@@ -7,6 +7,7 @@ use crate::clients::interactive::{InteractiveHandle, InteractiveSessionFactory};
 use crate::executor::gremlin::Gremlin;
 use crate::executor::state;
 
+use super::run_registry::{LogFlushHandle, LogSnapshot, LogSnapshotRequest};
 use gremlins_magic_bus::EventKind;
 use gremlins_magic_bus::{emit_event, init_bus};
 use gremlins_magic_bus::{CorrId, ReceiverHalf, SubscriberRegistration};
@@ -18,7 +19,7 @@ pub(crate) struct LogRelay {
     pub prefix: String,
 }
 
-/// Set up log + interactive + stage-stream channels on a gremlin. Returns the
+/// Set up log and interactive channels on a gremlin. Returns the
 /// interactive handle, log flush channel, and the log-writer bus subscriber
 /// (so the caller can unsubscribe when the run finishes).
 #[allow(clippy::type_complexity)]
@@ -27,7 +28,7 @@ pub(crate) fn setup_gremlin_channels(
     relay: Option<LogRelay>,
 ) -> (
     InteractiveHandle,
-    tokio::sync::mpsc::UnboundedSender<tokio::sync::oneshot::Sender<()>>,
+    LogFlushHandle,
     gremlins_magic_bus::Subscriber<EventKind>,
 ) {
     let (sessions, interactive_handle) = if gremlin.state.read_str("kind") == "chat" {
@@ -49,9 +50,6 @@ pub(crate) fn setup_gremlin_channels(
         ))
         .expect("lossless subscription cannot fail");
 
-    // Stage boundaries flow on the bus via send_stage_boundary; the
-    // stage_stream proxy subscriber picks them up.
-
     let log_flush = spawn_log_writer(log_rx, store, relay, run_id);
     (interactive_handle, log_flush, log_sub)
 }
@@ -68,7 +66,7 @@ pub(crate) async fn run_gremlin_task(
                 id: gremlin.id.to_string(),
                 line: format!("error: {e}"),
             });
-            crate::executor::stage_stream::send_stage_boundary(gremlin.id.as_str(), "", "other");
+            crate::executor::stage_boundary::send_stage_boundary(gremlin.id.as_str(), "", "other");
             gremlin.state.write_terminal_state(1);
             1
         }
@@ -83,13 +81,12 @@ fn spawn_log_writer(
     store: Arc<dyn state::StateStore + Send + Sync>,
     relay: Option<LogRelay>,
     run_id: String,
-) -> tokio::sync::mpsc::UnboundedSender<tokio::sync::oneshot::Sender<()>> {
-    let (barrier_tx, mut barrier_rx) =
-        tokio::sync::mpsc::unbounded_channel::<tokio::sync::oneshot::Sender<()>>();
+) -> LogFlushHandle {
+    let (barrier_tx, mut barrier_rx) = tokio::sync::mpsc::unbounded_channel::<LogSnapshotRequest>();
 
     enum WriteCmd {
-        Line(String),
-        Flush(tokio::sync::oneshot::Sender<()>),
+        Event(String, u64),
+        Snapshot(LogSnapshotRequest),
     }
 
     tokio::spawn(async move {
@@ -103,29 +100,59 @@ fn spawn_log_writer(
             };
 
         // A single long-lived blocking writer drains a channel of stamped
-        // fragments, so the async task never blocks on the synchronous
+        // whole events, so the async task never blocks on the synchronous
         // `StateBlob` handle and no blocking-pool job is spawned per line.
         let (write_tx, mut write_rx) = tokio::sync::mpsc::unbounded_channel::<WriteCmd>();
         let writer = file.map(|file| {
             tokio::task::spawn_blocking(move || {
+                let mut through_sequence = 0;
                 while let Some(cmd) = write_rx.blocking_recv() {
                     match cmd {
-                        WriteCmd::Line(stamped) => {
+                        WriteCmd::Event(stamped, sequence) => {
                             let mut guard = match file.lock() {
                                 Ok(guard) => guard,
                                 Err(_) => return,
                             };
-                            let _ = guard.write_all(stamped.as_bytes());
-                            let _ = guard.write_all(b"\n");
-                            let _ = guard.flush();
+                            if guard.write_all(stamped.as_bytes()).is_err()
+                                || guard.flush().is_err()
+                            {
+                                return;
+                            }
+                            through_sequence = sequence;
                         }
-                        WriteCmd::Flush(ack) => {
-                            let mut guard = match file.lock() {
-                                Ok(guard) => guard,
-                                Err(_) => return,
+                        WriteCmd::Snapshot(request) => {
+                            use std::io::Read;
+                            let Ok(mut blob) = store.open("log", state::BlobMode::Read) else {
+                                continue;
                             };
-                            let _ = guard.flush();
-                            let _ = ack.send(());
+                            let content = match request.max_lines {
+                                Some(0) => Ok(String::new()),
+                                Some(max_lines) => {
+                                    crate::executor::blob_io::read_tail_lines(&mut *blob, max_lines)
+                                        .map(|lines| {
+                                            if lines.is_empty() {
+                                                String::new()
+                                            } else {
+                                                format!("{}\n", lines.join("\n"))
+                                            }
+                                        })
+                                }
+                                None => {
+                                    let mut content = String::new();
+                                    blob.read_to_string(&mut content).map(|_| content)
+                                }
+                            };
+                            if let Ok(content) = content {
+                                let _ = request.ack.send(LogSnapshot {
+                                    content,
+                                    // Partial history cannot cover earlier bus events.
+                                    through_sequence: if request.max_lines.is_some() {
+                                        0
+                                    } else {
+                                        through_sequence
+                                    },
+                                });
+                            }
                         }
                     }
                 }
@@ -134,6 +161,7 @@ fn spawn_log_writer(
 
         loop {
             tokio::select! {
+                biased;
                 result = log_rx.recv() => {
                     match result {
                         gremlins_magic_bus::Recv::Event(dispatch) => {
@@ -155,17 +183,19 @@ fn spawn_log_writer(
                                 }
                                 _ => continue,
                             };
+                            let mut stamped = String::new();
                             for part in line.split('\n') {
-                                let stamped = format!("{ts} {part}");
-                                if writer.is_some() {
-                                    let _ = write_tx.send(WriteCmd::Line(stamped.clone()));
-                                }
+                                use std::fmt::Write;
+                                let _ = writeln!(stamped, "{ts} {part}");
                                 if let Some(relay) = &relay {
                                     emit_event(EventKind::LogLine {
                                         id: relay.parent_id.clone(),
                                         line: format!("{}{}", relay.prefix, part),
                                     });
                                 }
+                            }
+                            if writer.is_some() {
+                                let _ = write_tx.send(WriteCmd::Event(stamped, dispatch.sequence()));
                             }
                         }
                         gremlins_magic_bus::Recv::Lagged(_) => {
@@ -175,14 +205,13 @@ fn spawn_log_writer(
                         gremlins_magic_bus::Recv::Closed => break,
                     }
                 }
-                // Flush barrier: send a flush command through the write channel;
-                // the blocking writer acknowledges it after all prior writes
-                // have been flushed to the blob.
+                // Snapshot reads are ordered with writes, so content and watermark
+                // describe the same cut even as producers keep emitting.
                 Some(ack) = barrier_rx.recv() => {
                     if writer.is_some() {
-                        let _ = write_tx.send(WriteCmd::Flush(ack));
+                        let _ = write_tx.send(WriteCmd::Snapshot(ack));
                     } else {
-                        let _ = ack.send(());
+                        drop(ack);
                     }
                 }
             }

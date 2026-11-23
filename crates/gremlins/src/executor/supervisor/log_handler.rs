@@ -2,10 +2,9 @@
 //!
 //! The outer `handle_log` orchestrates three focused stages:
 //! 1. `resolve_log_source` — determines the log source (store vs path).
-//! 2. `replay_history` — replays persisted lines with dedup.
-//! 3. `drain_and_follow` — drains pre-subscription events and streams new ones.
+//! 2. `replay_history` — replays a fixed persisted snapshot.
+//! 3. `drain_and_follow` — skips the snapshot's bus overlap and streams new events.
 
-use std::collections::HashSet;
 use std::path::PathBuf;
 use std::sync::Arc;
 
@@ -23,7 +22,7 @@ use gremlins_magic_bus::{init_bus, EventKind};
 
 use super::error_response;
 use super::ops::resolve_store_for_id;
-use super::run_registry::RunRegistry;
+use super::run_registry::{LogSnapshot, RunRegistry};
 
 // ── Log source resolution ───────────────────────────────────────────────
 
@@ -84,11 +83,8 @@ fn unsubscribe(sub: &Option<Subscriber<EventKind>>) {
     }
 }
 
-/// Replay persisted log lines, building a dedup set of message bodies.
-/// Returns `None` if the writer reports a disconnected client (caller should
-/// bail out); otherwise `Some((dedup_set, next_offset))`.
-async fn replay_history(source: &LogSource, out: &LogOutput<'_>) -> Option<(HashSet<String>, u64)> {
-    let content = match source {
+async fn read_history(source: &LogSource) -> String {
+    match source {
         LogSource::Store(store) => match store.open("log", state::BlobMode::Read) {
             Ok(mut blob) => tokio::task::spawn_blocking(move || {
                 use std::io::Read;
@@ -103,50 +99,31 @@ async fn replay_history(source: &LogSource, out: &LogOutput<'_>) -> Option<(Hash
         LogSource::Path(state_dir) => tokio::fs::read_to_string(state_dir.join("log"))
             .await
             .unwrap_or_default(),
-    };
+    }
+}
 
+async fn replay_history(content: &str, out: &LogOutput<'_>) -> Option<u64> {
     let mut offset: u64 = 0;
-    let mut replayed: HashSet<String> = HashSet::new();
     for line in content.lines() {
-        let body = line.split_once("] ").map(|(_, msg)| msg).unwrap_or(line);
-        replayed.insert(body.to_string());
         if !out.send_line(line, &mut offset).await {
             // Client disconnected — signal the orchestrator to bail.
             return None;
         }
     }
-    Some((replayed, offset))
+    Some(offset)
 }
 
 // ── Drain + follow ──────────────────────────────────────────────────────
 
-/// Drain pre-subscription events (deduping against `replayed`), then stream
-/// new LogLine events until the run terminates or the client disconnects.
+/// Skip only events included in the writer's atomic snapshot, then follow.
 async fn drain_and_follow(
     id: &str,
     mut log_rx: gremlins_magic_bus::ReceiverHalf<EventKind>,
     out: &LogOutput<'_>,
     mut reader: BufReader<tokio::net::unix::OwnedReadHalf>,
-    replayed: &mut HashSet<String>,
+    through_sequence: u64,
     offset: &mut u64,
 ) {
-    // Drain queued events, re-emitting only those whose per-line message
-    // was not already replayed from the file.
-    while let Ok(dispatch) = log_rx.try_recv() {
-        if let EventKind::LogLine { id: line_id, line } = dispatch.kind() {
-            if line_id != id {
-                continue;
-            }
-            let ts = crate::executor::state::stamp_from_epoch_millis(dispatch.ts().wall_millis());
-            for part in line.split('\n') {
-                let stamped = format!("{ts} {part}");
-                if !replayed.contains(part) && !out.send_line(&stamped, offset).await {
-                    return;
-                }
-            }
-        }
-    }
-
     loop {
         tokio::select! {
             result = log_rx.recv() => {
@@ -154,7 +131,7 @@ async fn drain_and_follow(
                     gremlins_magic_bus::Recv::Event(dispatch) => {
                         match dispatch.kind() {
                             EventKind::LogLine { id: line_id, line } => {
-                                if line_id != id {
+                                if line_id != id || (dispatch.sequence() != 0 && dispatch.sequence() <= through_sequence) {
                                     continue;
                                 }
                                 let ts = crate::executor::state::stamp_from_epoch_millis(
@@ -179,7 +156,7 @@ async fn drain_and_follow(
                                     if let EventKind::LogLine { id: line_id, line } =
                                         dispatch.kind()
                                     {
-                                        if line_id != id {
+                                        if line_id != id || (dispatch.sequence() != 0 && dispatch.sequence() <= through_sequence) {
                                             continue;
                                         }
                                         let ts = crate::executor::state::stamp_from_epoch_millis(
@@ -249,7 +226,7 @@ pub(crate) async fn handle_log(
         .unwrap_or(false);
 
     // 2. Subscribe for live runs and flush pre-subscription events.
-    let (log_sub, log_rx) = if follow {
+    let (log_sub, log_rx, snapshot) = if follow {
         let (flush, sub_rx) =
             if let Some((flush, sub, rx)) = registry.get_run_log_flush_and_subscribe(id).await {
                 (Some(flush), Some((sub, rx)))
@@ -257,18 +234,18 @@ pub(crate) async fn handle_log(
                 (None, None)
             };
 
-        if let Some(flush) = &flush {
-            let (ack_tx, ack_rx) = tokio::sync::oneshot::channel();
-            let _ = flush.send(ack_tx);
-            let _ = ack_rx.await;
-        }
+        let snapshot = if let Some(flush) = &flush {
+            LogSnapshot::request(flush).await
+        } else {
+            None
+        };
 
         match sub_rx {
-            Some((sub, rx)) => (Some(sub), Some(rx)),
-            None => (None, None),
+            Some((sub, rx)) => (Some(sub), Some(rx), snapshot),
+            None => (None, None, None),
         }
     } else {
-        (None, None)
+        (None, None, registry.get_run_log_snapshot(id).await)
     };
 
     let out = LogOutput {
@@ -277,14 +254,28 @@ pub(crate) async fn handle_log(
     };
 
     // 3. Replay persisted history. Bail on client disconnect.
-    let Some((mut replayed, mut offset)) = replay_history(&source, &out).await else {
+    let LogSnapshot {
+        content,
+        through_sequence,
+    } = match snapshot {
+        Some(snapshot) => snapshot,
+        None => LogSnapshot {
+            content: read_history(&source).await,
+            through_sequence: 0,
+        },
+    };
+    let Some(mut offset) = replay_history(&content, &out).await else {
         return;
     };
 
     // 4. Drain and follow live events.
     if let Some(log_rx) = log_rx {
-        drain_and_follow(id, log_rx, &out, reader, &mut replayed, &mut offset).await;
+        drain_and_follow(id, log_rx, &out, reader, through_sequence, &mut offset).await;
     }
 
     unsubscribe(&log_sub);
 }
+
+#[cfg(test)]
+#[path = "log_handler_tests.rs"]
+mod tests;

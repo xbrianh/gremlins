@@ -5,12 +5,15 @@
 //! [`CorrId`] prefix matching, using the delivery primitive implied by each
 //! subscriber's [`DeliveryPolicy`].
 //!
-//! Registration is rare (gremlin launch / connection open); emission is the
-//! hot path, so the registry is a `RwLock<Vec<_>>` with only `try_send`-style
-//! work performed under the read lock.
+//! Journal insertion, routing, and history registration share one mutex.
+//! No lock is held while running read, persistence, or retention callbacks,
+//! or while awaiting bounded channel capacity.
 
+use std::collections::{BTreeMap, HashMap, VecDeque};
+use std::future::Future;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::RwLock;
+use std::sync::Mutex;
+use std::task::{Context, Poll};
 
 use futures::future::join_all;
 
@@ -19,10 +22,84 @@ use crate::{
     CorrId, DispatchEvent, ReceiverHalf, Subscriber, SubscriberError, SubscriberRegistration,
 };
 
+/// An atomic history/live cut. Events retain their original envelopes and order.
+///
+/// `complete` is conservatively false after any eviction or retention omission
+/// anywhere in this bus, even when it did not match the subscription filter.
+#[derive(Clone, Debug)]
+pub struct HistorySnapshot<P> {
+    pub events: Vec<DispatchEvent<P>>,
+    pub complete: bool,
+    /// Bus-global sequence of the last run-scoped event at this cut (zero initially).
+    pub through_sequence: u64,
+    /// Highest sequence evicted or omitted anywhere in the bus (zero if none).
+    pub evicted_through_sequence: u64,
+}
+
 /// A fan-out registry keyed by correlation-id prefixes.
 pub struct Bus<P> {
-    subscribers: RwLock<Vec<(u64, CorrId, SubscriberMailbox<P>)>>,
+    state: Mutex<BusState<P>>,
     next_id: AtomicU64,
+    retain: Box<dyn Fn(&P) -> bool + Send + Sync>,
+}
+
+struct BusState<P> {
+    subscribers: Vec<(u64, CorrId, SubscriberMailbox<P>)>,
+    journal: BTreeMap<u64, DispatchEvent<P>>,
+    runs: HashMap<String, VecDeque<u64>>,
+    per_run_limit: usize,
+    global_limit: usize,
+    sequence: u64,
+    evicted_through_sequence: u64,
+}
+
+impl<P: Clone> BusState<P> {
+    fn record(&mut self, event: &mut DispatchEvent<P>, retain: bool) {
+        event.set_sequence(0);
+        if event.corr_id().run().is_none() {
+            return;
+        }
+        self.sequence = self
+            .sequence
+            .checked_add(1)
+            .expect("bus sequence exhausted");
+        let sequence = self.sequence;
+        event.set_sequence(sequence);
+        let run = event.corr_id().run().expect("run-scoped event");
+        if self.per_run_limit == 0 || self.global_limit == 0 || !retain {
+            self.evicted_through_sequence = sequence;
+            return;
+        }
+        if let Some(oldest) = self
+            .runs
+            .get(run)
+            .filter(|entries| entries.len() >= self.per_run_limit)
+            .and_then(|entries| entries.front())
+            .copied()
+        {
+            self.remove(oldest);
+        }
+        if self.journal.len() >= self.global_limit {
+            let oldest = *self.journal.first_key_value().expect("nonempty journal").0;
+            self.remove(oldest);
+        }
+        self.journal.insert(sequence, event.clone());
+        self.runs
+            .entry(run.to_owned())
+            .or_default()
+            .push_back(sequence);
+    }
+
+    fn remove(&mut self, sequence: u64) {
+        let event = self.journal.remove(&sequence).expect("retained event");
+        let run = event.corr_id().run().expect("run-scoped journal");
+        let entries = self.runs.get_mut(run).expect("retained run");
+        assert_eq!(entries.pop_front(), Some(sequence));
+        if entries.is_empty() {
+            self.runs.remove(run);
+        }
+        self.evicted_through_sequence = self.evicted_through_sequence.max(sequence);
+    }
 }
 
 impl<P: Clone + Send + 'static> Default for Bus<P> {
@@ -32,11 +109,48 @@ impl<P: Clone + Send + 'static> Default for Bus<P> {
 }
 
 impl<P: Clone + Send + 'static> Bus<P> {
+    /// Retain up to 16,384 events per exact run and 65,536 globally.
     pub fn new() -> Self {
+        Self::with_history_limits(16_384, 65_536)
+    }
+
+    /// Construct with custom record bounds (including zero), useful for tests.
+    pub fn with_history_limits(per_run_limit: usize, global_limit: usize) -> Self {
+        Self::with_history_limits_and_retention(per_run_limit, global_limit, |_| true)
+    }
+
+    /// Customize history retention without changing live delivery. Rejected
+    /// payloads are never cloned into the journal and make history incomplete.
+    /// The predicate runs before acquiring the state mutex and may re-enter the bus.
+    pub fn with_history_limits_and_retention(
+        per_run_limit: usize,
+        global_limit: usize,
+        retain: impl Fn(&P) -> bool + Send + Sync + 'static,
+    ) -> Self {
         Self {
-            subscribers: RwLock::new(Vec::new()),
+            state: Mutex::new(BusState {
+                subscribers: Vec::new(),
+                journal: BTreeMap::new(),
+                runs: HashMap::new(),
+                per_run_limit,
+                global_limit,
+                sequence: 0,
+                evicted_through_sequence: 0,
+            }),
             next_id: AtomicU64::new(1),
+            retain: Box::new(retain),
         }
+    }
+
+    /// Run a synchronous read without holding the bus mutex.
+    ///
+    /// Returns zero as a conservative compatibility watermark: no persisted
+    /// replay cut is asserted, even if events were emitted before the read.
+    /// The read may re-enter the bus or wait for emissions. Persistence and
+    /// publication are not synchronized; callers must not suppress positive
+    /// live sequences on the basis of this watermark.
+    pub fn with_sequence_snapshot<T>(&self, read: impl FnOnce() -> T) -> (T, u64) {
+        (read(), 0)
     }
 
     /// Register a subscriber and receive its receiver half.
@@ -50,12 +164,48 @@ impl<P: Clone + Send + 'static> Bus<P> {
         let id = self.next_id.fetch_add(1, Ordering::Relaxed);
         let subscriber = Subscriber::new(id, prefix.clone(), mailbox.clone());
 
-        self.subscribers
-            .write()
-            .expect("subscriber registry poisoned")
+        self.state
+            .lock()
+            .expect("bus state poisoned")
+            .subscribers
             .push((id, prefix, mailbox));
 
         Ok((subscriber, receiver))
+    }
+
+    /// Atomically snapshot matching run-scoped history and register live delivery.
+    ///
+    /// History retains bounded original envelopes in emission order, without
+    /// disk persistence. Non-run events are live only. History is returned
+    /// separately, not replayed through the mailbox. See [`HistorySnapshot`]
+    /// for conservative completeness and sequence watermark semantics.
+    #[allow(clippy::type_complexity)] // Keep the history tuple parallel to subscribe's API.
+    pub fn subscribe_with_history(
+        &self,
+        registration: SubscriberRegistration,
+    ) -> Result<(Subscriber<P>, ReceiverHalf<P>, HistorySnapshot<P>), SubscriberError> {
+        let prefix = registration.prefix().clone();
+        let (mailbox, receiver) = SubscriberMailbox::for_policy(registration.policy())?;
+        let id = self.next_id.fetch_add(1, Ordering::Relaxed);
+        let subscriber = Subscriber::new(id, prefix.clone(), mailbox.clone());
+        let mut state = self.state.lock().expect("bus state poisoned");
+        let history = state
+            .journal
+            .values()
+            .filter(|event| event.corr_id().matches_prefix(&prefix))
+            .cloned()
+            .collect();
+        state.subscribers.push((id, prefix, mailbox));
+        Ok((
+            subscriber,
+            receiver,
+            HistorySnapshot {
+                events: history,
+                complete: state.evicted_through_sequence == 0,
+                through_sequence: state.sequence,
+                evicted_through_sequence: state.evicted_through_sequence,
+            },
+        ))
     }
 
     /// Remove a subscriber by its handle. Idempotent (no-op if already gone).
@@ -65,48 +215,91 @@ impl<P: Clone + Send + 'static> Bus<P> {
     /// close its log blob or connection and exit cleanly.
     pub fn unsubscribe(&self, subscriber: &Subscriber<P>) {
         let id = subscriber.id();
-        self.subscribers
-            .write()
-            .expect("subscriber registry poisoned")
+        self.state
+            .lock()
+            .expect("bus state poisoned")
+            .subscribers
             .retain(|(entry_id, _, _)| *entry_id != id);
     }
 
     /// Fan out synchronously. Never blocks; backpressured subscribers drop
     /// events when full. This is the path for log-shaped records.
     pub fn emit(&self, event: DispatchEvent<P>) {
-        let subscribers = self
-            .subscribers
-            .read()
-            .expect("subscriber registry poisoned");
+        self.emit_recorded(event);
+    }
 
-        for (_id, prefix, mailbox) in subscribers.iter() {
+    /// Compatibility helper: publish, then pass the assigned envelope to `persist`.
+    ///
+    /// The callback runs without the bus mutex and may re-enter the bus. There
+    /// is no atomic persistence/publication guarantee: subscribers may observe
+    /// the event before persistence, and concurrent callbacks may finish out of
+    /// sequence order. A callback panic does not undo publication.
+    pub fn emit_with_persistence(
+        &self,
+        event: DispatchEvent<P>,
+        persist: impl FnOnce(&DispatchEvent<P>),
+    ) {
+        let event = self.emit_recorded(event);
+        persist(&event);
+    }
+
+    fn emit_recorded(&self, mut event: DispatchEvent<P>) -> DispatchEvent<P> {
+        let retain = event.corr_id().run().is_some() && (self.retain)(event.kind());
+        let mut state = self.state.lock().expect("bus state poisoned");
+        state.record(&mut event, retain);
+        for (_id, prefix, mailbox) in &state.subscribers {
             if event.corr_id().matches_prefix(prefix) {
                 mailbox.try_send(event.clone());
             }
         }
+        event
     }
 
     /// Fan out asynchronously, awaiting capacity on backpressured subscribers.
     ///
-    /// Matching subscribers are collected under the read lock, then the lock
-    /// is released before any `.await`. Delivery to the matching subscribers
-    /// happens concurrently, so a slow backpressured subscriber cannot
-    /// head-of-line block the others.
-    pub async fn emit_async(&self, event: DispatchEvent<P>) {
-        let matching: Vec<SubscriberMailbox<P>> = {
-            let subscribers = self
-                .subscribers
-                .read()
-                .expect("subscriber registry poisoned");
-
-            subscribers
-                .iter()
-                .filter(|(_, prefix, _)| event.corr_id().matches_prefix(prefix))
-                .map(|(_, _, mailbox)| mailbox.clone())
-                .collect()
+    /// Nonbackpressured delivery happens under the journal mutex. Bounded
+    /// capacity reservations are first polled under that same mutex to enter
+    /// Tokio's FIFO waiter queue in journal order, then awaited concurrently.
+    /// FIFO reservations prevent capacity-wait overtaking, but concurrently
+    /// resumed tasks can send out of order when multiple permits are available.
+    /// Cancellation can drop pending bounded deliveries (not journal entries).
+    /// Direct `Subscriber::send` calls bypass this bus ordering contract.
+    pub async fn emit_async(&self, mut event: DispatchEvent<P>) {
+        let retain = event.corr_id().run().is_some() && (self.retain)(event.kind());
+        let pending = {
+            let mut state = self.state.lock().expect("bus state poisoned");
+            state.record(&mut event, retain);
+            let mut pending = Vec::new();
+            let waker = futures::task::noop_waker();
+            let mut cx = Context::from_waker(&waker);
+            for (_, prefix, mailbox) in &state.subscribers {
+                if !event.corr_id().matches_prefix(prefix) {
+                    continue;
+                }
+                if let SubscriberMailbox::Backpressured(tx) = mailbox {
+                    let mut reservation = Box::pin(tx.clone().reserve_owned());
+                    match reservation.as_mut().poll(&mut cx) {
+                        Poll::Ready(Ok(permit)) => {
+                            permit.send(event.clone());
+                        }
+                        Poll::Ready(Err(_)) => {}
+                        Poll::Pending => pending.push(reservation),
+                    }
+                } else {
+                    mailbox.try_send(event.clone());
+                }
+            }
+            pending
         };
-
-        join_all(matching.iter().map(|mailbox| mailbox.send(event.clone()))).await;
+        join_all(pending.into_iter().map(|reservation| {
+            let event = event.clone();
+            async move {
+                if let Ok(permit) = reservation.await {
+                    permit.send(event);
+                }
+            }
+        }))
+        .await;
     }
 }
 
@@ -117,6 +310,385 @@ mod tests {
 
     #[derive(Clone, Debug, PartialEq)]
     struct Payload(u64);
+
+    fn assert_same(actual: &DispatchEvent<Payload>, expected: &DispatchEvent<Payload>) {
+        assert_eq!(actual.corr_id(), expected.corr_id());
+        assert_eq!(actual.kind(), expected.kind());
+        assert_eq!(actual.ts().monotonic(), expected.ts().monotonic());
+        assert_eq!(actual.ts().wall(), expected.ts().wall());
+    }
+
+    #[test]
+    fn persistence_callback_can_reenter_after_publication() {
+        let bus = Bus::new();
+        let id = CorrId::new().with_run("persist");
+        let (_, mut rx) = bus
+            .subscribe(SubscriberRegistration::lossless(id.clone()))
+            .unwrap();
+        let mut persisted = Vec::new();
+        for number in 1..=3 {
+            bus.emit_with_persistence(DispatchEvent::new(id.clone(), Payload(number)), |event| {
+                persisted.push(event.sequence());
+                assert_eq!(event.sequence(), number);
+                assert!(bus.state.try_lock().is_ok());
+                let history = snapshot(&bus, Some("persist"));
+                assert_eq!(history.through_sequence, number);
+                assert_eq!(rx.try_recv().unwrap().sequence(), number);
+                // Reentrant publication must not wait on the callback's lock.
+                bus.emit(DispatchEvent::new(CorrId::new(), Payload(99)));
+                assert_eq!(bus.with_sequence_snapshot(|| "read").1, 0);
+            });
+            assert!(matches!(rx.try_recv(), Err(TryRecvError::Empty)));
+        }
+        let (covered, publication) = bus.with_sequence_snapshot(|| persisted.clone());
+        assert_eq!(covered, vec![1, 2, 3]);
+        assert_eq!(publication, 0);
+        bus.emit(DispatchEvent::new(id, Payload(4)));
+        assert_eq!(rx.try_recv().unwrap().sequence(), 4);
+        assert_eq!(covered.last(), Some(&3));
+    }
+
+    #[test]
+    fn sequence_snapshot_allows_reentrant_and_concurrent_emission() {
+        let bus = Bus::new();
+        let id = CorrId::new().with_run("cut");
+        bus.emit(DispatchEvent::new(id.clone(), Payload(1)));
+        let (done_tx, done_rx) = std::sync::mpsc::channel();
+
+        std::thread::scope(|scope| {
+            let (value, sequence) = bus.with_sequence_snapshot(|| {
+                scope.spawn(|| {
+                    bus.emit(DispatchEvent::new(id, Payload(2)));
+                    done_tx.send(()).unwrap();
+                });
+                assert!(bus.state.try_lock().is_ok());
+                record(&bus, "cut", 3);
+                let history = snapshot(&bus, Some("cut"));
+                assert!(history.through_sequence >= 2);
+                done_rx
+                    .recv_timeout(std::time::Duration::from_secs(5))
+                    .expect("read must not block concurrent publication");
+                "disk tail"
+            });
+            assert_eq!((value, sequence), ("disk tail", 0));
+        });
+        assert_eq!(snapshot(&bus, Some("cut")).through_sequence, 3);
+        assert_eq!(bus.with_sequence_snapshot(|| ()).1, 0);
+    }
+
+    #[tokio::test]
+    async fn retention_callback_can_reenter_sync_and_async_emission() {
+        use std::sync::{Arc, OnceLock, Weak};
+
+        let slot = Arc::new(OnceLock::<Weak<Bus<Payload>>>::new());
+        let callback_slot = slot.clone();
+        let bus = Arc::new(Bus::with_history_limits_and_retention(8, 8, move |_| {
+            let bus = callback_slot.get().unwrap().upgrade().unwrap();
+            assert!(bus.state.try_lock().is_ok());
+            let _ = snapshot(&bus, Some("retention"));
+            // Non-run emissions do not invoke the retention predicate.
+            bus.emit(DispatchEvent::new(CorrId::new(), Payload(99)));
+            true
+        }));
+        slot.set(Arc::downgrade(&bus)).unwrap();
+        let (_, mut rx) = bus
+            .subscribe(SubscriberRegistration::lossless(CorrId::new()))
+            .unwrap();
+        record(&bus, "retention", 1);
+        bus.emit_async(DispatchEvent::new(
+            CorrId::new().with_run("retention"),
+            Payload(2),
+        ))
+        .await;
+        for (value, sequence) in [(99, 0), (1, 1), (99, 0), (2, 2)] {
+            let event = rx.try_recv().unwrap();
+            assert_eq!(event.kind().0, value);
+            assert_eq!(event.sequence(), sequence);
+        }
+        let history = snapshot(&bus, Some("retention"));
+        assert!(history.complete);
+        assert_eq!(history.events.len(), 2);
+    }
+
+    #[tokio::test]
+    async fn snapshot_and_future_preserve_envelopes_and_filter_scope() {
+        for lag_tolerant in [false, true] {
+            let bus = Bus::new();
+            let base = CorrId::new()
+                .with_run("parent")
+                .with_stage("build")
+                .with_execution_id("exec");
+            let ids = [
+                base.clone(),
+                CorrId::new()
+                    .with_run("parent:child")
+                    .with_stage("build")
+                    .with_execution_id("exec"),
+                base.clone().with_run("parentish"),
+                base.clone().with_stage("test"),
+                base.clone().with_execution_id("exec:child"),
+                CorrId::new(),
+            ];
+            let events: Vec<_> = ids
+                .into_iter()
+                .enumerate()
+                .map(|(i, id)| DispatchEvent::new(id, Payload(i as u64)))
+                .collect();
+            for (i, event) in events.iter().enumerate() {
+                if i % 2 == 0 {
+                    bus.emit(event.clone());
+                } else {
+                    bus.emit_async(event.clone()).await;
+                }
+            }
+            let registration = if lag_tolerant {
+                SubscriberRegistration::lag_tolerant(base, 32)
+            } else {
+                SubscriberRegistration::lossless(base)
+            };
+            let (_, mut rx, history) = bus.subscribe_with_history(registration.clone()).unwrap();
+            assert!(history.complete);
+            assert_eq!(history.through_sequence, 5);
+            assert_eq!(history.events.len(), 2);
+            for (actual, expected) in history.events.iter().zip(&events) {
+                assert_same(actual, expected);
+            }
+            assert!(matches!(rx.try_recv(), Err(TryRecvError::Empty)));
+            for event in &events {
+                bus.emit_async(event.clone()).await;
+            }
+            let mut combined = history.events;
+            for expected in &events[..2] {
+                let actual = rx.try_recv().unwrap();
+                assert_same(&actual, expected);
+                combined.push(actual);
+            }
+            assert!(matches!(rx.try_recv(), Err(TryRecvError::Empty)));
+            let (_, _, snapshot) = bus.subscribe_with_history(registration).unwrap();
+            assert_eq!(snapshot.events.len(), combined.len());
+            for (actual, expected) in snapshot.events.iter().zip(&combined) {
+                assert_same(actual, expected);
+            }
+            let (_, _, all) = bus
+                .subscribe_with_history(SubscriberRegistration::lossless(CorrId::new()))
+                .unwrap();
+            assert_eq!(all.events.len(), 10, "non-run events are not journaled");
+        }
+    }
+
+    #[tokio::test]
+    async fn pending_bounded_send_does_not_delay_live_or_duplicate_snapshot() {
+        for lag_tolerant in [false, true] {
+            let bus = Bus::new();
+            let id = CorrId::new().with_run("X");
+            let (_, mut bounded) = bus
+                .subscribe(SubscriberRegistration::backpressured(id.clone(), 1))
+                .unwrap();
+            let registration = if lag_tolerant {
+                SubscriberRegistration::lag_tolerant(id.clone(), 32)
+            } else {
+                SubscriberRegistration::lossless(id.clone())
+            };
+            let (_, mut live, _) = bus.subscribe_with_history(registration.clone()).unwrap();
+            let events: Vec<_> = (0..4)
+                .map(|i| DispatchEvent::new(id.clone(), Payload(i)))
+                .collect();
+            bus.emit(events[0].clone());
+            let mut pending = Box::pin(bus.emit_async(events[1].clone()));
+            assert!(matches!(futures::poll!(&mut pending), Poll::Pending));
+            let (_, mut future, history) =
+                bus.subscribe_with_history(registration.clone()).unwrap();
+            assert_eq!(history.through_sequence, 2);
+            assert_eq!(history.events.len(), 2);
+            assert_eq!(history.events[1].sequence(), 2);
+            let mut history = history.events;
+            bus.emit(events[2].clone());
+            let mut later = Box::pin(bus.emit_async(events[3].clone()));
+            assert!(matches!(futures::poll!(&mut later), Poll::Pending));
+            for expected in &events {
+                assert_same(&live.try_recv().unwrap(), expected);
+            }
+            for expected in &events[2..] {
+                let actual = future.try_recv().unwrap();
+                assert_same(&actual, expected);
+                history.push(actual);
+            }
+            assert!(matches!(future.try_recv(), Err(TryRecvError::Empty)));
+            assert_same(&bounded.try_recv().unwrap(), &events[0]);
+            pending.await;
+            let delivered = bounded.try_recv().unwrap();
+            assert_same(&delivered, &events[1]);
+            assert_eq!(delivered.sequence(), 2);
+            later.await;
+            assert_same(&bounded.try_recv().unwrap(), &events[3]);
+            let (_, _, snapshot) = bus.subscribe_with_history(registration).unwrap();
+            assert_eq!(snapshot.events.len(), history.len());
+            for (actual, expected) in snapshot.events.iter().zip(&history) {
+                assert_same(actual, expected);
+            }
+        }
+    }
+
+    fn snapshot(bus: &Bus<Payload>, run: Option<&str>) -> HistorySnapshot<Payload> {
+        let prefix = run.map_or_else(CorrId::new, |run| CorrId::new().with_run(run));
+        let (sub, _, history) = bus
+            .subscribe_with_history(SubscriberRegistration::lossless(prefix))
+            .unwrap();
+        bus.unsubscribe(&sub);
+        history
+    }
+
+    fn record(bus: &Bus<Payload>, run: &str, value: u64) {
+        bus.emit(DispatchEvent::new(
+            CorrId::new().with_run(run),
+            Payload(value),
+        ));
+    }
+
+    #[test]
+    fn per_run_eviction_is_exact_and_preserves_global_order() {
+        let bus = Bus::with_history_limits(2, 10);
+        record(&bus, "parent", 1);
+        record(&bus, "parent:child", 2);
+        record(&bus, "parent", 3);
+        record(&bus, "parent", 4);
+        let history = snapshot(&bus, Some("parent"));
+        assert_eq!(
+            history
+                .events
+                .iter()
+                .map(|e| e.kind().0)
+                .collect::<Vec<_>>(),
+            [2, 3, 4]
+        );
+        assert!(!history.complete);
+        assert_eq!(history.through_sequence, 4);
+        assert_eq!(history.evicted_through_sequence, 1);
+        assert_eq!(bus.state.lock().unwrap().runs.len(), 2);
+        assert!(!snapshot(&bus, Some("unrelated")).complete);
+    }
+
+    #[test]
+    fn global_eviction_drops_oldest_and_bounds_metadata_across_many_runs() {
+        let bus = Bus::with_history_limits(2, 3);
+        for i in 0..1000 {
+            record(&bus, &format!("run-{i}"), i);
+            let state = bus.state.lock().unwrap();
+            assert!(state.journal.len() <= 3);
+            assert!(state.runs.len() <= 3);
+            assert_eq!(
+                state.runs.values().map(VecDeque::len).sum::<usize>(),
+                state.journal.len()
+            );
+        }
+        let history = snapshot(&bus, None);
+        assert_eq!(
+            history
+                .events
+                .iter()
+                .map(|e| e.kind().0)
+                .collect::<Vec<_>>(),
+            [997, 998, 999]
+        );
+        assert!(!history.complete);
+        assert_eq!(history.through_sequence, 1000);
+        assert_eq!(history.evicted_through_sequence, 997);
+        assert!(snapshot(&bus, Some("run-0")).events.is_empty());
+    }
+
+    #[tokio::test]
+    async fn omissions_and_zero_limits_keep_no_run_metadata_but_deliver_live() {
+        for bus in [
+            Bus::with_history_limits(0, 3),
+            Bus::with_history_limits(3, 0),
+            Bus::with_history_limits_and_retention(3, 3, |_| false),
+        ] {
+            let (_, mut rx) = bus
+                .subscribe(SubscriberRegistration::lossless(CorrId::new()))
+                .unwrap();
+            for i in 0..100 {
+                bus.emit_async(DispatchEvent::new(
+                    CorrId::new().with_run(format!("run-{i}")),
+                    Payload(i),
+                ))
+                .await;
+                let live = rx.try_recv().unwrap();
+                assert_eq!(live.kind().0, i);
+                assert_eq!(live.sequence(), i + 1);
+            }
+            bus.emit(DispatchEvent::new(CorrId::new(), Payload(101)));
+            assert_eq!(rx.try_recv().unwrap().sequence(), 0);
+            bus.emit_async(DispatchEvent::new(CorrId::new(), Payload(102)))
+                .await;
+            assert_eq!(rx.try_recv().unwrap().sequence(), 0);
+            let history = snapshot(&bus, None);
+            assert!(history.events.is_empty());
+            assert!(!history.complete);
+            assert_eq!(history.through_sequence, 100);
+            assert_eq!(history.evicted_through_sequence, 100);
+            assert!(bus.state.lock().unwrap().runs.is_empty());
+        }
+    }
+
+    #[tokio::test]
+    async fn emission_sequences_match_live_history_and_survive_cloning() {
+        let bus = Bus::new();
+        let (_, mut lossless) = bus
+            .subscribe(SubscriberRegistration::lossless(CorrId::new()))
+            .unwrap();
+        let (_, mut broadcast) = bus
+            .subscribe(SubscriberRegistration::lag_tolerant(CorrId::new(), 8))
+            .unwrap();
+        let (_, mut bounded) = bus
+            .subscribe(SubscriberRegistration::backpressured(CorrId::new(), 8))
+            .unwrap();
+        let original = DispatchEvent::new(CorrId::new().with_run("X"), Payload(1));
+        bus.emit(original.clone());
+        bus.emit_async(original.clone()).await;
+        let first = lossless.try_recv().unwrap();
+        assert_eq!(first.sequence(), 1);
+        assert_eq!(first.clone().sequence(), 1);
+        // Re-emitting an already stamped envelope must also get a fresh sequence.
+        bus.emit_async(first.clone()).await;
+        assert_eq!(original.sequence(), 0);
+        assert_eq!(first.sequence(), 1);
+        assert_eq!(lossless.try_recv().unwrap().sequence(), 2);
+        assert_eq!(lossless.try_recv().unwrap().sequence(), 3);
+        let history = snapshot(&bus, None);
+        assert_eq!(history.through_sequence, 3);
+        for (index, retained) in history.events.iter().enumerate() {
+            let sequence = index as u64 + 1;
+            assert_eq!(retained.sequence(), sequence);
+            assert_eq!(retained.clone().sequence(), sequence);
+            assert_eq!(broadcast.try_recv().unwrap().sequence(), sequence);
+            assert_eq!(bounded.try_recv().unwrap().sequence(), sequence);
+            assert_same(retained, &original);
+        }
+        assert_eq!(history.events.len(), 3);
+    }
+
+    #[test]
+    fn identical_envelopes_are_not_deduplicated_across_snapshot_live_cut() {
+        let bus = Bus::with_history_limits(10, 10);
+        let event = DispatchEvent::new(CorrId::new().with_run("same"), Payload(7));
+        bus.emit(event.clone());
+        bus.emit(event.clone());
+        let (_, mut rx, history) = bus
+            .subscribe_with_history(SubscriberRegistration::lossless(CorrId::new()))
+            .unwrap();
+        assert_eq!(history.events.len(), 2);
+        assert_eq!(history.through_sequence, 2);
+        for retained in &history.events {
+            assert_same(retained, &event);
+        }
+        assert!(matches!(rx.try_recv(), Err(TryRecvError::Empty)));
+        bus.emit(event.clone());
+        assert_same(&rx.try_recv().unwrap(), &event);
+        assert!(matches!(rx.try_recv(), Err(TryRecvError::Empty)));
+        let later = snapshot(&bus, None);
+        assert_eq!(later.events.len(), 3);
+        assert_eq!(later.through_sequence, 3);
+    }
 
     #[tokio::test]
     async fn emits_only_to_matching_prefixes() {

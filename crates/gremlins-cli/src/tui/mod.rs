@@ -627,9 +627,9 @@ fn fetch_run_statuses(
 /// aborted before the new one is spawned. Lines are scoped through the
 /// existing `view_log` channel so queued lines from a superseded follow are
 /// never painted into the new pane.
-fn start_watch_follow(
+fn start_watch_follow<B: ratatui::backend::Backend>(
     app: &mut App,
-    live_area: &mut LiveArea,
+    live_area: &mut LiveArea<B>,
     client: &Arc<client::DaemonClient>,
     id: String,
     log_tx: &mpsc::UnboundedSender<serde_json::Value>,
@@ -688,6 +688,45 @@ fn start_watch_follow(
         .await;
     });
     *watch_follow_handle = Some(follow_task);
+}
+
+fn apply_watch_frame<B: ratatui::backend::Backend>(
+    app: &mut App,
+    live_area: &mut LiveArea<B>,
+    raw: &serde_json::Value,
+    generation: u64,
+    follow: &mut Option<tokio::task::JoinHandle<()>>,
+) {
+    let Some(id) = raw.get("id").and_then(|v| v.as_str()) else {
+        return;
+    };
+    if app.watch_following.as_deref() != Some(id)
+        || raw.get("generation").and_then(|v| v.as_u64()) != Some(generation)
+    {
+        return;
+    }
+    match raw.get("type").and_then(|v| v.as_str()) {
+        Some("view_log") => {
+            if let Some(line) = raw.get("line").and_then(|v| v.as_str()) {
+                live_area.push_watch_line(line.to_string());
+            }
+        }
+        Some("view_error") => {
+            // Terminal runs can reach normal EOF after replaying history.
+            let is_terminal = app
+                .active_runs
+                .get(id)
+                .is_some_and(|r| r.status != "running");
+            if !is_terminal {
+                if let Some(message) = raw.get("message").and_then(|v| v.as_str()) {
+                    live_area.push_watch_line(format!("error: {message}"));
+                    app.watch_follow_error = Some(message.to_string());
+                    abort_watch_follow(follow);
+                }
+            }
+        }
+        _ => {}
+    }
 }
 
 /// What a `Ctrl+W` press should do given the current app state.
@@ -2583,8 +2622,6 @@ async fn run_app(live_area: &mut LiveArea) -> io::Result<()> {
                             last_cached_input_tokens,
                         );
                     }
-                    // Session-scoped / stage-stream kinds never arrive on the
-                    // control socket; ignore anything else.
                     _ => {}
                 }
             }
@@ -2617,47 +2654,14 @@ async fn run_app(live_area: &mut LiveArea) -> io::Result<()> {
                             }
                         }
                     }
-                    Some("view_log") => {
-                        // Scope the line to the current follow generation so
-                        // queued messages from an aborted or superseded follow
-                        // can't leak into a newly opened pane, even for the
-                        // same gremlin id.
-                        let generation = raw.get("generation").and_then(|v| v.as_u64());
-                        if let (Some(id), Some(line)) = (
-                            raw.get("id").and_then(|v| v.as_str()),
-                            raw.get("line").and_then(|v| v.as_str()),
-                        ) {
-                            if app.watch_following.as_deref() == Some(id)
-                                && generation == Some(watch_follow_generation)
-                            {
-                                live_area.push_watch_line(line.to_string());
-                            }
-                        }
-                    }
-                    Some("view_error") => {
-                        let generation = raw.get("generation").and_then(|v| v.as_u64());
-                        if let (Some(id), Some(message)) = (
-                            raw.get("id").and_then(|v| v.as_str()),
-                            raw.get("message").and_then(|v| v.as_str()),
-                        ) {
-                            if app.watch_following.as_deref() == Some(id)
-                                && generation == Some(watch_follow_generation)
-                            {
-                                // Ignore socket-closed notifications for
-                                // terminal runs — handle_log replays the
-                                // history and reaches normal EOF without a
-                                // live subscription.
-                                let is_terminal = app
-                                    .active_runs
-                                    .get(id)
-                                    .is_some_and(|r| r.status != "running");
-                                if !is_terminal {
-                                    live_area.push_watch_line(format!("error: {message}"));
-                                    app.watch_follow_error = Some(message.to_string());
-                                    abort_watch_follow(&mut watch_follow_handle);
-                                }
-                            }
-                        }
+                    Some("view_log" | "view_error") => {
+                        apply_watch_frame(
+                            &mut app,
+                            live_area,
+                            &raw,
+                            watch_follow_generation,
+                            &mut watch_follow_handle,
+                        );
                     }
                     Some("error") => {
                         let msg = raw
@@ -2780,10 +2784,7 @@ async fn run_app(live_area: &mut LiveArea) -> io::Result<()> {
 
             // ── Chat events ────────────────────────────────
             Some((event, turn, execution)) = chat_rx.recv() => {
-                // All chat events belong to the home conversation target
-                // regardless of which target is currently selected for
-                // display. Stage-execution targets only receive explicit
-                // stage-stream events.
+                // Home keeps streaming regardless of the selected conversation.
                 let home = Target::Home;
 
                 // Drop events that belong to a superseded turn (a turn that

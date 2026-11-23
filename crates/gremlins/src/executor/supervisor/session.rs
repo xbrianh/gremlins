@@ -352,7 +352,7 @@ pub(crate) async fn handle_session_op(
 }
 
 /// Serve a single auxiliary connection. First request names a streaming op
-/// (`log`/`attach`/`stage_stream`).
+/// (`log`/`attach`).
 pub(crate) async fn handle_session_aux(
     read_half: OwnedReadHalf,
     write_half: tokio::net::unix::OwnedWriteHalf,
@@ -393,9 +393,6 @@ pub(crate) async fn handle_session_aux(
         "log" => {
             handle_log(&request, &registry, reader, &writer).await;
         }
-        "stage_stream" => {
-            crate::executor::stage_stream::handle_stage_stream(&request, reader, &writer).await;
-        }
         "attach" => {
             handle_attach(&request, &registry, reader, &writer).await;
         }
@@ -430,8 +427,23 @@ async fn handle_read_blob(request: &Value, registry: &Arc<RunRegistry>) -> Value
         Err(resp) => return resp,
     };
 
-    let lines = crate::executor::blob_io::read_store_blob_tail(&store, blob, tail).await;
-    ok_response(serde_json::json!({"lines": lines}))
+    let lines = if blob == "log" {
+        match registry.get_run_log_tail_snapshot(&id, tail).await {
+            Some(snapshot) => snapshot.tail(tail),
+            None => crate::executor::blob_io::read_store_blob_tail(&store, blob, tail).await,
+        }
+    } else if blob.starts_with("command_logs/exec-") {
+        crate::executor::blob_io::read_exec_tail(&store, blob, tail)
+            .await
+            .0
+    } else {
+        crate::executor::blob_io::read_store_blob_tail(&store, blob, tail).await
+    };
+    ok_response(serde_json::json!({
+        "lines": lines,
+        "through_sequence": null,
+        "covered_sequences": null,
+    }))
 }
 
 async fn handle_read_definition(request: &Value, registry: &Arc<RunRegistry>) -> Value {
@@ -536,6 +548,67 @@ mod definition_tests {
 
     async fn read(registry: &Arc<RunRegistry>) -> Value {
         handle_read_definition(&json!({"id": "gr-session-definition"}), registry).await
+    }
+
+    #[tokio::test]
+    async fn read_blob_returns_raw_tail_without_coverage_for_existing_and_missing_blobs() {
+        let _sandbox = Sandbox::new();
+        let (store, registry) = fixture();
+        write_blob(&store, "log", b"first\nlast\n");
+        write_blob(&store, "artifacts/stream-test", b"first\nlast\n");
+        for (blob, expected) in [
+            ("log", json!(["last"])),
+            ("artifacts/stream-test", json!(["last"])),
+            ("artifacts/stream-missing", json!([])),
+        ] {
+            let response = handle_read_blob(
+                &json!({"id": "gr-session-definition", "blob": blob, "tail": 1}),
+                &registry,
+            )
+            .await;
+            assert_eq!(response["lines"], expected);
+            assert!(response["covered_sequences"].is_null());
+            assert!(response["through_sequence"].is_null());
+        }
+    }
+
+    #[tokio::test]
+    async fn read_exec_blob_returns_raw_tail_without_coverage_ignoring_sidecars() {
+        let _sandbox = Sandbox::new();
+        let (store, registry) = fixture();
+        let blob = "command_logs/exec-test.log";
+        write_blob(&store, blob, b"legacy\n");
+        let request = json!({"id": "gr-session-definition", "blob": blob, "tail": 2});
+        let response = handle_read_blob(&request, &registry).await;
+        assert_eq!(response["lines"], json!(["legacy"]));
+        assert_eq!(response["covered_sequences"], Value::Null);
+        assert_eq!(response["through_sequence"], Value::Null);
+
+        let native = format!("{blob}.events");
+        let records = [3, 7, 12]
+            .map(|sequence| json!({"sequence": sequence, "event": {"text": "same"}}).to_string())
+            .join("\n")
+            + "\n";
+        write_blob(&store, &native, records.as_bytes());
+        let response = handle_read_blob(&request, &registry).await;
+        assert_eq!(response["lines"], json!(["legacy"]));
+        assert_eq!(response["through_sequence"], Value::Null);
+        assert_eq!(response["covered_sequences"], Value::Null);
+
+        let response = handle_read_blob(
+            &json!({"id": "gr-session-definition", "blob": blob, "tail": 0}),
+            &registry,
+        )
+        .await;
+        assert_eq!(response["lines"], json!([]));
+        assert_eq!(response["through_sequence"], Value::Null);
+        assert_eq!(response["covered_sequences"], Value::Null);
+
+        write_blob(&store, &native, b"invalid json\n");
+        let response = handle_read_blob(&request, &registry).await;
+        assert_eq!(response["lines"], json!(["legacy"]));
+        assert_eq!(response["covered_sequences"], Value::Null);
+        assert_eq!(response["through_sequence"], Value::Null);
     }
 
     #[tokio::test]
