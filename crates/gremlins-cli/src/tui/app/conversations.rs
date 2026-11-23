@@ -290,7 +290,7 @@ mod tests {
         for target in [Target::Home, stage()] {
             let mut state = Conversations::default();
             let old = execution("old", 1);
-            let next = execution("next", 2);
+            let next = execution("next", 1);
             state.set_execution(target.clone(), Some(old.clone()));
             let id = correction(state.submit(&target, &input("old"), true), &old, "old");
             let other = if target.is_home() {
@@ -319,6 +319,50 @@ mod tests {
             assert!(state.drafts.contains_key(&target));
             assert!(state.finish(new_id, Ok(())).unwrap().clear_draft);
             assert!(state.finish(other_id, Ok(())).is_some());
+        }
+    }
+
+    #[test]
+    fn detached_execution_can_retry_without_accepting_its_retired_receipt() {
+        for target in [Target::Home, stage()] {
+            let mut state = Conversations::default();
+            let exec = execution("run", 1);
+            let draft = input("retry this correction");
+            state.set_execution(target.clone(), Some(exec.clone()));
+            let retired = correction(state.submit(&target, &draft, true), &exec, draft.text());
+
+            state.retire_pending(&target);
+            state.set_execution(target.clone(), None);
+            assert!(matches!(
+                state.submit(&target, &draft, true),
+                Submission::Blocked(_)
+            ));
+            assert!(state.retain_target(&target));
+
+            state.set_execution(target.clone(), Some(exec.clone()));
+            assert!(
+                state.pending.is_empty(),
+                "reselection must not send automatically"
+            );
+            let retry = correction(state.submit(&target, &draft, true), &exec, draft.text());
+            assert_ne!(retired, retry);
+            for result in [Ok(()), Err("late failure".into())] {
+                assert!(state.finish(retired, result).is_none());
+                assert!(state.pending.contains_key(&retry));
+                assert!(state.drafts.contains_key(&target));
+                assert!(matches!(
+                    state.submit(&target, &draft, true),
+                    Submission::Blocked(_)
+                ));
+            }
+
+            let receipt = state.finish(retry, Ok(())).unwrap();
+            assert_eq!(receipt.target, target);
+            assert_eq!(receipt.text, draft.text());
+            assert_eq!(receipt.result, Ok(()));
+            assert!(receipt.clear_draft);
+            assert!(!state.retain_target(&target));
+            assert!(state.pending.is_empty());
         }
     }
 
@@ -435,18 +479,39 @@ mod tests {
         for target in [Target::Home, stage()] {
             let mut state = Conversations::default();
             let draft = input("not for the next turn");
-            state.set_execution(target.clone(), Some(execution("old", 1)));
+            let old = execution("run", 1);
+            let next = Execution {
+                execution_id: "successor".into(),
+                ..old.clone()
+            };
+            state.set_execution(target.clone(), Some(old.clone()));
             state.observe_draft(&target, &draft, true);
             state.set_execution(target.clone(), None);
             assert!(matches!(
                 state.submit(&target, &draft, false),
                 Submission::Blocked(_)
             ));
-            state.set_execution(target.clone(), Some(execution("next", 2)));
+            // Only the execution ID changes within the same run and nonce.
+            state.set_execution(target.clone(), Some(next));
+            assert!(state.retain_target(&target));
+            assert!(state.drafts.contains_key(&target));
             assert!(matches!(
                 state.submit(&target, &draft, true),
                 Submission::Blocked(_)
             ));
+
+            assert!(state.pending.is_empty());
+            // The original draft is still recoverable on its own execution.
+            state.set_execution(target.clone(), Some(old.clone()));
+            let recovered = correction(state.submit(&target, &draft, true), &old, draft.text());
+            assert_eq!(
+                state
+                    .finish(recovered, Err("not delivered".into()))
+                    .unwrap()
+                    .text,
+                draft.text()
+            );
+            assert!(state.drafts.contains_key(&target));
 
             state.set_execution(target.clone(), None);
             state.observe_draft(&target, &InputBuffer::new(), false);
@@ -465,6 +530,13 @@ mod tests {
         let live = execution("session", 7);
         state.set_execution(Target::Home, Some(live.clone()));
         let text = input("again");
+        let job = execution("runner", 7);
+        state.set_execution(stage(), Some(job.clone()));
+        let job_id = correction(
+            state.submit(&stage(), &input("stage draft"), true),
+            &job,
+            "stage draft",
+        );
         let id = correction(state.submit(&Target::Home, &text, true), &live, "again");
         state.observe_draft(&Target::Home, &InputBuffer::new(), true);
         assert!(
@@ -472,7 +544,14 @@ mod tests {
             "receipt still outstanding"
         );
         state.observe_draft(&Target::Home, &text, true);
-        assert!(!state.finish(id, Ok(())).unwrap().clear_draft);
+        let receipt = state.finish(id, Ok(())).unwrap();
+        assert_eq!(receipt.target, Target::Home);
+        assert!(!receipt.clear_draft);
+        assert!(state.drafts.contains_key(&Target::Home));
+        assert!(state.drafts.contains_key(&stage()));
+        assert!(state.pending.contains_key(&job_id));
+        assert!(state.finish(job_id, Ok(())).unwrap().clear_draft);
+        assert!(state.drafts.contains_key(&Target::Home));
     }
 
     #[test]

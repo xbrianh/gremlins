@@ -3247,14 +3247,17 @@ fn format_ls_response(resp: &serde_json::Value) -> Vec<String> {
 mod attachment_tests {
     use super::*;
 
-    #[test]
-    fn failed_attachment_send_preserves_draft_and_releases_pending_delivery() {
+    // Draft addressing, retry eligibility, and receipt retirement are covered in
+    // app/conversations.rs. These tests witness attachment-to-UI integration.
+    fn correction_fixture() -> (
+        App,
+        LiveArea<ratatui::backend::TestBackend>,
+        Attachment,
+        Target,
+    ) {
         let mut app = App::new();
-        let mut live = LiveArea::with_backend(ratatui::backend::TestBackend::new(80, 24), 80, 24);
-        let target = Target::StageExecution {
-            run_id: "run".into(),
-            stage: "review".into(),
-        };
+        let mut live = LiveArea::with_backend(ratatui::backend::TestBackend::new(100, 40), 100, 40);
+        let target = attachment_target(&app, "run".into(), Some("review".into()));
         live.select_conversation(&mut app, target.clone());
         app.conversations.set_execution(
             target.clone(),
@@ -3264,169 +3267,259 @@ mod attachment_tests {
                 nonce: 7,
             }),
         );
-        app.replace_input("keep this correction");
-        let (commands, rx) = mpsc::unbounded_channel();
-        drop(rx);
         let attachment = Attachment {
-            commands: Some(commands),
             target: Some(target.clone()),
             ..Default::default()
         };
-        let Submission::Correction { id, text, .. } =
-            app.conversations.submit(&target, &app.input, false)
+        (app, live, attachment, target)
+    }
+
+    fn pending_correction(app: &mut App, target: &Target, text: &str) -> u64 {
+        app.replace_input(text);
+        let Submission::Correction { id, .. } = app.conversations.submit(target, &app.input, false)
         else {
             panic!("expected correction")
         };
-        send_attachment_correction(&mut app, &mut live, &attachment, id, &text);
-        assert_eq!(app.input.text(), "keep this correction");
-        assert!(app.finish_delivery(id, Ok(())).is_none());
-        assert!(matches!(
-            app.conversations.submit(&target, &app.input, false),
-            Submission::Correction { .. }
-        ));
-        assert_eq!(
-            attachment.send(serde_json::json!({"op":"continue"})),
-            Err("conversation attachment disconnected".into())
-        );
-        assert!(Attachment::default()
-            .send(serde_json::json!({"op":"continue"}))
-            .is_err());
+        id
+    }
+
+    fn correction_frame(
+        target: &Target,
+        generation: u64,
+        value: serde_json::Value,
+    ) -> AttachmentFrame {
+        AttachmentFrame {
+            generation,
+            target: target.clone(),
+            execution: None,
+            value,
+        }
     }
 
     #[test]
-    fn invalidating_pending_correction_allows_same_execution_retry_and_ignores_old_receipt() {
-        let mut app = App::new();
-        let mut live = LiveArea::with_backend(ratatui::backend::TestBackend::new(80, 24), 80, 24);
-        let target = attachment_target(&app, "run".into(), Some("review".into()));
-        let execution = protocol::Execution {
-            run_id: "run".into(),
-            execution_id: "execution".into(),
-            nonce: 7,
-        };
-        let mut attachment = Attachment {
-            target: Some(target.clone()),
-            ..Default::default()
-        };
-        let frame = |generation, value| AttachmentFrame {
-            generation,
-            target: target.clone(),
-            execution: Some(execution.clone()),
-            value,
-        };
-        let attached = || serde_json::json!({"type":"attached", "capabilities":["message"]});
-        live.select_conversation(&mut app, target.clone());
-        apply_attachment_frame(&mut app, &mut live, &mut attachment, frame(0, attached()));
-        app.replace_input("original correction");
-        let Submission::Correction { id: old_id, .. } =
-            app.conversations.submit(&target, &app.input, false)
-        else {
-            panic!("expected correction")
-        };
-        assert!(matches!(
-            app.conversations.submit(&target, &app.input, false),
-            Submission::Blocked(_)
-        ));
+    fn failed_attachment_send_preserves_draft_and_renders_error() {
+        let (mut app, mut live, mut attachment, target) = correction_fixture();
+        let id = pending_correction(&mut app, &target, "keep this correction");
+        let (commands, rx) = mpsc::unbounded_channel();
+        drop(rx);
+        attachment.commands = Some(commands);
+        send_attachment_correction(&mut app, &mut live, &attachment, id, "keep this correction");
+        assert_eq!(app.input.text(), "keep this correction");
+        let rendered = rendered_attachment(&mut live, &app);
+        assert!(rendered.contains("correction: keep this correction"));
+        assert!(rendered.contains("conversation attachment disconnected"));
+
+        let retry = pending_correction(&mut app, &target, "keep this correction");
+        let (commands, mut rx) = mpsc::unbounded_channel();
+        attachment.commands = Some(commands);
+        send_attachment_correction(
+            &mut app,
+            &mut live,
+            &attachment,
+            retry,
+            "keep this correction",
+        );
+        assert_eq!(
+            rx.try_recv().unwrap(),
+            serde_json::json!({
+                "op":"message", "req_id":retry.to_string(), "text":"keep this correction"
+            })
+        );
+    }
+
+    #[test]
+    fn invalidating_pending_correction_preserves_ui_and_ignores_old_receipt() {
+        let (mut app, mut live, mut attachment, target) = correction_fixture();
+        let id = pending_correction(&mut app, &target, "original correction");
+        live.push_response("partial response");
         attachment.invalidate(&mut app);
-        assert_eq!(app.input.text(), "original correction");
-        live.select_conversation(&mut app, Target::Home);
-        live.select_conversation(&mut app, target.clone());
+        // Even on a current stream, a retired receipt cannot change the UI.
         attachment.target = Some(target.clone());
         let generation = attachment.generation;
         apply_attachment_frame(
             &mut app,
             &mut live,
             &mut attachment,
-            frame(generation, attached()),
-        );
-        app.replace_input("new correction");
-        let Submission::Correction {
-            id: new_id,
-            execution: addressed,
-            ..
-        } = app.conversations.submit(&target, &app.input, false)
-        else {
-            panic!("expected retry for the same execution")
-        };
-        assert_eq!(addressed, execution);
-        assert_ne!(old_id, new_id);
-        // Even a receipt on the current stream must not revive the retired request.
-        apply_attachment_frame(
-            &mut app,
-            &mut live,
-            &mut attachment,
-            frame(
+            correction_frame(
+                &target,
                 generation,
-                serde_json::json!({"type":"delivered", "req_id":old_id.to_string()}),
+                serde_json::json!({
+                    "type":"delivered", "req_id":id.to_string()
+                }),
             ),
         );
-        assert_eq!(app.input.text(), "new correction");
-        assert!(app.finish_delivery(old_id, Ok(())).is_none());
-        assert!(matches!(
-            app.conversations.submit(&target, &app.input, false),
-            Submission::Blocked(_)
-        ));
+        assert_eq!(app.input.text(), "original correction");
+        assert_eq!(live.response_text(), "partial response");
+        let rendered = rendered_attachment(&mut live, &app);
+        assert!(!rendered.contains("correction:"));
+    }
+
+    #[test]
+    fn attachment_error_without_request_id_preserves_target_scoped_input_and_status() {
+        let (mut app, mut live, mut attachment, target) = correction_fixture();
+        let execution = protocol::Execution {
+            run_id: "run".into(),
+            execution_id: "execution".into(),
+            nonce: 7,
+        };
+        attachment.execution = Some(execution.clone());
+        pending_correction(&mut app, &target, "keep this correction");
+        app.set_conversation_status(target.clone(), ConversationStatus::Paused);
+        live.select_conversation(&mut app, Target::Home);
+        app.replace_input("unrelated home draft");
+        app.set_conversation_status(Target::Home, ConversationStatus::Running);
         apply_attachment_frame(
             &mut app,
             &mut live,
             &mut attachment,
-            frame(
-                generation,
-                serde_json::json!({"type":"delivered", "req_id":new_id.to_string()}),
+            AttachmentFrame {
+                execution: Some(execution),
+                ..correction_frame(
+                    &target,
+                    0,
+                    serde_json::json!({
+                        "type":"error", "message":"command rejected"
+                    }),
+                )
+            },
+        );
+        assert_eq!(app.input.text(), "unrelated home draft");
+        assert_eq!(
+            app.conversation_status(&Target::Home),
+            ConversationStatus::Running
+        );
+        assert!(!rendered_attachment(&mut live, &app).contains("command rejected"));
+        live.select_conversation(&mut app, target.clone());
+        assert_eq!(app.input.text(), "keep this correction");
+        assert_eq!(app.conversation_status(&target), ConversationStatus::Paused);
+        let rendered = rendered_attachment(&mut live, &app);
+        assert!(rendered.contains("correction: keep this correction"));
+        assert!(rendered.contains("error: command rejected"));
+    }
+
+    #[test]
+    fn repeated_correction_rejections_render_once() {
+        for kind in ["error", "correction_dropped"] {
+            let (mut app, mut live, mut attachment, target) = correction_fixture();
+            let id = pending_correction(&mut app, &target, "unique correction");
+            for _ in 0..2 {
+                apply_attachment_frame(
+                    &mut app,
+                    &mut live,
+                    &mut attachment,
+                    correction_frame(
+                        &target,
+                        0,
+                        serde_json::json!({
+                            "type":kind, "req_id":id.to_string(), "message":"delivery rejected"
+                        }),
+                    ),
+                );
+            }
+            assert_eq!(app.input.text(), "unique correction");
+            app.clear_input();
+            let rendered = rendered_attachment(&mut live, &app);
+            assert_eq!(
+                rendered.matches("delivery rejected").count(),
+                1,
+                "{rendered}"
+            );
+            assert_eq!(
+                rendered.matches("unique correction").count(),
+                1,
+                "{rendered}"
+            );
+        }
+    }
+
+    #[test]
+    fn control_error_does_not_consume_pending_correction() {
+        let (mut app, mut live, mut attachment, target) = correction_fixture();
+        let id = pending_correction(&mut app, &target, "keep this correction");
+        apply_attachment_frame(
+            &mut app,
+            &mut live,
+            &mut attachment,
+            correction_frame(
+                &target,
+                0,
+                serde_json::json!({
+                    "type":"error", "req_id":"selected-control", "message":"cannot continue"
+                }),
+            ),
+        );
+        assert_eq!(app.input.text(), "keep this correction");
+        apply_attachment_frame(
+            &mut app,
+            &mut live,
+            &mut attachment,
+            correction_frame(
+                &target,
+                0,
+                serde_json::json!({
+                    "type":"delivered", "req_id":id.to_string()
+                }),
             ),
         );
         assert!(app.input.is_empty());
     }
 
     #[test]
-    fn attachment_error_without_request_id_unlocks_pending_and_preserves_input() {
+    fn home_debug_done_defers_summary_and_lifecycle_to_owner() {
         let mut app = App::new();
-        let mut live = LiveArea::with_backend(ratatui::backend::TestBackend::new(80, 24), 80, 24);
-        let target = attachment_target(&app, "run".into(), Some("review".into()));
-        live.select_conversation(&mut app, target.clone());
-        let execution = protocol::Execution {
-            run_id: "run".into(),
-            execution_id: "execution".into(),
-            nonce: 7,
-        };
+        let mut live = LiveArea::with_backend(ratatui::backend::TestBackend::new(100, 40), 100, 40);
+        app.active_request = true;
+        live.submit_prompt("question".into());
+        live.push_response("owner response");
         let mut attachment = Attachment {
-            target: Some(target.clone()),
+            target: Some(Target::Home),
             ..Default::default()
         };
-        let frame = |value| AttachmentFrame {
-            generation: 0,
-            target: target.clone(),
-            execution: Some(execution.clone()),
-            value,
-        };
         apply_attachment_frame(
             &mut app,
             &mut live,
             &mut attachment,
-            frame(serde_json::json!({"type":"attached", "capabilities":["message"]})),
+            correction_frame(
+                &Target::Home,
+                0,
+                serde_json::json!({
+                    "type":"done", "text":"debug response", "summary":"debug summary"
+                }),
+            ),
         );
-        app.replace_input("keep this correction");
-        let Submission::Correction { id, .. } =
-            app.conversations.submit(&target, &app.input, false)
-        else {
-            panic!("expected correction")
-        };
-        assert!(matches!(
-            app.conversations.submit(&target, &app.input, false),
-            Submission::Blocked(_)
-        ));
-        apply_attachment_frame(
-            &mut app,
-            &mut live,
-            &mut attachment,
-            frame(serde_json::json!({"type":"error", "message":"command rejected"})),
-        );
-        assert_eq!(app.input.text(), "keep this correction");
-        assert!(app.finish_delivery(id, Ok(())).is_none());
-        assert!(rendered_attachment(&mut live, &app).contains("command rejected"));
-        assert!(matches!(
-            app.conversations.submit(&target, &app.input, false),
-            Submission::Correction { execution: addressed, .. } if addressed == execution
-        ));
+        assert!(app.active_request);
+        assert!(live.has_current_turn());
+        assert_eq!(live.response_text(), "owner response");
+        let rendered = rendered_attachment(&mut live, &app);
+        assert!(!rendered.contains("debug summary"));
+        assert!(!rendered.contains("debug response"));
+    }
+
+    #[test]
+    fn debug_resumed_keeps_attachment_and_appends_to_current_response() {
+        let (mut app, mut live, mut attachment, target) = correction_fixture();
+        live.submit_prompt("question".into());
+        live.push_response("preserved prefix ");
+        app.set_conversation_status(target.clone(), ConversationStatus::Paused);
+        for value in [
+            serde_json::json!({"type":"ended", "reason":"resumed"}),
+            serde_json::json!({"type":"stream_chunk", "text":"later output"}),
+        ] {
+            apply_attachment_frame(
+                &mut app,
+                &mut live,
+                &mut attachment,
+                correction_frame(&target, 0, value),
+            );
+            assert_eq!(attachment.target.as_ref(), Some(&target));
+            assert_eq!(attachment.generation, 0);
+            assert_eq!(
+                app.conversation_status(&target),
+                ConversationStatus::Running
+            );
+            assert!(live.has_current_turn());
+        }
+        assert_eq!(live.response_text(), "preserved prefix later output");
     }
 
     #[test]
@@ -3531,52 +3624,14 @@ mod attachment_tests {
     }
 
     #[test]
-    fn home_draft_and_stream_survive_navigation_without_duplication() {
-        let mut app = App::new();
-        app.home_run_id = Some("chat".into());
-        let mut live = LiveArea::with_backend(ratatui::backend::TestBackend::new(80, 24), 80, 24);
-        app.replace_input("idle draft");
-        let stage = Target::StageExecution {
-            run_id: "run".into(),
-            stage: "review".into(),
-        };
-        live.select_conversation(&mut app, stage.clone());
-        let home = attachment_target(&app, "chat".into(), None);
-        live.select_conversation(&mut app, home);
-        assert_eq!(app.input.text(), "idle draft");
-        live.submit_prompt("question".into());
-        live.push_response("partial");
-        app.active_request = true;
-        live.select_conversation(&mut app, stage.clone());
-        live.with_target_transcript(&Target::Home, |transcript, _| {
-            transcript.push_response(" answer")
-        });
-        live.select_conversation(&mut app, Target::Home);
-        assert!(app.active_request);
-        assert_eq!(live.response_text(), "partial answer");
-        live.select_conversation(&mut app, stage);
-        live.select_conversation(&mut app, Target::Home);
-        assert_eq!(live.response_text(), "partial answer");
-        assert_eq!(app.input.text(), "idle draft");
-    }
-
-    #[test]
     fn observer_ack_addresses_corrections_and_detach_rejects_late_frames() {
-        let mut app = App::new();
-        let mut live = LiveArea::with_backend(ratatui::backend::TestBackend::new(80, 24), 80, 24);
-        let target = Target::StageExecution {
-            run_id: "run".into(),
-            stage: "review".into(),
-        };
+        let (mut app, mut live, mut attachment, target) = correction_fixture();
+        app.conversations.set_execution(target.clone(), None);
         live.select_conversation(&mut app, target.clone());
         let execution = protocol::Execution {
             run_id: "run".into(),
             execution_id: "execution".into(),
             nonce: 7,
-        };
-        let mut attachment = Attachment {
-            target: Some(target.clone()),
-            ..Default::default()
         };
         let frame = |kind: &str| AttachmentFrame {
             generation: 0,
@@ -3586,57 +3641,13 @@ mod attachment_tests {
         };
         apply_attachment_frame(&mut app, &mut live, &mut attachment, frame("attached"));
         app.replace_input("correction");
-        match app.conversations.submit(&target, &app.input, false) {
-            Submission::Correction {
-                execution: addressed,
-                text,
-                ..
-            } => {
-                assert_eq!(addressed, execution);
-                assert_eq!(text, "correction");
-            }
-            other => panic!("expected correction, got {other:?}"),
-        }
+        assert!(matches!(
+            app.conversations.submit(&target, &app.input, false),
+            Submission::Correction { execution: addressed, .. } if addressed == execution
+        ));
         apply_attachment_frame(&mut app, &mut live, &mut attachment, frame("detached"));
-        assert!(!attachment.accepts(&frame("stream_chunk")));
         apply_attachment_frame(&mut app, &mut live, &mut attachment, frame("stream_chunk"));
         assert!(live.response_text().is_empty());
-    }
-
-    #[test]
-    fn leaving_before_ack_rejects_pause_and_correction_address() {
-        let mut app = App::new();
-        let mut live = LiveArea::with_backend(ratatui::backend::TestBackend::new(80, 24), 80, 24);
-        let target = Target::StageExecution {
-            run_id: "run".into(),
-            stage: "review".into(),
-        };
-        let mut attachment = Attachment {
-            target: Some(target.clone()),
-            ..Default::default()
-        };
-        attachment.invalidate(&mut app);
-        for kind in ["attached", "ready"] {
-            apply_attachment_frame(
-                &mut app,
-                &mut live,
-                &mut attachment,
-                AttachmentFrame {
-                    generation: 0,
-                    target: target.clone(),
-                    execution: Some(protocol::Execution {
-                        run_id: "run".into(),
-                        execution_id: "old".into(),
-                        nonce: 1,
-                    }),
-                    value: serde_json::json!({"type":kind,"capabilities":["message"]}),
-                },
-            );
-        }
-        assert_eq!(
-            app.conversation_status(&target),
-            ConversationStatus::ReadOnly
-        );
     }
 
     #[test]
@@ -3684,29 +3695,6 @@ mod attachment_tests {
             attachment_target(&app, "sess-actual".into(), Some("ignored".into())),
             Target::Home
         );
-    }
-
-    #[test]
-    fn invalidation_rejects_queued_frames_even_for_same_target() {
-        let mut app = App::new();
-        let target = Target::StageExecution {
-            run_id: "run".into(),
-            stage: "review".into(),
-        };
-        let mut attachment = Attachment {
-            target: Some(target.clone()),
-            ..Default::default()
-        };
-        let frame = AttachmentFrame {
-            generation: 0,
-            target: target.clone(),
-            execution: None,
-            value: serde_json::json!({"type":"stream_chunk", "text":"old"}),
-        };
-        assert!(attachment.accepts(&frame));
-        attachment.invalidate(&mut app);
-        attachment.target = Some(target);
-        assert!(!attachment.accepts(&frame));
     }
 
     #[test]
@@ -3854,79 +3842,40 @@ mod attachment_tests {
     }
 
     #[test]
-    fn attachment_receipts_leave_operator_event_authoritative_and_errors_correlated() {
-        for kind in ["delivered", "error", "correction_dropped"] {
-            let mut app = App::new();
-            let mut live =
-                LiveArea::with_backend(ratatui::backend::TestBackend::new(100, 40), 100, 40);
-            let target = attachment_target(&app, "run".into(), Some("review".into()));
-            live.select_conversation(&mut app, target.clone());
-            app.conversations.set_execution(
-                target.clone(),
-                Some(protocol::Execution {
-                    run_id: "run".into(),
-                    execution_id: "execution".into(),
-                    nonce: 1,
+    fn delivered_receipt_leaves_operator_event_authoritative() {
+        let (mut app, mut live, mut attachment, target) = correction_fixture();
+        let id = pending_correction(&mut app, &target, "unique correction");
+        apply_attachment_frame(
+            &mut app,
+            &mut live,
+            &mut attachment,
+            correction_frame(
+                &target,
+                0,
+                serde_json::json!({
+                    "type":"operator_message", "text":"unique correction"
                 }),
-            );
-            app.replace_input("unique correction");
-            let Submission::Correction { id, .. } =
-                app.conversations.submit(&target, &app.input, false)
-            else {
-                panic!("expected correction");
-            };
-            let mut attachment = Attachment {
-                target: Some(target.clone()),
-                ..Default::default()
-            };
-            if kind == "delivered" {
-                apply_attachment_frame(
-                    &mut app,
-                    &mut live,
-                    &mut attachment,
-                    AttachmentFrame {
-                        generation: 0,
-                        target: target.clone(),
-                        execution: None,
-                        value: serde_json::json!({"type":"operator_message", "text":"unique correction"}),
-                    },
-                );
-            }
-            for _ in 0..2 {
-                apply_attachment_frame(
-                    &mut app,
-                    &mut live,
-                    &mut attachment,
-                    AttachmentFrame {
-                        generation: 0,
-                        target: target.clone(),
-                        execution: None,
-                        value: serde_json::json!({"type":kind, "req_id":id.to_string(), "message":"delivery rejected"}),
-                    },
-                );
-            }
-            assert!(app.finish_delivery(id, Ok(())).is_none());
-            assert_eq!(
-                app.input.text(),
-                if kind == "delivered" {
-                    ""
-                } else {
-                    "unique correction"
-                }
-            );
-            app.clear_input();
-            let rendered = rendered_attachment(&mut live, &app);
-            assert_eq!(
-                rendered.matches("unique correction").count(),
-                1,
-                "{rendered}"
-            );
-            assert_eq!(
-                rendered.matches("delivery rejected").count(),
-                usize::from(kind != "delivered"),
-                "{rendered}"
-            );
-        }
+            ),
+        );
+        apply_attachment_frame(
+            &mut app,
+            &mut live,
+            &mut attachment,
+            correction_frame(
+                &target,
+                0,
+                serde_json::json!({
+                    "type":"delivered", "req_id":id.to_string()
+                }),
+            ),
+        );
+        assert!(app.input.is_empty());
+        let rendered = rendered_attachment(&mut live, &app);
+        assert_eq!(
+            rendered.matches("unique correction").count(),
+            1,
+            "{rendered}"
+        );
     }
 }
 
