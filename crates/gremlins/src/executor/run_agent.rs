@@ -904,7 +904,7 @@ mod tests {
         .await
         .expect("backend must start and observe cancellation");
         assert!(
-            matches!(result, Err(RunError::Cancelled { .. })),
+            matches!(result, Err(RunError::Cancelled)),
             "{result:?}"
         );
         let b_prompt = backend.requests.lock().unwrap()[1].0.clone();
