@@ -9,7 +9,7 @@ use crate::definition::Exec;
 use crate::executor::state::{self, StateStore};
 use crate::executor::state::{BlobMode, StateData};
 use crate::executor::vars;
-use gremlins_magic_bus::emit_event;
+use gremlins_magic_bus::{emit_corr_event, emit_event, CorrId};
 use tokio::sync::mpsc;
 
 #[derive(Debug)]
@@ -110,6 +110,8 @@ pub struct ExecPrepared {
     /// Gremlin ID for routing ExecOutput events to the per-gremlin bus subscriber
     /// and LogLine events to the per-gremlin log writer.
     pub gremlin_id: Option<String>,
+    /// Invocation envelope for output and operational events.
+    pub output_corr_id: Option<CorrId>,
 }
 
 /// Phase 1: resolve interpolation, compute bind paths, substitute commands.
@@ -239,6 +241,7 @@ pub async fn prepare_exec(
         base_env: HashMap::new(),
         substitution_env,
         gremlin_id: None,
+        output_corr_id: None,
     })
 }
 
@@ -287,6 +290,7 @@ pub async fn run_shell(
     // mpsc channel feeds a task that re-emits each line as an ExecOutput
     // event for the live watch pane.
     let gremlin_id = prepared.gremlin_id.clone();
+    let output_corr_id = prepared.output_corr_id.clone();
     let (line_tx, output_task) = if let Some(gid) = gremlin_id {
         let (tx, mut rx) = mpsc::unbounded_channel::<LineEvent>();
         let task = tokio::spawn(async move {
@@ -298,7 +302,11 @@ pub async fn run_shell(
                     text: ev.text,
                     ts,
                 };
-                emit_event(event);
+                if let Some(corr_id) = &output_corr_id {
+                    emit_corr_event(corr_id, event);
+                } else {
+                    emit_event(event);
+                }
             }
         });
         (Some(tx), Some(task))
@@ -364,13 +372,18 @@ pub fn process_shell_result(
     // side automatically.
     {
         use gremlins_magic_bus::EventKind;
-        emit_event(EventKind::LogLine {
+        let event = EventKind::LogLine {
             id: prepared.gremlin_id.clone().unwrap_or_default(),
             line: format!(
                 "exec {name}: done rc={shell_rc} output_len={}",
                 raw_output_str.len(),
             ),
-        });
+        };
+        if let Some(corr_id) = &prepared.output_corr_id {
+            emit_corr_event(corr_id, event);
+        } else {
+            emit_event(event);
+        }
     }
 
     // A non-zero exit is always an error.
@@ -557,6 +570,7 @@ mod tests {
             base_env: HashMap::new(),
             substitution_env,
             gremlin_id: None,
+            output_corr_id: None,
         };
 
         let state = StateData::with_state_dir(&state_dir);
@@ -586,6 +600,7 @@ mod tests {
             base_env: HashMap::new(),
             substitution_env: HashMap::new(),
             gremlin_id: None,
+            output_corr_id: None,
         }
     }
 
@@ -613,6 +628,11 @@ mod tests {
         );
         let mut prepared = make_prepared("drain", vec![&command], tmp.path());
         prepared.gremlin_id = Some(id.clone());
+        let route = CorrId::new()
+            .with_run(&id)
+            .with_stage("drain")
+            .with_execution_id("drain-execution");
+        prepared.output_corr_id = Some(route.clone());
         let state = StateData::with_state_dir(tmp.path());
         let result = run_shell(&prepared, &state).await;
         if rc == 0 {
@@ -644,6 +664,9 @@ mod tests {
         let mut closed = false;
         let mut terminal = false;
         while let Ok(event) = rx.try_recv() {
+            if matches!(event.kind(), EventKind::ExecOutput { .. }) {
+                assert_eq!(event.corr_id(), &route);
+            }
             match event.into_kind() {
                 EventKind::ExecOutput {
                     text, is_stderr, ..

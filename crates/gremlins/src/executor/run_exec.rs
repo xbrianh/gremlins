@@ -9,9 +9,10 @@ use crate::clients::client::ModelURI;
 use crate::definition::ExecutorStage;
 use crate::executor::exec_runner::{commit_exec, prepare_exec, run_shell};
 use crate::executor::gremlin::Gremlin;
+use crate::executor::stage_boundary::StageInvocation;
 use crate::executor::state::{Checkout, Collision};
 use crate::executor::RunError;
-use gremlins_magic_bus::emit_event;
+use gremlins_magic_bus::emit_corr_event;
 use gremlins_magic_bus::EventKind;
 
 use crate::executor::run::{
@@ -25,6 +26,7 @@ use crate::executor::run::{
 pub(crate) async fn run_exec(
     node: &ExecutorStage,
     gremlin: &mut Gremlin,
+    invocation: &StageInvocation,
     _enclosing_model: Option<&ModelURI>,
     _enclosing_task_models: Option<&IndexMap<String, String>>,
 ) -> Result<(), RunError> {
@@ -42,10 +44,13 @@ pub(crate) async fn run_exec(
     let loop_iter = gremlin.loop_iter.clone();
 
     let msg = format!("[{}] exec: preparing", exec.name);
-    emit_event(EventKind::LogLine {
-        id: gremlin.id.to_string(),
-        line: msg,
-    });
+    emit_corr_event(
+        &invocation.corr_id(),
+        EventKind::LogLine {
+            id: gremlin.id.to_string(),
+            line: msg,
+        },
+    );
 
     // Compute checkout keys from outputs_map + filepath interpolation map.
     let checkout_keys = collect_checkout_keys(
@@ -83,6 +88,7 @@ pub(crate) async fn run_exec(
     prepared.env = gremlin.env.clone();
     prepared.base_env = gremlin.runtime_config.base_process_env.clone();
     prepared.gremlin_id = Some(gremlin.id.to_string());
+    prepared.output_corr_id = Some(invocation.corr_id());
 
     if !prepared.cmds.is_empty() {
         log::info!(
@@ -91,10 +97,13 @@ pub(crate) async fn run_exec(
             prepared.cmds.len()
         );
         let exec_id = gremlin.id.to_string();
-        emit_event(EventKind::LogLine {
-            id: exec_id.clone(),
-            line: format!("exec {}: streaming output started", prepared.name),
-        });
+        emit_corr_event(
+            &invocation.corr_id(),
+            EventKind::LogLine {
+                id: exec_id.clone(),
+                line: format!("exec {}: streaming output started", prepared.name),
+            },
+        );
         // `run_shell` runs the commands and hands the result to
         // `process_shell_result`, which is what classifies the exit status: a
         // non-zero status is an error *unless* one of the stage's binds is a

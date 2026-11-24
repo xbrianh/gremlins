@@ -392,6 +392,7 @@ pub(crate) async fn run_agent(
         });
 
     let params = RunParams {
+        output_corr_id: Some(corr_id.clone()),
         prompt: prepared.user_prompt(),
         label: prepared.name.clone(),
         model: if gremlin.runtime_config.resolved_model_selection.is_some() {
@@ -462,6 +463,8 @@ pub(crate) async fn run_agent(
     );
 
     let run_result = client.run(params, interactive).await;
+    // Pipeline retries redispatch a fresh invocation via run_stage, not legacy resume().
+    client.release_invocation(&corr_id);
     // Close our subscription so the prompt-dump task drains any
     // already-buffered events and then exits.
     drop(prompt_dumper_guard);
@@ -509,11 +512,17 @@ pub(crate) async fn run_agent(
         }
     };
 
-    log::info!(
-        "[{name}][{model}] agent: completed (turns={turns})",
-        name = prepared.name,
-        model = effective_model,
-        turns = completed.token_usage.as_ref().map(|u| u.turns).unwrap_or(0)
+    emit_corr_event(
+        &corr_id,
+        EventKind::LogLine {
+            id: gremlin.id.to_string(),
+            line: format!(
+                "[{name}][{model}] agent: completed (turns={turns})",
+                name = prepared.name,
+                model = effective_model,
+                turns = completed.token_usage.as_ref().map(|u| u.turns).unwrap_or(0)
+            ),
+        },
     );
 
     if let Some(usage) = &completed.token_usage {

@@ -1069,7 +1069,9 @@ pub(crate) async fn run_agent_loop(
         audit_lock: Some(Arc::new(std::sync::Mutex::new(()))),
         id_prefix: String::new(),
         message_prefix: message_prefix.clone(),
-        corr_id: super::run_context::execution_corr_id(&message_prefix, &interactive),
+        corr_id: ctx.params.output_corr_id.clone().unwrap_or_else(|| {
+            super::run_context::execution_corr_id(&message_prefix, &interactive)
+        }),
         discovered_skills: ctx.params.discovered_skills.clone(),
         path_context: ctx.params.path_context.clone(),
         root_raw_stream_path: raw_path.clone(),
@@ -1767,6 +1769,7 @@ pub(crate) fn test_ctx(
             done: None,
             system_prompt: None,
             gremlin_id: None,
+            output_corr_id: None,
             base_env: None,
             allow_all: false,
             task_models: None,
@@ -3085,6 +3088,73 @@ mod tests {
         // turn_num counts completed turns only: the failed attempt is excluded.
         let usage = result.token_usage.unwrap();
         assert_eq!(usage.turns, 1, "turn_num must exclude the retried attempt");
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn invocation_route_survives_stream_retry_and_target_change() {
+        use rig_core::test_utils::{MockCompletionModel, MockStreamEvent as E};
+
+        let run = format!("native-route-{}", uuid::Uuid::new_v4());
+        let route = CorrId::new()
+            .with_run(&run)
+            .with_stage("implement")
+            .with_attempt(2)
+            .with_execution_id("invocation-execution");
+        let (_guard, mut rx) = subscribe_log(&run);
+        let (mut sessions, _) = InteractiveSessionFactory::for_chat();
+        let current_target = sessions.next_session();
+        assert_ne!(
+            current_target.snapshot().execution_id(),
+            route.execution_id()
+        );
+        // Headless producers are independent of whichever interactive target is current.
+        let session = InteractiveSession::unattached();
+        let model = MockCompletionModel::from_stream_turns([
+            vec![E::text("before retry"), E::error("http://429: slow down")],
+            vec![
+                E::text("after retry"),
+                E::tool_call("done", "Done", serde_json::json!({"summary": "done"})),
+                E::final_response_with_default_usage(),
+            ],
+        ]);
+        let mut ctx = test_ctx(None, None);
+        ctx.params.gremlin_id = Some(run);
+        ctx.params.output_corr_id = Some(route.clone());
+        assert_eq!(ctx.params.clone().output_corr_id, Some(route.clone()));
+        let handle = tokio::spawn(run_agent_loop(
+            model.clone().erase(),
+            "finish",
+            ctx,
+            CancelToken::new(),
+            loop_opts(None),
+            session,
+        ));
+        let mut saw_retry = false;
+        while !saw_retry {
+            let Recv::Event(event) = rx.recv().await else {
+                panic!("expected invocation output envelope");
+            };
+            assert_eq!(event.corr_id(), &route);
+            saw_retry =
+                matches!(event.kind(), EventKind::LogLine { line, .. } if line.contains("retry:"));
+        }
+        let successor = sessions.next_session();
+        assert_ne!(successor.snapshot().execution_id(), route.execution_id());
+        tokio::time::advance(Duration::from_secs(3)).await;
+        assert_eq!(
+            handle.await.unwrap().unwrap().text_result.as_deref(),
+            Some("after retry")
+        );
+        assert_eq!(model.requests().len(), 2);
+        let mut saw_usage = false;
+        let mut saw_text = false;
+        while let Ok(event) = rx.try_recv() {
+            assert_eq!(event.corr_id(), &route);
+            saw_usage |= matches!(event.kind(), EventKind::TokenUsage { .. });
+            saw_text |= matches!(event.kind(), EventKind::LogLine { line, .. } if line.contains("after retry"));
+        }
+        assert!(saw_text, "retried text must retain the invocation route");
+        assert!(saw_usage, "late usage must retain the invocation route");
     }
 
     /// A cancel token set during the turn-level backoff must abandon the

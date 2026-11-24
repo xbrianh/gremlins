@@ -27,8 +27,8 @@ use crate::executor::state;
 use crate::executor::state::StateStore;
 use crate::executor::vars;
 use crate::executor::RunError;
-use gremlins_magic_bus::emit_event;
 use gremlins_magic_bus::EventKind;
+use gremlins_magic_bus::{emit_corr_event, emit_event};
 use indexmap::IndexMap;
 
 // ---------------------------------------------------------------------------
@@ -78,15 +78,31 @@ async fn run_stage_scoped(
     let enc_tm = enclosing_task_models.or(tm.as_ref());
     let m = gremlin.enclosing_model.clone();
     let enc_model = enclosing_model.or(m.as_ref());
-    emit_event(EventKind::LogLine {
-        id: gremlin.id.to_string(),
-        line: format!(
-            "stage '{}': entering (type={})",
-            stage.name(),
-            stage.stage_type()
-        ),
-    });
+    emit_corr_event(
+        &invocation.corr_id(),
+        EventKind::LogLine {
+            id: gremlin.id.to_string(),
+            line: format!(
+                "stage '{}': starting (type={})",
+                stage.name(),
+                stage.stage_type()
+            ),
+        },
+    );
 
+    emit_corr_event(
+        &invocation.corr_id(),
+        EventKind::LogLine {
+            id: gremlin.id.to_string(),
+            line: format!(
+                "stage '{}': entering (type={})",
+                stage.name(),
+                stage.stage_type()
+            ),
+        },
+    );
+
+    let top_level = scope.is_empty() && sequences.is_empty();
     let display_stage = sequences.first().copied();
     let stage_usage_path = sequences.join("/");
     let saved_model_path = gremlin.state.read_str("model_stage_path");
@@ -134,10 +150,20 @@ async fn run_stage_scoped(
             .await
         }
         ExecutorStage::Exec { .. } => {
-            crate::executor::run_exec::run_exec(stage, gremlin, enc_model, enc_tm).await
+            crate::executor::run_exec::run_exec(stage, gremlin, &invocation, enc_model, enc_tm)
+                .await
         }
         ExecutorStage::Sequence(_) => {
-            run_sequence(stage, gremlin, scope, sequences, enc_model, enc_tm).await
+            run_sequence(
+                stage,
+                gremlin,
+                &invocation,
+                scope,
+                sequences,
+                enc_model,
+                enc_tm,
+            )
+            .await
         }
         ExecutorStage::Parallel { .. } => {
             run_parallel(stage, gremlin, scope, &stage_usage_path, enc_model, enc_tm).await
@@ -154,6 +180,24 @@ async fn run_stage_scoped(
             .into_iter()
             .collect(),
     );
+    if top_level {
+        let line = match &result {
+            Err(RunError::Bail { reason }) => {
+                Some(format!("stage '{}': bailed: {}", stage.name(), reason))
+            }
+            Err(error) => Some(format!("stage '{}': error: {}", stage.name(), error)),
+            Ok(()) => None,
+        };
+        if let Some(line) = line {
+            emit_corr_event(
+                &invocation.corr_id(),
+                EventKind::LogLine {
+                    id: gremlin.id.to_string(),
+                    line,
+                },
+            );
+        }
+    }
     result
 }
 
@@ -335,6 +379,7 @@ pub(crate) fn client_run_err(error: ClientError, name: &str) -> RunError {
 async fn run_sequence(
     node: &ExecutorStage,
     gremlin: &mut Gremlin,
+    invocation: &StageInvocation,
     scope: &str,
     sequences: &[&str],
     enclosing_model: Option<&ModelURI>,
@@ -364,10 +409,13 @@ async fn run_sequence(
             )
             .await
         {
-            emit_event(EventKind::LogLine {
-                id: gremlin.id.to_string(),
-                line: format!("sequence '{}': skipped (artifact exists)", seq.name),
-            });
+            emit_corr_event(
+                &invocation.corr_id(),
+                EventKind::LogLine {
+                    id: gremlin.id.to_string(),
+                    line: format!("sequence '{}': skipped (artifact exists)", seq.name),
+                },
+            );
             return Ok(());
         }
         for child in &seq.stages {
@@ -409,18 +457,21 @@ async fn run_sequence(
             )
             .await
         {
-            emit_event(EventKind::LogLine {
-                id: gremlin.id.to_string(),
-                line: format!(
-                    "sequence '{}': {}",
-                    seq.name,
-                    if iteration == 1 {
-                        "skipped (artifact exists)"
-                    } else {
-                        "stopped (artifact exists)"
-                    }
-                ),
-            });
+            emit_corr_event(
+                &invocation.corr_id(),
+                EventKind::LogLine {
+                    id: gremlin.id.to_string(),
+                    line: format!(
+                        "sequence '{}': {}",
+                        seq.name,
+                        if iteration == 1 {
+                            "skipped (artifact exists)"
+                        } else {
+                            "stopped (artifact exists)"
+                        }
+                    ),
+                },
+            );
             if iteration == 1 {
                 gremlin.loop_iter = saved_loop_iter;
                 return Ok(());
@@ -429,13 +480,16 @@ async fn run_sequence(
             break;
         }
 
-        emit_event(EventKind::LogLine {
-            id: gremlin.id.to_string(),
-            line: format!(
-                "sequence '{}': iteration {iteration}/{max_iterations} starting",
-                seq.name
-            ),
-        });
+        emit_corr_event(
+            &invocation.corr_id(),
+            EventKind::LogLine {
+                id: gremlin.id.to_string(),
+                line: format!(
+                    "sequence '{}': iteration {iteration}/{max_iterations} starting",
+                    seq.name
+                ),
+            },
+        );
 
         for child in &seq.stages {
             if let Err(error) = Box::pin(run_stage_scoped(
@@ -448,10 +502,13 @@ async fn run_sequence(
             ))
             .await
             {
-                emit_event(EventKind::LogLine {
-                    id: gremlin.id.to_string(),
-                    line: format!("sequence '{}': child stage failed: {}", seq.name, error),
-                });
+                emit_corr_event(
+                    &invocation.corr_id(),
+                    EventKind::LogLine {
+                        id: gremlin.id.to_string(),
+                        line: format!("sequence '{}': child stage failed: {}", seq.name, error),
+                    },
+                );
                 outcome = Err(error);
                 gremlin.loop_iter = saved_loop_iter;
                 return outcome;
@@ -467,10 +524,13 @@ async fn run_sequence(
             .await
         {
             let msg = format!("sequence '{}': stopped (artifact produced)", seq.name);
-            emit_event(EventKind::LogLine {
-                id: gremlin.id.to_string(),
-                line: msg,
-            });
+            emit_corr_event(
+                &invocation.corr_id(),
+                EventKind::LogLine {
+                    id: gremlin.id.to_string(),
+                    line: msg,
+                },
+            );
             stopped = true;
             break;
         }
@@ -578,25 +638,12 @@ impl Gremlin {
                 self.loop_iter = format!("{}~{}", saved_loop_iter, attempt);
             }
 
-            emit_event(EventKind::LogLine {
-                id: self.id.to_string(),
-                line: format!(
-                    "stage '{}': starting (type={})",
-                    stage.name(),
-                    stage.stage_type()
-                ),
-            });
-
             let stage_result = run_stage(&stage, self).await;
             self.loop_iter = saved_loop_iter;
 
             match stage_result {
                 Ok(()) => {}
                 Err(RunError::Bail { reason }) => {
-                    emit_event(EventKind::LogLine {
-                        id: self.id.to_string(),
-                        line: format!("stage '{}': bailed: {}", stage.name(), reason),
-                    });
                     emit_event(EventKind::Bail {
                         id: self.id.to_string(),
                         reason: reason.clone(),
@@ -607,10 +654,6 @@ impl Gremlin {
                     break;
                 }
                 Err(error) => {
-                    emit_event(EventKind::LogLine {
-                        id: self.id.to_string(),
-                        line: format!("stage '{}': error: {}", stage.name(), error),
-                    });
                     self.state.record_stage_error(
                         "other",
                         &truncate(&format!("unexpected error: {error}"), 200),
@@ -760,11 +803,12 @@ mod tests {
         bootstrap: Bootstrap,
     ) -> (Sandbox, Gremlin) {
         let sandbox = Sandbox::new();
-        let state_dir = config::state_root().join("gr-test-0001");
+        let id = format!("gr-test-{}", state::secure_token_hex(16).unwrap());
+        let state_dir = state::attempt_dir_path(&id, 1);
         std::fs::create_dir_all(state_dir.join("artifacts")).unwrap();
         std::fs::create_dir_all(&state_dir).unwrap();
 
-        let data = serde_json::json!({"id":"gr-test","attempt":"test-0001","stage":"starting","model":default_model});
+        let data = serde_json::json!({"id":id,"attempt":"test-0001","stage":"starting","model":default_model});
         state::write_state(&state_dir, data.as_object().unwrap()).unwrap();
 
         // Spawn a test actor so the parallel executor has a mailbox for
@@ -777,7 +821,7 @@ mod tests {
         runtime_config.registry = Some(registry);
 
         let gremlin = Gremlin {
-            id: validate_gremlin_id("gr-test").unwrap(),
+            id: validate_gremlin_id(&id).unwrap(),
             definition: Box::new(StaticDefinition::new(
                 "test".to_string(),
                 PathBuf::from("test.yaml"),
@@ -793,7 +837,7 @@ mod tests {
             model_override: None,
             workdir: None,
             project_root: sandbox.path().to_path_buf(),
-            state: StateData::open("gr-test").unwrap(),
+            state: StateData::open(&id).unwrap(),
             env: HashMap::new(),
             client: Client::parse(default_model).unwrap(),
             loop_iter: "1".to_string(),
@@ -814,6 +858,204 @@ mod tests {
     /// Take the first stage from the gremlin's definition via `next_stage()`.
     async fn take_first_stage(gremlin: &mut Gremlin) -> ExecutorStage {
         gremlin.definition.next_stage().await.unwrap()
+    }
+
+    fn drain_events(
+        rx: &mut gremlins_magic_bus::ReceiverHalf<EventKind>,
+    ) -> Vec<gremlins_magic_bus::DispatchEvent<EventKind>> {
+        let mut events = Vec::new();
+        loop {
+            match rx.try_recv() {
+                Ok(event) => events.push(event),
+                Err(gremlins_magic_bus::TryRecvError::Empty) => return events,
+                Err(error) => panic!("unexpected bus error: {error}"),
+            }
+        }
+    }
+
+    fn execution_events(
+        events: &[gremlins_magic_bus::DispatchEvent<EventKind>],
+        stage: &str,
+    ) -> Vec<gremlins_magic_bus::DispatchEvent<EventKind>> {
+        let owner = events
+            .iter()
+            .find(|event| {
+                matches!(event.kind(), EventKind::StageBoundary { .. })
+                    && event.corr_id().stage() == Some(stage)
+            })
+            .expect("stage boundary");
+        let (sub, _rx, history) = gremlins_magic_bus::init_bus()
+            .subscribe_with_history(gremlins_magic_bus::SubscriberRegistration::lossless(
+                owner.corr_id().clone(),
+            ))
+            .unwrap();
+        let _guard = gremlins_magic_bus::connection::BusSubGuard::new(sub);
+        assert!(history
+            .events
+            .iter()
+            .all(|event| event.corr_id() == owner.corr_id()));
+        history.events
+    }
+
+    fn has_log(events: &[gremlins_magic_bus::DispatchEvent<EventKind>], text: &str) -> bool {
+        events.iter().any(
+            |event| matches!(event.kind(), EventKind::LogLine { line, .. } if line.contains(text)),
+        )
+    }
+
+    #[tokio::test]
+    async fn execution_filter_receives_live_shell_error_but_not_run_finish() {
+        let stages = vec![ExecBuilder::new("broken")
+            .cmds(vec!["sleep 0.1; exit 7".into()])
+            .build()
+            .unwrap()];
+        let (_sandbox, mut gremlin) = test_gremlin(stages, "cmd/true");
+        let (sub, mut rx) = gremlins_magic_bus::subscribe_run(gremlin.id.as_str());
+        let _guard = gremlins_magic_bus::connection::BusSubGuard::new(sub);
+        let run = gremlin.run(None);
+        tokio::pin!(run);
+        let owner = loop {
+            tokio::select! {
+                result = &mut run => panic!("run ended before boundary: {result:?}"),
+                event = rx.recv() => {
+                    let gremlins_magic_bus::Recv::Event(event) = event else { panic!("bus closed") };
+                    if matches!(event.kind(), EventKind::StageBoundary { .. }) {
+                        break event.corr_id().clone();
+                    }
+                }
+            }
+        };
+        let (sub, mut execution_rx) = gremlins_magic_bus::init_bus()
+            .subscribe(gremlins_magic_bus::SubscriberRegistration::lossless(
+                owner.clone(),
+            ))
+            .unwrap();
+        let _execution_guard = gremlins_magic_bus::connection::BusSubGuard::new(sub);
+        assert!(run.await.is_err());
+        let execution = drain_events(&mut execution_rx);
+        assert!(has_log(&execution, "stage 'broken': error:"));
+        assert!(execution.iter().all(|event| event.corr_id() == &owner));
+        assert!(!has_log(&execution, "finished ("));
+        let events = drain_events(&mut rx);
+        assert!(events.iter().any(|event| {
+            matches!(event.kind(), EventKind::LogLine { line, .. } if line.contains("finished ("))
+                && event.corr_id().execution_id().is_none()
+        }));
+    }
+
+    #[tokio::test]
+    async fn sequence_logs_use_own_execution_and_bail_stays_run_only() {
+        let stages = vec![SequenceBuilder::new("poll")
+            .max_iterations(2)
+            .skip_if_exists("artifact://missing")
+            .stage(
+                ExecBuilder::new("tick")
+                    .cmds(vec!["true".into()])
+                    .build()
+                    .unwrap(),
+            )
+            .build()
+            .unwrap()];
+        let (_sandbox, mut gremlin) = test_gremlin(stages, "cmd/true");
+        let (sub, mut rx) = gremlins_magic_bus::subscribe_run(gremlin.id.as_str());
+        let _guard = gremlins_magic_bus::connection::BusSubGuard::new(sub);
+        assert_eq!(gremlin.run(None).await.unwrap(), 1);
+        let events = drain_events(&mut rx);
+        let boundaries: Vec<_> = events
+            .iter()
+            .filter(|event| matches!(event.kind(), EventKind::StageBoundary { active: true, .. }))
+            .collect();
+        assert_eq!(boundaries.len(), 3, "sequence and both child attempts");
+        for boundary in boundaries {
+            let stage = boundary.corr_id().stage().unwrap();
+            let logs: Vec<_> = events
+                .iter()
+                .filter(|event| event.corr_id() == boundary.corr_id())
+                .filter_map(|event| match event.kind() {
+                    EventKind::LogLine { line, .. } => Some(line.as_str()),
+                    _ => None,
+                })
+                .collect();
+            let starting = format!("stage '{stage}': starting (type=");
+            let entering = format!("stage '{stage}': entering (type=");
+            assert_eq!(
+                logs.iter()
+                    .filter(|line| line.starts_with(&starting))
+                    .count(),
+                1
+            );
+            let start = logs
+                .iter()
+                .position(|line| line.starts_with(&starting))
+                .unwrap();
+            let enter = logs
+                .iter()
+                .position(|line| line.starts_with(&entering))
+                .unwrap();
+            assert!(start < enter, "starting must precede entering for {stage}");
+        }
+        let sequence = execution_events(&events, "poll");
+        assert!(has_log(&sequence, "iteration 1/2 starting"));
+        assert!(has_log(&sequence, "iteration 2/2 starting"));
+        assert!(has_log(&sequence, "stage 'poll': starting"));
+        assert!(has_log(&sequence, "stage 'poll': bailed:"));
+        assert!(!sequence
+            .iter()
+            .any(|event| matches!(event.kind(), EventKind::Bail { .. })));
+        assert!(events
+            .iter()
+            .any(|event| matches!(event.kind(), EventKind::Bail { .. })
+                && event.corr_id().execution_id().is_none()));
+    }
+
+    #[tokio::test]
+    async fn sequence_skip_and_child_failure_routes_belong_to_sequence() {
+        for iterations in [1, 2] {
+            let stages = vec![
+                SequenceBuilder::new("skip")
+                    .max_iterations(iterations)
+                    .skip_if_exists("artifact://done")
+                    .stage(
+                        ExecBuilder::new("unused")
+                            .cmds(vec!["true".into()])
+                            .build()
+                            .unwrap(),
+                    )
+                    .build()
+                    .unwrap(),
+                SequenceBuilder::new("failed")
+                    .max_iterations(2)
+                    .stage(
+                        ExecBuilder::new("bad")
+                            .cmds(vec!["exit 1".into()])
+                            .build()
+                            .unwrap(),
+                    )
+                    .build()
+                    .unwrap(),
+            ];
+            let (_sandbox, mut gremlin) = test_gremlin(stages, "cmd/true");
+            gremlin
+                .state
+                .write_into_registry(&Uri::parse("artifact://done").unwrap(), "yes")
+                .await
+                .unwrap();
+            let (sub, mut rx) = gremlins_magic_bus::subscribe_run(gremlin.id.as_str());
+            let _guard = gremlins_magic_bus::connection::BusSubGuard::new(sub);
+            assert!(gremlin.run(None).await.is_err());
+            let events = drain_events(&mut rx);
+            assert!(has_log(
+                &execution_events(&events, "skip"),
+                "skipped (artifact exists)"
+            ));
+            let failed = execution_events(&events, "failed");
+            assert!(has_log(&failed, "child stage failed:"));
+            assert!(has_log(&failed, "stage 'failed': error:"));
+            assert!(!has_log(
+                &execution_events(&events, "bad"),
+                "child stage failed:"
+            ));
+        }
     }
 
     // --- scope keys ---
@@ -1655,7 +1897,10 @@ mod tests {
                 .unwrap(),
         ];
         let (sandbox, mut gremlin) = test_gremlin(stages, "cmd/true");
-        let state_dir = sandbox.path().join("state").join("gr-test-0001");
+        let state_dir = sandbox
+            .path()
+            .join("state")
+            .join(format!("{}-0001", gremlin.id.as_str()));
 
         assert_eq!(gremlin.run(None).await.unwrap(), 0);
         assert!(state_dir.join("finished").is_file());
@@ -1676,7 +1921,10 @@ mod tests {
             .build()
             .unwrap()];
         let (sandbox, mut gremlin) = test_gremlin(stages, "cmd/true");
-        let state_dir = sandbox.path().join("state").join("gr-test-0001");
+        let state_dir = sandbox
+            .path()
+            .join("state")
+            .join(format!("{}-0001", gremlin.id.as_str()));
 
         assert_eq!(gremlin.run(None).await.unwrap(), 1);
 
@@ -1756,7 +2004,10 @@ mod tests {
         assert!(got_bail, "expected a Bail event, but none was received");
 
         // ── persisted bail file ──
-        let state_dir = sandbox.path().join("state").join("gr-test-0001");
+        let state_dir = sandbox
+            .path()
+            .join("state")
+            .join(format!("{}-0001", gremlin.id.as_str()));
         let bail_file = std::fs::read_dir(&state_dir)
             .unwrap()
             .filter_map(Result::ok)
@@ -1861,7 +2112,10 @@ mod tests {
             .build()
             .unwrap()];
         let (sandbox, mut gremlin) = test_gremlin(stages, "cmd/true");
-        let state_dir = sandbox.path().join("state").join("gr-test-0001");
+        let state_dir = sandbox
+            .path()
+            .join("state")
+            .join(format!("{}-0001", gremlin.id.as_str()));
 
         // First run: group fails because "bad" exits non-zero.
         match gremlin.run(None).await {
@@ -1928,7 +2182,10 @@ mod tests {
             .build()
             .unwrap()];
         let (sandbox, mut gremlin) = test_gremlin(stages, "cmd/true");
-        let state_dir = sandbox.path().join("state").join("gr-test-0001");
+        let state_dir = sandbox
+            .path()
+            .join("state")
+            .join(format!("{}-0001", gremlin.id.as_str()));
 
         match gremlin.run(None).await {
             Err(RunError::StageFailed { stage, .. }) => assert_eq!(stage, "broken"),
@@ -1966,7 +2223,10 @@ mod tests {
         let worktree = sandbox.path().join("worktree");
         std::fs::create_dir_all(&worktree).unwrap();
         gremlin.workdir = Some(WorkDir::Persistent(worktree.clone()));
-        let state_dir = sandbox.path().join("state").join("gr-test-0001");
+        let state_dir = sandbox
+            .path()
+            .join("state")
+            .join(format!("{}-0001", gremlin.id.as_str()));
 
         assert_eq!(gremlin.run(None).await.unwrap(), 1);
         assert!(!worktree.join("never.marker").exists());

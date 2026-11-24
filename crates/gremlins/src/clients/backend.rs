@@ -31,6 +31,8 @@ pub struct RunParams {
     pub(crate) done: Option<crate::clients::agent::done_assess::DoneAssessment>,
     pub system_prompt: Option<String>,
     pub gremlin_id: Option<String>,
+    /// Immutable invocation route for output, independent of the live debugger target.
+    pub(crate) output_corr_id: Option<gremlins_magic_bus::CorrId>,
     /// Base process environment for tool sandboxing.
     /// When set, replaces `std::env::vars()` as the base for bash tool env.
     pub base_env: Option<HashMap<String, String>>,
@@ -91,6 +93,7 @@ impl RunParams {
             done: None,
             system_prompt: None,
             gremlin_id: None,
+            output_corr_id: None,
             base_env: None,
             allow_all: false,
             task_models: None,
@@ -121,6 +124,7 @@ impl Clone for RunParams {
             done: self.done.clone(),
             system_prompt: self.system_prompt.clone(),
             gremlin_id: self.gremlin_id.clone(),
+            output_corr_id: self.output_corr_id.clone(),
             base_env: self.base_env.clone(),
             allow_all: self.allow_all,
             task_models: self.task_models.clone(),
@@ -176,11 +180,29 @@ pub trait Backend: Send + Sync {
         })
     }
 
-    /// Resume a paused or timed-out run.
+    /// Resume the most recently used run. On a shared backend, use
+    /// [`Backend::resume_for`] to avoid selecting another invocation.
     async fn resume(&self) -> Result<CompletedRun, ClientError> {
         self.run(self.last_run_params()?, InteractiveSession::unattached())
             .await
     }
+
+    /// Resume a specific invocation, independent of later backend use.
+    /// Callers retain the invocation's output route, including its execution ID.
+    /// A run ID alone cannot distinguish stages sharing a backend. Backends that
+    /// cannot select per-invocation state fail rather than resume another run.
+    async fn resume_for(
+        &self,
+        _route: &gremlins_magic_bus::CorrId,
+    ) -> Result<CompletedRun, ClientError> {
+        Err(ClientError::Runtime {
+            message: "invocation-specific resume not supported".into(),
+        })
+    }
+
+    /// Release invocation retry state when its owner will not resume it again.
+    /// Backends may retain the latest context for the legacy `resume` API.
+    fn release_invocation(&self, _route: &gremlins_magic_bus::CorrId) {}
 
     /// Reap all child processes for a given gremlin ID.
     fn reap_all(&self, _gremlin_id: &str) {}

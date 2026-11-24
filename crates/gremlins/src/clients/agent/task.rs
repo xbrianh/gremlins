@@ -576,20 +576,40 @@ mod tests {
 
     #[tokio::test]
     async fn make_task_runner_invokes_and_sets_task_fn() {
+        assert_task_bus_envelopes(TaskKind::Scout, false).await;
+    }
+
+    #[tokio::test]
+    async fn fork_retains_invocation_bus_envelopes() {
+        assert_task_bus_envelopes(TaskKind::Fork, false).await;
+    }
+
+    #[tokio::test]
+    async fn alternate_model_retains_invocation_bus_envelopes() {
+        assert_task_bus_envelopes(TaskKind::Scout, true).await;
+    }
+
+    async fn assert_task_bus_envelopes(task_kind: TaskKind, alternate_model: bool) {
         use gremlins_magic_bus::{CorrId, EventKind};
         use rig_core::test_utils::{MockCompletionModel, MockStreamEvent};
 
         gremlins_magic_bus::init_bus();
         let mut ctx = depth_test_ctx();
         ctx.message_prefix = "task-runner-payload".into();
+        let run = format!("test.task-runner.{task_kind}.{alternate_model}");
         ctx.corr_id = CorrId::new()
-            .with_run("test.task-runner.nested-correlation")
+            .with_run(&run)
             .with_stage("agent")
+            .with_attempt(7)
             .with_execution_id("execution-original");
         let corr_id = ctx.corr_id.clone();
         let payload_id = ctx.message_prefix.clone();
-        let (_sub, mut rx) =
-            gremlins_magic_bus::subscribe_run("test.task-runner.nested-correlation");
+        // Run-only subscriptions would hide progress routed to the wrong stage/execution.
+        let (_sub, mut rx) = gremlins_magic_bus::init_bus()
+            .subscribe(gremlins_magic_bus::SubscriberRegistration::lossless(
+                corr_id.clone(),
+            ))
+            .unwrap();
         std::fs::write(ctx.cwd.as_ref().unwrap().join("input.txt"), "evidence").unwrap();
 
         let model = MockCompletionModel::from_stream_turns([
@@ -607,10 +627,31 @@ mod tests {
             ],
         ]);
 
+        let unused_parent = MockCompletionModel::from_turns([]);
+        let selected = model.clone();
+        let selector = alternate_model.then(|| {
+            TaskModelSelector::new(
+                HashMap::from([(task_kind, "alternate/model".into())]),
+                crate::clients::agent::task_models::sync_factory(move |_| {
+                    Ok(TaskModel {
+                        model: selected.clone().erase(),
+                        temperature: None,
+                        max_tokens: None,
+                        extra: None,
+                        preserve_reasoning: None,
+                    })
+                }),
+            )
+            .unwrap()
+        });
         let cancel = crate::clients::cancel::CancelToken::new();
         let runner = make_task_runner(
-            model.clone().erase(),
-            None,
+            if alternate_model {
+                unused_parent.clone().erase()
+            } else {
+                model.clone().erase()
+            },
+            selector,
             None,
             cancel,
             ctx,
@@ -627,7 +668,7 @@ mod tests {
 
         // First invocation: depth 0 < 3, should succeed.
         let output = runner(
-            TaskKind::Scout,
+            task_kind,
             "first call".into(),
             Box::new(ConversationStub::new("")),
             "parent-message".into(),
@@ -666,7 +707,7 @@ mod tests {
                 } => {
                     assert_eq!(parent_id, "parent-message");
                     assert_eq!(call, "task-call");
-                    assert_eq!(kind, "Scout");
+                    assert_eq!(kind, task_kind.to_string());
                     assert!(!chain.is_empty());
                     if let Some(previous) = &progress_chain {
                         assert_eq!(&chain, previous);
@@ -691,6 +732,7 @@ mod tests {
         assert_eq!(read_result_id, Some(format!("{chain}.read-call")));
         assert!(saw_reply, "nested text must reach TaskProgress");
         assert!(saw_log, "nested runner must emit logs");
+        assert!(unused_parent.requests().is_empty());
 
         // The task harness prompt must reach the model as a leading system message.
         for req in model.requests() {
@@ -952,6 +994,7 @@ mod tests {
 
         let done_turn = |id: &str, summary: &str| {
             vec![
+                MockStreamEvent::text(summary),
                 MockStreamEvent::tool_call(id, "Done", serde_json::json!({"summary": summary})),
                 MockStreamEvent::final_response_with_default_usage(),
             ]
@@ -1020,12 +1063,27 @@ mod tests {
             selector
         };
         assert!(calls.lock().unwrap().is_empty(), "selection must be lazy");
+        gremlins_magic_bus::init_bus();
+        let run = format!("test.task-recursive.{pinned_fallback}.{grandchild_kind}");
+        let mut ctx = depth_test_ctx();
+        ctx.message_prefix = "recursive-task-payload".into();
+        ctx.corr_id = gremlins_magic_bus::CorrId::new()
+            .with_run(&run)
+            .with_execution_id("recursive-execution")
+            .with_stage("nested-agent")
+            .with_attempt(3);
+        let corr_id = ctx.corr_id.clone();
+        let (_sub, mut rx) = gremlins_magic_bus::init_bus()
+            .subscribe(gremlins_magic_bus::SubscriberRegistration::lossless(
+                corr_id.clone(),
+            ))
+            .unwrap();
         let runner = make_task_runner(
             stage.clone().erase(),
             Some(selector),
             None,
             crate::clients::cancel::CancelToken::new(),
-            depth_test_ctx(),
+            ctx,
             String::new(),
             "stage".into(),
             5.0,
@@ -1040,11 +1098,58 @@ mod tests {
             TaskKind::Scout,
             "mapped scout prompt sentinel".into(),
             Box::new(ConversationStub::new("")),
-            String::new(),
-            String::new(),
+            "outer-task-id".into(),
+            "outer-task-call".into(),
         )
         .await;
         assert_eq!(output.output, "scout result");
+        let mut chains = HashSet::new();
+        let mut nested_parent_ids = HashSet::new();
+        let mut nested_text_chains = HashSet::new();
+        let mut result_ids = HashSet::new();
+        while let Ok(event) = rx.try_recv() {
+            assert_eq!(event.corr_id(), &corr_id, "nested envelope: {event:?}");
+            match event.into_kind() {
+                gremlins_magic_bus::EventKind::TaskProgress {
+                    parent_id,
+                    chain,
+                    kind,
+                    call,
+                    text,
+                    ..
+                } => {
+                    if chain.contains('.') {
+                        assert_eq!(kind, grandchild_kind.to_string());
+                        let (parent_chain, _) = chain.rsplit_once('.').unwrap();
+                        assert_eq!(parent_id, format!("{parent_chain}.recursive-task"));
+                        if text.contains("grandchild result") {
+                            nested_text_chains.insert(chain.clone());
+                        }
+                        nested_parent_ids.insert(parent_id);
+                    } else {
+                        assert_eq!(kind, "Scout");
+                        assert_eq!(parent_id, "outer-task-id");
+                        assert_eq!(call, "outer-task-call");
+                    }
+                    chains.insert(chain);
+                }
+                gremlins_magic_bus::EventKind::ToolResult { id, .. } => {
+                    result_ids.insert(id);
+                }
+                _ => {}
+            }
+        }
+        assert_eq!(chains.len(), 2, "both levels must emit progress");
+        let parent_chain = chains.iter().find(|chain| !chain.contains('.')).unwrap();
+        let child_chain = chains.iter().find(|chain| chain.contains('.')).unwrap();
+        assert!(child_chain.starts_with(&format!("{parent_chain}.")));
+        assert_eq!(
+            nested_text_chains,
+            HashSet::from([child_chain.clone()]),
+            "grandchild text must reach the originating stage/execution with its task chain intact"
+        );
+        assert_eq!(nested_parent_ids.len(), 1);
+        assert!(result_ids.contains(&format!("{parent_chain}.recursive-task")));
         let expected_calls = if uses_stage {
             vec!["mapped/scout", "stage/model"]
         } else {

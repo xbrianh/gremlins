@@ -142,6 +142,141 @@ fn assert_pair(events: &[DispatchEvent<EventKind>], run: &str, name: &str, kind:
     }
 }
 
+fn assert_exec_envelopes(events: &[DispatchEvent<EventKind>], pair: &[DispatchEvent<EventKind>]) {
+    let mut stdout = false;
+    let mut stderr = false;
+    let mut logs = 0;
+    for event in events.iter().filter(|event| {
+        matches!(
+            event.kind(),
+            EventKind::ExecOutput { .. } | EventKind::LogLine { .. }
+        )
+    }) {
+        assert_eq!(event.corr_id(), pair[0].corr_id());
+        assert!(pair[0].sequence() < event.sequence());
+        assert!(event.sequence() < pair[1].sequence());
+        match event.kind() {
+            EventKind::ExecOutput {
+                is_stderr, text, ..
+            } => {
+                stdout |= !is_stderr && text.contains("OUT_MARKER");
+                stderr |= *is_stderr && text.contains("ERR_MARKER");
+            }
+            EventKind::LogLine { .. } => logs += 1,
+            _ => unreachable!(),
+        }
+    }
+    assert!(
+        stdout && stderr,
+        "both streams must drain before end: {events:?}"
+    );
+    assert!(logs >= 2, "preparation and streaming logs must be scoped");
+}
+
+#[tokio::test]
+async fn exec_streams_and_logs_share_boundaries_on_success_and_failure() {
+    for rc in [0, 23] {
+        let stage = exec(
+            "streams",
+            &format!("printf 'OUT_MARKER\\n'; printf 'ERR_MARKER\\n' >&2; exit {rc}"),
+        );
+        let (_sandbox, mut gremlin, node) = fixture(stage);
+        let mut bus = Subscription::new(CorrId::new().with_run(gremlin.id.as_str()));
+        let result = run_stage(&node, &mut gremlin).await;
+        assert_eq!(result.is_ok(), rc == 0);
+        let events = bus.drain();
+        let pair: Vec<_> = events.iter().filter(|e| is_boundary(e)).cloned().collect();
+        assert_pair(&pair, gremlin.id.as_str(), "streams", "exec");
+        assert_exec_envelopes(&events, &pair);
+    }
+}
+
+#[tokio::test]
+async fn exec_subscription_after_start_replays_start_then_streams_and_end() {
+    let (_sandbox, mut gremlin, node) = fixture(exec(
+        "replay",
+        "sleep 0.1; printf 'OUT_MARKER\\n'; printf 'ERR_MARKER\\n' >&2",
+    ));
+    let id = gremlin.id.to_string();
+    let mut bus = Subscription::new(CorrId::new().with_run(&id));
+    let observe = async {
+        let start = loop {
+            let gremlins_magic_bus::Recv::Event(event) = bus.rx.recv().await else {
+                panic!("subscription closed");
+            };
+            if is_boundary(&event) {
+                break event;
+            }
+        };
+        let (sub, mut rx, history) = init_bus()
+            .subscribe_with_history(SubscriberRegistration::lossless(start.corr_id().clone()))
+            .unwrap();
+        let _guard = BusSubGuard::new(sub);
+        assert!(history
+            .events
+            .iter()
+            .any(|e| e.sequence() == start.sequence()));
+        let mut events = history.events;
+        while !events
+            .iter()
+            .any(|event| matches!(event.kind(), EventKind::StageBoundary { active: false, .. }))
+        {
+            let gremlins_magic_bus::Recv::Event(event) = rx.recv().await else {
+                panic!("subscription closed");
+            };
+            let end = matches!(event.kind(), EventKind::StageBoundary { active: false, .. });
+            events.push(event);
+            if end {
+                break;
+            }
+        }
+        let pair: Vec<_> = events.iter().filter(|e| is_boundary(e)).cloned().collect();
+        assert_pair(&pair, &id, "replay", "exec");
+        assert_exec_envelopes(&events, &pair);
+
+        // A bounded stream journal retains the last shell line and end, not start.
+        let replay =
+            gremlins_magic_bus::Bus::with_history_limits_and_retention(2, 2, |kind: &EventKind| {
+                matches!(
+                    kind,
+                    EventKind::ExecOutput { .. } | EventKind::StageBoundary { .. }
+                )
+            });
+        for event in &events {
+            replay.emit(event.clone());
+        }
+        let (sub, _rx, retained) = replay
+            .subscribe_with_history(SubscriberRegistration::lossless(
+                CorrId::new().with_run(&id),
+            ))
+            .unwrap();
+        assert!(!retained.complete);
+        assert_eq!(retained.events.len(), 2);
+        assert!(!retained
+            .events
+            .iter()
+            .any(|event| matches!(event.kind(), EventKind::StageBoundary { active: true, .. })));
+        let first_line = &retained.events[0];
+        assert!(matches!(first_line.kind(), EventKind::ExecOutput { .. }));
+        let envelope = first_line.corr_id();
+        assert_eq!(envelope.run(), Some(id.as_str()));
+        assert_eq!(envelope.stage(), Some("replay"));
+        assert!(envelope.execution_id().is_some_and(|id| !id.is_empty()));
+        assert_eq!(retained.events[1].corr_id(), envelope);
+        assert!(matches!(
+            retained.events[1].kind(),
+            EventKind::StageBoundary { active: false, .. }
+        ));
+        replay.unsubscribe(&sub);
+    };
+    tokio::time::timeout(Duration::from_secs(10), async {
+        let (result, ()) = tokio::join!(run_stage(&node, &mut gremlin), observe);
+        result.unwrap();
+    })
+    .await
+    .unwrap();
+}
+
 fn exec(name: &str, command: &str) -> StageSpec {
     ExecBuilder::new(name).cmd(command).build().unwrap()
 }
@@ -150,7 +285,10 @@ fn exec(name: &str, command: &str) -> StageSpec {
 async fn repeated_leaf_has_distinct_execution_filters_inside_one_sequence_pair() {
     let stage = SequenceBuilder::new("repeat")
         .max_iterations(2)
-        .stage(exec("leaf", "true"))
+        .stage(exec(
+            "leaf",
+            "printf 'OUT_MARKER\\n'; printf 'ERR_MARKER\\n' >&2",
+        ))
         .build()
         .unwrap();
     let (_sandbox, mut gremlin, node) = fixture(stage);
@@ -167,10 +305,23 @@ async fn repeated_leaf_has_distinct_execution_filters_inside_one_sequence_pair()
         "repeat",
         "sequence",
     );
-    let leaves = leaf.boundaries();
+    let leaf_events = leaf.drain();
+    let leaves: Vec<_> = leaf_events
+        .iter()
+        .filter(|e| is_boundary(e))
+        .cloned()
+        .collect();
     assert_eq!(leaves.len(), 4);
     assert_pair(&leaves[..2], gremlin.id.as_str(), "leaf", "exec");
     assert_pair(&leaves[2..], gremlin.id.as_str(), "leaf", "exec");
+    for pair in leaves.chunks(2) {
+        let selected: Vec<_> = leaf_events
+            .iter()
+            .filter(|e| e.corr_id() == pair[0].corr_id())
+            .cloned()
+            .collect();
+        assert_exec_envelopes(&selected, pair);
+    }
     assert_ne!(
         leaves[0].corr_id().execution_id(),
         leaves[2].corr_id().execution_id()
@@ -192,8 +343,14 @@ async fn repeated_leaf_has_distinct_execution_filters_inside_one_sequence_pair()
         ))
         .unwrap();
     let _guard = BusSubGuard::new(sub);
-    let selected: Vec<_> = history.events.into_iter().filter(is_boundary).collect();
+    let selected: Vec<_> = history
+        .events
+        .iter()
+        .filter(|e| is_boundary(e))
+        .cloned()
+        .collect();
     assert_pair(&selected, gremlin.id.as_str(), "leaf", "exec");
+    assert_exec_envelopes(&history.events, &selected);
 }
 
 #[tokio::test]
@@ -266,6 +423,14 @@ async fn running_sequence_skips_guarded_leaf_but_dispatches_its_sibling() {
 async fn exec_and_preparation_failures_close_leaf_and_enclosing_sequence() {
     for (child, kind) in [
         (exec("bad", "exit 23"), "exec"),
+        (
+            ExecBuilder::new("bad")
+                .cmd("cat {missing}")
+                .interpolate("missing", "artifact://missing")
+                .build()
+                .unwrap(),
+            "exec",
+        ),
         (
             AgentBuilder::new("bad")
                 .prompt("read {missing}")
@@ -348,12 +513,12 @@ impl Backend for RetryingAgentBackend {
         interactive: InteractiveSession,
     ) -> Result<CompletedRun, ClientError> {
         use crate::clients::agent::agent_loop::{loop_opts, run_agent_loop};
-        use crate::clients::agent::run_context::{execution_corr_id, RunContext};
+        use crate::clients::agent::run_context::RunContext;
 
         self.runs.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         let transport = RetryTransport {
             requests: self.requests.clone(),
-            corr: execution_corr_id(params.gremlin_id.as_deref().unwrap(), &interactive),
+            corr: params.output_corr_id.clone().unwrap(),
         };
         assert!(transport.corr.execution_id().is_some());
         let model =
@@ -655,8 +820,14 @@ async fn missing_output_bail_closes_leaf_and_enclosing_sequence() {
 #[tokio::test]
 async fn parallel_children_have_own_run_identities_visible_to_parent_subscription() {
     let stage = ParallelBuilder::new("fanout")
-        .stage(exec("left", "true"))
-        .stage(exec("right", "true"))
+        .stage(exec(
+            "left",
+            "printf 'LEFT_OUT_MARKER\\n'; printf 'LEFT_ERR_MARKER\\n' >&2",
+        ))
+        .stage(exec(
+            "right",
+            "printf 'RIGHT_OUT_MARKER\\n'; printf 'RIGHT_ERR_MARKER\\n' >&2",
+        ))
         .build()
         .unwrap();
     let (_sandbox, mut gremlin, node) = fixture(stage);
@@ -689,7 +860,7 @@ async fn parallel_children_have_own_run_identities_visible_to_parent_subscriptio
         assert_ne!(child_id, &id);
         assert_eq!(event.corr_id(), &CorrId::new().with_run(child_id));
     }
-    let events: Vec<_> = all.into_iter().filter(is_boundary).collect();
+    let events: Vec<_> = all.iter().filter(|e| is_boundary(e)).cloned().collect();
     assert_eq!(
         events.len(),
         6,
@@ -720,6 +891,34 @@ async fn parallel_children_have_own_run_identities_visible_to_parent_subscriptio
             .with_run(run)
             .matches_prefix(&CorrId::new().with_run(&id)));
         assert_pair(&child, run, name, "exec");
+        let output: Vec<_> = all
+            .iter()
+            .filter(|e| e.corr_id() == child[0].corr_id())
+            .cloned()
+            .collect();
+        assert_exec_envelopes(&output, &child);
+        let marker = name.to_uppercase();
+        for (is_stderr, suffix) in [(false, "OUT_MARKER"), (true, "ERR_MARKER")] {
+            let expected = format!("{marker}_{suffix}");
+            let lines: Vec<_> = all
+                .iter()
+                .filter(|event| {
+                    matches!(
+                        event.kind(),
+                        EventKind::ExecOutput { text, .. } if text.trim() == expected
+                    )
+                })
+                .collect();
+            assert_eq!(lines.len(), 1, "missing or duplicated {expected}: {all:?}");
+            let line = lines[0];
+            assert_eq!(line.corr_id(), child[0].corr_id());
+            assert!(child[0].sequence() < line.sequence());
+            assert!(line.sequence() < child[1].sequence());
+            assert!(matches!(
+                line.kind(),
+                EventKind::ExecOutput { is_stderr: actual, .. } if *actual == is_stderr
+            ));
+        }
         assert!(parent[0].sequence() < child[0].sequence());
         assert!(child[1].sequence() < parent[1].sequence());
     }
