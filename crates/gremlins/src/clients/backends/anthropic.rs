@@ -657,13 +657,28 @@ mod tests {
         } else {
             assert!(headers.contains("x-api-key: configured-key"));
         }
-        assert_eq!(
-            body["messages"][1]["content"][0]["signature"],
-            "native signature"
-        );
+        let captured_messages = body["messages"].as_array().unwrap();
+        assert_eq!(captured_messages.len(), 3);
+        assert_eq!(captured_messages[0]["role"], "user");
+        assert_eq!(captured_messages[1]["role"], "assistant");
+        let assistant_blocks = captured_messages[1]["content"].as_array().unwrap();
+        assert_eq!(assistant_blocks.len(), 2);
+        assert_eq!(assistant_blocks[0]["type"], "thinking");
+        assert_eq!(assistant_blocks[0]["thinking"], "signed thought");
+        assert_eq!(assistant_blocks[0]["signature"], "native signature");
+        assert_eq!(assistant_blocks[1]["type"], "tool_use");
+        assert_eq!(assistant_blocks[1]["id"], "call-1");
+        assert_eq!(captured_messages[2]["role"], "user");
+        let final_blocks = captured_messages[2]["content"].as_array().unwrap();
+        assert_eq!(final_blocks.len(), 1);
+        assert_eq!(final_blocks[0]["type"], "tool_result");
+        assert_eq!(final_blocks[0]["tool_use_id"], "call-1");
+        for message in captured_messages {
+            for block in message["content"].as_array().unwrap() {
+                assert_ne!(block["type"], "reasoning");
+            }
+        }
         assert!(!body.to_string().contains("estimated_tokens"));
-        assert!(body.to_string().contains("tool_use"));
-        assert!(body.to_string().contains("tool_result"));
         assert_eq!(result.input_tokens, Some(123));
         assert_eq!(result.output_tokens, Some(17));
         let block = result.block.unwrap();
