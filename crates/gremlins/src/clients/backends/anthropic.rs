@@ -23,6 +23,10 @@ use rig_reqwest::ReqwestClient;
 /// Current-generation models (Opus 5.5, Sonnet 5.5, Fable 5.1) support up to 128_000 output tokens.
 const DEFAULT_MAX_TOKENS: u64 = 128_000;
 
+/// Required by AnthropicConfig, but never sent: BearerStrategy removes the
+/// x-api-key header and supplies the identity provider's bearer token instead.
+const DYNAMIC_AUTH_PLACEHOLDER_KEY: &str = "unused";
+
 // ── AnthropicClientState ─────────────────────────────────────────────────
 
 /// Either a statically-built client (for ApiKey / Token auth) or the
@@ -180,7 +184,7 @@ impl Backend for AnthropicBackend {
                         token_provider.clone(),
                         auth_scope.clone(),
                     );
-                    let client = AnthropicConfig::new("unused")
+                    let client = AnthropicConfig::new(DYNAMIC_AUTH_PLACEHOLDER_KEY)
                         .with_beta("compact-2026-09-04")
                         .with_base_url(base_url)
                         .connect(wrapped);
@@ -217,7 +221,7 @@ impl Backend for AnthropicBackend {
                         token_provider.clone(),
                         auth_scope.clone(),
                     );
-                    let client = AnthropicConfig::new("unused")
+                    let client = AnthropicConfig::new(DYNAMIC_AUTH_PLACEHOLDER_KEY)
                         .with_beta("compact-2026-09-04")
                         .with_base_url(base_url)
                         .connect(wrapped);
@@ -275,7 +279,7 @@ impl Backend for AnthropicBackend {
                     token_provider.clone(),
                     auth_scope.clone(),
                 );
-                AnthropicConfig::new("unused")
+                AnthropicConfig::new(DYNAMIC_AUTH_PLACEHOLDER_KEY)
                     .with_beta("compact-2026-09-04")
                     .with_base_url(base_url)
                     .connect(wrapped)
@@ -293,11 +297,13 @@ impl Backend for AnthropicBackend {
             message: "Anthropic compaction provider parameters must be an object".into(),
         })?;
         extra.insert("compaction".into(), compaction.into());
-        let request =
-            <Completion as Operation>::prepare(context.request(messages), &driver.wire.describe())
-                .map_err(|e| ClientError::Runtime {
-                    message: format!("failed to prepare compaction request: {e}"),
-                })?;
+        let request = <Completion as Operation>::prepare(
+            context.request(messages.to_vec()),
+            &driver.wire.describe(),
+        )
+        .map_err(|e| ClientError::Runtime {
+            message: format!("failed to prepare compaction request: {e}"),
+        })?;
         let encoded =
             driver
                 .wire
@@ -524,7 +530,7 @@ mod tests {
         }
     }
 
-    async fn compact_matches_stream_wire(dynamic: bool) {
+    async fn compact_matches_unary_wire(auth: &str) {
         use rig_core::completion::message::{
             AssistantContent, AssistantMessage, Reasoning, ToolCall, ToolFunction,
         };
@@ -573,6 +579,7 @@ mod tests {
             .with_beta("compact-2026-09-04")
             .connect(DynHttpClient::new(ReqwestClient::default()));
         let context = crate::clients::compaction::ResolvedRequestContext {
+            provider: "anthropic".into(),
             model: "claude-sonnet-4-6".into(),
             system: Some("nondefault system framing".into()),
             tools: vec![ToolDefinition {
@@ -600,39 +607,55 @@ mod tests {
             Message::tool_result(call.id, call.function.name, "tool output"),
         ];
         let driver = client.completion(&context.model);
-        let prepared =
-            <Completion as Operation>::prepare(context.request(&messages), &driver.wire.describe())
-                .unwrap();
-        let encoded = driver.wire.encode(prepared, Mode::Streaming).unwrap();
+        let prepared = <Completion as Operation>::prepare(
+            context.request(messages.clone()),
+            &driver.wire.describe(),
+        )
+        .unwrap();
+        let encoded = driver.wire.encode(prepared, Mode::Unary).unwrap();
         let Body::Bytes(bytes) = encoded.request.body() else {
             panic!("JSON body")
         };
         let mut expected: serde_json::Value = serde_json::from_slice(bytes).unwrap();
-        assert_eq!(expected["stream"], true);
-        assert_eq!(expected["tool_choice"], json!({"type": "auto"}));
-        // The Messages wire only inserts these streaming defaults in Streaming mode.
-        expected.as_object_mut().unwrap().remove("stream");
-        expected.as_object_mut().unwrap().remove("tool_choice");
+        // Compare against the same unary wire mode without discarding fields.
         expected["compaction"] = json!({"type": "summarize", "instructions": "keep decisions"});
         let token = Arc::new(CompactToken(Default::default()));
-        let state = if dynamic {
-            AnthropicClientState::Dynamic {
+        let dynamic = auth == "dynamic";
+        let backend: Arc<dyn Backend> = if dynamic {
+            let state = AnthropicClientState::Dynamic {
                 token_provider: token.clone(),
                 base_url: base,
                 http_client: DynHttpClient::new(ReqwestClient::default()),
                 auth_scope: "compact-scope".into(),
-            }
+            };
+            Arc::new(AnthropicBackend {
+                state: NativeRunState::new(
+                    state,
+                    "different-default-model".into(),
+                    None,
+                    AnthropicBackend::resolve_params(&Default::default()).unwrap(),
+                    "AnthropicBackend",
+                ),
+            })
         } else {
-            AnthropicClientState::Static(client)
-        };
-        let backend = AnthropicBackend {
-            state: NativeRunState::new(
-                state,
-                "different-default-model".into(),
-                None,
-                AnthropicBackend::resolve_params(&Default::default()).unwrap(),
-                "AnthropicBackend",
-            ),
+            // Exercise production construction, including its beta configuration,
+            // rather than injecting the reference client into the backend.
+            let mut guard = isolated_env();
+            guard.set(
+                if auth == "token" {
+                    "ANTHROPIC_TOKEN"
+                } else {
+                    "ANTHROPIC_API_KEY"
+                },
+                "configured-key",
+            );
+            guard.set("ANTHROPIC_BASE_URL", &base);
+            AnthropicBackend::build(
+                "different-default-model",
+                &HashMap::new(),
+                &Default::default(),
+            )
+            .unwrap()
         };
         let result = backend
             .compact(&messages, &context, Some("keep decisions"))
@@ -689,17 +712,23 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn production_compact_matches_stream_wire_static() {
-        compact_matches_stream_wire(false).await;
+    async fn production_compact_matches_unary_wire_static_api_key() {
+        compact_matches_unary_wire("api-key").await;
     }
 
     #[tokio::test]
-    async fn production_compact_matches_stream_wire_dynamic() {
-        compact_matches_stream_wire(true).await;
+    async fn production_compact_matches_unary_wire_static_token() {
+        compact_matches_unary_wire("token").await;
+    }
+
+    #[tokio::test]
+    async fn production_compact_matches_unary_wire_dynamic() {
+        compact_matches_unary_wire("dynamic").await;
     }
 
     fn scrub_anthropic_env(guard: &mut EnvGuard) {
         guard.remove("ANTHROPIC_API_KEY");
+        guard.remove("ANTHROPIC_TOKEN");
         guard.remove("ANTHROPIC_BASE_URL");
         guard.remove("ANTHROPIC_AUTH");
         guard.remove("ANTHROPIC_AUTH_SCOPE");

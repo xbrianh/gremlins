@@ -12,6 +12,9 @@ use serde_json::Value;
 /// The resolved inputs shared by normal completion and server compaction.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct ResolvedRequestContext {
+    /// Empty for older artifacts; unknown providers cannot use server compaction.
+    #[serde(default)]
+    pub(crate) provider: String,
     pub(crate) model: String,
     pub(crate) system: Option<String>,
     pub(crate) tools: Vec<ToolDefinition>,
@@ -21,8 +24,8 @@ pub struct ResolvedRequestContext {
 }
 
 impl ResolvedRequestContext {
-    pub(crate) fn request(&self, messages: &[Message]) -> CompletionRequest {
-        let mut request = CompletionRequest::from(messages.to_vec()).tools(self.tools.clone());
+    pub(crate) fn request(&self, messages: Vec<Message>) -> CompletionRequest {
+        let mut request = CompletionRequest::from(messages).tools(self.tools.clone());
         if let Some(system) = &self.system {
             request = request.preamble(system.clone());
         }
@@ -201,6 +204,7 @@ mod tests {
 
     fn context() -> ResolvedRequestContext {
         ResolvedRequestContext {
+            provider: "anthropic".into(),
             model: MODEL.into(),
             system: Some("system".into()),
             tools: vec![ToolDefinition {
@@ -220,7 +224,7 @@ mod tests {
         let context: ResolvedRequestContext =
             serde_json::from_value(serde_json::to_value(context()).unwrap()).unwrap();
         for messages in [vec![], older_prefix(), retained()] {
-            let request = context.request(&messages);
+            let request = context.request(messages.clone());
             assert_eq!(
                 request
                     .chat_history

@@ -554,10 +554,32 @@ pub(crate) async fn run_agent(
 pub(crate) fn messages_from_conversation(
     json: &str,
 ) -> Result<Vec<rig_core::completion::Message>, String> {
-    let value: serde_json::Value = serde_json::from_str(json)
-        .map_err(|e| format!("chat: failed to parse conversation artifact: {e}"))?;
-    serde_json::from_value(value.get("messages").cloned().unwrap_or(value))
-        .map_err(|e| format!("chat: failed to parse conversation artifact: {e}"))
+    conversation_from_json(json).map(|(messages, _)| messages)
+}
+
+fn conversation_from_json(
+    json: &str,
+) -> Result<(Vec<Message>, Option<ResolvedRequestContext>), String> {
+    #[derive(serde::Deserialize)]
+    #[serde(untagged)]
+    enum ConversationArtifact {
+        Legacy(Vec<Message>),
+        Envelope {
+            messages: Vec<Message>,
+            #[serde(default)]
+            request_context: Option<ResolvedRequestContext>,
+        },
+    }
+
+    match serde_json::from_str(json)
+        .map_err(|e| format!("chat: failed to parse conversation artifact: {e}"))?
+    {
+        ConversationArtifact::Legacy(messages) => Ok((messages, None)),
+        ConversationArtifact::Envelope {
+            messages,
+            request_context,
+        } => Ok((messages, request_context)),
+    }
 }
 
 /// Persist messages to `artifact://conversation/{turn:04}.json`.
@@ -633,13 +655,10 @@ pub(crate) async fn read_chat_conversation_with_context(
         }
         let uri = conversation_uri(t);
         match gremlin.state.content(&uri, None).await {
-            Ok(json) => match messages_from_conversation(&json) {
-                Ok(msgs) => {
+            Ok(json) => match conversation_from_json(&json) {
+                Ok((msgs, turn_context)) => {
                     if !msgs.is_empty() {
-                        context = serde_json::from_str::<serde_json::Value>(&json)
-                            .ok()
-                            .and_then(|v| v.get("request_context").cloned())
-                            .and_then(|v| serde_json::from_value(v).ok());
+                        context = turn_context;
                     }
                     all_msgs.extend(msgs);
                 }
@@ -737,6 +756,39 @@ mod tests {
     use crate::test_support::Sandbox;
     use std::sync::{Arc, Mutex};
 
+    #[test]
+    fn conversation_decoder_accepts_legacy_arrays_and_envelopes() {
+        let messages = vec![Message::user("saved history")];
+        let value = serde_json::to_value(&messages).unwrap();
+        for artifact in [value.clone(), serde_json::json!({"messages": value})] {
+            let (restored, context) = conversation_from_json(&artifact.to_string()).unwrap();
+            assert_eq!(serde_json::to_value(restored).unwrap(), value);
+            assert!(context.is_none());
+        }
+
+        // Older envelopes have no provider and must remain readable.
+        let artifact = serde_json::json!({
+            "messages": value,
+            "request_context": {
+                "model": "old-model", "system": null, "tools": [],
+                "extra": null, "temperature": null, "max_tokens": null
+            }
+        });
+        let (restored, context) = conversation_from_json(&artifact.to_string()).unwrap();
+        assert_eq!(serde_json::to_value(restored).unwrap(), value);
+        let context = context.unwrap();
+        assert!(context.provider.is_empty());
+        assert!(context.system.is_none());
+        assert_eq!(context.model, "old-model");
+    }
+
+    #[test]
+    fn conversation_decoder_rejects_invalid_artifacts() {
+        for artifact in ["not json", "{}", "{\"messages\": false}", "null"] {
+            assert!(conversation_from_json(artifact).is_err());
+        }
+    }
+
     #[tokio::test]
     async fn chat_request_context_tracks_committed_history() {
         let stage = AgentBuilder::new("chat-0001")
@@ -745,6 +797,7 @@ mod tests {
             .unwrap();
         let (_sandbox, gremlin) = test_gremlin(stage);
         let context = ResolvedRequestContext {
+            provider: "anthropic".into(),
             model: "retained-model".into(),
             system: Some("resolved workspace and skills".into()),
             tools: vec![],

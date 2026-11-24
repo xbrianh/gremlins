@@ -331,6 +331,7 @@ impl LoopState {
     ) -> Result<CompletionRequest, ClientError> {
         let effective_system = self.system_prompt.clone().or_else(|| opts.preamble.clone());
         let mut context = crate::clients::compaction::ResolvedRequestContext {
+            provider: self.conv.request_provider().unwrap_or_default().to_owned(),
             model: model.id().unwrap_or_default().to_string(),
             system: effective_system.clone(),
             tools: tool_defs.to_vec(),
@@ -353,7 +354,7 @@ impl LoopState {
         self.conv.set_request_context(context.clone());
         let mut messages = script.messages;
         messages.push(script.next_user_prompt);
-        Ok(context.request(&messages))
+        Ok(context.request(messages))
     }
 
     #[allow(clippy::too_many_arguments)]

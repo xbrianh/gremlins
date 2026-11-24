@@ -111,14 +111,9 @@ pub(crate) async fn handle_compact(_request: &Value, session_task: &SessionTaskH
         }
     };
     let mut conv = reconstruct_compaction_conversation(verbatim_history, request_context, backend);
-    let system_prompt = conv
-        .request_context()
-        .and_then(|c| c.system)
-        .unwrap_or_else(|| {
-            crate::executor::supervisor::chat_system_prompt::chat_system_prompt().to_owned()
-        });
+    let system_prompt = manual_compaction_system(conv.request_context());
 
-    match conv.compact(Some(&system_prompt), None).await {
+    match conv.compact(system_prompt.as_deref(), None).await {
         Some(report) => {
             let messages = conv.committed_history();
             // Convert the error to a `String` inside the match arm so no
@@ -143,6 +138,17 @@ pub(crate) async fn handle_compact(_request: &Value, session_task: &SessionTaskH
         None => {
             session_task.reinsert_gremlin(&id, gremlin).await;
             ok_response(serde_json::json!({"compacted": false, "reason": "nothing to compact"}))
+        }
+    }
+}
+
+fn manual_compaction_system(
+    context: Option<crate::clients::compaction::ResolvedRequestContext>,
+) -> Option<String> {
+    match context {
+        Some(context) => context.system,
+        None => {
+            Some(crate::executor::supervisor::chat_system_prompt::chat_system_prompt().to_owned())
         }
     }
 }
@@ -235,6 +241,7 @@ mod tests {
 
     fn context() -> ResolvedRequestContext {
         ResolvedRequestContext {
+            provider: "anthropic".into(),
             model: "original-effective-model".into(),
             system: Some("original resolved system and workspace preamble".into()),
             tools: vec![ToolDefinition {
@@ -274,14 +281,46 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn manual_provider_mismatch_preserves_retained_system_in_local_fallback() {
+        for system in [None, Some("retained system".to_owned())] {
+            let backend = Arc::new(ManualBackend::default());
+            let mut retained = context();
+            retained.provider = "openai".into();
+            retained.system = system.clone();
+            let expected = serde_json::to_value(&retained).unwrap();
+            let mut conv =
+                reconstruct_compaction_conversation(history(), Some(retained), backend.clone());
+            conv.set_local_summarizer(|_, messages, _, system| {
+                assert!(!messages.is_empty());
+                assert!(system.is_none() || system == Some("retained system"));
+                Box::pin(async { Some((Message::assistant("local manual summary"), None, None)) })
+            });
+            let prompt = manual_compaction_system(conv.request_context());
+            assert_eq!(prompt, system);
+            let report = conv.compact(prompt.as_deref(), None).await.unwrap();
+            assert!(matches!(report.strategy, CompactionStrategy::Local));
+            assert!(backend.0.lock().unwrap().is_empty());
+            assert_eq!(
+                serde_json::to_value(conv.request_context().unwrap()).unwrap(),
+                expected
+            );
+        }
+    }
+
+    #[tokio::test]
     async fn manual_reconstruction_without_context_skips_server_and_falls_back_locally() {
         let backend = Arc::new(ManualBackend::default());
         let mut conv = reconstruct_compaction_conversation(history(), None, backend.clone());
-        conv.set_local_summarizer(|_, messages, _, _| {
+        conv.set_local_summarizer(|_, messages, _, system| {
+            assert_eq!(
+                system,
+                Some(crate::executor::supervisor::chat_system_prompt::chat_system_prompt())
+            );
             assert!(!messages.is_empty());
             Box::pin(async { Some((Message::assistant("local manual summary"), None, None)) })
         });
-        let report = conv.compact(None, None).await.unwrap();
+        let system = manual_compaction_system(conv.request_context());
+        let report = conv.compact(system.as_deref(), None).await.unwrap();
         assert!(matches!(report.strategy, CompactionStrategy::Local));
         assert!(backend.0.lock().unwrap().is_empty());
         assert!(conv.request_context().is_none());

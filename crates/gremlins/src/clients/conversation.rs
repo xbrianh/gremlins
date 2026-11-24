@@ -244,6 +244,11 @@ pub(crate) trait Conversation: Send + Sync {
     ) {
     }
 
+    /// Provider responsible for this conversation's requests.
+    fn request_provider(&self) -> Option<&str> {
+        None
+    }
+
     /// Resolved request inputs for persistence and later manual compaction.
     fn request_context(&self) -> Option<crate::clients::compaction::ResolvedRequestContext> {
         None

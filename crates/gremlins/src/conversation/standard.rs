@@ -195,7 +195,7 @@ impl StandardConversation {
         if let Some(context) = self
             .request_context
             .as_ref()
-            .filter(|_| backend.supports_compaction())
+            .filter(|context| backend.supports_compaction() && context.provider == backend.name())
         {
             match backend.compact(&to_compact, context, instructions).await {
                 Ok(Some(r)) if r.block.is_some() => {
@@ -280,6 +280,10 @@ impl Conversation for StandardConversation {
 
     fn set_request_context(&mut self, context: ResolvedRequestContext) {
         self.request_context = Some(context);
+    }
+
+    fn request_provider(&self) -> Option<&str> {
+        self.backend.as_ref().map(|backend| backend.name())
     }
 
     fn request_context(&self) -> Option<ResolvedRequestContext> {
