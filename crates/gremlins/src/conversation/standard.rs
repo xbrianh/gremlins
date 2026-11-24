@@ -43,6 +43,16 @@ use crate::conversation::compaction::{
 /// Default number of most-recent turns to keep verbatim during compaction.
 const KEEP_RECENT: usize = 10;
 
+type LocalSummary = Option<(Message, Option<u64>, Option<u64>)>;
+type LocalSummarizer = for<'a> fn(
+    &'a str,
+    &'a [Message],
+    Option<&'a str>,
+    Option<&'a str>,
+) -> std::pin::Pin<
+    Box<dyn std::future::Future<Output = LocalSummary> + Send + 'a>,
+>;
+
 /// The standard [`Conversation`] implementation.
 pub(crate) struct StandardConversation {
     /// Verbatim durable message history. User prompts are committed before each
@@ -64,6 +74,7 @@ pub(crate) struct StandardConversation {
     finalized_messages: Option<Vec<Message>>,
     /// Backend for model construction and server-side API calls.
     backend: Option<Arc<dyn Backend>>,
+    local_summarizer: LocalSummarizer,
     /// Set to `true` when [`render_turn`] auto-compacts the prefix.
     /// Persistence uses this signal to write a full replacement transcript
     /// instead of an incremental diff that would leave compacted-away
@@ -93,6 +104,9 @@ impl StandardConversation {
             last_prompt_tokens: None,
             finalized_messages: None,
             backend,
+            local_summarizer: |spec, messages, instructions, system| {
+                Box::pin(run_local_compaction(spec, messages, instructions, system))
+            },
             compacted_prefix: false,
             compaction_threshold_tokens: threshold,
         }
@@ -114,6 +128,11 @@ impl StandardConversation {
     /// headless pipeline runs inside the same daemon still compact.
     pub(crate) fn set_compaction_threshold_tokens(&mut self, threshold: u64) {
         self.compaction_threshold_tokens = threshold;
+    }
+
+    #[cfg(test)]
+    pub(crate) fn set_local_summarizer(&mut self, summarize: LocalSummarizer) {
+        self.local_summarizer = summarize;
     }
 
     /// Install a successful summary, sanitizing only the retained Anthropic tail.
@@ -194,7 +213,7 @@ impl StandardConversation {
         // ── Local compaction ──
         let spec = format!("{}/{}", backend.name(), backend.model());
         if let Some((summary_msg, input_tokens, output_tokens)) =
-            run_local_compaction(&spec, &to_compact, instructions, system_prompt).await
+            (self.local_summarizer)(&spec, &to_compact, instructions, system_prompt).await
         {
             self.commit_compaction(summary_msg, &kept);
             return Some(CompactionReport {
@@ -243,6 +262,7 @@ impl Conversation for StandardConversation {
             compacted_prefix: self.compacted_prefix,
             compaction_threshold_tokens: self.compaction_threshold_tokens,
             backend: self.backend.clone(),
+            local_summarizer: self.local_summarizer,
         })
     }
 
@@ -423,6 +443,7 @@ impl Conversation for StandardConversation {
             compacted_prefix: false,
             compaction_threshold_tokens: self.compaction_threshold_tokens,
             backend: self.backend.clone(),
+            local_summarizer: self.local_summarizer,
         })
     }
 

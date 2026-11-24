@@ -113,6 +113,7 @@ mod tests {
     struct CompactionBackend {
         provider: &'static str,
         received: Mutex<Vec<Message>>,
+        server_summary: bool,
     }
 
     #[async_trait::async_trait]
@@ -142,6 +143,9 @@ mod tests {
             assert_eq!(system, Some("system"));
             assert_eq!(instructions, Some("instructions"));
             *self.received.lock().unwrap() = messages.to_vec();
+            if !self.server_summary {
+                return Ok(None);
+            }
             Ok(Some(CompactionResult {
                 block: Some(full_block()),
                 input_tokens: Some(123),
@@ -154,6 +158,7 @@ mod tests {
         Arc::new(CompactionBackend {
             provider,
             received: Mutex::new(vec![]),
+            server_summary: true,
         })
     }
 
@@ -300,16 +305,38 @@ mod tests {
         );
     }
 
-    #[test]
-    fn local_strategy_swap_helper_commits_plain_summary_and_sanitized_tail() {
-        // Local summarization needs a live model. Exercise its shared successful
-        // swap helper with the plain assistant summary it produces instead.
-        let kept = retained();
-        let mut history = older_prefix();
-        history.extend(kept.clone());
-        let mut conv =
-            StandardConversation::new(NEXT, true, Some(history), Some(backend("anthropic")));
-        conv.commit_compaction(Message::assistant("LOCAL SUMMARY"), &kept);
+    #[tokio::test]
+    async fn local_compaction_commits_plain_summary_and_sanitized_tail() {
+        let backend = Arc::new(CompactionBackend {
+            provider: "anthropic",
+            received: Mutex::new(vec![]),
+            server_summary: false,
+        });
+        let prefix = older_prefix();
+        let mut history = prefix.clone();
+        history.extend(retained());
+        let mut conv = StandardConversation::new(NEXT, true, Some(history), Some(backend.clone()));
+        conv.set_local_summarizer(|spec, messages, instructions, system| {
+            assert_eq!(spec, format!("anthropic/{MODEL}"));
+            assert_eq!(messages, older_prefix());
+            assert_eq!(instructions, Some("instructions"));
+            assert_eq!(system, Some("system"));
+            Box::pin(async { Some((Message::assistant("LOCAL SUMMARY"), Some(67), Some(8))) })
+        });
+        let report = conv
+            .compact(Some("system"), Some("instructions"))
+            .await
+            .expect("local success after server returns no block");
+        assert!(matches!(
+            report.strategy,
+            crate::conversation::compaction::CompactionStrategy::Local
+        ));
+        assert_eq!(*backend.received.lock().unwrap(), prefix);
+        assert_eq!(report.messages_compacted, prefix.len());
+        assert_eq!(report.messages_kept, retained().len());
+        assert_eq!(report.compaction_input_tokens, Some(67));
+        assert_eq!(report.compaction_output_tokens, Some(8));
+        assert!(report.compaction_block.is_none());
         assert_compacted_wire(&conv, json!({"type": "text", "text": "LOCAL SUMMARY"}));
     }
 
