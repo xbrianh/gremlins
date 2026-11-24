@@ -16,7 +16,8 @@
 //! [`StandardConversation::compact`] is an on-demand method that
 //! replaces the oldest history messages with a signed compaction
 //! block (server) or a plain summary (local). The most recent
-//! `KEEP_RECENT` user+assistant pairs are preserved verbatim.
+//! `KEEP_RECENT` user+assistant pairs are preserved, except that retained
+//! Anthropic assistant reasoning is removed after successful compaction.
 //! It is called by the `/compact` TUI command handler and, when
 //! [`render_turn`](StandardConversation::render_turn) observes a previous
 //! turn whose prompt token count exceeded the configured
@@ -24,7 +25,7 @@
 //! byte-size gate.
 
 use async_trait::async_trait;
-use rig_core::completion::message::{Origin, Reasoning, ToolCall};
+use rig_core::completion::message::{AssistantContent, Origin, Reasoning, ToolCall};
 use rig_core::completion::Message;
 use std::sync::Arc;
 
@@ -41,6 +42,16 @@ use crate::conversation::compaction::{
 
 /// Default number of most-recent turns to keep verbatim during compaction.
 const KEEP_RECENT: usize = 10;
+
+type LocalSummary = Option<(Message, Option<u64>, Option<u64>)>;
+type LocalSummarizer = for<'a> fn(
+    &'a str,
+    &'a [Message],
+    Option<&'a str>,
+    Option<&'a str>,
+) -> std::pin::Pin<
+    Box<dyn std::future::Future<Output = LocalSummary> + Send + 'a>,
+>;
 
 /// The standard [`Conversation`] implementation.
 pub(crate) struct StandardConversation {
@@ -63,6 +74,7 @@ pub(crate) struct StandardConversation {
     finalized_messages: Option<Vec<Message>>,
     /// Backend for model construction and server-side API calls.
     backend: Option<Arc<dyn Backend>>,
+    local_summarizer: LocalSummarizer,
     /// Set to `true` when [`render_turn`] auto-compacts the prefix.
     /// Persistence uses this signal to write a full replacement transcript
     /// instead of an incremental diff that would leave compacted-away
@@ -92,6 +104,9 @@ impl StandardConversation {
             last_prompt_tokens: None,
             finalized_messages: None,
             backend,
+            local_summarizer: |spec, messages, instructions, system| {
+                Box::pin(run_local_compaction(spec, messages, instructions, system))
+            },
             compacted_prefix: false,
             compaction_threshold_tokens: threshold,
         }
@@ -113,6 +128,42 @@ impl StandardConversation {
     /// headless pipeline runs inside the same daemon still compact.
     pub(crate) fn set_compaction_threshold_tokens(&mut self, threshold: u64) {
         self.compaction_threshold_tokens = threshold;
+    }
+
+    #[cfg(test)]
+    pub(crate) fn set_local_summarizer(&mut self, summarize: LocalSummarizer) {
+        self.local_summarizer = summarize;
+    }
+
+    /// Install a successful summary, sanitizing only the retained Anthropic tail.
+    /// Even a signed server summary does not certify preserved-thinking models,
+    /// suffix boundaries, or unchanged system/tools, so discard stale signatures.
+    pub(crate) fn commit_compaction(&mut self, summary: Message, kept: &[Message]) {
+        let unstamped_anthropic = self
+            .backend
+            .as_ref()
+            .is_some_and(|backend| backend.name() == "anthropic");
+        let mut history = Vec::with_capacity(1 + kept.len());
+        history.push(summary);
+        history.extend(kept.iter().cloned().filter_map(|mut message| {
+            if let Message::Assistant(turn) = &mut message {
+                // Replay follows the turn's origin, not the provider doing compaction.
+                let anthropic = turn
+                    .origin
+                    .as_ref()
+                    .map_or(unstamped_anthropic, |origin| origin.provider == "anthropic");
+                if anthropic {
+                    turn.content.retain(|block| !is_compacted_reasoning(block));
+                    if turn.content.is_empty() {
+                        return None;
+                    }
+                }
+            }
+            Some(message)
+        }));
+        self.history = history;
+        // `render_turn` owns the auto-compaction persistence signal; manual
+        // `/compact` persists committed_history() as a full replacement directly.
     }
 
     /// Run compaction on the current history. Called by the `/compact` TUI
@@ -146,10 +197,8 @@ impl StandardConversation {
             {
                 Ok(Some(r)) if r.block.is_some() => {
                     let signed = r.block.unwrap();
-                    let mut new_history = Vec::with_capacity(1 + kept.len());
-                    new_history.push(compaction_block_as_message(&signed, backend.model()));
-                    new_history.extend_from_slice(&kept);
-                    self.history = new_history;
+                    let summary = compaction_block_as_message(&signed, backend.model());
+                    self.commit_compaction(summary, &kept);
                     return Some(CompactionReport {
                         strategy: CompactionStrategy::Server,
                         messages_compacted: to_compact.len(),
@@ -171,12 +220,9 @@ impl StandardConversation {
         // ── Local compaction ──
         let spec = format!("{}/{}", backend.name(), backend.model());
         if let Some((summary_msg, input_tokens, output_tokens)) =
-            run_local_compaction(&spec, &to_compact, instructions, system_prompt).await
+            (self.local_summarizer)(&spec, &to_compact, instructions, system_prompt).await
         {
-            let mut new_history = Vec::with_capacity(1 + kept.len());
-            new_history.push(summary_msg);
-            new_history.extend_from_slice(&kept);
-            self.history = new_history;
+            self.commit_compaction(summary_msg, &kept);
             return Some(CompactionReport {
                 strategy: CompactionStrategy::Local,
                 messages_compacted: to_compact.len(),
@@ -189,6 +235,26 @@ impl StandardConversation {
 
         None
     }
+}
+
+fn is_compacted_reasoning(block: &AssistantContent) -> bool {
+    let native = match block {
+        AssistantContent::Reasoning(_) => return true,
+        AssistantContent::Text(text) => text.native.as_ref(),
+        AssistantContent::ToolCall(call) => call.native.as_ref(),
+        AssistantContent::Image(image) => image.native.as_ref(),
+        AssistantContent::Opaque(opaque) => return is_thinking_item(&opaque.item),
+        // Preserve other content: only known reasoning or native thinking is stale.
+        _ => None,
+    };
+    native.is_some_and(|native| is_thinking_item(&native.item))
+}
+
+fn is_thinking_item(item: &serde_json::Value) -> bool {
+    matches!(
+        item.get("type").and_then(serde_json::Value::as_str),
+        Some("thinking" | "redacted_thinking")
+    )
 }
 
 #[async_trait]
@@ -204,6 +270,7 @@ impl Conversation for StandardConversation {
             compacted_prefix: self.compacted_prefix,
             compaction_threshold_tokens: self.compaction_threshold_tokens,
             backend: self.backend.clone(),
+            local_summarizer: self.local_summarizer,
         })
     }
 
@@ -384,6 +451,7 @@ impl Conversation for StandardConversation {
             compacted_prefix: false,
             compaction_threshold_tokens: self.compaction_threshold_tokens,
             backend: self.backend.clone(),
+            local_summarizer: self.local_summarizer,
         })
     }
 

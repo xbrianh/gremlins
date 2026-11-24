@@ -96,7 +96,338 @@ mod tests {
     use rig_core::operation::Completion;
     use rig_core::wire::{Body, Mode, Operation, Wire};
 
+    use crate::clients::backend::{Backend, RunParams};
+    use crate::clients::error::ClientError;
+    use crate::clients::interactive::InteractiveSession;
+    use crate::clients::protocol::{CompactionResult, CompletedRun};
+    use crate::conversation::standard::StandardConversation;
+    use rig_core::completion::message::{
+        AssistantMessage, Opaque, Reasoning, Text, ToolCall, ToolFunction,
+    };
+    use serde_json::{json, Value};
+    use std::sync::{Arc, Mutex};
+
     const MODEL: &str = "claude-sonnet-4-6";
+    const NEXT: &str = "DISTINCT NEXT PROMPT";
+
+    struct CompactionBackend {
+        provider: &'static str,
+        received: Mutex<Vec<Message>>,
+        server_summary: bool,
+    }
+
+    #[async_trait::async_trait]
+    impl Backend for CompactionBackend {
+        async fn run(
+            &self,
+            _: RunParams,
+            _: InteractiveSession,
+        ) -> Result<CompletedRun, ClientError> {
+            panic!("offline compaction tests must not run a model")
+        }
+        fn name(&self) -> &'static str {
+            self.provider
+        }
+        fn model(&self) -> &str {
+            MODEL
+        }
+        fn supports_compaction(&self) -> bool {
+            true
+        }
+        async fn compact(
+            &self,
+            messages: &[Message],
+            system: Option<&str>,
+            instructions: Option<&str>,
+        ) -> Result<Option<CompactionResult>, ClientError> {
+            assert_eq!(system, Some("system"));
+            assert_eq!(instructions, Some("instructions"));
+            *self.received.lock().unwrap() = messages.to_vec();
+            if !self.server_summary {
+                return Ok(None);
+            }
+            Ok(Some(CompactionResult {
+                block: Some(full_block()),
+                input_tokens: Some(123),
+                output_tokens: Some(45),
+            }))
+        }
+    }
+
+    fn backend(provider: &'static str) -> Arc<CompactionBackend> {
+        Arc::new(CompactionBackend {
+            provider,
+            received: Mutex::new(vec![]),
+            server_summary: true,
+        })
+    }
+
+    fn full_block() -> CompactionBlock {
+        CompactionBlock {
+            encrypted_content: Some("ENCRYPTED SUMMARY".into()),
+            tool_changes: Some(vec![json!({"name": "Do", "change": "preserved"})]),
+            ..block()
+        }
+    }
+
+    fn assistant(content: Vec<AssistantContent>) -> Message {
+        Message::Assistant(AssistantMessage::new(content).with_origin(Origin::new(
+            ANTHROPIC_API,
+            ANTHROPIC_PROVIDER,
+            MODEL,
+        )))
+    }
+
+    fn thinking() -> Value {
+        json!({"type": "thinking", "thinking": "SIGNED REASONING", "signature": "THINKING SIG"})
+    }
+
+    fn retained() -> Vec<Message> {
+        let call = ToolCall::from_wire(
+            "call-1",
+            ToolFunction::new(ToolName::new("Do").unwrap(), json!({})),
+        );
+        let mut messages = vec![
+            Message::user("RETAINED USER"),
+            assistant(vec![
+                AssistantContent::Reasoning(Reasoning::new("REASONING WITHOUT NATIVE")),
+                AssistantContent::Reasoning(Reasoning::new("SIGNED REASONING"))
+                    .with_native(thinking()),
+                AssistantContent::Text(Text::new("redacted projection"))
+                    .with_native(json!({"type": "redacted_thinking", "data": "SEALED"})),
+                AssistantContent::Opaque(Opaque {
+                    item: thinking(),
+                    replay: true,
+                }),
+                AssistantContent::Opaque(Opaque {
+                    item: json!({"type": "redacted_thinking", "data": "OPAQUE SEALED"}),
+                    replay: true,
+                }),
+                AssistantContent::Text(Text::new("thinking projection")).with_native(thinking()),
+                AssistantContent::Text(Text::new("RETAINED TEXT"))
+                    .with_native(json!({"type": "text", "text": "RETAINED TEXT"})),
+                AssistantContent::ToolCall(call.clone()).with_native(
+                    json!({"type": "tool_use", "id": "call-1", "name": "Do", "input": {}}),
+                ),
+            ]),
+            Message::tool_result(call.id, call.function.name, "TOOL RESULT"),
+            assistant(vec![AssistantContent::Reasoning(Reasoning::new(
+                "THINKING ONLY",
+            ))
+            .with_native(thinking())]),
+        ];
+        for i in 0..9 {
+            messages.extend([
+                Message::user(format!("KEPT {i}")),
+                Message::assistant(format!("ANSWER {i}")),
+            ]);
+        }
+        messages
+    }
+
+    fn older_prefix() -> Vec<Message> {
+        vec![Message::user("OLD USER"), Message::assistant("OLD ANSWER")]
+    }
+
+    fn artifact_roundtrip(history: Vec<Message>) -> Vec<Message> {
+        serde_json::from_slice(&serde_json::to_vec(&history).unwrap()).unwrap()
+    }
+
+    fn expected_tail() -> Vec<Value> {
+        let mut expected = vec![
+            json!({"role": "user", "content": [{"type": "text", "text": "RETAINED USER"}]}),
+            json!({"role": "assistant", "content": [
+                {"type": "text", "text": "RETAINED TEXT"},
+                {"type": "tool_use", "id": "call-1", "name": "Do", "input": {}}
+            ]}),
+            json!({"role": "user", "content": [{"type": "tool_result", "tool_use_id": "call-1", "content": [{"type": "text", "text": "TOOL RESULT"}]}]}),
+        ];
+        // Removing the thinking-only turn makes these adjacent users; the wire merges them.
+        expected[2]["content"]
+            .as_array_mut()
+            .unwrap()
+            .push(json!({"type": "text", "text": "KEPT 0"}));
+        expected
+            .push(json!({"role": "assistant", "content": [{"type": "text", "text": "ANSWER 0"}]}));
+        for i in 1..9 {
+            expected.extend([
+                json!({"role": "user", "content": [{"type": "text", "text": format!("KEPT {i}")}]}),
+                json!({"role": "assistant", "content": [{"type": "text", "text": format!("ANSWER {i}")}]}),
+            ]);
+        }
+        expected.push(json!({"role": "user", "content": [{"type": "text", "text": NEXT}]}));
+        expected
+    }
+
+    fn assert_compacted_wire(conv: &StandardConversation, summary: Value) {
+        let committed = conv.committed_history();
+        assert_eq!(
+            committed.len(),
+            22,
+            "summary plus retained user/tool exchange; thinking-only turn removed"
+        );
+        let Message::Assistant(turn) = &committed[2] else {
+            panic!("retained mixed assistant turn must survive");
+        };
+        assert_eq!(
+            turn.content.len(),
+            2,
+            "only visible text and tool call survive"
+        );
+        assert!(
+            turn.content
+                .iter()
+                .all(|block| !matches!(block, AssistantContent::Reasoning(_))),
+            "reasoning without native data must be removed before wire encoding"
+        );
+        let restored = artifact_roundtrip(committed.clone());
+        assert_eq!(restored, committed);
+        let encoded = body_with_prompt(restored, MODEL, NEXT);
+        let mut expected = vec![json!({"role": "assistant", "content": [summary]})];
+        expected.extend(expected_tail());
+        assert_eq!(encoded["messages"], json!(expected));
+    }
+
+    #[tokio::test]
+    async fn server_compaction_commits_sanitized_tail_and_replays_full_signed_summary() {
+        let backend = backend("anthropic");
+        let prefix = older_prefix();
+        let mut history = prefix.clone();
+        history.extend(retained());
+        let mut conv = StandardConversation::new(NEXT, true, Some(history), Some(backend.clone()));
+        let report = conv
+            .compact(Some("system"), Some("instructions"))
+            .await
+            .expect("server success");
+        assert!(matches!(
+            report.strategy,
+            crate::conversation::compaction::CompactionStrategy::Server
+        ));
+        let cut = prefix.len();
+        assert_eq!(*backend.received.lock().unwrap(), prefix[..cut]);
+        assert_eq!(report.messages_compacted, cut);
+        assert_eq!(report.messages_kept, retained().len());
+        assert_eq!(report.compaction_input_tokens, Some(123));
+        assert_eq!(report.compaction_output_tokens, Some(45));
+        assert_compacted_wire(
+            &conv,
+            json!({
+                "type": "compaction", "content": "SUMMARY", "signature": "SIG",
+                "encrypted_content": "ENCRYPTED SUMMARY",
+                "tool_changes": [{"name": "Do", "change": "preserved"}],
+                "cache_control": {"type": "ephemeral"}
+            }),
+        );
+    }
+
+    #[tokio::test]
+    async fn local_compaction_commits_plain_summary_and_sanitized_tail() {
+        let backend = Arc::new(CompactionBackend {
+            provider: "anthropic",
+            received: Mutex::new(vec![]),
+            server_summary: false,
+        });
+        let prefix = older_prefix();
+        let mut history = prefix.clone();
+        history.extend(retained());
+        let mut conv = StandardConversation::new(NEXT, true, Some(history), Some(backend.clone()));
+        conv.set_local_summarizer(|spec, messages, instructions, system| {
+            assert_eq!(spec, format!("anthropic/{MODEL}"));
+            assert_eq!(messages, older_prefix());
+            assert_eq!(instructions, Some("instructions"));
+            assert_eq!(system, Some("system"));
+            Box::pin(async { Some((Message::assistant("LOCAL SUMMARY"), Some(67), Some(8))) })
+        });
+        let report = conv
+            .compact(Some("system"), Some("instructions"))
+            .await
+            .expect("local success after server returns no block");
+        assert!(matches!(
+            report.strategy,
+            crate::conversation::compaction::CompactionStrategy::Local
+        ));
+        assert_eq!(*backend.received.lock().unwrap(), prefix);
+        assert_eq!(report.messages_compacted, prefix.len());
+        assert_eq!(report.messages_kept, retained().len());
+        assert_eq!(report.compaction_input_tokens, Some(67));
+        assert_eq!(report.compaction_output_tokens, Some(8));
+        assert!(report.compaction_block.is_none());
+        assert_compacted_wire(&conv, json!({"type": "text", "text": "LOCAL SUMMARY"}));
+    }
+
+    #[test]
+    fn uncompacted_history_still_replays_signed_and_opaque_thinking() {
+        let kept = retained();
+        let conv =
+            StandardConversation::new(NEXT, true, Some(kept.clone()), Some(backend("anthropic")));
+        assert_eq!(conv.committed_history(), kept);
+        let mut signed_control = artifact_roundtrip(conv.committed_history());
+        // This control isolates signed replay; plain reasoning is checked in committed history.
+        if let Message::Assistant(turn) = &mut signed_control[1] {
+            turn.content.remove(0);
+        }
+        let encoded = body_with_prompt(signed_control, MODEL, NEXT);
+        assert_eq!(
+            encoded["messages"][1]["content"],
+            json!([
+                thinking(), {"type": "redacted_thinking", "data": "SEALED"}, thinking(),
+                {"type": "redacted_thinking", "data": "OPAQUE SEALED"}, thinking(),
+                {"type": "text", "text": "RETAINED TEXT"},
+                {"type": "tool_use", "id": "call-1", "name": "Do", "input": {}}
+            ])
+        );
+        assert_eq!(encoded["messages"][3]["content"], json!([thinking()]));
+    }
+
+    #[tokio::test]
+    async fn other_provider_compaction_sanitizes_anthropic_origin_before_switching_back() {
+        let backend = Arc::new(CompactionBackend {
+            provider: "openai",
+            received: Mutex::new(vec![]),
+            server_summary: false,
+        });
+        let mut history = older_prefix();
+        history.extend(retained());
+        let mut conv = StandardConversation::new(NEXT, true, Some(history), Some(backend));
+        conv.set_local_summarizer(|spec, messages, _, _| {
+            assert_eq!(spec, format!("openai/{MODEL}"));
+            assert_eq!(messages, older_prefix());
+            Box::pin(async { Some((Message::assistant("OTHER SUMMARY"), None, None)) })
+        });
+        conv.compact(Some("system"), Some("instructions"))
+            .await
+            .expect("other provider local compaction succeeds");
+        // The harness replays persisted history on the original Anthropic model.
+        assert_compacted_wire(&conv, json!({"type": "text", "text": "OTHER SUMMARY"}));
+    }
+
+    #[test]
+    fn compaction_respects_non_anthropic_origins_and_unstamped_fallback() {
+        for provider in ["openai", "anthropic"] {
+            let mut kept = retained();
+            for message in &mut kept {
+                if let Message::Assistant(turn) = message {
+                    turn.origin = Some(Origin::new(
+                        Api::from_static("openai.responses"),
+                        "openai",
+                        "other-model",
+                    ));
+                }
+            }
+            kept.push(Message::Assistant(AssistantMessage::new(vec![
+                AssistantContent::Reasoning(Reasoning::new("UNSTAMPED REASONING")),
+            ])));
+            let mut conv = StandardConversation::new(NEXT, true, None, Some(backend(provider)));
+            let summary = Message::assistant("OTHER SUMMARY");
+            conv.commit_compaction(summary.clone(), &kept);
+            if provider == "anthropic" {
+                kept.pop();
+            }
+            let mut expected = vec![summary];
+            expected.extend(kept);
+            assert_eq!(artifact_roundtrip(conv.committed_history()), expected);
+        }
+    }
 
     fn block() -> CompactionBlock {
         CompactionBlock {
@@ -118,9 +449,13 @@ mod tests {
     /// Goes through `prepare` then `encode`, exactly as the driver does, so
     /// `adapt`'s replay gate is exercised rather than bypassed.
     fn body(history: Vec<Message>, model: &str) -> serde_json::Value {
+        body_with_prompt(history, model, "go")
+    }
+
+    fn body_with_prompt(history: Vec<Message>, model: &str, prompt: &str) -> Value {
         let wire = rig_core::providers::anthropic::Anthropic::new("k").completion(model);
         let mut request =
-            CompletionRequest::new("go")
+            CompletionRequest::new(prompt)
                 .preamble("sys")
                 .tools(vec![ToolDefinition {
                     name: ToolName::new("Do").unwrap(),
@@ -128,7 +463,11 @@ mod tests {
                     parameters: serde_json::json!({"type": "object", "properties": {}}),
                     annotations: Default::default(),
                 }]);
-        request.chat_history = history.into_iter().map(std::sync::Arc::new).collect();
+        request.chat_history = history
+            .into_iter()
+            .chain([Message::user(prompt)])
+            .map(std::sync::Arc::new)
+            .collect();
         let request = <Completion as Operation>::prepare(request, &wire.wire.describe())
             .expect("request prepares");
         let encoded = wire.wire.encode(request, Mode::Streaming).expect("encodes");
