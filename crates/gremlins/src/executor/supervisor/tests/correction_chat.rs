@@ -1,10 +1,9 @@
 use super::TestRegistry;
 use super::{
-    chat_pair_actor, create_chat_gremlin, create_session, model, read_until_type, sandbox_dirs,
-    spawn_test_actor, teardown_session,
+    create_chat_gremlin, create_session, model, read_until_type, sandbox_dirs, spawn_test_actor,
+    teardown_session,
 };
 use crate::executor::socket;
-use crate::executor::supervisor::chat::handle_chat;
 use serde_json::{json, Value};
 use std::future::Future;
 use std::task::Poll;
@@ -133,7 +132,6 @@ async fn second_prompt_is_gated_and_each_start_matches_live_snapshot_then_become
     let first = read_until_type(&mut reader, "turn_started").await;
     assert_start_snapshot(&registry, &session, &first, "first").await;
     let (_, held) = pending_request(&provider).await;
-
     send_chat(&mut write, prompt("second")).await;
     let busy = read_until_type(&mut reader, "error").await;
     assert!(busy.to_string().contains("session busy"), "{busy}");
@@ -204,6 +202,51 @@ async fn second_prompt_is_gated_and_each_start_matches_live_snapshot_then_become
     assert_eq!(delivered["execution_id"], second["execution_id"]);
     assert_eq!(delivered["req_id"], "live-second-correction");
     let (incorporated, held) = pending_request(&provider).await;
+    // Follow the owner's identity change while the second execution is held live.
+    for (nonce, execution_id, expected) in [
+        (
+            second["nonce"].as_u64().unwrap() + 1,
+            second["execution_id"].as_str().unwrap(),
+            "error",
+        ),
+        (
+            second["nonce"].as_u64().unwrap(),
+            first["execution_id"].as_str().unwrap(),
+            "error",
+        ),
+        (
+            second["nonce"].as_u64().unwrap(),
+            second["execution_id"].as_str().unwrap(),
+            "attached",
+        ),
+    ] {
+        let (client, server) = UnixStream::pair().unwrap();
+        let (read, aux_write) = server.into_split();
+        let aux = tokio::spawn(crate::executor::supervisor::session::handle_session_aux(
+            read,
+            aux_write,
+            write.1.clone(),
+            registry.clone(),
+        ));
+        let mut client = BufReader::new(client);
+        socket::write_json_line(
+            client.get_mut(),
+            &json!({
+                "op": "attach", "scope": "conversation", "session_id": write.1,
+                "id": second["id"], "nonce": nonce, "execution_id": execution_id,
+            }),
+        )
+        .await
+        .unwrap();
+        let response = socket::read_json_line(&mut client).await.unwrap().unwrap();
+        assert_eq!(response["type"], expected, "{response}");
+        if expected == "attached" {
+            assert_eq!(response["nonce"], second["nonce"]);
+            assert_eq!(response["execution_id"], second["execution_id"]);
+        }
+        drop(client);
+        aux.await.unwrap();
+    }
     assert!(
         incorporated
             .to_string()
@@ -284,11 +327,6 @@ async fn reregistered_same_nonce_rejects_old_execution_and_invalid_targets_witho
     let mut old_descriptor = target.clone();
     old_descriptor["execution_id"] = json!(old_target.execution_id());
     for (target, expected) in [
-        (json!(null), "target must be an object"),
-        (
-            json!({"id": id, "nonce": live.nonce()}),
-            "target.execution_id is required",
-        ),
         (wrong_nonce, "stale"),
         (wrong_execution, "execution_id mismatch"),
         (old_descriptor, "execution_id mismatch"),
@@ -334,104 +372,11 @@ async fn reregistered_same_nonce_rejects_old_execution_and_invalid_targets_witho
     task.await.unwrap();
 }
 
-async fn assert_rejected(registry: &TestRegistry, target: Value, expected: &str) {
-    let (writer, mut reader, _read, _id, session) = chat_pair_actor(registry).await;
-    let request = json!({"op": "chat", "text": "correct this", "target": target});
-    tokio::time::timeout(
-        Duration::from_secs(10),
-        handle_chat(&request, &writer, registry, &session),
-    )
-    .await
-    .expect("invalid correction must return promptly");
-    let response =
-        tokio::time::timeout(Duration::from_secs(10), socket::read_json_line(&mut reader))
-            .await
-            .unwrap()
-            .unwrap()
-            .expect("correction response");
-    assert_eq!(response["type"], "error", "target {target}: {response}");
-    assert!(
-        response.to_string().contains(expected),
-        "target {target}: expected {expected:?}, got {response}"
-    );
-    assert!(session.get_chat_ids().await.is_empty());
-    assert!(session.get_chat_gremlin_keys().await.is_empty());
-    assert!(session.get_current_turn().await.is_none());
-    teardown_session(&session).await;
-}
-
 #[tokio::test]
-async fn correction_rejects_non_object_targets_without_starting_chat() {
-    let (_sandbox, _, _) = sandbox_dirs(None);
-    let (registry, _) = spawn_test_actor().await;
-    for target in [json!(null), json!(false), json!(1), json!("run"), json!([])] {
-        assert_rejected(&registry, target, "target must be an object").await;
-    }
-}
-
-#[tokio::test]
-async fn correction_requires_nonempty_string_target_id() {
-    let (_sandbox, _, _) = sandbox_dirs(None);
-    let (registry, _) = spawn_test_actor().await;
-    let mut target = json!({"nonce": 1, "execution_id": "execution"});
-    assert_rejected(&registry, target.clone(), "target.id is required").await;
-    for id in [
-        json!(null),
-        json!(false),
-        json!(1),
-        json!([]),
-        json!({}),
-        json!(""),
-    ] {
-        target["id"] = id;
-        assert_rejected(&registry, target.clone(), "target.id is required").await;
-    }
-}
-
-#[tokio::test]
-async fn correction_requires_positive_integer_nonce() {
-    let (_sandbox, _, _) = sandbox_dirs(None);
-    let (registry, _) = spawn_test_actor().await;
-    let mut target = json!({"id": "missing-run", "execution_id": "execution"});
-    assert_rejected(&registry, target.clone(), "target.nonce is required").await;
-    for nonce in [
-        json!(null),
-        json!(false),
-        json!("1"),
-        json!(0),
-        json!(-1),
-        json!(1.5),
-        json!([]),
-        json!({}),
-    ] {
-        target["nonce"] = nonce;
-        assert_rejected(&registry, target.clone(), "target.nonce is required").await;
-    }
-}
-
-#[tokio::test]
-async fn correction_requires_execution_id_before_resolving_target() {
-    let (_sandbox, _, _) = sandbox_dirs(None);
-    let (registry, _) = spawn_test_actor().await;
-    let mut target = json!({"id": "missing-run", "nonce": 1});
-    assert_rejected(&registry, target.clone(), "target.execution_id is required").await;
-    for execution_id in [
-        json!(null),
-        json!(false),
-        json!(1),
-        json!([]),
-        json!({}),
-        json!(""),
-    ] {
-        target["execution_id"] = execution_id;
-        assert_rejected(&registry, target.clone(), "target.execution_id is required").await;
-    }
-}
-
-#[tokio::test]
-async fn empty_session_cannot_correct_another_sessions_chat() {
+async fn correction_rejects_malformed_targets_without_starting_chat() {
     let (_sandbox, project, _) = sandbox_dirs(None);
     let (registry, _) = spawn_test_actor().await;
+    let (mut reader, mut write, session, task) = main_socket(&registry).await;
     let (_owner_id, owner) = create_session(&registry).await;
     let id = "chat-correction-owner";
     let gremlin = create_chat_gremlin(
@@ -451,206 +396,96 @@ async fn empty_session_cannot_correct_another_sessions_chat() {
         )
         .await;
     owner.reinsert_gremlin(id, gremlin).await;
-
-    assert_rejected(
-        &registry,
-        json!({"id": id, "nonce": 1, "execution_id": "execution"}),
-        "not owned by this session",
-    )
-    .await;
+    #[rustfmt::skip]
+    let cases = [
+        ("target/null", json!(null), "target must be an object"),
+        ("target/bool", json!(false), "target must be an object"),
+        ("target/number", json!(1), "target must be an object"),
+        ("target/string", json!("run"), "target must be an object"),
+        ("target/array", json!([]), "target must be an object"),
+        ("id/missing", json!({"nonce": 1, "execution_id": "execution"}), "target.id is required"),
+        ("id/null", json!({"id": null, "nonce": 1, "execution_id": "execution"}), "target.id is required"),
+        ("id/bool", json!({"id": false, "nonce": 1, "execution_id": "execution"}), "target.id is required"),
+        ("id/number", json!({"id": 1, "nonce": 1, "execution_id": "execution"}), "target.id is required"),
+        ("id/array", json!({"id": [], "nonce": 1, "execution_id": "execution"}), "target.id is required"),
+        ("id/object", json!({"id": {}, "nonce": 1, "execution_id": "execution"}), "target.id is required"),
+        ("id/empty", json!({"id": "", "nonce": 1, "execution_id": "execution"}), "target.id is required"),
+        ("nonce/missing", json!({"id": "missing-run", "execution_id": "execution"}), "target.nonce is required"),
+        ("nonce/null", json!({"id": "missing-run", "nonce": null, "execution_id": "execution"}), "target.nonce is required"),
+        ("nonce/bool", json!({"id": "missing-run", "nonce": false, "execution_id": "execution"}), "target.nonce is required"),
+        ("nonce/string", json!({"id": "missing-run", "nonce": "1", "execution_id": "execution"}), "target.nonce is required"),
+        ("nonce/zero", json!({"id": "missing-run", "nonce": 0, "execution_id": "execution"}), "target.nonce is required"),
+        ("nonce/negative", json!({"id": "missing-run", "nonce": -1, "execution_id": "execution"}), "target.nonce is required"),
+        ("nonce/fraction", json!({"id": "missing-run", "nonce": 1.5, "execution_id": "execution"}), "target.nonce is required"),
+        ("nonce/array", json!({"id": "missing-run", "nonce": [], "execution_id": "execution"}), "target.nonce is required"),
+        ("nonce/object", json!({"id": "missing-run", "nonce": {}, "execution_id": "execution"}), "target.nonce is required"),
+        ("execution_id/missing", json!({"id": "missing-run", "nonce": 1}), "target.execution_id is required"),
+        ("execution_id/null", json!({"id": "missing-run", "nonce": 1, "execution_id": null}), "target.execution_id is required"),
+        ("execution_id/bool", json!({"id": "missing-run", "nonce": 1, "execution_id": false}), "target.execution_id is required"),
+        ("execution_id/number", json!({"id": "missing-run", "nonce": 1, "execution_id": 1}), "target.execution_id is required"),
+        ("execution_id/array", json!({"id": "missing-run", "nonce": 1, "execution_id": []}), "target.execution_id is required"),
+        ("execution_id/object", json!({"id": "missing-run", "nonce": 1, "execution_id": {}}), "target.execution_id is required"),
+        ("execution_id/empty", json!({"id": "missing-run", "nonce": 1, "execution_id": ""}), "target.execution_id is required"),
+        ("another session owns the chat", json!({"id": id, "nonce": 1, "execution_id": "execution"}), "not owned by this session"),
+    ];
+    for (case, target, expected) in cases {
+        send_chat(
+            &mut write,
+            json!({"op": "chat", "text": "correct this", "target": target}),
+        )
+        .await;
+        let response = frame(&mut reader).await;
+        assert_eq!(
+            response["type"], "error",
+            "{case}: target {target}: {response}"
+        );
+        assert!(
+            response.to_string().contains(expected),
+            "{case}: target {target}: expected {expected:?}, got {response}"
+        );
+        assert!(session.get_chat_ids().await.is_empty(), "{case}: chat ids");
+        assert!(
+            session.get_chat_gremlin_keys().await.is_empty(),
+            "{case}: gremlin keys"
+        );
+        assert!(
+            session.get_current_turn().await.is_none(),
+            "{case}: current turn"
+        );
+        assert!(
+            session.get_chat_handle().await.is_none(),
+            "{case}: chat handle"
+        );
+    }
     assert_eq!(owner.get_chat_ids().await, vec![id.to_string()]);
     assert!(owner.take_gremlin(id).await.is_some());
+    send_chat(&mut write, json!({"op": "close_session"})).await;
+    assert_eq!(frame(&mut reader).await["type"], "ok");
+    task.await.unwrap();
     teardown_session(&owner).await;
 }
 
-#[tokio::test]
-async fn chat_announces_execution_identity_only_when_the_turn_starts() {
-    use crate::executor::supervisor::test_provider::pending_request;
-    use crate::test_support::Sandbox;
-    use tokio::net::TcpListener;
-
-    let provider = TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let sandbox = Sandbox::with_providers(
-        &json!({"openrouter": {
-            "api-key": "test",
-            "base-url": format!("http://{}", provider.local_addr().unwrap()),
-        }})
-        .to_string(),
-    );
-    std::fs::write(
-        sandbox.join("config/settings.yaml"),
-        "default-model: openrouter/test-turn-started\n",
-    )
-    .unwrap();
-    let (registry, _) = spawn_test_actor().await;
-    let (writer, mut reader, _read, session_id, session) = chat_pair_actor(&registry).await;
-    handle_chat(
-        &json!({
-            "op": "chat", "turn": "first", "text": "Review this draft.",
-            "project_root": sandbox.path(),
-        }),
-        &writer,
-        &registry,
-        &session,
-    )
-    .await;
-
-    let ack = read_until_type(&mut reader, "ok").await;
-    let id = ack["id"].as_str().expect("enqueue ack must name the chat");
-    assert!(ack.get("nonce").is_none(), "{ack}");
-    assert!(ack.get("execution_id").is_none(), "{ack}");
-
-    let started = read_until_type(&mut reader, "turn_started").await;
-    assert_eq!(started["id"], id);
-    assert_eq!(started["turn"], "first");
-    assert!(started["nonce"].as_u64().is_some_and(|nonce| nonce > 0));
-    let execution_id = started["execution_id"]
-        .as_str()
-        .filter(|id| !id.is_empty())
-        .expect("TurnStarted must announce an execution id");
-    let current = session.get_current_turn().await.expect("active turn");
-    assert_eq!(current.id, id);
-    assert_eq!(current.turn.as_deref(), Some("first"));
-    assert_eq!(current.execution_id.as_deref(), Some(execution_id));
-    let (interactive, _, _) = registry.get_run_interactive(id).await.unwrap();
-    let target = interactive.target();
-    assert_eq!(started["nonce"], target.nonce());
-    assert_eq!(target.execution_id(), Some(execution_id));
-
-    let (_request, _held) = pending_request(&provider).await;
-    // A correction connection needs only the owner's announcement. Check
-    // both halves of the identity independently, then attach to the exact
-    // execution without taking a pause or subscribing the owner twice.
-    for (nonce, eid, expected) in [
-        (
-            started["nonce"].as_u64().unwrap() + 1,
-            execution_id,
-            "error",
-        ),
-        (target.nonce(), "previous-execution", "error"),
-        (target.nonce(), execution_id, "attached"),
-    ] {
-        let (client, server) = UnixStream::pair().unwrap();
-        let (read, write) = server.into_split();
-        let aux = tokio::spawn(crate::executor::supervisor::session::handle_session_aux(
-            read,
-            write,
-            session_id.clone(),
-            registry.clone(),
-        ));
-        let mut client = BufReader::new(client);
-        socket::write_json_line(
-            client.get_mut(),
-            &json!({
-                "op": "attach", "scope": "conversation", "session_id": session_id,
-                "id": id, "nonce": nonce, "execution_id": eid,
-            }),
-        )
-        .await
-        .unwrap();
-        let response = socket::read_json_line(&mut client).await.unwrap().unwrap();
-        assert_eq!(response["type"], expected, "{response}");
-        if expected == "attached" {
-            assert_eq!(response["nonce"], started["nonce"]);
-            assert_eq!(response["execution_id"], started["execution_id"]);
-        }
-        drop(client);
-        aux.await.unwrap();
-    }
-    teardown_session(&session).await;
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum CorrectionWait {
+    Readiness,
+    Incorporation,
 }
 
-async fn exercise_targeted_delivery(confirm_delivery: bool) {
-    use crate::clients::cancel::CancelToken;
-    use crate::clients::interactive::InteractiveCommand;
-
-    let (_sandbox, project, _) = sandbox_dirs(None);
-    let (registry, _) = spawn_test_actor().await;
-    let (writer, mut reader, _read, _session_id, session) = chat_pair_actor(&registry).await;
-    let id = "chat-targeted-delivery";
-    let gremlin = create_chat_gremlin(
-        id,
-        &model("cmd/echo"),
-        "helpful",
-        &project,
-        &Default::default(),
-    )
-    .unwrap();
-    let mut gremlin = registry
-        .register_chat_gremlin(id.into(), gremlin, CancelToken::new())
-        .await;
-    session.add_chat_id(id).await;
-    let mut execution = gremlin.next_interactive_session();
-    let (interactive, _, _) = registry.get_run_interactive(id).await.unwrap();
-    let target = interactive.target();
-    let nonce = target.nonce();
-    let execution_id = target.execution_id().unwrap().to_string();
-    handle_chat(
-        &json!({
-            "op": "chat", "text": "Use the revised plan.", "req_id": "correction-1",
-            "target": {"id": id, "nonce": nonce, "execution_id": execution_id},
-        }),
-        &writer,
-        &registry,
-        &session,
-    )
-    .await;
-    let ack = read_until_type(&mut reader, "ok").await;
-    assert_eq!(ack["id"], id);
-    assert_eq!(ack["status"], "queued");
-    assert_eq!(ack["nonce"], nonce);
-    assert!(session.get_current_turn().await.is_none());
-    assert!(session.get_chat_handle().await.is_none());
-
-    assert!(execution.accept_pause());
-    let command = tokio::time::timeout(Duration::from_secs(10), execution.next_command())
-        .await
-        .expect("correction must reach the existing execution")
-        .expect("correction command");
-    let InteractiveCommand::Message(text, req_id, delivery) = command else {
-        panic!("expected a targeted message");
-    };
-    assert_eq!(text, "Use the revised plan.");
-    assert_eq!(req_id.as_deref(), Some("correction-1"));
-    let delivery = delivery.expect("existing delivery acknowledgement channel");
-    if confirm_delivery {
-        delivery.send(()).unwrap();
-        let delivered = read_until_type(&mut reader, "delivered").await;
-        assert_eq!(delivered["id"], id);
-        assert_eq!(delivered["nonce"], nonce);
-        assert_eq!(delivered["execution_id"], execution_id);
-        assert_eq!(delivered["req_id"], "correction-1");
-    } else {
-        // Keep the sender alive: only execution end can release the delivery wait.
-        drop(execution);
-        let dropped = read_until_type(&mut reader, "correction_dropped").await;
-        assert_eq!(dropped["id"], id);
-        assert_eq!(dropped["req_id"], "correction-1");
-        assert_eq!(dropped["execution_id"], execution_id);
-        assert_eq!(dropped["reason"], "agent exited before incorporation");
-        drop(delivery);
-    }
-    registry.stop_run(id).await;
-    teardown_session(&session).await;
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum CorrectionFailure {
+    MainSocketEof,
+    ExecutionEnd,
 }
 
-async fn exercise_targeted_disconnect(incorporating: bool) {
+async fn exercise_targeted_failure(phase: CorrectionWait, trigger: CorrectionFailure) {
     use crate::clients::cancel::CancelToken;
     use crate::clients::interactive::{AttachError, InteractiveCommand};
-    use crate::executor::supervisor::session::handle_session_main;
-    use gremlins_magic_bus::connection::SharedWriter;
-    use tokio::io::BufReader;
-    use tokio::net::UnixStream;
 
     tokio::time::timeout(Duration::from_secs(10), async {
         let (_sandbox, project, _) = sandbox_dirs(None);
         let (registry, _) = spawn_test_actor().await;
-        let (session_id, session) = create_session(&registry).await;
-        let id = if incorporating {
-            "pipeline-correction-incorporation-disconnect"
-        } else {
-            "pipeline-correction-readiness-disconnect"
-        };
+        let (mut reader, mut write, session, task) = main_socket(&registry).await;
+        let id = "pipeline-targeted-failure";
         let gremlin = create_chat_gremlin(
             id,
             &model("cmd/echo"),
@@ -659,8 +494,7 @@ async fn exercise_targeted_disconnect(incorporating: bool) {
             &Default::default(),
         )
         .unwrap();
-        // Register a synthetic pipeline, deliberately not owned by the session.
-        // Main-session teardown must not end the execution under test.
+        // Independent pipeline: MAIN teardown must not end this execution.
         gremlin
             .state
             .patch(&[], json!({"kind": "pipeline"}).as_object().unwrap());
@@ -671,181 +505,148 @@ async fn exercise_targeted_disconnect(incorporating: bool) {
         let (interactive, _, _) = registry.get_run_interactive(id).await.unwrap();
         let target = interactive.target();
         let end = target.end_signal();
-
-        let (server, client) = UnixStream::pair().unwrap();
-        let (read, write) = server.into_split();
-        let writer = SharedWriter::new(write);
-        let main = tokio::spawn(handle_session_main(
-            read,
-            writer.clone(),
-            session_id.clone(),
-            registry.clone(),
-            session.clone(),
-        ));
-        let (client_read, mut client_write) = client.into_split();
-        let mut client = BufReader::new(client_read);
-        socket::write_json_line(
-            &mut client_write,
-            &json!({
-                "op": "chat", "session_id": session_id,
-                "text": "Use the revised plan.", "req_id": "disconnect-correction",
-                "target": {
-                    "id": id, "nonce": target.nonce(),
-                    "execution_id": target.execution_id(),
-                },
-            }),
+        send_chat(
+            &mut write,
+            json!({"op": "chat", "text": "Use the revised plan.",
+            "req_id": "correction-1", "target": {
+                "id": id, "nonce": target.nonce(),
+                "execution_id": target.execution_id(),
+            }}),
         )
-        .await
-        .unwrap();
-        let ack = read_until_type(&mut client, "ok").await;
+        .await;
+        let ack = frame(&mut reader).await;
+        assert_eq!(ack["type"], "ok");
         assert_eq!(ack["id"], id);
         assert_eq!(ack["status"], "queued");
         assert_eq!(ack["nonce"], target.nonce());
+        assert!(session.get_current_turn().await.is_none());
+        assert!(session.get_chat_handle().await.is_none());
+        assert!(session.get_chat_ids().await.is_empty());
         assert!(matches!(target.attach(), Err(AttachError::Busy)));
 
-        let delivery = if incorporating {
+        let delivery = if phase == CorrectionWait::Incorporation {
             assert!(execution.accept_pause());
             let command = execution.next_command().await.expect("correction command");
             let InteractiveCommand::Message(text, req_id, Some(delivery)) = command else {
                 panic!("expected correction with incorporation acknowledgement");
             };
             assert_eq!(text, "Use the revised plan.");
-            assert_eq!(req_id.as_deref(), Some("disconnect-correction"));
+            assert_eq!(req_id.as_deref(), Some("correction-1"));
             Some(delivery)
         } else {
             None
         };
-        drop(client);
-        drop(client_write);
-        writer.closed().await;
-        main.await.unwrap();
-        assert!(
-            !end.is_ended(),
-            "session teardown ended the independent target"
-        );
-        assert!(registry.contains_run(id).await);
-
-        // Await lease release, not socket activity or a wall-clock sleep.
-        let replacement = loop {
-            match target.attach() {
-                Ok(attachment) => break attachment,
-                Err(AttachError::Busy) => tokio::task::yield_now().await,
-                Err(error) => panic!("live execution became unavailable: {error:?}"),
-            }
-        };
-        if let Some(delivery) = delivery {
+        if trigger == CorrectionFailure::MainSocketEof {
+            drop(write);
+            task.await.unwrap();
             assert!(
-                delivery.send(()).is_err(),
-                "disconnected delivery wait survived"
+                !end.is_ended(),
+                "MAIN teardown ended the independent target"
             );
+            assert!(registry.contains_run(id).await);
+            // Reacquire the SAME live target, not a successor, after EOF.
+            let replacement = loop {
+                match target.attach() {
+                    Ok(attachment) => break attachment,
+                    Err(AttachError::Busy) => tokio::task::yield_now().await,
+                    Err(error) => panic!("live execution became unavailable: {error:?}"),
+                }
+            };
+            if let Some(delivery) = delivery {
+                assert!(delivery.send(()).is_err(), "EOF delivery wait survived");
+            }
+            assert!(execution.accept_pause(), "cleanup cleared the new owner");
+            assert!(execution.is_attached());
+            assert!(matches!(target.attach(), Err(AttachError::Busy)));
+            // No terminal frame can be emitted after MAIN EOF.
+            while let Some(response) = socket::read_json_line(&mut reader).await.unwrap() {
+                assert_ne!(response["type"], "delivered");
+                assert_ne!(response["type"], "correction_dropped");
+            }
+            drop(replacement);
+        } else {
+            // Keep MAIN open and the delivery sender alive until execution end.
+            drop(execution);
+            let mut successor = gremlin.next_interactive_session();
+            let dropped = frame(&mut reader).await;
+            assert_eq!(dropped["type"], "correction_dropped");
+            assert_eq!(dropped["id"], id);
+            assert_eq!(dropped["req_id"], "correction-1");
+            assert_eq!(dropped["execution_id"], target.execution_id().unwrap());
+            assert_eq!(
+                dropped["reason"],
+                if phase == CorrectionWait::Incorporation {
+                    "agent exited before incorporation"
+                } else {
+                    "agent exited before accepting pause"
+                }
+            );
+            if let Some(delivery) = delivery {
+                assert!(delivery.send(()).is_err(), "ended delivery wait survived");
+            }
+            assert!(!successor.accept_pause(), "correction paused the successor");
+            assert!(!successor.is_attached());
+            let mut command = std::pin::pin!(successor.next_command());
+            // Give delayed correction work repeated opportunities to leak a command.
+            for _ in 0..128 {
+                tokio::task::yield_now().await;
+                let ended = std::future::poll_fn(|cx| {
+                    Poll::Ready(match command.as_mut().poll(cx) {
+                        Poll::Ready(Some(command)) => {
+                            panic!("successor received a command: {command:?}")
+                        }
+                        Poll::Ready(None) => true,
+                        Poll::Pending => false,
+                    })
+                })
+                .await;
+                if ended {
+                    break;
+                }
+            }
+            send_chat(&mut write, json!({"op": "close_session"})).await;
+            while let Some(response) = socket::read_json_line(&mut reader).await.unwrap() {
+                assert_ne!(
+                    response["type"], "delivered",
+                    "ended correction was delivered"
+                );
+                assert_ne!(
+                    response["type"], "correction_dropped",
+                    "duplicate terminal response"
+                );
+            }
+            task.await.unwrap();
         }
-        assert!(
-            execution.accept_pause(),
-            "stale correction cleanup cleared the new owner"
-        );
-        assert!(execution.is_attached());
-        assert!(matches!(target.attach(), Err(AttachError::Busy)));
-        assert!(session.get_chat_ids().await.is_empty());
-        drop(replacement);
         registry.stop_run(id).await.unwrap();
     })
     .await
-    .expect("disconnect must release the targeted correction attachment");
+    .expect("targeted correction failure must release its attachment");
 }
 
 #[tokio::test]
 async fn main_socket_disconnect_releases_targeted_correction_during_readiness() {
-    exercise_targeted_disconnect(false).await;
+    exercise_targeted_failure(CorrectionWait::Readiness, CorrectionFailure::MainSocketEof).await;
 }
 
 #[tokio::test]
 async fn main_socket_disconnect_releases_targeted_correction_during_incorporation() {
-    exercise_targeted_disconnect(true).await;
-}
-
-#[tokio::test]
-async fn targeted_correction_reports_delivery_through_existing_oneshot() {
-    exercise_targeted_delivery(true).await;
+    exercise_targeted_failure(
+        CorrectionWait::Incorporation,
+        CorrectionFailure::MainSocketEof,
+    )
+    .await;
 }
 
 #[tokio::test]
 async fn execution_end_cancels_targeted_correction_delivery_wait() {
-    exercise_targeted_delivery(false).await;
+    exercise_targeted_failure(
+        CorrectionWait::Incorporation,
+        CorrectionFailure::ExecutionEnd,
+    )
+    .await;
 }
 
 #[tokio::test]
 async fn execution_end_before_chat_readiness_drops_correction_without_retargeting() {
-    use crate::clients::cancel::CancelToken;
-    use crate::clients::interactive::AttachError;
-
-    let (_sandbox, project, _) = sandbox_dirs(None);
-    let (registry, _) = spawn_test_actor().await;
-    let (mut reader, mut write, session, task) = main_socket(&registry).await;
-    let id = "chat-readiness-execution-end";
-    let gremlin = create_chat_gremlin(
-        id,
-        &model("cmd/echo"),
-        "helpful",
-        &project,
-        &Default::default(),
-    )
-    .unwrap();
-    let mut gremlin = registry
-        .register_chat_gremlin(id.into(), gremlin, CancelToken::new())
-        .await;
-    session.add_chat_id(id).await;
-    let execution = gremlin.next_interactive_session();
-    let (interactive, _, _) = registry.get_run_interactive(id).await.unwrap();
-    let target = interactive.target();
-    send_chat(
-        &mut write,
-        json!({"op": "chat", "text": "Do not retry this correction",
-        "req_id": "ended-before-ready", "target": {
-            "id": id, "nonce": target.nonce(),
-            "execution_id": target.execution_id(),
-        }}),
-    )
-    .await;
-    let ack = frame(&mut reader).await;
-    assert_eq!(ack["type"], "ok");
-    assert_eq!(ack["status"], "queued");
-    assert!(matches!(target.attach(), Err(AttachError::Busy)));
-
-    // Never accept the reserved pause. Keep the owning socket open.
-    drop(execution);
-    let mut successor = gremlin.next_interactive_session();
-    let dropped = frame(&mut reader).await;
-    assert_eq!(dropped["type"], "correction_dropped");
-    assert_eq!(dropped["id"], id);
-    assert_eq!(dropped["req_id"], "ended-before-ready");
-    assert_eq!(dropped["execution_id"], target.execution_id().unwrap());
-    assert_eq!(dropped["reason"], "agent exited before accepting pause");
-    assert!(!successor.accept_pause(), "correction paused the successor");
-    assert!(
-        !matches!(
-            tokio::time::timeout(Duration::from_millis(100), successor.next_command()).await,
-            Ok(Some(_))
-        ),
-        "correction command leaked into the successor"
-    );
-    assert!(!successor.is_attached());
-
-    send_chat(&mut write, json!({"op": "close_session"})).await;
-    loop {
-        let response =
-            tokio::time::timeout(Duration::from_secs(10), socket::read_json_line(&mut reader))
-                .await
-                .expect("session must close after correction terminates")
-                .unwrap();
-        let Some(response) = response else { break };
-        assert_ne!(
-            response["type"], "delivered",
-            "ended correction was delivered"
-        );
-        assert_ne!(
-            response["type"], "correction_dropped",
-            "duplicate terminal response"
-        );
-    }
-    task.await.unwrap();
+    exercise_targeted_failure(CorrectionWait::Readiness, CorrectionFailure::ExecutionEnd).await;
 }
