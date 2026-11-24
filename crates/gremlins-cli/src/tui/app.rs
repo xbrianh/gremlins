@@ -23,6 +23,10 @@ pub struct App {
     parked_inputs: HashMap<Target, (InputBuffer, usize)>,
     /// Live gremlin state: id → run details.
     pub active_runs: HashMap<String, ActiveRun>,
+    pub live_executions: HashMap<String, LiveExecution>,
+    replay_executions: HashMap<PipelineSource, ExecutionReplay>,
+    lifecycle_sequences: HashMap<String, u64>,
+    lifecycle_cuts: Vec<(ExecutionReplay, u64)>,
     /// Cached project name for the info bar.
     pub project_name: String,
     /// Display-only cache of the active chat gremlin's model, populated by
@@ -69,6 +73,77 @@ pub struct App {
     /// Active reverse history search state (Ctrl+R). When `Some`, the
     /// input bar renders the search prompt instead of the normal chevron.
     pub history_search: Option<HistorySearch>,
+}
+
+/// One lifecycle-confirmed stage invocation. Keys are opaque watch selections.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LiveExecution {
+    pub run_id: String,
+    pub stage: String,
+    pub stage_type: String,
+    pub stage_run_id: String,
+}
+
+impl From<super::protocol::Invocation> for LiveExecution {
+    fn from(invocation: super::protocol::Invocation) -> Self {
+        Self {
+            run_id: invocation.run_id,
+            stage: invocation.stage,
+            stage_type: invocation.stage_type,
+            stage_run_id: invocation.stage_run_id,
+        }
+    }
+}
+
+impl LiveExecution {
+    pub fn target(&self) -> Target {
+        Target::Invocation {
+            run_id: self.run_id.clone(),
+            stage: self.stage.clone(),
+            stage_run_id: self.stage_run_id.clone(),
+        }
+    }
+
+    pub fn key(&self) -> String {
+        format!(
+            "invocation:{}",
+            serde_json::json!([self.run_id, self.stage, self.stage_run_id])
+        )
+    }
+}
+
+/// Independent subscription streams may replay concurrently.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub(super) enum PipelineSource {
+    Passive,
+    Inline,
+}
+
+#[derive(Default)]
+struct ExecutionReplay {
+    run_id: Option<String>,
+    stage: Option<String>,
+    stage_run_id: Option<String>,
+    candidates: HashMap<String, (LiveExecution, bool, Option<u64>)>,
+    live_updates: HashMap<String, Option<LiveExecution>>,
+    incomplete: bool,
+}
+
+impl ExecutionReplay {
+    fn new(frame: &serde_json::Value) -> Self {
+        Self {
+            run_id: frame["id"].as_str().map(str::to_owned),
+            stage: frame["stage"].as_str().map(str::to_owned),
+            stage_run_id: frame["stage_run_id"].as_str().map(str::to_owned),
+            ..Self::default()
+        }
+    }
+
+    fn matches(&self, execution: &LiveExecution) -> bool {
+        !matches!(&self.run_id, Some(id) if id != &execution.run_id)
+            && !matches!(&self.stage, Some(stage) if stage != &execution.stage)
+            && !matches!(&self.stage_run_id, Some(id) if id != &execution.stage_run_id)
+    }
 }
 
 /// One tracked gremlin run.
@@ -181,6 +256,12 @@ pub enum Target {
     Home,
     /// A selected stage execution from a run.
     StageExecution { run_id: String, stage: String },
+    /// A pinned invocation, never a replacement with the same stage name.
+    Invocation {
+        run_id: String,
+        stage: String,
+        stage_run_id: String,
+    },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -210,6 +291,11 @@ impl Target {
         match self {
             Target::Home => "chat".to_string(),
             Target::StageExecution { run_id, stage } => format!("{run_id}:{stage}"),
+            Target::Invocation {
+                run_id,
+                stage,
+                stage_run_id,
+            } => format!("{run_id}:{stage}:{stage_run_id}"),
         }
     }
 
@@ -231,6 +317,10 @@ impl App {
             input_cursor: 0,
             parked_inputs: HashMap::new(),
             active_runs: HashMap::new(),
+            live_executions: HashMap::new(),
+            replay_executions: HashMap::new(),
+            lifecycle_sequences: HashMap::new(),
+            lifecycle_cuts: Vec::new(),
             project_name,
             chat_model: None,
             following_log: None,
@@ -511,6 +601,8 @@ impl App {
     /// Remove a run from the watch table entirely (the gremlin was rm'd).
     pub fn on_run_removed(&mut self, id: &str) {
         self.active_runs.remove(id);
+        self.live_executions
+            .retain(|_, execution| execution.run_id != id);
         if self.watch_selection.as_deref() == Some(id) {
             self.watch_selection = None;
         }
@@ -614,6 +706,170 @@ impl App {
         self.ensure_watch_selection();
     }
 
+    /// Discard the passive subscription's replay without changing live executions.
+    pub fn abandon_pipeline_replay(&mut self) {
+        self.replay_executions.remove(&PipelineSource::Passive);
+    }
+
+    /// Discard only the inline subscription's pending replay.
+    pub fn abandon_inline_pipeline_replay(&mut self) {
+        self.replay_executions.remove(&PipelineSource::Inline);
+    }
+
+    /// Observe passive subscription frames. Candidates stay hidden until a complete cut.
+    pub fn observe_pipeline_frame(&mut self, frame: &serde_json::Value) {
+        self.observe_pipeline_frame_from(PipelineSource::Passive, frame);
+    }
+
+    /// Observe frames from the independent inline watch subscription.
+    pub fn observe_inline_pipeline_frame(&mut self, frame: &serde_json::Value) {
+        self.observe_pipeline_frame_from(PipelineSource::Inline, frame);
+    }
+
+    fn observe_pipeline_frame_from(&mut self, source: PipelineSource, frame: &serde_json::Value) {
+        let kind = frame["type"].as_str().unwrap_or_default();
+        if matches!(kind, "watched" | "attached") && frame["replay"] == true {
+            let incomplete = self
+                .replay_executions
+                .get(&source)
+                .is_some_and(|replay| replay.incomplete);
+            let mut replay = ExecutionReplay::new(frame);
+            replay.incomplete = incomplete;
+            self.replay_executions.insert(source, replay);
+            return;
+        }
+        if kind == "history_gap" {
+            let replay = self
+                .replay_executions
+                .entry(source)
+                .or_insert_with(|| ExecutionReplay::new(frame));
+            replay.incomplete = true;
+            return;
+        }
+        if kind == "replay_checkpoint" {
+            if let Some(mut replay) = self.replay_executions.remove(&source) {
+                let complete = frame["complete"] == true && !replay.incomplete;
+                let cut = frame["through_sequence"].as_u64();
+                if complete && replay.run_id.is_some() {
+                    let absent: Vec<_> = self
+                        .live_executions
+                        .iter()
+                        .filter(|(key, execution)| {
+                            replay.matches(execution)
+                                && !replay.candidates.contains_key(*key)
+                                && (cut.is_some() || !replay.live_updates.contains_key(*key))
+                        })
+                        .map(|(_, execution)| execution.clone())
+                        .collect();
+                    for execution in absent {
+                        self.apply_lifecycle(execution, false, cut);
+                    }
+                }
+                for (key, (execution, active, sequence)) in std::mem::take(&mut replay.candidates) {
+                    let sequence = if complete { cut.or(sequence) } else { sequence };
+                    if (complete || !active)
+                        && (sequence.is_some() || !replay.live_updates.contains_key(&key))
+                    {
+                        self.apply_lifecycle(execution, active, sequence);
+                    }
+                }
+                if complete {
+                    if let Some(cut) = cut {
+                        // Store only selector metadata, not per-replay live updates.
+                        replay.live_updates.clear();
+                        // Retain only the newest cut for an identical selector.
+                        let previous = self.lifecycle_cuts.iter().position(|(scope, _)| {
+                            scope.run_id == replay.run_id
+                                && scope.stage == replay.stage
+                                && scope.stage_run_id == replay.stage_run_id
+                        });
+                        if let Some(index) = previous {
+                            if self.lifecycle_cuts[index].1 < cut {
+                                self.lifecycle_cuts[index] = (replay, cut);
+                            }
+                        } else {
+                            self.lifecycle_cuts.push((replay, cut));
+                        }
+                    }
+                }
+            }
+            self.ensure_watch_selection();
+            return;
+        }
+        if kind != "stage_boundary" {
+            return;
+        }
+        let Some(execution) = super::protocol::invocation_from_frame(frame) else {
+            return;
+        };
+        let Some(active) = frame["active"].as_bool() else {
+            return;
+        };
+        let execution = LiveExecution::from(execution);
+        let key = execution.key();
+        let sequence = frame["sequence"].as_u64();
+        match self.replay_executions.get_mut(&source) {
+            Some(replay) if replay.matches(&execution) => {
+                let stale = replay.candidates.get(&key).is_some_and(
+                    |(_, _, old)| matches!(sequence.zip(*old), Some((new, old)) if new <= old),
+                );
+                if !stale {
+                    replay.candidates.insert(key, (execution, active, sequence));
+                }
+            }
+            _ => self.observe_live_pipeline_frame(frame),
+        }
+        self.ensure_watch_selection();
+    }
+
+    /// Observe a live notification independently of any watch replay in progress.
+    pub fn observe_live_pipeline_frame(&mut self, frame: &serde_json::Value) {
+        if frame["type"] != "stage_boundary" {
+            return;
+        }
+        let Some(execution) = super::protocol::invocation_from_frame(frame) else {
+            return;
+        };
+        let Some(active) = frame["active"].as_bool() else {
+            return;
+        };
+        let execution = LiveExecution::from(execution);
+        let key = execution.key();
+        for replay in self.replay_executions.values_mut() {
+            if replay.matches(&execution) {
+                replay
+                    .live_updates
+                    .insert(key.clone(), active.then(|| execution.clone()));
+            }
+        }
+        self.apply_lifecycle(execution, active, frame["sequence"].as_u64());
+        self.ensure_watch_selection();
+    }
+
+    /// Sequence tombstones and selector cuts also protect executions absent from the table.
+    fn apply_lifecycle(&mut self, execution: LiveExecution, active: bool, sequence: Option<u64>) {
+        let key = execution.key();
+        if let Some(sequence) = sequence {
+            if self
+                .lifecycle_sequences
+                .get(&key)
+                .is_some_and(|old| *old >= sequence)
+                || self
+                    .lifecycle_cuts
+                    .iter()
+                    .any(|(scope, cut)| scope.matches(&execution) && *cut >= sequence)
+            {
+                return;
+            }
+            self.lifecycle_sequences.insert(key.clone(), sequence);
+        }
+        if active {
+            self.live_executions.insert(key, execution);
+        } else {
+            self.live_executions.remove(&key);
+        }
+    }
+
     /// Stable-sorted ids of every tracked gremlin, running first.
     ///
     /// Done/failed/stopped runs stay in the table so a run that just failed
@@ -636,7 +892,50 @@ impl App {
             let running = |s: &str| s != "running";
             running(ra).cmp(&running(rb)).then_with(|| a.cmp(b))
         });
-        ids
+        let mut grouped: HashMap<&str, Vec<String>> = HashMap::new();
+        let mut orphans = Vec::new();
+        for (key, execution) in &self.live_executions {
+            if self.active_runs.contains_key(&execution.run_id) {
+                grouped
+                    .entry(&execution.run_id)
+                    .or_default()
+                    .push(key.clone());
+            } else {
+                orphans.push(key.clone());
+            }
+        }
+        let mut rows = Vec::new();
+        for id in ids {
+            let mut children = grouped.remove(id.as_str()).unwrap_or_default();
+            rows.push(id);
+            children.sort();
+            rows.extend(children);
+        }
+        orphans.sort();
+        rows.extend(orphans);
+        rows
+    }
+
+    pub fn watch_target(&self) -> Option<Target> {
+        let key = self.watch_selection.as_deref()?;
+        if let Some(execution) = self.live_executions.get(key) {
+            return Some(execution.target());
+        }
+        self.active_runs.get(key)?;
+        if self.home_run_id.as_deref() == Some(key) {
+            return Some(Target::Home);
+        }
+        Some(Target::StageExecution {
+            run_id: key.to_owned(),
+            stage: String::new(),
+        })
+    }
+
+    pub fn watch_run_id<'a>(&'a self, key: &'a str) -> Option<&'a str> {
+        self.live_executions
+            .get(key)
+            .map(|execution| execution.run_id.as_str())
+            .or_else(|| self.active_runs.contains_key(key).then_some(key))
     }
 
     /// Ensure the watch selection points at a listed gremlin, choosing the
@@ -1013,6 +1312,530 @@ impl App {
 
 #[cfg(test)]
 mod tests {
+    fn boundary(id: &str, active: bool) -> serde_json::Value {
+        serde_json::json!({"type":"stage_boundary","run_id":"run","stage":"work",
+            "stage_type":"exec","stage_run_id":id,"active":active})
+    }
+
+    #[test]
+    fn interleaved_subscription_checkpoints_only_promote_their_own_candidates() {
+        use super::PipelineSource::{Inline, Passive};
+        for first in [Passive, Inline] {
+            let mut app = super::App::new();
+            let start = serde_json::json!({"type":"watched", "replay":true});
+            app.observe_pipeline_frame(&start);
+            app.observe_pipeline_frame(&boundary("passive", true));
+            app.observe_inline_pipeline_frame(&start);
+            app.observe_inline_pipeline_frame(&boundary("inline", true));
+            assert!(app.live_executions.is_empty());
+            let checkpoint = serde_json::json!({"type":"replay_checkpoint", "complete":true});
+            app.observe_pipeline_frame_from(first, &checkpoint);
+            let expected = if first == Passive {
+                "passive"
+            } else {
+                "inline"
+            };
+            assert_eq!(app.live_executions.len(), 1);
+            assert_eq!(
+                app.live_executions.values().next().unwrap().stage_run_id,
+                expected
+            );
+            assert_eq!(app.replay_executions.len(), 1);
+            // A duplicate checkpoint cannot consume the other stream's replay.
+            app.observe_pipeline_frame_from(first, &checkpoint);
+            assert_eq!(app.replay_executions.len(), 1);
+            let second = if first == Passive { Inline } else { Passive };
+            app.observe_pipeline_frame_from(second, &checkpoint);
+            assert_eq!(app.live_executions.len(), 2);
+            assert!(app.replay_executions.is_empty());
+        }
+    }
+
+    #[test]
+    fn subscription_abandonment_is_isolated() {
+        use super::PipelineSource::{Inline, Passive};
+        for abandoned in [Passive, Inline] {
+            let mut app = super::App::new();
+            let start = serde_json::json!({"type":"watched", "replay":true, "id":"run"});
+            app.observe_pipeline_frame(&start);
+            app.observe_inline_pipeline_frame(&start);
+            app.observe_pipeline_frame(&boundary("passive", true));
+            app.observe_inline_pipeline_frame(&boundary("inline", true));
+            app.observe_live_pipeline_frame(&boundary("live", true));
+            if abandoned == Passive {
+                app.abandon_pipeline_replay();
+            } else {
+                app.abandon_inline_pipeline_replay();
+            }
+            assert!(!app.replay_executions.contains_key(&abandoned));
+            assert_eq!(app.replay_executions.len(), 1);
+            let checkpoint = serde_json::json!({"type":"replay_checkpoint", "complete":true});
+            app.observe_pipeline_frame_from(abandoned, &checkpoint);
+            assert_eq!(app.live_executions.len(), 1);
+            let remaining = if abandoned == Passive {
+                Inline
+            } else {
+                Passive
+            };
+            app.observe_pipeline_frame_from(remaining, &checkpoint);
+            let candidate = if remaining == Passive {
+                "passive"
+            } else {
+                "inline"
+            };
+            assert_eq!(app.live_executions.len(), 2);
+            assert!(app
+                .live_executions
+                .values()
+                .any(|e| e.stage_run_id == candidate));
+            assert!(app
+                .live_executions
+                .values()
+                .any(|e| e.stage_run_id == "live"));
+            assert!(app.replay_executions.is_empty());
+        }
+    }
+
+    #[test]
+    fn concurrent_replays_preserve_live_updates_and_isolate_incomplete_cuts() {
+        use super::PipelineSource::{Inline, Passive};
+        for incomplete in [Passive, Inline] {
+            for gap in [false, true] {
+                for first in [Passive, Inline] {
+                    let mut app = super::App::new();
+                    let start = serde_json::json!({"type":"watched", "replay":true, "id":"run"});
+                    app.observe_live_pipeline_frame(&boundary("ended", true));
+                    app.observe_pipeline_frame(&start);
+                    app.observe_inline_pipeline_frame(&start);
+                    app.observe_live_pipeline_frame(&boundary("started", true));
+                    app.observe_live_pipeline_frame(&boundary("ended", false));
+                    for source in [Passive, Inline] {
+                        app.observe_pipeline_frame_from(source, &boundary("ended", true));
+                        app.observe_pipeline_frame_from(source, &boundary("started", false));
+                        let candidate = if source == incomplete {
+                            "incomplete"
+                        } else {
+                            "complete"
+                        };
+                        app.observe_pipeline_frame_from(source, &boundary(candidate, true));
+                    }
+                    if gap {
+                        app.observe_pipeline_frame_from(
+                            incomplete,
+                            &serde_json::json!({"type":"history_gap"}),
+                        );
+                    }
+                    let second = if first == Passive { Inline } else { Passive };
+                    for source in [first, second] {
+                        app.observe_pipeline_frame_from(
+                            source,
+                            &serde_json::json!({
+                                "type":"replay_checkpoint", "complete": gap || source != incomplete
+                            }),
+                        );
+                        assert!(app
+                            .live_executions
+                            .values()
+                            .any(|e| e.stage_run_id == "started"));
+                        assert!(app
+                            .live_executions
+                            .values()
+                            .all(|e| e.stage_run_id != "ended" && e.stage_run_id != "incomplete"));
+                    }
+                    assert_eq!(app.live_executions.len(), 2);
+                    assert!(app
+                        .live_executions
+                        .values()
+                        .any(|e| e.stage_run_id == "complete"));
+                    assert!(app.replay_executions.is_empty());
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn run_row_selection_does_not_resolve_current_stage() {
+        let mut app = super::App::new();
+        let mut run = super::ActiveRun::new("running");
+        run.stage = "work".into();
+        app.active_runs.insert("run".into(), run);
+        app.watch_selection = Some("run".into());
+        assert_eq!(
+            app.watch_target(),
+            Some(super::Target::StageExecution {
+                run_id: "run".into(),
+                stage: String::new(),
+            })
+        );
+    }
+
+    #[test]
+    fn home_run_row_returns_home_but_invocation_stays_exact() {
+        let mut app = super::App::new();
+        app.home_run_id = Some("run".into());
+        app.active_runs
+            .insert("run".into(), super::ActiveRun::new("running"));
+        app.watch_selection = Some("run".into());
+        assert_eq!(app.watch_target(), Some(super::Target::Home));
+        app.observe_live_pipeline_frame(&boundary("home-turn", true));
+        let execution = app.live_executions.values().next().unwrap();
+        let target = execution.target();
+        app.watch_selection = Some(execution.key());
+        assert_eq!(app.watch_target(), Some(target));
+    }
+
+    #[test]
+    fn abandoning_pipeline_replay_discards_candidates_and_preserves_live_notifications() {
+        let mut app = super::App::new();
+        app.observe_live_pipeline_frame(&boundary("existing", true));
+        app.observe_pipeline_frame(&serde_json::json!({
+            "type":"watched", "replay":true, "id":"run"
+        }));
+        app.observe_pipeline_frame(&boundary("candidate", true));
+        app.observe_live_pipeline_frame(&boundary("notified", true));
+        let live_before = app.watch_ids();
+
+        app.abandon_pipeline_replay();
+
+        assert!(app.replay_executions.is_empty());
+        assert_eq!(app.watch_ids(), live_before);
+        assert_eq!(app.live_executions.len(), 2);
+        assert!(app
+            .live_executions
+            .values()
+            .all(|e| e.stage_run_id != "candidate"));
+        app.observe_pipeline_frame(&serde_json::json!({
+            "type":"replay_checkpoint", "complete":true
+        }));
+        assert_eq!(app.watch_ids(), live_before);
+
+        app.observe_pipeline_frame(&boundary("future", true));
+        assert!(app.replay_executions.is_empty());
+        assert_eq!(app.live_executions.len(), 3);
+        assert!(app
+            .live_executions
+            .values()
+            .any(|e| e.stage_run_id == "future"));
+        app.observe_pipeline_frame(&boundary("future", false));
+        assert_eq!(app.watch_ids(), live_before);
+    }
+
+    #[test]
+    fn live_notifications_survive_complete_and_incomplete_replay() {
+        for complete in [false, true] {
+            for gap in [false, true] {
+                let mut app = super::App::new();
+                app.observe_live_pipeline_frame(&boundary("ended", true));
+                app.observe_pipeline_frame(&serde_json::json!({
+                    "type":"watched", "replay":true, "id":"run"
+                }));
+                app.observe_pipeline_frame(&boundary("ended", true));
+                app.observe_pipeline_frame(&boundary("started", false));
+                app.observe_live_pipeline_frame(&boundary("started", true));
+                app.observe_live_pipeline_frame(&boundary("ended", false));
+                // Older replay records must not undo the live notifications.
+                app.observe_pipeline_frame(&boundary("ended", true));
+                app.observe_pipeline_frame(&boundary("started", false));
+                assert_eq!(app.live_executions.len(), 1);
+                assert!(app
+                    .live_executions
+                    .values()
+                    .all(|e| e.stage_run_id == "started"));
+                if gap {
+                    app.observe_pipeline_frame(&serde_json::json!({"type":"history_gap"}));
+                }
+                app.observe_pipeline_frame(&serde_json::json!({
+                    "type":"replay_checkpoint", "complete":complete
+                }));
+                assert_eq!(app.live_executions.len(), 1);
+                assert!(app
+                    .live_executions
+                    .values()
+                    .all(|e| e.stage_run_id == "started"));
+            }
+        }
+    }
+
+    #[test]
+    fn repeated_agent_and_exec_starts_are_selectable_and_pins_survive_delayed_end() {
+        for stage_type in ["agent", "exec"] {
+            let mut app = super::App::new();
+            app.active_runs
+                .insert("run".into(), super::ActiveRun::new("running"));
+            let mut start = boundary("old", true);
+            start["stage_type"] = serde_json::json!(stage_type);
+            app.observe_live_pipeline_frame(&start);
+            let old = app.live_executions.values().next().unwrap().clone();
+            app.watch_selection = Some(old.key());
+            assert_eq!(app.watch_target(), Some(old.target()));
+            app.select_composer(old.target());
+            app.observe_live_pipeline_frame(&boundary("old", false));
+            start["stage_run_id"] = serde_json::json!("replacement");
+            app.observe_live_pipeline_frame(&start);
+            let replacement = app.live_executions.values().next().unwrap().clone();
+            app.watch_selection = Some(replacement.key());
+            assert_eq!(app.watch_target(), Some(replacement.target()));
+            assert_eq!(replacement.stage_type, stage_type);
+            app.observe_live_pipeline_frame(&boundary("old", false));
+            assert_eq!(app.live_executions.len(), 1);
+            assert_eq!(app.watch_target(), Some(replacement.target()));
+            assert_eq!(app.selected_target, old.target());
+        }
+    }
+
+    #[test]
+    fn concurrent_review_and_build_siblings_are_selectable_while_live() {
+        for stage_type in ["agent", "exec"] {
+            let mut app = super::App::new();
+            app.active_runs
+                .insert("run".into(), super::ActiveRun::new("running"));
+            for (stage, id) in [("review", "review-1"), ("build", "build-1")] {
+                let mut start = boundary(id, true);
+                start["stage"] = serde_json::json!(stage);
+                start["stage_type"] = serde_json::json!(stage_type);
+                app.observe_live_pipeline_frame(&start);
+            }
+            assert_eq!(app.live_executions.len(), 2);
+            let rows = app.watch_ids();
+            assert_eq!(rows.len(), 3);
+            let mut selections = Vec::new();
+            for (stage, id) in [("review", "review-1"), ("build", "build-1")] {
+                let execution = app
+                    .live_executions
+                    .values()
+                    .find(|execution| execution.stage_run_id == id)
+                    .unwrap();
+                assert_eq!(execution.stage_type, stage_type);
+                let key = execution.key();
+                assert!(rows.contains(&key));
+                assert_eq!(app.watch_run_id(&key), Some("run"));
+                app.watch_selection = Some(key.clone());
+                let target = super::Target::Invocation {
+                    run_id: "run".into(),
+                    stage: stage.into(),
+                    stage_run_id: id.into(),
+                };
+                assert_eq!(app.watch_target(), Some(target.clone()));
+                assert_eq!(app.live_executions.len(), 2);
+                selections.push((key, target));
+            }
+            assert_ne!(selections[0].0, selections[1].0);
+            assert_ne!(selections[0].1, selections[1].1);
+        }
+    }
+
+    #[test]
+    fn invocation_siblings_repeats_and_exact_removal() {
+        let mut app = super::App::new();
+        app.active_runs
+            .insert("run".into(), super::ActiveRun::new("running"));
+        for id in ["a", "b"] {
+            app.observe_pipeline_frame(&boundary(id, true));
+        }
+        assert_eq!(app.live_executions.len(), 2);
+        assert_eq!(app.watch_ids().len(), 3);
+        let key = app
+            .live_executions
+            .iter()
+            .find(|(_, e)| e.stage_run_id == "a")
+            .unwrap()
+            .0
+            .clone();
+        app.watch_selection = Some(key.clone());
+        assert_eq!(app.watch_run_id(&key), Some("run"));
+        assert!(
+            matches!(app.watch_target(), Some(super::Target::Invocation { stage_run_id, .. }) if stage_run_id == "a")
+        );
+        app.observe_pipeline_frame(&boundary("b", false));
+        assert_eq!(app.watch_selection.as_ref(), Some(&key));
+        app.observe_pipeline_frame(&boundary("c", true));
+        app.observe_pipeline_frame(&boundary("b", false));
+        assert_eq!(app.live_executions.len(), 2);
+        app.observe_pipeline_frame(&boundary("a", false));
+        assert_eq!(app.live_executions.len(), 1);
+        assert!(app.live_executions.values().all(|e| e.stage_run_id == "c"));
+    }
+
+    #[test]
+    fn filtered_replay_replaces_only_its_selector() {
+        for stage_run_id in [None, Some("a")] {
+            let mut app = super::App::new();
+            for id in ["a", "b"] {
+                app.observe_pipeline_frame(&boundary(id, true));
+            }
+            let mut other_stage = boundary("a", true);
+            other_stage["stage"] = serde_json::json!("other");
+            app.observe_pipeline_frame(&other_stage);
+            let mut other_run = boundary("a", true);
+            other_run["run_id"] = serde_json::json!("other");
+            app.observe_pipeline_frame(&other_run);
+            app.observe_pipeline_frame(&serde_json::json!({
+                "type":"watched", "replay":true, "id":"run",
+                "stage":"work", "stage_run_id":stage_run_id
+            }));
+            app.observe_pipeline_frame(&boundary("a", true));
+            app.observe_pipeline_frame(&boundary("a", false));
+            // This sibling is outside an exact replay and must remain live.
+            app.observe_pipeline_frame(&boundary("c", true));
+            app.observe_pipeline_frame(&serde_json::json!({
+                "type":"replay_checkpoint", "id":"run", "complete":true
+            }));
+            assert!(!app
+                .live_executions
+                .values()
+                .any(|e| e.run_id == "run" && e.stage == "work" && e.stage_run_id == "a"));
+            assert_eq!(
+                app.live_executions.len(),
+                if stage_run_id.is_some() { 4 } else { 3 }
+            );
+            assert!(app.live_executions.values().any(|e| e.stage_run_id == "c"));
+        }
+    }
+
+    #[test]
+    fn incomplete_scoped_replay_keeps_live_siblings_and_accepts_future_boundaries() {
+        for gap in [false, true] {
+            let mut app = super::App::new();
+            app.observe_pipeline_frame(&boundary("known", true));
+            app.observe_pipeline_frame(&serde_json::json!({
+                "type":"watched", "replay":true, "id":"run",
+                "stage":"work", "stage_run_id":"candidate"
+            }));
+            app.observe_pipeline_frame(&boundary("candidate", true));
+            if gap {
+                app.observe_pipeline_frame(&serde_json::json!({"type":"history_gap"}));
+            }
+            app.observe_pipeline_frame(&boundary("concurrent", true));
+            app.observe_pipeline_frame(&boundary("known", false));
+            assert_eq!(app.live_executions.len(), 1);
+            app.observe_pipeline_frame(&serde_json::json!({
+                "type":"replay_checkpoint", "id":"run", "complete":gap
+            }));
+            assert_eq!(app.live_executions.len(), 1);
+            assert!(app
+                .live_executions
+                .values()
+                .all(|e| e.stage_run_id == "concurrent"));
+            app.observe_pipeline_frame(&boundary("candidate", true));
+            assert_eq!(app.live_executions.len(), 2);
+        }
+    }
+
+    fn sequenced_boundary(id: &str, active: bool, sequence: u64) -> serde_json::Value {
+        let mut frame = boundary(id, active);
+        frame["sequence"] = sequence.into();
+        frame
+    }
+
+    #[test]
+    fn pre_ack_gap_preserves_incompleteness_and_explicit_ends() {
+        for source in [PipelineSource::Passive, PipelineSource::Inline] {
+            let mut app = super::App::new();
+            app.observe_live_pipeline_frame(&sequenced_boundary("ended", true, 1));
+            app.observe_pipeline_frame_from(source, &serde_json::json!({"type":"history_gap"}));
+            app.observe_pipeline_frame_from(
+                source,
+                &serde_json::json!({
+                    "type":"watched", "replay":true, "id":"run"
+                }),
+            );
+            app.observe_pipeline_frame_from(source, &sequenced_boundary("candidate", true, 2));
+            app.observe_pipeline_frame_from(source, &sequenced_boundary("ended", false, 3));
+            app.observe_pipeline_frame_from(source, &sequenced_boundary("newer", false, 4));
+            app.observe_live_pipeline_frame(&sequenced_boundary("newer", true, 5));
+            app.observe_pipeline_frame_from(
+                source,
+                &serde_json::json!({
+                    "type":"replay_checkpoint", "complete":true, "through_sequence":4
+                }),
+            );
+            assert_eq!(app.live_executions.len(), 1);
+            assert_eq!(
+                app.live_executions.values().next().unwrap().stage_run_id,
+                "newer"
+            );
+        }
+    }
+
+    #[test]
+    fn incomplete_checkpoint_applies_ends_but_not_starts() {
+        let mut app = super::App::new();
+        app.observe_live_pipeline_frame(&sequenced_boundary("ended", true, 1));
+        app.observe_pipeline_frame(&serde_json::json!({
+            "type":"watched", "replay":true, "id":"run"
+        }));
+        app.observe_pipeline_frame(&sequenced_boundary("candidate", true, 2));
+        app.observe_pipeline_frame(&sequenced_boundary("ended", false, 3));
+        app.observe_pipeline_frame(&sequenced_boundary("newer", false, 4));
+        app.observe_live_pipeline_frame(&sequenced_boundary("newer", true, 5));
+        app.observe_pipeline_frame(&serde_json::json!({
+            "type":"replay_checkpoint", "complete":false, "through_sequence":6
+        }));
+        assert_eq!(app.live_executions.len(), 1);
+        assert_eq!(
+            app.live_executions.values().next().unwrap().stage_run_id,
+            "newer"
+        );
+    }
+
+    #[test]
+    fn overlapping_cuts_cannot_erase_newer_starts_or_resurrect_ends() {
+        for first in [PipelineSource::Passive, PipelineSource::Inline] {
+            let second = if first == PipelineSource::Passive {
+                PipelineSource::Inline
+            } else {
+                PipelineSource::Passive
+            };
+            for newer_first in [false, true] {
+                let mut app = super::App::new();
+                let ack = serde_json::json!({"type":"watched", "replay":true, "id":"run"});
+                app.observe_pipeline_frame_from(first, &ack);
+                app.observe_pipeline_frame_from(second, &ack);
+                app.observe_pipeline_frame_from(first, &sequenced_boundary("ended", true, 1));
+                app.observe_pipeline_frame_from(second, &sequenced_boundary("ended", false, 3));
+                app.observe_pipeline_frame_from(second, &sequenced_boundary("started", true, 4));
+                let old = serde_json::json!({"type":"replay_checkpoint", "complete":true, "through_sequence":2});
+                let new = serde_json::json!({"type":"replay_checkpoint", "complete":true, "through_sequence":5});
+                if newer_first {
+                    app.observe_pipeline_frame_from(second, &new);
+                    app.observe_pipeline_frame_from(first, &old);
+                } else {
+                    app.observe_pipeline_frame_from(first, &old);
+                    app.observe_pipeline_frame_from(second, &new);
+                }
+                // Delayed duplicate live events are stale against the newer cut too.
+                app.observe_live_pipeline_frame(&sequenced_boundary("ended", true, 1));
+                assert_eq!(app.live_executions.len(), 1);
+                assert_eq!(
+                    app.live_executions.values().next().unwrap().stage_run_id,
+                    "started"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn only_complete_lifecycle_replay_establishes_liveness() {
+        let mut app = super::App::new();
+        app.observe_pipeline_frame(&serde_json::json!({"type":"exec_output", "run_id":"run", "stage":"work", "stage_run_id":"output"}));
+        let mut legacy = boundary("legacy", true);
+        legacy.as_object_mut().unwrap().remove("stage_run_id");
+        app.observe_pipeline_frame(&legacy);
+        assert!(app.live_executions.is_empty());
+        for complete in [false, true] {
+            app.observe_pipeline_frame(&serde_json::json!({"type":"watched","replay":true}));
+            app.observe_pipeline_frame(&boundary("old", true));
+            app.observe_pipeline_frame(&boundary("old", false));
+            app.observe_pipeline_frame(&boundary("live", true));
+            assert!(app.live_executions.is_empty());
+            app.observe_pipeline_frame(
+                &serde_json::json!({"type":"replay_checkpoint","complete":complete}),
+            );
+            assert_eq!(app.live_executions.len(), usize::from(complete));
+        }
+        app.observe_pipeline_frame(&boundary("next", true));
+        assert_eq!(app.live_executions.len(), 2);
+    }
     #[test]
     fn conversation_status_persists_independently_per_target() {
         use super::{App, ConversationStatus as Status, Target};

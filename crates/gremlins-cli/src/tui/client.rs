@@ -435,14 +435,23 @@ impl DaemonClient {
     }
 
     /// Passively observe a run on a dedicated session connection.
-    /// Requires replay-checkpoint support in the acknowledgment before yielding native frames.
     pub async fn follow_run(
         &self,
         id: &str,
     ) -> Result<(mpsc::Receiver<Value>, tokio::task::JoinHandle<()>), String> {
+        self.follow_watch(id, None, None).await
+    }
+
+    /// Observe a run or an exact stage invocation without acquiring conversation control.
+    pub async fn follow_watch(
+        &self,
+        run_id: &str,
+        stage: Option<&str>,
+        stage_run_id: Option<&str>,
+    ) -> Result<(mpsc::Receiver<Value>, tokio::task::JoinHandle<()>), String> {
         let session_id = self.session_id().await;
         let stream = self.open_aux_stream().await?;
-        follow_run(stream, &session_id, id).await
+        follow_watch(stream, &session_id, run_id, stage, stage_run_id).await
     }
 
     /// Read persisted history together with its native handoff watermark.
@@ -595,34 +604,45 @@ async fn send_correction(
     ))
 }
 
+#[cfg(test)]
 async fn follow_run(
-    mut stream: tokio::net::UnixStream,
+    stream: tokio::net::UnixStream,
     session_id: &str,
     id: &str,
 ) -> Result<(mpsc::Receiver<Value>, tokio::task::JoinHandle<()>), String> {
-    let request =
-        json!({"op":"attach", "scope":"run", "id":id, "session_id":session_id, "replay":true});
+    follow_watch(stream, session_id, id, None, None).await
+}
+
+async fn follow_watch(
+    mut stream: tokio::net::UnixStream,
+    session_id: &str,
+    id: &str,
+    stage: Option<&str>,
+    stage_run_id: Option<&str>,
+) -> Result<(mpsc::Receiver<Value>, tokio::task::JoinHandle<()>), String> {
+    let mut request =
+        json!({"op":"watch", "scope":"run", "id":id, "session_id":session_id, "replay":true});
+    for (key, value) in [("stage", stage), ("stage_run_id", stage_run_id)] {
+        if let Some(value) = value {
+            request[key] = json!(value);
+        }
+    }
     socket::write_json_line(&mut stream, &request).await?;
     let mut reader = BufReader::new(stream);
     let ack = socket::read_json_line(&mut reader)
         .await?
-        .ok_or("executor closed connection before run attachment acknowledgment")?;
+        .ok_or("executor closed connection before watch acknowledgment")?;
     if ack["type"] == "error" {
-        return Err(ack["message"]
-            .as_str()
-            .unwrap_or("run attachment failed")
-            .to_owned());
+        return Err(ack["message"].as_str().unwrap_or("watch failed").to_owned());
     }
-    if ack["type"] != "attached" || ack["scope"] != "run" || ack["id"] != id {
-        return Err(format!("unexpected run attachment acknowledgment: {ack}"));
-    }
-
-    if !ack["capabilities"].as_array().is_some_and(|capabilities| {
-        capabilities
-            .iter()
-            .any(|capability| capability == "replay_checkpoint")
-    }) {
-        return Err("run attachment does not support replay_checkpoint".to_owned());
+    if ack["type"] != "watched"
+        || ack["scope"] != "run"
+        || ack["id"] != id
+        || ack["replay"] != true
+        || ack.get("stage") != Some(&json!(stage))
+        || ack.get("stage_run_id") != Some(&json!(stage_run_id))
+    {
+        return Err(format!("unexpected watch acknowledgment: {ack}"));
     }
 
     let (tx, rx) = mpsc::channel(256);
@@ -826,17 +846,17 @@ mod run_follow_tests {
     use tokio::time::{timeout, Duration};
 
     fn ack() -> Value {
-        json!({"type":"attached", "scope":"run", "id":"run", "capabilities":["observe", "replay_checkpoint"]})
+        json!({"type":"watched", "scope":"run", "id":"run", "replay":true, "stage":null, "stage_run_id":null})
     }
 
     #[tokio::test]
-    async fn waits_for_ack_and_sends_only_passive_attach() {
+    async fn waits_for_ack_and_sends_only_passive_watch() {
         let (client, peer) = UnixStream::pair().unwrap();
         let mut peer = BufReader::new(peer);
         let mut pending = tokio::spawn(follow_run(client, "owner", "run"));
         assert_eq!(
             socket::read_json_line(&mut peer).await.unwrap().unwrap(),
-            json!({"op":"attach", "scope":"run", "id":"run", "session_id":"owner", "replay":true})
+            json!({"op":"watch", "scope":"run", "id":"run", "session_id":"owner", "replay":true})
         );
         assert!(timeout(Duration::from_millis(20), &mut pending)
             .await
@@ -919,20 +939,26 @@ mod run_follow_tests {
     }
 
     #[tokio::test]
-    async fn rejects_missing_replay_checkpoint_capability_without_waiting_for_frames() {
-        for capabilities in [
-            None,
-            Some(json!(["observe"])),
-            Some(json!("replay_checkpoint")),
+    async fn rejects_missing_or_mismatched_selector_fields_without_waiting_for_frames() {
+        for (field, value) in [
+            ("replay", None),
+            ("replay", Some(json!(false))),
+            ("replay", Some(json!("true"))),
+            ("stage", None),
+            ("stage", Some(json!("build"))),
+            ("stage_run_id", None),
+            ("stage_run_id", Some(json!("invocation"))),
+            ("type", Some(json!("attached"))),
+            ("scope", Some(json!("conversation"))),
         ] {
             let (client, peer) = UnixStream::pair().unwrap();
             let mut peer = BufReader::new(peer);
             let pending = tokio::spawn(follow_run(client, "owner", "run"));
             socket::read_json_line(&mut peer).await.unwrap().unwrap();
             let mut response = ack();
-            response.as_object_mut().unwrap().remove("capabilities");
-            if let Some(capabilities) = capabilities {
-                response["capabilities"] = capabilities;
+            response.as_object_mut().unwrap().remove(field);
+            if let Some(value) = value {
+                response[field] = value;
             }
             socket::write_json_line(peer.get_mut(), &response)
                 .await
@@ -943,8 +969,70 @@ mod run_follow_tests {
                 .unwrap()
                 .unwrap()
                 .unwrap_err();
-            assert!(error.contains("replay_checkpoint"), "{error}");
+            assert!(error.contains("unexpected watch acknowledgment"), "{error}");
             assert!(socket::read_json_line(&mut peer).await.unwrap().is_none());
+        }
+    }
+
+    #[tokio::test]
+    async fn exact_watch_uses_only_auxiliary_current_session_and_rejects_wrong_identity() {
+        for wrong_field in [None, Some("stage"), Some("stage_run_id")] {
+            let (stream, peer) = UnixStream::pair().unwrap();
+            let (client, [control, session]) = DaemonClient::fake_with_aux_streams(
+                json!({"session_id":"current-owner", "home_run_id":"home"}),
+                vec![stream],
+            );
+            let client = Arc::new(client);
+            let watcher = Arc::clone(&client);
+            let pending = tokio::spawn(async move {
+                watcher
+                    .follow_watch("run", Some("build"), Some("invocation"))
+                    .await
+            });
+            let mut peer = BufReader::new(peer);
+            assert_eq!(
+                socket::read_json_line(&mut peer).await.unwrap().unwrap(),
+                json!({"op":"watch", "scope":"run", "id":"run",
+                    "session_id":"current-owner", "replay":true,
+                    "stage":"build", "stage_run_id":"invocation"})
+            );
+            let mut response = ack();
+            response["stage"] = json!("build");
+            response["stage_run_id"] = json!("invocation");
+            if let Some(field) = wrong_field {
+                response[field] = json!("other");
+            }
+            let frame = json!({"type":"replay_checkpoint", "complete":true});
+            peer.get_mut()
+                .write_all(format!("{response}\n{frame}\n").as_bytes())
+                .await
+                .unwrap();
+            let result = timeout(Duration::from_secs(1), pending)
+                .await
+                .unwrap()
+                .unwrap();
+            if wrong_field.is_some() {
+                assert!(result
+                    .unwrap_err()
+                    .contains("unexpected watch acknowledgment"));
+            } else {
+                let (mut rx, handle) = result.unwrap();
+                assert_eq!(
+                    timeout(Duration::from_secs(1), rx.recv()).await.unwrap(),
+                    Some(frame)
+                );
+                handle.abort();
+                let _ = handle.await;
+            }
+            let mut control = BufReader::new(control);
+            let mut session = BufReader::new(session);
+            assert!(timeout(Duration::from_millis(20), async {
+                tokio::select! {
+                    request = socket::read_json_line(&mut control) => panic!("watch used control: {request:?}"),
+                    request = socket::read_json_line(&mut session) => panic!("watch used primary session: {request:?}"),
+                }
+            }).await.is_err());
+            client.shutdown().await;
         }
     }
 
@@ -958,6 +1046,8 @@ mod run_follow_tests {
             json!({"type":"log_line", "id":"run", "line":"log"}),
             json!({"type":"stage_boundary", "id":"run", "stage":"exec", "stage_type":"exec", "active":true}),
             json!({"type":"stage_transition", "id":"run", "stage":"review"}),
+            json!({"type":"history_gap", "id":"run", "reason":"retention"}),
+            json!({"type":"replay_checkpoint", "id":"run", "complete":false}),
             json!({"type":"stream_reset"}),
             json!({"type":"lagged", "skipped":2}),
             json!({"type":"run_completed", "id":"run", "exit_code":0}),
@@ -1021,10 +1111,10 @@ mod replay_fallback_tests {
 
     async fn fallback(history_error: bool) {
         let (native, native_peer) = UnixStream::pair().unwrap();
-        let (log, log_peer) = UnixStream::pair().unwrap();
-        let (client, [_control, session]) = DaemonClient::fake_with_aux_streams(
+        let (replacement, replacement_peer) = UnixStream::pair().unwrap();
+        let (client, [control, session]) = DaemonClient::fake_with_aux_streams(
             json!({"session_id":"owner", "home_run_id":"home"}),
-            vec![native, log],
+            vec![native, replacement],
         );
         let client = Arc::new(client);
         let (tx, mut rx) = mpsc::unbounded_channel();
@@ -1039,7 +1129,7 @@ mod replay_fallback_tests {
         let mut native = BufReader::new(native_peer);
         assert_eq!(
             read(&mut native).await,
-            json!({"op":"attach", "scope":"run", "id":"run", "session_id":"owner", "replay":true})
+            json!({"op":"watch", "scope":"run", "id":"run", "session_id":"owner", "replay":true})
         );
         socket::write_json_line(
             native.get_mut(),
@@ -1047,92 +1137,95 @@ mod replay_fallback_tests {
         )
         .await
         .unwrap();
-        let mut log = BufReader::new(log_peer);
+        let mut replacement = BufReader::new(replacement_peer);
         let mut session = BufReader::new(session);
+        let mut control = BufReader::new(control);
         let request = timeout(Duration::from_secs(2), async {
             tokio::select! {
-                biased;
-                request = socket::read_json_line(&mut log) => request.unwrap().unwrap(),
-                request = socket::read_json_line(&mut session) => panic!("history requested before log subscription: {request:?}"),
+                request = socket::read_json_line(&mut session) => request.unwrap().unwrap(),
+                request = socket::read_json_line(&mut replacement) => panic!("fallback opened a replacement follow: {request:?}"),
             }
-        }).await.expect("fallback did not subscribe");
+        }).await.expect("fallback did not request bounded disk history");
         assert_eq!(
             request,
-            json!({"op":"log", "id":"run", "follow":true, "session_id":"owner"})
+            json!({"op":"read_blob", "id":"run", "blob":"log", "tail":500, "session_id":"owner"})
         );
-        // The endpoint owns both persisted and live operational history.
-        // A separate disk read would duplicate the persisted portion.
+        // Rejection permits only a bounded persisted tail, never a replacement follow.
         if history_error {
             socket::write_json_line(
-                log.get_mut(),
+                session.get_mut(),
                 &json!({"type":"error", "message":"permission denied: original diagnostic"}),
             )
             .await
             .unwrap();
         } else {
-            for line in [
-                "[history-ts] repeated",
-                "[history-ts] repeated",
-                "plain history",
-            ] {
-                socket::write_json_line(
-                    log.get_mut(),
-                    &json!({"type":"log_line", "id":"run", "line":line}),
-                )
-                .await
-                .unwrap();
-            }
+            socket::write_json_line(
+                session.get_mut(),
+                &json!({"type":"blob", "lines":[
+                    "[history-ts] repeated", "[history-ts] repeated", "plain history"
+                ]}),
+            )
+            .await
+            .unwrap();
         }
-        let diagnostic = unwrap_line(output(&mut rx).await);
+        let frame = output(&mut rx).await;
+        assert!(frame.get("native").is_none());
+        let diagnostic = unwrap_line(frame);
         assert!(diagnostic["line"]
             .as_str()
             .unwrap()
             .contains("native run follow unavailable"));
+        assert!(diagnostic["line"]
+            .as_str()
+            .unwrap()
+            .contains("bounded persisted tail only (no live follow)"));
         if history_error {
-            let error = unwrap_line(output(&mut rx).await);
+            let frame = output(&mut rx).await;
+            assert!(frame.get("native").is_none());
+            let error = unwrap_line(frame);
             assert_eq!(error["type"], "log_line");
-            assert_eq!(error["line"], "permission denied: original diagnostic");
+            assert_eq!(
+                error["line"],
+                "history unavailable (log): permission denied: original diagnostic"
+            );
         } else {
+            let warning = output(&mut rx).await;
+            assert!(warning.get("native").is_none());
+            assert_eq!(
+                unwrap_line(warning),
+                json!({"type":"log_line", "id":"run",
+                "line":"history discontinuity: bounded persisted tail (up to 500 lines); persisted tail and original stream may overlap; possible overlap is preserved, not deduplicated"})
+            );
             for text in ["repeated", "repeated", "plain history"] {
                 assert_eq!(
-                    unwrap_line(output(&mut rx).await),
+                    {
+                        let frame = output(&mut rx).await;
+                        assert!(frame.get("native").is_none());
+                        unwrap_line(frame)
+                    },
                     json!({"type":"log_line", "id":"run", "line":text})
                 );
             }
         }
-        // Identical content after the persisted output is a new live event.
-        socket::write_json_line(
-            log.get_mut(),
-            &json!({"type":"log_line", "id":"run", "line":"[live-ts] repeated"}),
-        )
-        .await
-        .unwrap();
         assert_eq!(
-            unwrap_line(output(&mut rx).await),
-            json!({"type":"log_line", "id":"run", "line":"repeated"})
+            output(&mut rx).await,
+            json!({"type":"view_error", "id":"run",
+            "generation":73, "force":true,
+            "message":"native run follow unavailable; showing bounded persisted tail only, no live updates"})
         );
-        assert!(
-            timeout(
-                Duration::from_millis(100),
-                socket::read_json_line(&mut session)
-            )
+        timeout(Duration::from_secs(2), replay)
             .await
-            .is_err(),
-            "operational fallback must not request disk history"
-        );
-        assert!(rx.try_recv().is_err(), "unexpected duplicate replay output");
-        assert!(!replay.is_finished(), "live subscription ended prematurely");
-
-        // Cancellation must abort the auxiliary reader, not leave its socket open.
-        replay.abort();
-        assert!(replay.await.unwrap_err().is_cancelled());
-        assert_eq!(
-            timeout(Duration::from_secs(2), socket::read_json_line(&mut log))
-                .await
-                .expect("auxiliary reader leaked after cancellation")
-                .unwrap(),
-            None
-        );
+            .unwrap()
+            .unwrap();
+        assert!(rx.recv().await.is_none(), "unexpected extra replay output");
+        assert!(socket::read_json_line(&mut native).await.unwrap().is_none());
+        assert!(timeout(Duration::from_millis(100), async {
+            tokio::select! {
+                request = socket::read_json_line(&mut control) => panic!("unexpected shared control request: {request:?}"),
+                request = socket::read_json_line(&mut session) => panic!("extra disk request: {request:?}"),
+                request = socket::read_json_line(&mut replacement) => panic!("replacement follow: {request:?}"),
+            }
+        }).await.is_err());
         client.shutdown().await;
     }
 
@@ -1152,10 +1245,26 @@ mod replay_fallback_tests {
         live: Vec<Value>,
     }
 
-    async fn native_handoff(case: NativeCase) {
+    async fn native_handoff(mut case: NativeCase) {
+        let checkpoint = case.frames.last().unwrap().clone();
+        assert_eq!(checkpoint["type"], "replay_checkpoint");
+        let checkpoint_index =
+            case.expected.len() - case.before_response.len() - case.after_response.len();
+        case.expected.insert(checkpoint_index, checkpoint);
+        let native_start = case.expected.len()
+            - case.frames.len()
+            - case.before_response.len()
+            - case.after_response.len();
+        let native_frames: Vec<_> = case
+            .frames
+            .iter()
+            .chain(&case.before_response)
+            .chain(&case.after_response)
+            .cloned()
+            .collect();
         let (stream, peer) = UnixStream::pair().unwrap();
         let (replacement, replacement_peer) = UnixStream::pair().unwrap();
-        let (client, [_control, session]) = DaemonClient::fake_with_aux_streams(
+        let (client, [control, session]) = DaemonClient::fake_with_aux_streams(
             json!({"session_id":"owner", "home_run_id":"home"}),
             vec![stream, replacement],
         );
@@ -1171,17 +1280,18 @@ mod replay_fallback_tests {
         ));
         let mut peer = BufReader::new(peer);
         let mut session = BufReader::new(session);
+        let mut control = BufReader::new(control);
         let mut replacement = BufReader::new(replacement_peer);
         assert_eq!(
             read(&mut peer).await,
-            json!({"op":"attach", "scope":"run", "id":"run", "session_id":"owner", "replay":true})
+            json!({"op":"watch", "scope":"run", "id":"run", "session_id":"owner", "replay":true})
         );
         // One write also exercises frames buffered alongside the attach acknowledgment.
         use tokio::io::AsyncWriteExt;
         let mut wire = format!(
             "{}\n",
-            json!({"type":"attached", "scope":"run", "id":"run",
-            "capabilities":["observe", "replay_checkpoint"]})
+            json!({"type":"watched", "scope":"run", "id":"run",
+            "replay":true, "stage":null, "stage_run_id":null})
         );
         for frame in &case.frames {
             wire.push_str(&format!("{frame}\n"));
@@ -1214,8 +1324,22 @@ mod replay_fallback_tests {
                 .await
                 .unwrap();
         }
-        for expected in case.expected {
-            let actual = unwrap_line(output(&mut rx).await);
+        let watched =
+            json!({"type":"watched", "id":"run", "replay":true, "stage":null, "stage_run_id":null});
+        let wrapper = output(&mut rx).await;
+        assert_eq!(wrapper["native"], watched);
+        assert_eq!(unwrap_line(wrapper), watched);
+        for (index, expected) in case.expected.into_iter().enumerate() {
+            let wrapper = output(&mut rx).await;
+            if index < native_start {
+                assert!(
+                    wrapper.get("native").is_none(),
+                    "disk history must not establish liveness"
+                );
+            } else {
+                assert_eq!(wrapper["native"], native_frames[index - native_start]);
+            }
+            let actual = unwrap_line(wrapper);
             if expected["line"] == "history_gap" {
                 assert_eq!(actual["type"], "log_line");
                 assert_eq!(actual["id"], "run");
@@ -1229,10 +1353,13 @@ mod replay_fallback_tests {
             socket::write_json_line(peer.get_mut(), &frame)
                 .await
                 .unwrap();
-            assert_eq!(unwrap_line(output(&mut rx).await), frame);
+            let wrapper = output(&mut rx).await;
+            assert_eq!(wrapper["native"], frame);
+            assert_eq!(unwrap_line(wrapper), frame);
         }
         assert!(timeout(Duration::from_millis(100), async {
             tokio::select! {
+                request = socket::read_json_line(&mut control) => panic!("unexpected shared control request: {request:?}"),
                 request = socket::read_json_line(&mut session) => panic!("unexpected disk read: {request:?}"),
                 request = socket::read_json_line(&mut replacement) => panic!("replacement attach: {request:?}"),
                 frame = rx.recv() => panic!("checkpoint or extra output: {frame:?}"),
@@ -1269,7 +1396,7 @@ mod replay_fallback_tests {
         // Exact diagnostics and their position are part of the handoff contract.
         let warnings = vec![
             log("history_gap: native replay history is incomplete"),
-            log("history discontinuity: persisted tail and original stream may overlap; possible overlap is preserved, not deduplicated; stage history is not execution-scoped and may include other executions"),
+            log("history discontinuity: bounded persisted tail (up to 500 lines); persisted tail and original stream may overlap; possible overlap is preserved, not deduplicated; stage history is not execution-scoped and may include other executions"),
         ];
         // Match the diagnostic at this position without coupling to JSON formatting.
         let gap_log = log("history_gap");
@@ -1400,12 +1527,12 @@ mod replay_fallback_tests {
     }
 
     #[tokio::test]
-    async fn rejected_run_uses_log_endpoint_for_persisted_and_live_history() {
+    async fn rejected_run_reads_only_bounded_disk_history() {
         fallback(false).await;
     }
 
     #[tokio::test]
-    async fn rejected_run_surfaces_endpoint_error_and_keeps_live_subscription() {
+    async fn rejected_run_surfaces_disk_error_without_live_subscription() {
         fallback(true).await;
     }
 }

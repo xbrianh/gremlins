@@ -75,6 +75,14 @@ impl Conversations {
         if target.is_home() {
             self.starting_home = None;
         }
+        let execution = execution.filter(|execution| match &target {
+            Target::Invocation {
+                run_id,
+                stage_run_id,
+                ..
+            } => execution.run_id == *run_id && execution.stage_run_id == *stage_run_id,
+            _ => true,
+        });
         if let Some(execution) = execution {
             self.live.insert(target, execution);
         } else {
@@ -93,6 +101,7 @@ impl Conversations {
         self.drafts.remove(target);
     }
 
+    #[cfg(test)]
     pub fn retain_target(&self, target: &Target) -> bool {
         self.drafts.contains_key(target) || self.pending.values().any(|p| &p.target == target)
     }
@@ -235,6 +244,14 @@ mod tests {
         }
     }
 
+    fn invocation(stage: &str, execution: &Execution) -> Target {
+        Target::Invocation {
+            run_id: execution.run_id.clone(),
+            stage: stage.into(),
+            stage_run_id: execution.stage_run_id.clone(),
+        }
+    }
+
     fn input(text: &str) -> InputBuffer {
         let mut buf = InputBuffer::new();
         buf.replace_all(text);
@@ -253,6 +270,130 @@ mod tests {
         assert_eq!(&execution, expected);
         assert_eq!(text, expected_text);
         id
+    }
+
+    #[test]
+    fn sibling_and_repeated_invocations_keep_drafts_and_receipts_independent() {
+        let mut state = Conversations::default();
+        let first = execution("runner", 1);
+        let sibling = execution("runner", 2);
+        let repeat = execution("runner", 3);
+        let targets = [
+            invocation("build", &first),
+            invocation("test", &sibling),
+            invocation("build", &repeat),
+        ];
+        let executions = [first, sibling, repeat];
+        let mut ids = Vec::new();
+        for (target, exec) in targets.iter().zip(&executions) {
+            state.set_execution(target.clone(), Some(exec.clone()));
+            ids.push(correction(
+                state.submit(target, &input("original"), true),
+                exec,
+                "original",
+            ));
+        }
+        state.observe_draft(&targets[0], &input("pinned edit"), true);
+        state.set_execution(targets[0].clone(), None);
+
+        let repeated = state.finish(ids[2], Ok(())).unwrap();
+        assert_eq!(repeated.target, targets[2]);
+        assert_eq!(repeated.text, "original");
+        assert!(repeated.clear_draft);
+        assert!(!state.retain_target(&targets[2]));
+        assert!(state.retain_target(&targets[0]));
+        assert!(state.retain_target(&targets[1]));
+
+        let pinned = state.finish(ids[0], Ok(())).unwrap();
+        assert_eq!(pinned.target, targets[0]);
+        assert_eq!(pinned.text, "original");
+        assert!(!pinned.clear_draft);
+        assert!(matches!(
+            state.submit(&targets[0], &input("pinned edit"), true),
+            Submission::Blocked(_)
+        ));
+        state.set_execution(targets[0].clone(), Some(executions[0].clone()));
+        correction(
+            state.submit(&targets[0], &input("pinned edit"), true),
+            &executions[0],
+            "pinned edit",
+        );
+
+        let failed = state.finish(ids[1], Err("rejected".into())).unwrap();
+        assert_eq!(failed.target, targets[1]);
+        assert_eq!(failed.text, "original");
+        assert_eq!(failed.result, Err("rejected".into()));
+        assert!(!failed.clear_draft);
+        correction(
+            state.submit(&targets[1], &input("original"), true),
+            &executions[1],
+            "original",
+        );
+        assert!(state.finish(ids[0], Ok(())).is_none());
+        assert!(state.finish(ids[2], Ok(())).is_none());
+    }
+
+    #[test]
+    fn mismatched_invocation_clears_live_address_but_preserves_pinned_draft_and_receipt() {
+        let original = execution("runner", 1);
+        let target = invocation("build", &original);
+        let mismatches = [
+            Execution {
+                run_id: "other-run".into(),
+                ..original.clone()
+            },
+            Execution {
+                stage_run_id: "repeat-build".into(),
+                ..original.clone()
+            },
+            execution("other-run", 2),
+        ];
+        for mismatch in mismatches {
+            let mut state = Conversations::default();
+            state.set_execution(target.clone(), Some(original.clone()));
+            let id = correction(
+                state.submit(&target, &input("original"), true),
+                &original,
+                "original",
+            );
+            state.observe_draft(&target, &input("pinned edit"), true);
+            let revision = state.drafts[&target].revision;
+            state.set_execution(target.clone(), Some(mismatch.clone()));
+            assert!(!state.live.contains_key(&target));
+            assert_eq!(state.drafts[&target].revision, revision);
+            assert!(matches!(
+                &state.drafts[&target].address,
+                Address::Execution(exec) if exec == &original
+            ));
+            assert!(matches!(
+                state.submit(&target, &input("pinned edit"), true),
+                Submission::Blocked(_)
+            ));
+            let receipt = state.finish(id, Ok(())).unwrap();
+            assert_eq!(receipt.target, target);
+            assert_eq!(receipt.text, "original");
+            assert_eq!(receipt.result, Ok(()));
+            assert!(!receipt.clear_draft);
+            assert!(state.retain_target(&target));
+            state.set_execution(target.clone(), Some(original.clone()));
+            let retry = correction(
+                state.submit(&target, &input("pinned edit"), true),
+                &original,
+                "pinned edit",
+            );
+            assert!(state.finish(retry, Ok(())).unwrap().clear_draft);
+
+            state.set_execution(target.clone(), Some(mismatch));
+            assert!(!state.live.contains_key(&target));
+            assert!(matches!(
+                state.submit(&target, &input("fresh draft"), true),
+                Submission::Blocked(_)
+            ));
+            assert!(matches!(
+                state.drafts[&target].address,
+                Address::Unavailable
+            ));
+        }
     }
 
     #[test]

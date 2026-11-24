@@ -70,10 +70,44 @@ struct Attachment {
     target: Option<Target>,
     execution: Option<protocol::Execution>,
     commands: Option<mpsc::UnboundedSender<serde_json::Value>>,
+    observed_sequences: HashMap<Target, SequenceRanges>,
+}
+
+/// Sorted, disjoint inclusive ranges; retained across selection changes.
+#[derive(Default)]
+struct SequenceRanges(Vec<(u64, u64)>);
+
+impl SequenceRanges {
+    fn insert(&mut self, sequence: u64) -> bool {
+        let index = self.0.partition_point(|&(_, end)| end < sequence);
+        if self
+            .0
+            .get(index)
+            .is_some_and(|&(start, _)| start <= sequence)
+        {
+            return false;
+        }
+        let joins_left = index > 0 && self.0[index - 1].1.checked_add(1) == Some(sequence);
+        let joins_right = self
+            .0
+            .get(index)
+            .is_some_and(|&(start, _)| sequence.checked_add(1) == Some(start));
+        match (joins_left, joins_right) {
+            (true, true) => {
+                let (_, end) = self.0.remove(index);
+                self.0[index - 1].1 = end;
+            }
+            (true, false) => self.0[index - 1].1 = sequence,
+            (false, true) => self.0[index].0 = sequence,
+            (false, false) => self.0.insert(index, (sequence, sequence)),
+        }
+        true
+    }
 }
 
 impl Attachment {
     fn invalidate(&mut self, app: &mut App) {
+        app.abandon_pipeline_replay();
         self.commands = None;
         self.task = None;
         self.generation = self.generation.wrapping_add(1);
@@ -205,13 +239,32 @@ fn watch_enter<B: ratatui::backend::Backend>(
     last_stage: &mut Option<Target>,
     follow: &mut Option<tokio::task::JoinHandle<()>>,
 ) {
-    if let Some(selected) = app.watch_selection.clone() {
+    if let Some(target) = app.watch_target() {
         close_watch_follow(app, live, follow);
-        let target = attachment_target(app, selected, None);
-        select_attachment(
-            app, live, client, target, "control", attachment, tx, last_stage,
-        );
+        select_passive_watch(app, live, client, target, attachment, tx, last_stage);
     }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn attach_stage_entry<B: ratatui::backend::Backend>(
+    app: &mut App,
+    live: &mut LiveArea<B>,
+    client: &Arc<client::DaemonClient>,
+    run_id: String,
+    stage: Option<String>,
+    attachment: &mut Attachment,
+    tx: &mpsc::UnboundedSender<AttachmentFrame>,
+    last_stage: &mut Option<Target>,
+) {
+    let target = if app.home_run_id.as_deref() == Some(run_id.as_str()) {
+        Target::Home
+    } else {
+        Target::StageExecution {
+            run_id,
+            stage: stage.unwrap_or_default(),
+        }
+    };
+    select_passive_watch(app, live, client, target, attachment, tx, last_stage);
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -227,18 +280,15 @@ fn debug_entry<B: ratatui::backend::Backend>(
 ) {
     close_watch_follow(app, live, follow);
     let target = attachment_target(app, id, None);
-    select_attachment(
-        app, live, client, target, "debugger", attachment, tx, last_stage,
-    );
+    select_debugger_attachment(app, live, client, target, attachment, tx, last_stage);
 }
 
 #[allow(clippy::too_many_arguments)]
-fn select_attachment<B: ratatui::backend::Backend>(
+fn select_debugger_attachment<B: ratatui::backend::Backend>(
     app: &mut App,
     live: &mut LiveArea<B>,
     client: &Arc<client::DaemonClient>,
     target: Target,
-    mode: &'static str,
     attachment: &mut Attachment,
     tx: &mpsc::UnboundedSender<AttachmentFrame>,
     last_stage: &mut Option<Target>,
@@ -248,14 +298,17 @@ fn select_attachment<B: ratatui::backend::Backend>(
     live.exit_screen_view();
     live.select_conversation(app, target.clone());
     let (run_id, stage) = match &target {
-        Target::Home if mode == "debugger" => {
+        Target::Home => {
             let Some(id) = app.home_run_id.clone() else {
                 live.push_transcript_line("home has no chat run to debug yet".to_string());
                 return;
             };
             (id, None)
         }
-        Target::Home => return,
+        Target::Invocation { .. } => {
+            live.push_transcript_line("debugging an exact invocation is unsupported".to_string());
+            return;
+        }
         Target::StageExecution { run_id, stage } => {
             *last_stage = Some(target.clone());
             app.conversations.set_execution(target.clone(), None);
@@ -264,7 +317,7 @@ fn select_attachment<B: ratatui::backend::Backend>(
     };
     attachment.target = Some(target.clone());
     let generation = attachment.generation;
-    let mut transport = client.start_attachment(run_id, stage, mode);
+    let mut transport = client.start_attachment(run_id, stage, "debugger");
     attachment.commands = Some(transport.commands.clone());
     let tx = tx.clone();
     attachment.task = Some(AbortOnDrop(tokio::spawn(async move {
@@ -284,6 +337,171 @@ fn select_attachment<B: ratatui::backend::Backend>(
     })));
 }
 
+#[allow(clippy::too_many_arguments)]
+fn select_passive_watch<B: ratatui::backend::Backend>(
+    app: &mut App,
+    live: &mut LiveArea<B>,
+    client: &Arc<client::DaemonClient>,
+    target: Target,
+    attachment: &mut Attachment,
+    tx: &mpsc::UnboundedSender<AttachmentFrame>,
+    last_stage: &mut Option<Target>,
+) {
+    attachment.invalidate(app);
+    app.screen = Screen::Chat;
+    live.exit_screen_view();
+    live.select_conversation(app, target.clone());
+    let (run_id, stage, stage_run_id) = match &target {
+        Target::Home => return,
+        Target::StageExecution { run_id, stage } => (
+            run_id.clone(),
+            (!stage.is_empty()).then(|| stage.clone()),
+            None,
+        ),
+        Target::Invocation {
+            run_id,
+            stage,
+            stage_run_id,
+        } => (
+            run_id.clone(),
+            Some(stage.clone()),
+            Some(stage_run_id.clone()),
+        ),
+    };
+    *last_stage = Some(target.clone());
+    app.set_conversation_status(target.clone(), ConversationStatus::ReadOnly);
+    app.conversations.set_execution(target.clone(), None);
+    attachment.target = Some(target.clone());
+    let generation = attachment.generation;
+    let client = Arc::clone(client);
+    let tx = tx.clone();
+    attachment.task = Some(AbortOnDrop(tokio::spawn(async move {
+        let send = |mut value: serde_json::Value| {
+            value["_passive_watch"] = serde_json::json!(true);
+            tx.send(AttachmentFrame {
+                generation,
+                target: target.clone(),
+                execution: None,
+                value,
+            })
+            .map_err(|_| ())
+        };
+        match client
+            .follow_watch(&run_id, stage.as_deref(), stage_run_id.as_deref())
+            .await
+        {
+            Ok((mut frames, reader)) => {
+                let _reader = AbortOnDrop(reader);
+                let _ = send(serde_json::json!({
+                    "type":"watched", "replay":true, "id":run_id,
+                    "stage":stage, "stage_run_id":stage_run_id
+                }));
+                while let Some(value) = frames.recv().await {
+                    if send(value).is_err() {
+                        return;
+                    }
+                }
+                let _ = send(
+                    serde_json::json!({"type":"transport_error", "reason":"watch disconnected"}),
+                );
+            }
+            Err(reason) => {
+                let _ = send(serde_json::json!({"type":"transport_error", "reason":reason}));
+            }
+        }
+    })));
+}
+
+/// Raw event identity does not require a start frame, stage type, or nonce.
+fn watch_frame_target(value: &serde_json::Value) -> Option<Target> {
+    let field = |key: &str| {
+        value[key]
+            .as_str()
+            .filter(|s| !s.is_empty())
+            .map(str::to_owned)
+    };
+    Some(Target::Invocation {
+        run_id: field("run_id").or_else(|| field("id"))?,
+        stage: field("correlation_stage").or_else(|| field("stage"))?,
+        stage_run_id: field("stage_run_id")?,
+    })
+}
+
+fn watch_target_matches(selector: &Target, event: &Target) -> bool {
+    match (selector, event) {
+        (Target::Invocation { .. }, _) => selector == event,
+        (
+            Target::StageExecution { run_id, stage },
+            Target::Invocation {
+                run_id: id,
+                stage: name,
+                ..
+            },
+        ) => run_id == id && (stage.is_empty() || stage == name),
+        _ => false,
+    }
+}
+
+fn apply_passive_watch_frame<B: ratatui::backend::Backend>(
+    app: &mut App,
+    live: &mut LiveArea<B>,
+    attachment: &mut Attachment,
+    frame: &AttachmentFrame,
+) {
+    let value = &frame.value;
+    let kind = value["type"].as_str().unwrap_or("");
+    // Reject sibling identities before updating lifecycle or rendering.
+    let identity = watch_frame_target(value);
+    if identity
+        .as_ref()
+        .is_some_and(|event| !watch_target_matches(&frame.target, event))
+    {
+        return;
+    }
+    app.observe_pipeline_frame(value);
+    if matches!(kind, "transport_error" | "error") {
+        app.abandon_pipeline_replay();
+    }
+    if matches!(kind, "history_gap" | "lagged" | "transport_error" | "error")
+        || (kind == "replay_checkpoint" && value["complete"] != true)
+    {
+        live.with_target_transcript(&frame.target, |live, _| {
+            live.push_transcript_line(format!(
+                "watch {kind}: {}",
+                value["message"]
+                    .as_str()
+                    .or(value["reason"].as_str())
+                    .unwrap_or("history incomplete")
+            ));
+        });
+        return;
+    }
+    let Some(identity) = identity else {
+        return;
+    };
+    let mut targets = vec![identity.clone()];
+    for selector in [&frame.target, &app.selected_target] {
+        if watch_target_matches(selector, &identity) && !targets.contains(selector) {
+            targets.push(selector.clone());
+        }
+    }
+    for target in targets {
+        if let Some(sequence) = value["sequence"].as_u64() {
+            if !attachment
+                .observed_sequences
+                .entry(target.clone())
+                .or_default()
+                .insert(sequence)
+            {
+                continue;
+            }
+        }
+        // Observation never grants a correction address or debugger controls.
+        app.set_conversation_status(target.clone(), ConversationStatus::ReadOnly);
+        render_execution_frame(live, &target, value);
+    }
+}
+
 fn apply_attachment_frame<B: ratatui::backend::Backend>(
     app: &mut App,
     live: &mut LiveArea<B>,
@@ -291,6 +509,10 @@ fn apply_attachment_frame<B: ratatui::backend::Backend>(
     frame: AttachmentFrame,
 ) {
     if !attachment.accepts(&frame) {
+        return;
+    }
+    if frame.value["_passive_watch"] == true {
+        apply_passive_watch_frame(app, live, attachment, &frame);
         return;
     }
     let mut frame = frame;
@@ -424,9 +646,38 @@ fn apply_attachment_frame<B: ratatui::backend::Backend>(
         app.conversations.set_execution(frame.target.clone(), None);
         live.set_target_active_request(&frame.target, false);
     }
-    live.with_target_transcript(&frame.target, |live, reasoning| {
+    render_execution_frame(live, &frame.target, value);
+    if matches!(kind, "done" | "ended" | "detached") {
+        attachment.invalidate(app);
+    }
+}
+
+fn render_execution_frame<B: ratatui::backend::Backend>(
+    live: &mut LiveArea<B>,
+    target: &Target,
+    value: &serde_json::Value,
+) {
+    let kind = value["type"].as_str().unwrap_or("");
+    let invocation = if value["_passive_watch"] == true {
+        watch_frame_target(value).unwrap_or_else(|| target.clone())
+    } else {
+        target.clone()
+    };
+    live.with_invocation_transcript(target, &invocation, |live, reasoning| {
         let text = value["text"].as_str().unwrap_or("");
         match kind {
+            "exec_output" => {
+                live.push_exec_output_record(text, value["is_stderr"] == true);
+            }
+            "stage_boundary" => live.push_transcript_line(format!(
+                "stage {}: {}",
+                value["stage"].as_str().unwrap_or(""),
+                if value["active"] == true {
+                    "started"
+                } else {
+                    "ended"
+                }
+            )),
             "stream_chunk" => live.push_response(text),
             "reasoning_chunk" => reasoning.push_text(text),
             "tool_output_chunk" => live.push_tool_output_chunk(
@@ -509,9 +760,6 @@ fn apply_attachment_frame<B: ratatui::backend::Backend>(
             _ => {}
         }
     });
-    if matches!(kind, "done" | "ended" | "detached") {
-        attachment.invalidate(app);
-    }
 }
 
 /// Drop-guard that aborts a JoinHandle on drop, ensuring a dedicated
@@ -539,6 +787,9 @@ fn close_watch_follow<B: ratatui::backend::Backend>(
     live_area: &mut LiveArea<B>,
     watch_follow_handle: &mut Option<tokio::task::JoinHandle<()>>,
 ) {
+    if app.watch_following.is_some() {
+        app.abandon_inline_pipeline_replay();
+    }
     abort_watch_follow(watch_follow_handle);
     app.watch_following = None;
     app.watch_follow_error = None;
@@ -636,10 +887,19 @@ fn start_watch_follow<B: ratatui::backend::Backend>(
     watch_follow_handle: &mut Option<tokio::task::JoinHandle<()>>,
     watch_follow_generation: &mut u64,
 ) {
+    let execution = app.live_executions.get(&id).cloned();
+    let Some(id) = app.watch_run_id(&id).map(str::to_owned) else {
+        return;
+    };
     abort_watch_follow(watch_follow_handle);
+    app.abandon_inline_pipeline_replay();
     live_area.clear_watch_stream();
     app.watch_following = Some(id.clone());
     app.watch_follow_error = None;
+    if let Some(view) = live_area.runs_view_mut() {
+        view.watch_pending = true;
+        view.watch_execution = execution.clone();
+    }
 
     // Each follow is tagged with a unique generation so messages queued by
     // an aborted/superseded follow are never accepted after the same id is
@@ -657,11 +917,6 @@ fn start_watch_follow<B: ratatui::backend::Backend>(
     let run = app.active_runs.get(&follow_id);
     let is_terminal =
         run.is_none_or(|r| matches!(r.status.as_str(), "done" | "failed" | "stopped"));
-    let current_stage = if is_terminal {
-        String::new()
-    } else {
-        run.map(|r| r.stage.clone()).unwrap_or_default()
-    };
     // Use sub_stage (leaf) for blob lookup when available; falls back
     // to stage for top-level stages and terminal runs.
     let replay_stage = if is_terminal {
@@ -677,10 +932,10 @@ fn start_watch_follow<B: ratatui::backend::Backend>(
     };
 
     let follow_task = tokio::spawn(async move {
-        watch_replay::replay_and_dedup(
+        watch_replay::replay_selection(
             client,
             follow_id,
-            current_stage,
+            execution,
             replay_stage,
             generation,
             log_tx,
@@ -707,17 +962,44 @@ fn apply_watch_frame<B: ratatui::backend::Backend>(
     }
     match raw.get("type").and_then(|v| v.as_str()) {
         Some("view_log") => {
+            if let Some(native) = raw.get("native") {
+                let Some(view) = live_area.runs_view_mut() else {
+                    return;
+                };
+                if native["type"] == "watched" {
+                    view.watch_pending = false;
+                } else if view.watch_pending {
+                    return;
+                }
+                if let Some(execution) = &view.watch_execution {
+                    if let Some(target) = watch_frame_target(native) {
+                        if target != execution.target() {
+                            return;
+                        }
+                    } else if !matches!(
+                        native["type"].as_str(),
+                        Some("watched" | "history_gap" | "replay_checkpoint" | "lagged")
+                    ) {
+                        return;
+                    }
+                }
+                app.observe_inline_pipeline_frame(native);
+            }
             if let Some(line) = raw.get("line").and_then(|v| v.as_str()) {
                 live_area.push_watch_line(line.to_string());
             }
         }
         Some("view_error") => {
+            app.abandon_inline_pipeline_replay();
+            if let Some(view) = live_area.runs_view_mut() {
+                view.watch_pending = false;
+            }
             // Terminal runs can reach normal EOF after replaying history.
             let is_terminal = app
                 .active_runs
                 .get(id)
                 .is_some_and(|r| r.status != "running");
-            if !is_terminal {
+            if !is_terminal || raw["force"] == true {
                 if let Some(message) = raw.get("message").and_then(|v| v.as_str()) {
                     live_area.push_watch_line(format!("error: {message}"));
                     app.watch_follow_error = Some(message.to_string());
@@ -1608,7 +1890,7 @@ async fn run_app(live_area: &mut LiveArea) -> io::Result<()> {
                                 Some(Target::Home)
                             };
                             if let Some(target) = next {
-                                select_attachment(&mut app, live_area, &client, target, "control", &mut attachment, &attach_tx, &mut last_stage);
+                                select_passive_watch(&mut app, live_area, &client, target, &mut attachment, &attach_tx, &mut last_stage);
                             }
                         }
                         KeyCode::Char('r')
@@ -2186,8 +2468,7 @@ async fn run_app(live_area: &mut LiveArea) -> io::Result<()> {
                                         live_area.select_conversation(&mut app, Target::Home);
                                     }
                                     CommandResult::AttachStage { run_id, stage } => {
-                                        let target = attachment_target(&app, run_id, stage);
-                                        select_attachment(&mut app, live_area, &client, target, "control", &mut attachment, &attach_tx, &mut last_stage);
+                                        attach_stage_entry(&mut app, live_area, &client, run_id, stage, &mut attachment, &attach_tx, &mut last_stage);
                                     }
                                     CommandResult::ActivateSkill(name) => {
                                         // Discover skills to validate the name.
@@ -2511,6 +2792,15 @@ async fn run_app(live_area: &mut LiveArea) -> io::Result<()> {
 
             // ── Daemon events ─────────────────────────────────
             Some(event) = event_rx.recv() => {
+                // EventKind drops envelope correlation, but identified boundary
+                // payloads still carry enough identity to maintain invocation rows.
+                // client::read_loop routes each frame exclusively to event_rx,
+                // chat_rx, a response waiter, or raw_rx, never both event/raw.
+                if matches!(&event, gremlins_magic_bus::EventKind::StageBoundary { .. }) {
+                    if let Ok(value) = serde_json::to_value(&event) {
+                        app.observe_live_pipeline_frame(&value);
+                    }
+                }
                 match event {
                     gremlins_magic_bus::EventKind::RunStarted { id, definition, stage } => {
                         log::info!("[run started] {id} ({definition}) stage={stage}");
@@ -2569,39 +2859,8 @@ async fn run_app(live_area: &mut LiveArea) -> io::Result<()> {
                     gremlins_magic_bus::EventKind::Bail { id, reason } => {
                         log::info!("[{id}] bail: {reason}");
                     }
-                    gremlins_magic_bus::EventKind::StageBoundary { id, stage, active, .. } => {
-                        let target = Target::StageExecution { run_id: id, stage };
-                        // Boundaries name a stage, not an execution. An old end
-                        // cannot revoke a newer binding; the pinned attach at
-                        // delivery rejects an execution that has actually ended.
-                        if active && !app.conversations.retain_target(&target) {
-                            // Re-entry may replace an empty conversation, never a
-                            // parked draft or a transcript awaiting a receipt.
-                            live_area.reset_target_state(&target);
-                        }
-                    }
-                    gremlins_magic_bus::EventKind::ExecOutput { id, is_stderr, text, .. } => {
-                        // Find the active stage for this run and route the
-                        // output to its transcript.
-                        if let Some(run) = app.active_runs.get(&id) {
-                            let stage = if run.sub_stage.is_empty() {
-                                run.stage.as_str()
-                            } else {
-                                run.sub_stage.as_str()
-                            };
-                            if !stage.is_empty() {
-                                let target = Target::StageExecution {
-                                    run_id: id,
-                                    stage: stage.to_string(),
-                                };
-                                let kind = if is_stderr { "stderr" } else { "stdout" };
-                                let line = format!("[{kind}] {text}");
-                                live_area.with_target_transcript(&target, |transcript, _reasoning| {
-                                    transcript.push_transcript_line(line);
-                                });
-                            }
-                        }
-                    }
+                    // Execution transcripts have a single writer: the passive
+                    // watch (or debugger) stream, never current-stage guesses.
                     gremlins_magic_bus::EventKind::TokenUsage {
                         id,
                         usage,
@@ -2628,6 +2887,7 @@ async fn run_app(live_area: &mut LiveArea) -> io::Result<()> {
 
             // ── Raw lines (non-event JSON from the main socket) ─
             Some(raw) = raw_rx.recv() => {
+                app.observe_live_pipeline_frame(&raw);
                 if raw.get("type").and_then(|v| v.as_str()) == Some("event_lagged") {
                     // Resync lifecycle status from the daemon so terminal
                     // events (RunCompleted / RunFailed / RunStopped) that
@@ -3296,6 +3556,148 @@ mod attachment_tests {
         }
     }
 
+    #[allow(clippy::too_many_arguments)]
+    fn passive_sibling_frame(
+        app: &mut App,
+        live: &mut LiveArea<ratatui::backend::TestBackend>,
+        attachment: &mut Attachment,
+        target: &Target,
+        invocation: &str,
+        sequence: u64,
+        kind: &str,
+        text: &str,
+    ) {
+        apply_passive_watch_frame(
+            app,
+            live,
+            attachment,
+            &correction_frame(
+                target,
+                0,
+                serde_json::json!({
+                    "_passive_watch":true, "type":kind, "text":text,
+                    "run_id":"run", "stage":"review", "stage_run_id":invocation,
+                    "sequence":sequence
+                }),
+            ),
+        );
+    }
+
+    #[test]
+    fn aggregate_sibling_completion_and_reset_are_isolated() {
+        for stage in ["", "review"] {
+            let mut app = App::new();
+            let mut live =
+                LiveArea::with_backend(ratatui::backend::TestBackend::new(100, 40), 100, 40);
+            let target = Target::StageExecution {
+                run_id: "run".into(),
+                stage: stage.into(),
+            };
+            live.select_conversation(&mut app, target.clone());
+            let mut attachment = Attachment::default();
+            passive_sibling_frame(
+                &mut app,
+                &mut live,
+                &mut attachment,
+                &target,
+                "a",
+                1,
+                "stream_chunk",
+                "alpha",
+            );
+            passive_sibling_frame(
+                &mut app,
+                &mut live,
+                &mut attachment,
+                &target,
+                "b",
+                2,
+                "stream_chunk",
+                "beta",
+            );
+            let rendered = rendered_attachment(&mut live, &app);
+            assert_eq!(rendered.matches("alpha").count(), 1, "{rendered}");
+            assert_eq!(rendered.matches("beta").count(), 1, "{rendered}");
+            passive_sibling_frame(
+                &mut app,
+                &mut live,
+                &mut attachment,
+                &target,
+                "a",
+                3,
+                "done",
+                "alpha",
+            );
+            let rendered = rendered_attachment(&mut live, &app);
+            assert_eq!(rendered.matches("alpha").count(), 1, "{rendered}");
+            assert_eq!(rendered.matches("beta").count(), 1, "{rendered}");
+            let b = Target::Invocation {
+                run_id: "run".into(),
+                stage: "review".into(),
+                stage_run_id: "b".into(),
+            };
+            live.with_invocation_transcript(&target, &b, |transcript, _| {
+                assert_eq!(transcript.response_accumulator(), "beta");
+            });
+            passive_sibling_frame(
+                &mut app,
+                &mut live,
+                &mut attachment,
+                &target,
+                "a",
+                4,
+                "stream_reset",
+                "",
+            );
+            live.with_invocation_transcript(&target, &b, |transcript, _| {
+                assert_eq!(transcript.response_accumulator(), "beta");
+            });
+            passive_sibling_frame(
+                &mut app,
+                &mut live,
+                &mut attachment,
+                &target,
+                "b",
+                5,
+                "done",
+                "beta",
+            );
+            let rendered = rendered_attachment(&mut live, &app);
+            assert_eq!(rendered.matches("beta").count(), 1, "{rendered}");
+        }
+    }
+
+    #[test]
+    fn exec_output_records_restore_newlines_including_empty_records() {
+        let mut live = LiveArea::with_backend(ratatui::backend::TestBackend::new(100, 40), 100, 40);
+        for (text, stderr) in [
+            ("first", false),
+            ("", false),
+            ("second", false),
+            ("failure", true),
+            ("", true),
+        ] {
+            render_execution_frame(
+                &mut live,
+                &Target::Home,
+                &serde_json::json!({
+                    "type":"exec_output", "text":text, "is_stderr":stderr
+                }),
+            );
+        }
+        assert_eq!(
+            live.response_text(),
+            "first\n\nsecond\nstderr: failure\nstderr: \n"
+        );
+        let rendered = rendered_attachment(&mut live, &App::new());
+        let rows: Vec<_> = rendered.lines().map(str::trim).collect();
+        let first = rows.iter().position(|row| *row == "first").unwrap();
+        assert_eq!(
+            &rows[first..first + 5],
+            &["first", "", "second", "stderr: failure", "stderr:"]
+        );
+    }
+
     #[test]
     fn failed_attachment_send_preserves_draft_and_renders_error() {
         let (mut app, mut live, mut attachment, target) = correction_fixture();
@@ -3738,6 +4140,189 @@ mod attachment_tests {
             })
             .collect::<Vec<_>>()
             .join("\n")
+    }
+
+    fn passive_frame(
+        app: &mut App,
+        live: &mut LiveArea<ratatui::backend::TestBackend>,
+        attachment: &mut Attachment,
+        value: serde_json::Value,
+    ) {
+        let mut value = value;
+        value["_passive_watch"] = serde_json::json!(true);
+        apply_attachment_frame(
+            app,
+            live,
+            attachment,
+            AttachmentFrame {
+                generation: attachment.generation,
+                target: attachment.target.clone().unwrap(),
+                execution: None,
+                value,
+            },
+        );
+    }
+
+    #[test]
+    fn sequence_ranges_compact_sequential_delivery() {
+        let mut seen = SequenceRanges::default();
+        for sequence in 0..10_000 {
+            assert!(seen.insert(sequence));
+        }
+        assert_eq!(seen.0, vec![(0, 9_999)]);
+        for sequence in [0, 5_000, 9_999] {
+            assert!(!seen.insert(sequence));
+        }
+        assert_eq!(seen.0, vec![(0, 9_999)]);
+    }
+
+    #[test]
+    fn sequence_ranges_merge_reordered_delivery_without_hiding_gaps() {
+        let mut seen = SequenceRanges::default();
+        for sequence in [5, 1, 3] {
+            assert!(seen.insert(sequence));
+        }
+        assert_eq!(seen.0, vec![(1, 1), (3, 3), (5, 5)]);
+        assert!(seen.insert(2));
+        assert_eq!(seen.0, vec![(1, 3), (5, 5)]);
+        assert!(seen.insert(4));
+        assert!(seen.insert(0));
+        assert_eq!(seen.0, vec![(0, 5)]);
+        for sequence in 0..=5 {
+            assert!(!seen.insert(sequence));
+        }
+    }
+
+    #[test]
+    fn sequence_ranges_handle_max_u64_without_wrapping() {
+        let mut seen = SequenceRanges::default();
+        for sequence in [u64::MAX, 0, u64::MAX - 2, u64::MAX - 1] {
+            assert!(seen.insert(sequence));
+        }
+        assert_eq!(seen.0, vec![(0, 0), (u64::MAX - 2, u64::MAX)]);
+        assert!(!seen.insert(u64::MAX));
+        assert!(!seen.insert(u64::MAX - 1));
+        assert!(!seen.insert(0));
+    }
+
+    #[test]
+    fn passive_reopen_suppresses_only_repeated_sequences() {
+        let (mut app, mut live, mut attachment, target) = correction_fixture();
+        let event = |sequence: Option<u64>| {
+            serde_json::json!({
+                "type":"exec_output", "run_id":"run", "stage":"review",
+                "stage_run_id":"execution", "text":"echo-token ", "sequence":sequence
+            })
+        };
+        passive_frame(&mut app, &mut live, &mut attachment, event(Some(1)));
+        attachment.invalidate(&mut app);
+        live.select_conversation(&mut app, Target::Home);
+        live.select_conversation(&mut app, target.clone());
+        attachment.target = Some(target);
+        passive_frame(&mut app, &mut live, &mut attachment, event(Some(1)));
+        assert_eq!(
+            rendered_attachment(&mut live, &app)
+                .matches("echo-token")
+                .count(),
+            1
+        );
+        passive_frame(&mut app, &mut live, &mut attachment, event(Some(2)));
+        assert_eq!(
+            rendered_attachment(&mut live, &app)
+                .matches("echo-token")
+                .count(),
+            2
+        );
+        for _ in 0..2 {
+            passive_frame(&mut app, &mut live, &mut attachment, event(None));
+        }
+        assert_eq!(
+            rendered_attachment(&mut live, &app)
+                .matches("echo-token")
+                .count(),
+            4
+        );
+    }
+
+    #[test]
+    fn passive_sequences_are_per_target_and_siblings_are_rejected() {
+        let (mut app, mut live, mut attachment, selector) = correction_fixture();
+        let event = serde_json::json!({
+            "type":"exec_output", "run_id":"run", "stage":"review",
+            "stage_run_id":"execution", "text":"routed-token ", "sequence":7
+        });
+        let identity = watch_frame_target(&event).unwrap();
+        passive_frame(&mut app, &mut live, &mut attachment, event.clone());
+        attachment.invalidate(&mut app);
+        live.select_conversation(&mut app, identity.clone());
+        attachment.target = Some(identity.clone());
+        passive_frame(&mut app, &mut live, &mut attachment, event.clone());
+        assert_eq!(
+            rendered_attachment(&mut live, &app)
+                .matches("routed-token")
+                .count(),
+            1
+        );
+        let mut sibling = event.clone();
+        sibling["stage_run_id"] = serde_json::json!("sibling");
+        sibling["sequence"] = serde_json::json!(8);
+        passive_frame(&mut app, &mut live, &mut attachment, sibling);
+        assert_eq!(
+            rendered_attachment(&mut live, &app)
+                .matches("routed-token")
+                .count(),
+            1
+        );
+        let run_selector = Target::StageExecution {
+            run_id: "run".into(),
+            stage: String::new(),
+        };
+        attachment.invalidate(&mut app);
+        attachment.target = Some(run_selector.clone());
+        live.select_conversation(&mut app, run_selector.clone());
+        passive_frame(&mut app, &mut live, &mut attachment, event);
+        assert_eq!(
+            rendered_attachment(&mut live, &app)
+                .matches("routed-token")
+                .count(),
+            1
+        );
+        for target in [selector, identity, run_selector] {
+            assert_eq!(attachment.observed_sequences[&target].0, vec![(7, 7)]);
+        }
+    }
+
+    #[test]
+    fn passive_replay_rebuilds_lifecycle_even_for_seen_sequences() {
+        let (mut app, mut live, mut attachment, target) = correction_fixture();
+        let boundary = serde_json::json!({
+            "type":"stage_boundary", "run_id":"run", "stage":"review",
+            "stage_run_id":"execution", "stage_type":"exec", "active":true, "sequence":1
+        });
+        for _ in 0..2 {
+            passive_frame(
+                &mut app,
+                &mut live,
+                &mut attachment,
+                serde_json::json!({"type":"watched", "id":"run", "stage":"review", "replay":true}),
+            );
+            passive_frame(&mut app, &mut live, &mut attachment, boundary.clone());
+            passive_frame(
+                &mut app,
+                &mut live,
+                &mut attachment,
+                serde_json::json!({"type":"replay_checkpoint", "id":"run", "complete":true}),
+            );
+            assert_eq!(app.live_executions.len(), 1);
+            attachment.invalidate(&mut app);
+            attachment.target = Some(target.clone());
+        }
+        assert_eq!(
+            rendered_attachment(&mut live, &app)
+                .matches("stage review: started")
+                .count(),
+            1
+        );
     }
 
     #[test]

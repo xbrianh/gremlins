@@ -146,9 +146,7 @@ pub(super) async fn collect_checkpoint(rx: &mut mpsc::Receiver<Value>) -> Snapsh
     while let Some(value) = rx.recv().await {
         fallback = fallback.or_else(|| fallback_reason(&value));
         let checkpoint = value["type"] == "replay_checkpoint";
-        if !checkpoint {
-            values.push(value);
-        }
+        values.push(value);
         if checkpoint {
             return Snapshot { values, fallback };
         }
@@ -166,9 +164,6 @@ pub(super) async fn collect_checkpoint(rx: &mut mpsc::Receiver<Value>) -> Snapsh
 }
 
 fn send_line(tx: &mpsc::UnboundedSender<Value>, id: &str, generation: u64, value: Value) -> bool {
-    if value["type"] == "replay_checkpoint" {
-        return true;
-    }
     let value = if value["type"] == "history_gap" {
         log_line(
             id,
@@ -181,6 +176,20 @@ fn send_line(tx: &mpsc::UnboundedSender<Value>, id: &str, generation: u64, value
         json!({"type": "view_log", "id": id, "generation": generation, "line": value.to_string()}),
     )
     .is_ok()
+}
+
+fn send_native(tx: &mpsc::UnboundedSender<Value>, id: &str, generation: u64, value: Value) -> bool {
+    let line = if value["type"] == "history_gap" {
+        log_line(
+            id,
+            &format!("history_gap: native replay discontinuity ({value})"),
+        )
+    } else {
+        value.clone()
+    };
+    tx.send(json!({"type":"view_log", "id":id, "generation":generation,
+        "line":line.to_string(), "native":value}))
+        .is_ok()
 }
 
 /// Disk tails have no execution-scoped coverage contract. Preserve every native
@@ -198,14 +207,26 @@ fn send_disk_history(
         "; stage history is not execution-scoped and may include other executions"
     };
     send_line(tx, id, generation, log_line(id, &format!(
-        "history discontinuity: persisted tail and original stream may overlap; possible overlap is preserved, not deduplicated{scope}"
+        "history discontinuity: bounded persisted tail (up to 500 lines); persisted tail and original stream may overlap; possible overlap is preserved, not deduplicated{scope}"
     ))) && history.into_iter().all(|value| send_line(tx, id, generation, value))
 }
 
+#[cfg(test)]
 pub(crate) async fn replay_and_dedup(
     client: Arc<DaemonClient>,
     follow_id: String,
     _current_stage: String,
+    replay_stage: String,
+    generation: u64,
+    log_tx: mpsc::UnboundedSender<Value>,
+) {
+    replay_selection(client, follow_id, None, replay_stage, generation, log_tx).await;
+}
+
+pub(crate) async fn replay_selection(
+    client: Arc<DaemonClient>,
+    follow_id: String,
+    execution: Option<super::app::LiveExecution>,
     replay_stage: String,
     generation: u64,
     log_tx: mpsc::UnboundedSender<Value>,
@@ -216,96 +237,94 @@ pub(crate) async fn replay_and_dedup(
     let diagnostic = |msg: &str| {
         send_line(&log_tx, &follow_id, generation, log_line(&follow_id, msg));
     };
-    match client.follow_run(&follow_id).await {
+    let subscription = match &execution {
+        Some(execution) => {
+            client
+                .follow_watch(
+                    &follow_id,
+                    Some(&execution.stage),
+                    Some(&execution.stage_run_id),
+                )
+                .await
+        }
+        None => client.follow_run(&follow_id).await,
+    };
+    match subscription {
         Ok((mut rx, handle)) => {
             let _guard = AbortOnDrop(handle);
+            if !send_native(
+                &log_tx,
+                &follow_id,
+                generation,
+                json!({"type":"watched", "id":follow_id, "replay":true,
+                    "stage":execution.as_ref().map(|e| &e.stage),
+                    "stage_run_id":execution.as_ref().map(|e| &e.stage_run_id)}),
+            ) {
+                return;
+            }
             let snapshot = collect_checkpoint(&mut rx).await;
             if let Some(reason) = snapshot.fallback {
                 diagnostic(reason);
-                match read_disk(&client, &follow_id, &replay_stage, false).await {
-                    Ok(history) => {
-                        if !send_disk_history(
-                            &log_tx,
-                            &follow_id,
-                            generation,
-                            history,
-                            &replay_stage,
-                        ) {
-                            return;
+                if execution.is_none() {
+                    match read_disk(&client, &follow_id, &replay_stage).await {
+                        Ok(history) => {
+                            if !send_disk_history(
+                                &log_tx,
+                                &follow_id,
+                                generation,
+                                history,
+                                &replay_stage,
+                            ) {
+                                return;
+                            }
                         }
+                        Err(error) => diagnostic(&error),
                     }
-                    Err(error) => diagnostic(&error),
+                } else {
+                    diagnostic("history discontinuity: exact invocation history unavailable; persisted stage history is not execution-scoped");
                 }
             }
             for value in snapshot.values {
-                if !send_line(&log_tx, &follow_id, generation, value) {
+                if !send_native(&log_tx, &follow_id, generation, value) {
                     return;
                 }
             }
             while let Some(value) = rx.recv().await {
-                if !send_line(&log_tx, &follow_id, generation, value) {
+                if !send_native(&log_tx, &follow_id, generation, value) {
                     return;
                 }
             }
             send_error("run stream closed");
             return;
         }
+        Err(error) if execution.is_some() => {
+            let _ = log_tx.send(json!({"type":"view_error", "id":follow_id,
+                "generation":generation, "force":true,
+                "message":format!("exact invocation follow unavailable: {error}; no execution-scoped persisted history")}));
+            return;
+        }
         Err(error) => diagnostic(&format!(
-            "native run follow unavailable: {error}; using legacy history/log follow"
+            "native run follow unavailable: {error}; bounded persisted tail only (no live follow)"
         )),
     }
 
-    // Subscribe first so output produced during disk replay remains buffered.
-    let follow = client.follow_log(&follow_id).await;
-    let (mut rx, _guard) = match follow {
-        Ok((rx, handle)) => (Some(rx), Some(AbortOnDrop(handle))),
-        Err(error) => {
-            diagnostic(&format!("log follow unavailable: {error}"));
-            (None, None)
-        }
-    };
-    // The log endpoint owns persisted operational history as well as live
-    // delivery. A second read of that same blob would replay it twice.
-    if rx.is_none() || !replay_stage.is_empty() {
-        match read_disk(&client, &follow_id, &replay_stage, rx.is_some()).await {
-            Ok(history) => {
-                if !send_disk_history(&log_tx, &follow_id, generation, history, &replay_stage) {
-                    return;
-                }
+    match read_disk(&client, &follow_id, &replay_stage).await {
+        Ok(history) => {
+            if !send_disk_history(&log_tx, &follow_id, generation, history, &replay_stage) {
+                return;
             }
-            Err(error) => diagnostic(&error),
         }
+        Err(error) => diagnostic(&error),
     }
-    if let Some(rx) = rx.as_mut() {
-        while let Some(value) = rx.recv().await {
-            if value["type"] == "error" {
-                diagnostic(value["message"].as_str().unwrap_or("log follow failed"));
-                continue;
-            }
-            let values = if value["type"] == "log_line" {
-                decode_history(
-                    vec![value["line"].as_str().unwrap_or("").to_owned()],
-                    "log",
-                    &follow_id,
-                )
-            } else {
-                vec![value]
-            };
-            for value in values {
-                if !send_line(&log_tx, &follow_id, generation, value) {
-                    return;
-                }
-            }
-        }
-        send_error("log stream closed");
-    }
+    let _ = log_tx.send(json!({"type":"view_error", "id":follow_id,
+        "generation":generation, "force":true,
+        "message":"native run follow unavailable; showing bounded persisted tail only, no live updates"}));
 }
 
 async fn read_disk(
     client: &DaemonClient,
     follow_id: &str,
     replay_stage: &str,
-    log_owned_by_follow: bool,
 ) -> Result<Vec<Value>, String> {
     let blob = if replay_stage.is_empty() {
         "log".to_owned()
@@ -321,9 +340,6 @@ async fn read_disk(
             _ => "log".to_owned(),
         }
     };
-    if blob == "log" && log_owned_by_follow {
-        return Ok(Vec::new());
-    }
     let (lines, _, _) = client
         .read_blob_checkpoint(follow_id, &blob, 500)
         .await
@@ -334,6 +350,258 @@ async fn read_disk(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn inline_exact_watch_waits_for_ack_filters_siblings_and_never_reads_disk() {
+        use crate::tui::{
+            app::{App, LiveExecution},
+            apply_watch_frame, close_watch_follow,
+            screen::LiveArea,
+            start_watch_follow,
+        };
+        use gremlins::executor::socket;
+        use tokio::{
+            io::BufReader,
+            net::UnixStream,
+            time::{timeout, Duration},
+        };
+        let (native, peer) = UnixStream::pair().unwrap();
+        let (client, [_control, session]) = DaemonClient::fake_with_aux_streams(
+            json!({"session_id":"owner", "home_run_id":"home"}),
+            vec![native],
+        );
+        let client = Arc::new(client);
+        let mut app = App::new();
+        let execution = LiveExecution {
+            run_id: "r".into(),
+            stage: "review".into(),
+            stage_type: "exec".into(),
+            stage_run_id: "review#1".into(),
+        };
+        let key = execution.key();
+        app.live_executions.insert(key.clone(), execution);
+        let mut live = LiveArea::with_backend(ratatui::backend::TestBackend::new(80, 24), 80, 24);
+        live.show_runs();
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let mut follow = None;
+        let mut generation = 0;
+        start_watch_follow(
+            &mut app,
+            &mut live,
+            &client,
+            key,
+            &tx,
+            &mut follow,
+            &mut generation,
+        );
+        let mut peer = BufReader::new(peer);
+        let request = socket::read_json_line(&mut peer).await.unwrap().unwrap();
+        assert_eq!(request["stage"], "review");
+        assert_eq!(request["stage_run_id"], "review#1");
+        assert!(live.runs_view_mut().unwrap().watch_pending);
+        assert!(timeout(Duration::from_millis(30), rx.recv()).await.is_err());
+        assert!(live.runs_view_mut().unwrap().watch_pending);
+        socket::write_json_line(peer.get_mut(), &json!({"type":"watched", "scope":"run", "id":"r", "replay":true, "stage":"review", "stage_run_id":"review#1"})).await.unwrap();
+        let ack = rx.recv().await.unwrap();
+        apply_watch_frame(&mut app, &mut live, &ack, generation, &mut follow);
+        assert!(!live.runs_view_mut().unwrap().watch_pending);
+        for (stage, invocation) in [("build", "build#1"), ("review", "review#2")] {
+            let frame = json!({"type":"view_log", "id":"r", "generation":generation,
+                "native":{"type":"stream_chunk", "run_id":"r", "stage":stage, "stage_run_id":invocation, "text":"wrong"}, "line":"wrong"});
+            apply_watch_frame(&mut app, &mut live, &frame, generation, &mut follow);
+        }
+        assert!(!live.runs_view_mut().unwrap().stream_contains("wrong"));
+        let frame = json!({"type":"view_log", "id":"r", "generation":generation,
+            "native":{"type":"stream_chunk", "run_id":"r", "stage":"review", "stage_run_id":"review#1", "text":"right"},
+            "line":json!({"type":"stream_chunk", "text":"right"}).to_string()});
+        apply_watch_frame(&mut app, &mut live, &frame, generation, &mut follow);
+        assert!(live.runs_view_mut().unwrap().stream_contains("right"));
+        socket::write_json_line(
+            peer.get_mut(),
+            &json!({"type":"replay_checkpoint", "id":"r", "complete":false}),
+        )
+        .await
+        .unwrap();
+        let mut checkpoint_seen = false;
+        while !checkpoint_seen {
+            let frame = timeout(Duration::from_secs(2), rx.recv())
+                .await
+                .unwrap()
+                .unwrap();
+            checkpoint_seen = frame["native"]["type"] == "replay_checkpoint";
+            assert!(!frame["line"].as_str().unwrap_or("").contains("wrong"));
+            apply_watch_frame(&mut app, &mut live, &frame, generation, &mut follow);
+        }
+        let mut session = BufReader::new(session);
+        assert!(timeout(
+            Duration::from_millis(30),
+            socket::read_json_line(&mut session)
+        )
+        .await
+        .is_err());
+        close_watch_follow(&mut app, &mut live, &mut follow);
+        assert!(!live.runs_view_mut().unwrap().watch_pending);
+        client.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn exact_rejection_never_reads_disk() {
+        use gremlins::executor::socket;
+        use tokio::{
+            io::BufReader,
+            net::UnixStream,
+            time::{timeout, Duration},
+        };
+        let (native, peer) = UnixStream::pair().unwrap();
+        let (client, [_control, session]) = DaemonClient::fake_with_aux_streams(
+            json!({"session_id":"owner", "home_run_id":"home"}),
+            vec![native],
+        );
+        let client = Arc::new(client);
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let execution = super::super::app::LiveExecution {
+            run_id: "r".into(),
+            stage: "review".into(),
+            stage_type: "exec".into(),
+            stage_run_id: "review#1".into(),
+        };
+        let task = tokio::spawn(replay_selection(
+            client.clone(),
+            "r".into(),
+            Some(execution),
+            "review".into(),
+            1,
+            tx,
+        ));
+        let mut peer = BufReader::new(peer);
+        socket::read_json_line(&mut peer).await.unwrap().unwrap();
+        socket::write_json_line(
+            peer.get_mut(),
+            &json!({"type":"error", "message":"unavailable"}),
+        )
+        .await
+        .unwrap();
+        timeout(Duration::from_secs(2), task)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(rx.recv().await.unwrap()["type"], "view_error");
+        let mut session = BufReader::new(session);
+        assert!(timeout(
+            Duration::from_millis(30),
+            socket::read_json_line(&mut session)
+        )
+        .await
+        .is_err());
+        client.shutdown().await;
+    }
+
+    #[test]
+    fn inline_lifecycle_replay_observes_native_only() {
+        use crate::tui::{app::App, apply_watch_frame, screen::LiveArea};
+        let mut app = App::new();
+        app.watch_following = Some("r".into());
+        let mut live = LiveArea::with_backend(ratatui::backend::TestBackend::new(80, 24), 80, 24);
+        live.show_runs();
+        let mut follow = None;
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let boundary = json!({"type":"stage_boundary", "run_id":"r", "stage":"work",
+            "stage_type":"exec", "stage_run_id":"execution", "active":true});
+        send_line(&tx, "r", 7, boundary.clone());
+        apply_watch_frame(&mut app, &mut live, &rx.try_recv().unwrap(), 7, &mut follow);
+        assert!(
+            app.live_executions.is_empty(),
+            "disk must not establish liveness"
+        );
+        for frame in [json!({"type":"watched", "replay":true}), boundary] {
+            send_native(&tx, "r", 7, frame);
+            apply_watch_frame(&mut app, &mut live, &rx.try_recv().unwrap(), 7, &mut follow);
+            assert!(app.live_executions.is_empty());
+        }
+        send_native(
+            &tx,
+            "r",
+            7,
+            json!({"type":"replay_checkpoint", "id":"r", "complete":true}),
+        );
+        apply_watch_frame(&mut app, &mut live, &rx.try_recv().unwrap(), 7, &mut follow);
+        assert_eq!(app.live_executions.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn rejection_reads_bounded_tail_without_replacement_follow() {
+        use gremlins::executor::socket;
+        use tokio::{
+            io::BufReader,
+            net::UnixStream,
+            time::{timeout, Duration},
+        };
+        let (native, peer) = UnixStream::pair().unwrap();
+        let (replacement, replacement_peer) = UnixStream::pair().unwrap();
+        let (client, [_control, session]) = DaemonClient::fake_with_aux_streams(
+            json!({"session_id":"owner", "home_run_id":"home"}),
+            vec![native, replacement],
+        );
+        let client = Arc::new(client);
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let task = tokio::spawn(replay_selection(
+            client.clone(),
+            "r".into(),
+            None,
+            "".into(),
+            7,
+            tx,
+        ));
+        let mut peer = BufReader::new(peer);
+        let request = socket::read_json_line(&mut peer).await.unwrap().unwrap();
+        assert_eq!(request["op"], "watch");
+        socket::write_json_line(
+            peer.get_mut(),
+            &json!({"type":"error", "message":"unsupported"}),
+        )
+        .await
+        .unwrap();
+        let mut session = BufReader::new(session);
+        let request = timeout(Duration::from_secs(2), socket::read_json_line(&mut session))
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        assert_eq!(request["op"], "read_blob");
+        assert_eq!(request["tail"], 500);
+        socket::write_json_line(
+            session.get_mut(),
+            &json!({"type":"blob", "lines":["same", "same"]}),
+        )
+        .await
+        .unwrap();
+        timeout(Duration::from_secs(2), task)
+            .await
+            .unwrap()
+            .unwrap();
+        let mut frames = Vec::new();
+        while let Some(frame) = rx.recv().await {
+            frames.push(frame);
+        }
+        assert!(frames.iter().all(|f| f.get("native").is_none()));
+        assert_eq!(
+            frames
+                .iter()
+                .filter(|f| f["line"].as_str().is_some_and(|s| s.contains("same")))
+                .count(),
+            2
+        );
+        assert_eq!(frames.last().unwrap()["type"], "view_error");
+        assert_eq!(frames.last().unwrap()["force"], true);
+        let mut replacement = BufReader::new(replacement_peer);
+        assert!(timeout(
+            Duration::from_millis(50),
+            socket::read_json_line(&mut replacement)
+        )
+        .await
+        .is_err());
+        client.shutdown().await;
+    }
 
     fn text(text: &str) -> Value {
         json!({"type": "stream_chunk", "text": text})
@@ -368,7 +636,9 @@ mod tests {
             collector.await
         };
         assert!(snapshot.fallback.is_none());
-        assert_eq!(snapshot.values, frames);
+        let mut expected = frames;
+        expected.push(json!({"type":"replay_checkpoint"}));
+        assert_eq!(snapshot.values, expected);
         assert_eq!(rx.recv().await, Some(text("live")));
     }
 
@@ -407,7 +677,14 @@ mod tests {
         tx.send(text("retained")).await.unwrap();
         let snapshot = collect_checkpoint(&mut rx).await;
         assert!(snapshot.fallback.unwrap().contains("history_gap"));
-        assert_eq!(snapshot.values, vec![gap, text("retained")]);
+        assert_eq!(
+            snapshot.values,
+            vec![
+                gap,
+                text("retained"),
+                json!({"type":"replay_checkpoint", "complete":false})
+            ]
+        );
         assert_eq!(rx.recv().await, Some(text("retained")));
     }
 
@@ -423,7 +700,13 @@ mod tests {
         tx.send(text("same")).await.unwrap();
         let snapshot = collect_checkpoint(&mut rx).await;
         assert!(snapshot.fallback.unwrap().contains("incomplete"));
-        assert_eq!(snapshot.values, vec![text("same")]);
+        assert_eq!(
+            snapshot.values,
+            vec![
+                text("same"),
+                json!({"type":"replay_checkpoint", "complete":false})
+            ]
+        );
         assert_eq!(rx.recv().await, Some(text("same")));
         assert_eq!(rx.recv().await, Some(text("same")));
         assert!(fallback_reason(&json!({"type":"replay_checkpoint", "complete":true})).is_none());
@@ -444,24 +727,25 @@ mod tests {
     }
 
     #[test]
-    fn forwarding_is_immediate_and_only_ignores_checkpoint() {
+    fn native_forwarding_preserves_duplicates_and_checkpoint() {
         let (tx, mut rx) = mpsc::unbounded_channel();
         let frames = vec![
             text("same"),
             text("same"),
             json!({"type":"native_future_event", "data":42}),
+            json!({"type":"replay_checkpoint", "complete":true}),
         ];
         for frame in frames {
-            assert!(send_line(&tx, "r", 7, frame.clone()));
+            assert!(send_native(&tx, "r", 7, frame.clone()));
             let wrapped = rx.try_recv().unwrap();
             assert_eq!(wrapped["id"], "r");
             assert_eq!(wrapped["generation"], 7);
+            assert_eq!(wrapped["native"], frame);
             assert_eq!(
                 serde_json::from_str::<Value>(wrapped["line"].as_str().unwrap()).unwrap(),
                 frame
             );
         }
-        assert!(send_line(&tx, "r", 7, json!({"type":"replay_checkpoint"})));
         assert!(rx.try_recv().is_err());
     }
 

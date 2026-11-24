@@ -45,6 +45,26 @@ impl Fixture {
         f
     }
 
+    fn with_watch_socket(count: usize) -> Self {
+        let mut f = Self::with_socket();
+        let path = f.socket.as_ref().unwrap().0.local_addr().unwrap();
+        let streams = (0..count)
+            .map(|_| {
+                let stream =
+                    std::os::unix::net::UnixStream::connect(path.as_pathname().unwrap()).unwrap();
+                stream.set_nonblocking(true).unwrap();
+                UnixStream::from_std(stream).unwrap()
+            })
+            .collect();
+        let (client, peers) = client::DaemonClient::fake_with_aux_streams(
+            json!({"session_id":"test", "home_run_id":"home"}),
+            streams,
+        );
+        f.client = Arc::new(client);
+        f.peers = peers;
+        f
+    }
+
     async fn peer(&self) -> BufReader<UnixStream> {
         let listener = &self.socket.as_ref().unwrap().0;
         let (stream, _) = tokio::time::timeout(Duration::from_secs(2), listener.accept())
@@ -83,6 +103,19 @@ impl Fixture {
         );
     }
 
+    fn home(&mut self) {
+        close_watch_follow(&mut self.app, &mut self.live, &mut self.follow);
+        select_passive_watch(
+            &mut self.app,
+            &mut self.live,
+            &self.client,
+            Target::Home,
+            &mut self.attachment,
+            &self.tx,
+            &mut self.last_stage,
+        );
+    }
+
     fn debug(&mut self, id: &str) {
         debug_entry(
             &mut self.app,
@@ -113,7 +146,6 @@ impl Fixture {
         self.app
             .upsert_run_from_ls(&json!({"id":"run", "stage":"review", "status":"running"}));
         match mode {
-            "control" => self.watch("run"),
             "debugger" => self.debug("run"),
             _ => panic!("unexpected attachment mode: {mode}"),
         }
@@ -158,6 +190,29 @@ impl Fixture {
             })
             .collect::<Vec<_>>()
             .join("\n")
+    }
+
+    async fn watch_socket(
+        &mut self,
+        key: &str,
+        stage: &str,
+        execution: Option<&str>,
+    ) -> BufReader<UnixStream> {
+        self.watch(key);
+        let mut peer = self.peer().await;
+        let mut expected =
+            json!({"op":"watch", "scope":"run", "id":"run", "session_id":"test", "replay":true});
+        if let Some(execution) = execution {
+            expected["stage"] = json!(stage);
+            expected["stage_run_id"] = json!(execution);
+        }
+        assert_eq!(read(&mut peer).await, expected);
+        let selected_stage = execution.map(|_| stage);
+        self.receive(&mut peer, json!({"type":"watched", "scope":"run", "id":"run", "replay":true, "stage":selected_stage, "stage_run_id":execution})).await;
+        assert_eq!(self.app.screen, Screen::Chat);
+        assert!(self.attachment.commands.is_none());
+        assert!(self.attachment.execution.is_none());
+        peer
     }
 
     fn assert_unsent(&self) {
@@ -235,9 +290,55 @@ async fn inline_watch_switch_away_back_rejects_buffered_output_for_same_run() {
 }
 
 #[tokio::test]
-async fn watch_home_preserves_idle_and_streaming_drafts_without_attachment_or_send() {
+async fn exact_inline_watch_renders_identity_free_lag_warning_but_rejects_sibling() {
+    let mut f = Fixture::new();
+    f.app.show_runs();
+    f.live.show_runs();
+    f.app.observe_pipeline_frame(&json!({"type":"stage_boundary", "run_id":"run", "stage":"review", "stage_run_id":"selected", "stage_type":"exec", "active":true}));
+    let execution = f.app.live_executions.values().next().unwrap().clone();
+    f.app.watch_following = Some("run".into());
+    let view = f.live.runs_view_mut().unwrap();
+    view.watch_execution = Some(execution);
+    view.watch_pending = true;
+    for (native, line) in [
+        (
+            json!({"type":"watched", "id":"run", "replay":true, "stage":"review", "stage_run_id":"selected"}),
+            "",
+        ),
+        (
+            json!({"type":"lagged", "skipped":3}),
+            "warning: watch lagged; skipped 3 frames\n",
+        ),
+        (
+            json!({"type":"exec_output", "run_id":"run", "stage":"review", "stage_run_id":"sibling", "text":"foreign-sibling"}),
+            "foreign-sibling\n",
+        ),
+    ] {
+        apply_watch_frame(
+            &mut f.app,
+            &mut f.live,
+            &json!({"type":"view_log", "id":"run", "generation":7, "native":native, "line":line}),
+            7,
+            &mut f.follow,
+        );
+    }
+    let rendered = f.rendered();
+    assert!(
+        rendered.contains("warning: watch lagged; skipped 3 frames"),
+        "{rendered}"
+    );
+    assert!(!rendered.contains("foreign-sibling"), "{rendered}");
+    close_watch_follow(&mut f.app, &mut f.live, &mut f.follow);
+    f.assert_unsent();
+    f.client.shutdown().await;
+}
+
+#[tokio::test]
+async fn home_selection_preserves_idle_and_streaming_drafts_without_attachment_or_send() {
     let mut f = Fixture::new();
     install_home_session(&mut f.app, &f.client).await;
+    f.app
+        .upsert_run_from_ls(&json!({"id":"home", "status":"running"}));
     f.app.replace_input("unsent home draft");
     f.watch("home");
     assert_eq!(f.app.selected_target, Target::Home);
@@ -284,7 +385,7 @@ async fn session_install_uses_authoritative_identity_before_turn_started() {
     f.app.active_request = true;
     f.app
         .upsert_run_from_ls(&json!({"id":"home", "stage":"chat", "status":"running"}));
-    f.watch("home");
+    f.home();
     assert_eq!(f.app.selected_target, Target::Home);
     assert!(f.attachment.task.is_none());
     assert_ne!(attachment_target(&f.app, "test".into(), None), Target::Home);
@@ -365,12 +466,11 @@ async fn unknown_stage_adopts_and_stores_advertised_stage_run_id() {
 #[tokio::test]
 async fn home_debug_without_run_reports_why_it_cannot_attach() {
     let mut f = Fixture::new();
-    select_attachment(
+    select_debugger_attachment(
         &mut f.app,
         &mut f.live,
         &f.client,
         Target::Home,
-        "debugger",
         &mut f.attachment,
         &f.tx,
         &mut f.last_stage,
@@ -382,11 +482,11 @@ async fn home_debug_without_run_reports_why_it_cannot_attach() {
 }
 
 #[tokio::test]
-async fn watch_partial_correction_then_exit_closes_without_execution_control() {
+async fn debug_partial_correction_then_exit_closes_without_execution_control() {
     let mut f = Fixture::with_socket();
     install_home_session(&mut f.app, &f.client).await;
     f.app.replace_input("home draft");
-    let mut peer = f.attach("control", "original").await;
+    let mut peer = f.attach("debugger", "original").await;
     let target = f.app.selected_target.clone();
     assert_eq!(
         f.app.conversation_status(&target),
@@ -460,10 +560,10 @@ async fn watch_partial_correction_then_exit_closes_without_execution_control() {
 }
 
 #[tokio::test]
-async fn rapid_watch_home_watch_rejects_buffered_old_generation_for_same_execution() {
+async fn rapid_debug_home_debug_rejects_buffered_old_generation_for_same_execution() {
     let mut f = Fixture::with_socket();
     install_home_session(&mut f.app, &f.client).await;
-    let mut first = f.attach("control", "same-execution").await;
+    let mut first = f.attach("debugger", "same-execution").await;
     socket::write_json_line(
         first.get_mut(),
         &json!({"type":"stream_chunk", "text":"stale buffered output"}),
@@ -474,8 +574,8 @@ async fn rapid_watch_home_watch_rejects_buffered_old_generation_for_same_executi
         .await
         .unwrap()
         .unwrap();
-    f.watch("home");
-    let mut current = f.attach("control", "same-execution").await;
+    f.home();
+    let mut current = f.attach("debugger", "same-execution").await;
     assert_ne!(buffered.generation, f.attachment.generation);
     assert_eq!(buffered.execution, f.attachment.execution);
     apply_attachment_frame(&mut f.app, &mut f.live, &mut f.attachment, buffered);
@@ -490,6 +590,417 @@ async fn rapid_watch_home_watch_rejects_buffered_old_generation_for_same_executi
     assert_eq!(rendered.matches("current output").count(), 1, "{rendered}");
     f.assert_unsent();
     f.attachment.invalidate(&mut f.app);
+    f.client.shutdown().await;
+}
+
+#[tokio::test]
+async fn watch_enter_exact_invocation_outside_retention_is_passive_and_isolates_drafts() {
+    let mut f = Fixture::with_watch_socket(2);
+    install_home_session(&mut f.app, &f.client).await;
+    f.app.replace_input("home private draft");
+    f.app
+        .upsert_run_from_ls(&json!({"id":"run", "stage":"newer", "status":"running"}));
+    // The row was discovered earlier; its start has since fallen outside retention.
+    f.app.observe_pipeline_frame(&json!({"type":"stage_boundary", "run_id":"run", "stage":"review", "stage_run_id":"old", "stage_type":"exec", "active":true}));
+    let key = f
+        .app
+        .live_executions
+        .iter()
+        .find(|(_, e)| e.stage_run_id == "old")
+        .unwrap()
+        .0
+        .clone();
+    let target = Target::Invocation {
+        run_id: "run".into(),
+        stage: "review".into(),
+        stage_run_id: "old".into(),
+    };
+    let mut peer = f.watch_socket(&key, "review", Some("old")).await;
+    assert_eq!(f.app.selected_target, target);
+    assert!(f.app.input.is_empty());
+    f.receive(
+        &mut peer,
+        json!({"type":"history_gap", "message":"start outside retention"}),
+    )
+    .await;
+    // No start frame or nonce is needed for any identified output channel.
+    for (kind, text, stderr) in [
+        ("exec_output", "old-stdout\n", false),
+        ("exec_output", "old-stderr\n", true),
+        ("stream_chunk", "old-response\n", false),
+        ("reasoning_chunk", "old-reasoning\n", false),
+        ("tool_output_chunk", "old-tool\n", false),
+    ] {
+        for (run, stage, execution, body) in [
+            ("run", "review", "sibling", "foreign-sibling\n"),
+            ("run", "newer", "old", "foreign-stage\n"),
+            ("other", "review", "old", "foreign-run\n"),
+            ("run", "review", "old", text),
+        ] {
+            f.receive(&mut peer, json!({"type":kind, "run_id":run, "correlation_stage":stage, "stage_run_id":execution, "id":"tool-id", "call":"Bash", "text":body, "is_stderr":stderr})).await;
+        }
+    }
+    f.receive(
+        &mut peer,
+        json!({"type":"replay_checkpoint", "id":"run", "complete":false}),
+    )
+    .await;
+    let rendered = f.rendered();
+    for text in [
+        "old-stdout",
+        "old-stderr",
+        "old-response",
+        "old-reasoning",
+        "old-tool",
+    ] {
+        assert_eq!(rendered.matches(text).count(), 1, "{rendered}");
+    }
+    assert!(!rendered.contains("foreign-"), "{rendered}");
+    assert!(rendered.contains("start outside retention"), "{rendered}");
+    assert_eq!(f.app.active_runs["run"].stage, "newer");
+    assert_eq!(
+        f.app.conversation_status(&target),
+        ConversationStatus::ReadOnly
+    );
+    let mut input = input_buffer::InputBuffer::new();
+    input.replace_all("must not become correction");
+    assert!(!matches!(
+        f.app.conversations.submit(&target, &input, false),
+        Submission::Correction { .. }
+    ));
+    for command in ["/continue", "/quit", "/bail stop"] {
+        assert!(f.control(command));
+    }
+    assert!(
+        tokio::time::timeout(Duration::from_millis(30), socket::read_json_line(&mut peer))
+            .await
+            .is_err()
+    );
+    f.app.replace_input("invocation private draft");
+    // Capture an old-generation frame, then leave and return to the same invocation.
+    socket::write_json_line(peer.get_mut(), &json!({"type":"stream_chunk", "run_id":"run", "stage":"review", "stage_run_id":"old", "text":"stale-watch-output"})).await.unwrap();
+    let stale = tokio::time::timeout(Duration::from_secs(2), f.rx.recv())
+        .await
+        .unwrap()
+        .unwrap();
+    f.home();
+    assert_eq!(f.app.selected_target, Target::Home);
+    assert_eq!(f.app.input.text(), "home private draft");
+    f.assert_closed(&mut peer).await;
+    let mut current = f.watch_socket(&key, "review", Some("old")).await;
+    assert_eq!(f.app.input.text(), "invocation private draft");
+    apply_attachment_frame(&mut f.app, &mut f.live, &mut f.attachment, stale);
+    assert!(!f.rendered().contains("stale-watch-output"));
+    assert!(f.control("/exit"));
+    assert_eq!(f.app.input.text(), "home private draft");
+    f.assert_closed(&mut current).await;
+    f.client.shutdown().await;
+}
+
+#[tokio::test]
+async fn passive_replay_survives_closing_absent_inline_follow_until_incomplete_checkpoint() {
+    let mut f = Fixture::with_watch_socket(1);
+    f.app
+        .upsert_run_from_ls(&json!({"id":"run", "stage":"review", "status":"running"}));
+    let mut peer = f.watch_socket("run", "review", None).await;
+    assert!(f.app.watch_following.is_none());
+    assert!(f.follow.is_none());
+    // Ctrl+W from Chat closes only the inline pane before showing the table.
+    close_watch_follow(&mut f.app, &mut f.live, &mut f.follow);
+    f.app.show_runs();
+    f.live.show_runs();
+    f.receive(&mut peer, json!({"type":"stage_boundary", "run_id":"run", "stage":"review", "stage_run_id":"stale", "stage_type":"exec", "active":true})).await;
+    assert!(f.app.live_executions.is_empty());
+    assert_eq!(
+        f.app.watch_target(),
+        Some(Target::StageExecution {
+            run_id: "run".into(),
+            stage: String::new()
+        })
+    );
+    f.receive(
+        &mut peer,
+        json!({"type":"replay_checkpoint", "id":"run", "complete":false}),
+    )
+    .await;
+    assert!(f.app.live_executions.is_empty());
+    assert_eq!(
+        f.app.watch_target(),
+        Some(Target::StageExecution {
+            run_id: "run".into(),
+            stage: String::new()
+        })
+    );
+    assert!(f.attachment.task.is_some());
+    assert!(f.attachment.commands.is_none());
+    f.attachment.invalidate(&mut f.app);
+    f.assert_closed(&mut peer).await;
+    f.client.shutdown().await;
+}
+
+#[tokio::test]
+async fn opening_inline_follow_preserves_passive_replay_until_incomplete_checkpoint() {
+    let mut f = Fixture::with_watch_socket(2);
+    f.app
+        .upsert_run_from_ls(&json!({"id":"run", "stage":"review", "status":"running"}));
+    let mut peer = f.watch_socket("run", "review", None).await;
+    close_watch_follow(&mut f.app, &mut f.live, &mut f.follow);
+    f.app.show_runs();
+    f.live.show_runs();
+
+    let (tx, mut rx) = mpsc::unbounded_channel();
+    let mut generation = 0;
+    start_watch_follow(
+        &mut f.app,
+        &mut f.live,
+        &f.client,
+        "run".into(),
+        &tx,
+        &mut f.follow,
+        &mut generation,
+    );
+    let mut inline = f.peer().await;
+    assert_eq!(read(&mut inline).await["op"], "watch");
+    // The passive subscription's retained start arrives before the inline ack.
+    f.receive(&mut peer, json!({"type":"stage_boundary", "run_id":"run", "stage":"review", "stage_run_id":"stale", "stage_type":"exec", "active":true})).await;
+    assert!(f.app.live_executions.is_empty());
+
+    // Completing a different subscription must not finish the passive replay.
+    socket::write_json_line(inline.get_mut(), &json!({"type":"watched", "scope":"run", "id":"run", "replay":true, "stage":null, "stage_run_id":null})).await.unwrap();
+    socket::write_json_line(
+        inline.get_mut(),
+        &json!({"type":"replay_checkpoint", "id":"run", "complete":true}),
+    )
+    .await
+    .unwrap();
+    loop {
+        let frame = tokio::time::timeout(Duration::from_secs(2), rx.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        let checkpoint = frame["native"]["type"] == "replay_checkpoint";
+        apply_watch_frame(&mut f.app, &mut f.live, &frame, generation, &mut f.follow);
+        if checkpoint {
+            break;
+        }
+    }
+    f.receive(&mut peer, json!({"type":"stage_boundary", "run_id":"run", "stage":"review", "stage_run_id":"also-stale", "stage_type":"exec", "active":true})).await;
+    assert!(f.app.live_executions.is_empty());
+    f.receive(
+        &mut peer,
+        json!({"type":"replay_checkpoint", "id":"run", "complete":false}),
+    )
+    .await;
+    assert!(f.app.live_executions.is_empty());
+    assert_eq!(f.app.watch_ids(), vec!["run"]);
+    assert_eq!(
+        f.app.watch_target(),
+        Some(Target::StageExecution {
+            run_id: "run".into(),
+            stage: String::new(),
+        })
+    );
+    assert!(f.attachment.task.is_some());
+    assert!(f.attachment.commands.is_none());
+    close_watch_follow(&mut f.app, &mut f.live, &mut f.follow);
+    f.attachment.invalidate(&mut f.app);
+    f.assert_closed(&mut peer).await;
+    f.client.shutdown().await;
+}
+
+#[tokio::test]
+async fn attach_authoritative_home_preserves_idle_and_streaming_drafts_without_socket() {
+    let mut f = Fixture::with_socket();
+    install_home_session(&mut f.app, &f.client).await;
+    assert_eq!(f.app.home_run_id.as_deref(), Some("home"));
+    for streaming in [false, true] {
+        f.app.active_request = streaming;
+        if streaming {
+            f.live.submit_prompt("question".into());
+            f.live.push_response("home streaming response");
+        }
+        let draft = if streaming {
+            "streaming draft"
+        } else {
+            "idle draft"
+        };
+        f.app.replace_input(draft);
+        for stage in [None, Some("chat".into())] {
+            attach_stage_entry(
+                &mut f.app,
+                &mut f.live,
+                &f.client,
+                "home".into(),
+                stage,
+                &mut f.attachment,
+                &f.tx,
+                &mut f.last_stage,
+            );
+            assert_eq!(f.app.selected_target, Target::Home);
+            assert_eq!(f.app.screen, Screen::Chat);
+            assert_eq!(f.app.input.text(), draft);
+            assert_eq!(f.app.active_request, streaming);
+            if streaming {
+                assert_eq!(f.live.response_text(), "home streaming response");
+            }
+            assert!(f.attachment.target.is_none());
+            assert!(f.attachment.task.is_none());
+            assert!(f.attachment.commands.is_none());
+            f.assert_unsent();
+        }
+    }
+    assert!(
+        tokio::time::timeout(
+            Duration::from_millis(50),
+            f.socket.as_ref().unwrap().0.accept()
+        )
+        .await
+        .is_err(),
+        "home attach must not open an auxiliary socket"
+    );
+    f.client.shutdown().await;
+}
+
+#[tokio::test]
+async fn run_only_attach_command_does_not_infer_current_stage() {
+    let mut f = Fixture::with_watch_socket(1);
+    f.app
+        .upsert_run_from_ls(&json!({"id":"run", "stage":"review", "status":"running"}));
+    let Some(commands::CommandResult::AttachStage { run_id, stage }) =
+        commands::dispatch("/attach run")
+    else {
+        panic!("expected attach command");
+    };
+    attach_stage_entry(
+        &mut f.app,
+        &mut f.live,
+        &f.client,
+        run_id,
+        stage,
+        &mut f.attachment,
+        &f.tx,
+        &mut f.last_stage,
+    );
+    assert_eq!(
+        f.app.selected_target,
+        Target::StageExecution {
+            run_id: "run".into(),
+            stage: String::new(),
+        }
+    );
+    let mut peer = f.peer().await;
+    assert_eq!(
+        read(&mut peer).await,
+        json!({"op":"watch", "scope":"run", "id":"run", "session_id":"test", "replay":true})
+    );
+    f.receive(&mut peer, json!({"type":"watched", "scope":"run", "id":"run", "replay":true, "stage":null, "stage_run_id":null})).await;
+    assert!(f.attachment.commands.is_none());
+    f.attachment.invalidate(&mut f.app);
+    f.assert_closed(&mut peer).await;
+    f.client.shutdown().await;
+}
+
+#[tokio::test]
+async fn watch_run_row_routes_interleaved_sibling_invocations_once() {
+    let mut f = Fixture::with_watch_socket(1);
+    f.app
+        .upsert_run_from_ls(&json!({"id":"run", "stage":"review", "status":"running"}));
+    let mut peer = f.watch_socket("run", "review", None).await;
+    for (kind, label) in [
+        ("exec_output", "stdout"),
+        ("exec_output", "stderr"),
+        ("stream_chunk", "response"),
+        ("reasoning_chunk", "reasoning"),
+        ("tool_output_chunk", "tool"),
+    ] {
+        for execution in ["a", "b"] {
+            f.receive(&mut peer, json!({"type":kind, "run_id":"run", "stage":"review", "stage_run_id":execution, "id":format!("tool-{execution}"), "call":"Bash", "text":format!("{execution}-{label}\n"), "is_stderr":label == "stderr"})).await;
+        }
+    }
+    let rendered = f.rendered();
+    for execution in ["a", "b"] {
+        for label in ["stdout", "stderr", "response", "reasoning", "tool"] {
+            assert_eq!(
+                rendered.matches(&format!("{execution}-{label}")).count(),
+                1,
+                "{rendered}"
+            );
+        }
+        let target = Target::Invocation {
+            run_id: "run".into(),
+            stage: "review".into(),
+            stage_run_id: execution.into(),
+        };
+        // Render each parked target on a fresh terminal: previous screen cells and
+        // terminal scrollback are not part of that invocation's transcript.
+        let mut isolated_live = LiveArea::with_backend(TestBackend::new(80, 24), 80, 24);
+        f.live.with_target_transcript(&target, |live, reasoning| {
+            isolated_live.with_target_transcript(&Target::Home, |transcript, band| {
+                std::mem::swap(transcript, live);
+                std::mem::swap(band, reasoning);
+            });
+        });
+        isolated_live.compose(&f.app).unwrap();
+        let isolated = isolated_live
+            .backend()
+            .buffer()
+            .content
+            .iter()
+            .map(|cell| cell.symbol())
+            .collect::<String>();
+        for label in ["stdout", "stderr", "response", "reasoning", "tool"] {
+            assert_eq!(
+                isolated.matches(&format!("{execution}-{label}")).count(),
+                1,
+                "{isolated}"
+            );
+        }
+        let sibling = if execution == "a" { "b" } else { "a" };
+        assert!(!isolated.contains(&format!("{sibling}-")), "{isolated}");
+        assert_eq!(
+            f.app.conversation_status(&target),
+            ConversationStatus::ReadOnly
+        );
+    }
+    f.attachment.invalidate(&mut f.app);
+    f.assert_closed(&mut peer).await;
+    f.client.shutdown().await;
+}
+
+#[tokio::test]
+async fn watch_rejection_closes_auxiliary_socket_without_attach_or_control_fallback() {
+    let mut f = Fixture::with_watch_socket(1);
+    f.app
+        .upsert_run_from_ls(&json!({"id":"run", "stage":"review", "status":"running"}));
+    f.watch("run");
+    let mut peer = f.peer().await;
+    assert_eq!(
+        read(&mut peer).await,
+        json!({"op":"watch", "scope":"run", "id":"run", "session_id":"test", "replay":true})
+    );
+    f.receive(
+        &mut peer,
+        json!({"type":"error", "message":"watch rejected"}),
+    )
+    .await;
+    assert!(f.rendered().contains("watch rejected"));
+    assert!(f.attachment.commands.is_none());
+    assert!(f.attachment.execution.is_none());
+    for command in ["/continue", "/quit", "/bail stop"] {
+        assert!(f.control(command));
+    }
+    assert!(f.control("/exit"));
+    f.assert_closed(&mut peer).await;
+    assert!(
+        tokio::time::timeout(
+            Duration::from_millis(50),
+            f.socket.as_ref().unwrap().0.accept()
+        )
+        .await
+        .is_err(),
+        "watch rejection must not open a fallback attachment"
+    );
+    f.assert_unsent();
     f.client.shutdown().await;
 }
 
@@ -564,9 +1075,9 @@ async fn debug_leaving_before_ready_ignores_buffered_late_ready() {
 }
 
 #[tokio::test]
-async fn watch_and_debug_use_aux_modes_identity_controls_and_detach() {
+async fn debug_uses_aux_mode_identity_controls_and_detach() {
     let mut f = Fixture::with_socket();
-    for mode in ["control", "debugger"] {
+    for mode in ["debugger"] {
         let mut peer = f.attach(mode, "exec").await;
         let execution = f.attachment.execution.as_ref().unwrap();
         assert_eq!(execution.run_id, "run");

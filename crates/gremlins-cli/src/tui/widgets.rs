@@ -201,6 +201,8 @@ pub struct TranscriptWidget {
     committed_unmatched: HashMap<String, usize>,
     /// Raw response accumulator (for reconciliation).
     response_accumulator: String,
+    /// Render execution output as literal line records rather than Markdown.
+    response_is_literal: bool,
     /// FIFO index where the current turn starts (the pinned boundary).
     turn_start: Option<usize>,
     /// FIFO index where the response region starts.
@@ -246,6 +248,7 @@ impl TranscriptWidget {
             pending_tool_calls: Vec::new(),
             committed_unmatched: HashMap::new(),
             response_accumulator: String::new(),
+            response_is_literal: false,
             turn_start: None,
             response_start: None,
             prompt_end: 0,
@@ -759,6 +762,7 @@ impl TranscriptWidget {
         self.separator_index = sep_index;
         self.response_start = None;
         self.response_accumulator.clear();
+        self.response_is_literal = false;
         self.response_dirty = false;
         self.response_drained_lines = 0;
     }
@@ -774,6 +778,14 @@ impl TranscriptWidget {
         // accumulator, but the lines already committed to scrollback stay
         // committed and must not be emitted again.
         self.response_dirty = true;
+    }
+
+    /// Append one execution-output line record, restoring its newline.
+    /// Empty records remain visible blank rows; stderr retains its buffer prefix.
+    pub fn push_exec_output_record(&mut self, text: &str, is_stderr: bool) {
+        self.response_is_literal = true;
+        let prefix = if is_stderr { "stderr: " } else { "" };
+        self.push_response(&format!("{prefix}{text}\n"));
     }
 
     /// Replace the entire response text.
@@ -888,6 +900,7 @@ impl TranscriptWidget {
         self.separator_index = None;
         self.response_dirty = false;
         self.response_accumulator.clear();
+        self.response_is_literal = false;
         self.response_drained_lines = 0;
         self.sealed_response_len = 0;
     }
@@ -916,6 +929,7 @@ impl TranscriptWidget {
         self.separator_index = None;
         self.response_dirty = false;
         self.response_accumulator.clear();
+        self.response_is_literal = false;
         self.response_drained_lines = 0;
         self.sealed_response_len = 0;
     }
@@ -931,6 +945,7 @@ impl TranscriptWidget {
         self.separator_index = None;
         self.response_dirty = false;
         self.response_accumulator.clear();
+        self.response_is_literal = false;
         self.response_drained_lines = 0;
     }
 
@@ -946,11 +961,21 @@ impl TranscriptWidget {
         // Re-render the full accumulator so appended chunks merge into the
         // retained response instead of replacing it, but skip the leading
         // lines already committed to scrollback by overflow.
-        let lines = markdown::render(
-            &self.response_accumulator,
-            Style::default().fg(DEFAULT_THEME.text),
-            self.last_width.saturating_sub(1),
-        );
+        let style = Style::default().fg(DEFAULT_THEME.text);
+        let lines = if self.response_is_literal {
+            // Every restored newline terminates a record, not an extra row.
+            // Unlike `lines()`, splitting on '\n' also preserves literal CRs.
+            self.response_accumulator
+                .split_terminator('\n')
+                .map(|record| Line::from(Span::styled(record.to_owned(), style)))
+                .collect()
+        } else {
+            markdown::render(
+                &self.response_accumulator,
+                style,
+                self.last_width.saturating_sub(1),
+            )
+        };
         for line in lines.into_iter().skip(self.response_drained_lines) {
             self.scrollable.push(line);
         }
@@ -2813,6 +2838,73 @@ impl LiveAreaWidget for InfoBarWidget {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn exec_output_records_render_literal_rows_including_empty_records() {
+        let mut transcript = TranscriptWidget::new();
+        for (text, stderr) in [
+            ("", false),
+            ("# heading", false),
+            ("**literal**", false),
+            ("", false),
+            ("", false),
+            ("failure", true),
+            ("", true),
+            ("", false),
+        ] {
+            transcript.push_exec_output_record(text, stderr);
+            transcript.rebuild_response();
+        }
+        assert_eq!(
+            transcript.response_accumulator(),
+            "\n# heading\n**literal**\n\n\nstderr: failure\nstderr: \n\n"
+        );
+        let rows: Vec<_> = transcript
+            .scrollable
+            .visible_lines()
+            .iter()
+            .map(ToString::to_string)
+            .collect();
+        assert_eq!(
+            rows,
+            [
+                "",
+                "# heading",
+                "**literal**",
+                "",
+                "",
+                "stderr: failure",
+                "stderr: ",
+                ""
+            ]
+        );
+    }
+
+    #[test]
+    fn exec_output_rendering_mode_resets_between_turns() {
+        for reset in [
+            TranscriptWidget::finish_turn,
+            TranscriptWidget::clear_current_turn,
+            TranscriptWidget::clear_scrollable,
+            |widget: &mut TranscriptWidget| widget.submit_prompt("next".to_owned()),
+        ] {
+            let mut transcript = TranscriptWidget::new();
+            transcript.submit_prompt("exec".to_owned());
+            transcript.push_exec_output_record("**literal**", false);
+            reset(&mut transcript);
+            transcript.push_response("**markdown**");
+            transcript.rebuild_response();
+            assert_eq!(
+                transcript
+                    .scrollable
+                    .visible_lines()
+                    .last()
+                    .unwrap()
+                    .to_string(),
+                "markdown"
+            );
+        }
+    }
 
     #[test]
     fn reconcile_response_fills_dropped_suffix_without_touching_prior_turns() {

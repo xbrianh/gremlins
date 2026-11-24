@@ -15,7 +15,7 @@
 //! visible frame. The closure paints the visible tail into `curr` —
 //! the overflow content was already committed separately.
 
-use std::collections::VecDeque;
+use std::collections::{HashMap, VecDeque};
 use std::io::{self, Stdout};
 
 use crossterm::{
@@ -45,6 +45,7 @@ use crate::tui::{REASONING_COMPLETED_TITLE, REASONING_PLACEHOLDER_TITLE};
 /// input and info bars before the first layout pass runs. The real value is
 /// tracked each frame from the live widget stack.
 const INITIAL_RESERVED_ROWS: u16 = 2;
+const ENDED_INVOCATIONS_PER_SELECTOR: usize = 64;
 
 /// A fresh reasoning band: the shared reasoning stream configured with the
 /// transcript's one-cell left inset so its title and body align with the
@@ -140,6 +141,11 @@ pub struct LiveArea<B: Backend = CrosstermBackend<Stdout>> {
     target_states: std::collections::HashMap<crate::tui::app::Target, RenderTargetState>,
     /// The target whose widgets are currently loaded into `scene`.
     active_target: crate::tui::app::Target,
+    /// Aggregate selectors own independent invocation widgets, in first-seen order.
+    invocation_states: std::collections::HashMap<
+        crate::tui::app::Target,
+        Vec<(crate::tui::app::Target, RenderTargetState)>,
+    >,
 }
 
 impl<B: Backend> LiveArea<B> {
@@ -164,6 +170,7 @@ impl<B: Backend> LiveArea<B> {
             reserved_rows: INITIAL_RESERVED_ROWS,
             target_states,
             active_target: crate::tui::app::Target::Home,
+            invocation_states: Default::default(),
         }
     }
 
@@ -342,6 +349,7 @@ impl<B: Backend> LiveArea<B> {
     /// full-screen view body; chat widgets are occluded and no overflow is
     /// committed.
     pub fn compose(&mut self, app: &App) -> io::Result<()> {
+        self.prune_invocation_states(app);
         let chat = app.screen.is_chat();
 
         // When returning from a full-screen view, clear the visible frame
@@ -363,6 +371,41 @@ impl<B: Backend> LiveArea<B> {
         };
         self.scene = scene;
         result
+    }
+
+    fn prune_invocation_states(&mut self, app: &App) {
+        if self
+            .invocation_states
+            .values()
+            .all(|states| states.len() <= ENDED_INVOCATIONS_PER_SELECTOR)
+        {
+            return;
+        }
+        let live: std::collections::HashSet<_> = app
+            .live_executions
+            .values()
+            .map(|execution| execution.target())
+            .collect();
+        for states in self.invocation_states.values_mut() {
+            let protected = |target: &crate::tui::app::Target, state: &RenderTargetState| {
+                live.contains(target) || state.transcript.has_current_turn()
+            };
+            let ended = states
+                .iter()
+                .filter(|(target, state)| !protected(target, state))
+                .count();
+            let mut excess = ended.saturating_sub(ENDED_INVOCATIONS_PER_SELECTOR);
+            // Drop oldest aggregate history only; exact target state and drafts
+            // are independent and must remain available when revisiting a target.
+            states.retain(|(target, state)| {
+                if excess > 0 && !protected(target, state) {
+                    excess -= 1;
+                    false
+                } else {
+                    true
+                }
+            });
+        }
     }
 
     fn render_context<'a>(&self, app: &'a App, gremlin_count: &'a str) -> RenderContext<'a> {
@@ -399,31 +442,43 @@ impl<B: Backend> LiveArea<B> {
         let gremlin_count = app.gremlin_count_str();
         let ctx = self.render_context(app, &gremlin_count);
         let width = self.cols;
-        let mut widgets: Vec<&mut dyn LiveAreaWidget> = vec![
-            &mut scene.transcript,
-            &mut scene.reasoning,
-            &mut scene.input_bar,
-            &mut scene.info_bar,
-        ];
+        let mut invocations = self
+            .invocation_states
+            .remove(&self.active_target)
+            .unwrap_or_default();
+        let mut widgets: Vec<&mut dyn LiveAreaWidget> =
+            vec![&mut scene.transcript, &mut scene.reasoning];
+        for (_, state) in &mut invocations {
+            widgets.push(&mut state.transcript);
+            widgets.push(&mut state.reasoning);
+        }
+        widgets.push(&mut scene.input_bar);
+        widgets.push(&mut scene.info_bar);
         let layout = layout_widgets(widgets.as_mut_slice(), width, self.rows, &ctx);
         self.reserved_rows = layout
             .heights
-            .get(2)
+            .get(widgets.len() - 2)
             .copied()
             .unwrap_or(0)
-            .saturating_add(layout.heights.get(3).copied().unwrap_or(0));
-        self.finish_compose(
+            .saturating_add(layout.heights.last().copied().unwrap_or(0));
+        let result = self.finish_compose(
             widgets.as_mut_slice(),
             &layout.heights,
             layout.overflow,
             &ctx,
             true,
-        )
+        );
+        self.invocation_states
+            .insert(self.active_target.clone(), invocations);
+        result
     }
 
     /// Compose the active full-screen view body. The chat scene is occluded
     /// and no overflow is committed.
     fn compose_screen_view(&mut self, scene: &mut Scene, app: &App) -> io::Result<()> {
+        if let Some(ScreenView::Runs(view)) = scene.screen_view.as_mut() {
+            view.snapshot_watch_rows(app);
+        }
         let gremlin_count = app.gremlin_count_str();
         let ctx = self.render_context(app, &gremlin_count);
         let width = self.cols;
@@ -501,7 +556,6 @@ impl<B: Backend> LiveArea<B> {
             app.select_composer(target);
             self.copy_app_state_to(app);
             self.reset_input_scroll();
-            self.invalidate();
         }
     }
 
@@ -535,6 +589,7 @@ impl<B: Backend> LiveArea<B> {
         }
 
         self.active_target = new_target;
+        self.last_screen_was_chat = false;
     }
 
     // ── Widget accessors ─────────────────────────────────────────
@@ -617,6 +672,28 @@ impl<B: Backend> LiveArea<B> {
         }
     }
 
+    /// Aggregate views reconcile each invocation independently, including tool IDs,
+    /// response completion, reasoning, and resets.
+    pub fn with_invocation_transcript(
+        &mut self,
+        target: &crate::tui::app::Target,
+        invocation: &crate::tui::app::Target,
+        f: impl FnOnce(&mut TranscriptWidget, &mut StreamingWidget),
+    ) {
+        if target == invocation {
+            self.with_target_transcript(target, f);
+            return;
+        }
+        let states = self.invocation_states.entry(target.clone()).or_default();
+        let index = states.iter().position(|(key, _)| key == invocation);
+        let index = index.unwrap_or_else(|| {
+            states.push((invocation.clone(), RenderTargetState::new()));
+            states.len() - 1
+        });
+        let state = &mut states[index].1;
+        f(&mut state.transcript, &mut state.reasoning);
+    }
+
     /// Whether the given target's transcript has an active (pinned) turn.
     ///
     /// When `target` is the active target the scene is checked directly;
@@ -628,22 +705,6 @@ impl<B: Backend> LiveArea<B> {
             state.transcript.has_current_turn()
         } else {
             false
-        }
-    }
-
-    /// Reset a target's render state for a later execution of the same stage.
-    pub fn reset_target_state(&mut self, target: &crate::tui::app::Target) {
-        if *target == self.active_target {
-            self.scene.transcript.clear_scrollable();
-            let fresh = new_reasoning_band();
-            self.scene.reasoning = fresh;
-        } else {
-            if let Some(state) = self.target_states.get_mut(target) {
-                state.transcript.clear_scrollable();
-                state.reasoning = new_reasoning_band();
-
-                state.active_request = false;
-            }
         }
     }
 
@@ -665,7 +726,7 @@ impl<B: Backend> LiveArea<B> {
         &mut self.scene.input_bar
     }
 
-    fn runs_view_mut(&mut self) -> Option<&mut RunsView> {
+    pub(crate) fn runs_view_mut(&mut self) -> Option<&mut RunsView> {
         match self.scene.screen_view.as_mut() {
             Some(ScreenView::Runs(w)) => Some(w),
             _ => None,
@@ -1012,7 +1073,35 @@ const WATCH_STREAM_MAX_LINES: usize = 2_000;
 /// of `HashMap` iteration order. When `watch_following` is set, the view owns
 /// an internal vertical split and paints a tail-anchored live-log pane for
 /// the followed id.
+struct InvocationRow {
+    stage: String,
+    stage_type: String,
+    stage_run_id: String,
+}
+
+type StreamInvocation = (String, String, String);
+
+fn stream_invocation(value: &serde_json::Value) -> Option<StreamInvocation> {
+    let field = |key: &str| value[key].as_str().filter(|s| !s.is_empty());
+    Some((
+        field("run_id")
+            .or_else(|| field("id"))
+            .unwrap_or("")
+            .to_owned(),
+        field("correlation_stage")
+            .or_else(|| field("stage"))
+            .unwrap_or("")
+            .to_owned(),
+        field("stage_run_id")?.to_owned(),
+    ))
+}
+
 pub struct RunsView {
+    pub(crate) watch_pending: bool,
+    pub(crate) watch_execution: Option<super::app::LiveExecution>,
+    watch_rows: Option<Vec<(String, Option<InvocationRow>)>>,
+    watch_run_order: HashMap<String, bool>,
+    watch_invocations: HashMap<String, super::app::LiveExecution>,
     stream_lines: VecDeque<String>,
     /// Kind of the most recent logical text/reasoning line, if any.
     stream_tail_kind: Option<String>,
@@ -1022,6 +1111,8 @@ pub struct RunsView {
     /// Agent response text accumulated since the last `stream_reset`; used to
     /// avoid re-displaying `Done.text` that was already streamed.
     streamed_agent_text: String,
+    stream_invocation: Option<StreamInvocation>,
+    invocation_agent_text: HashMap<Option<StreamInvocation>, String>,
 }
 
 /// Truncate a string to at most `max_width` terminal columns.
@@ -1242,12 +1333,54 @@ impl ColumnWidths {
 }
 
 impl RunsView {
+    fn snapshot_watch_rows(&mut self, app: &App) {
+        let unchanged = self.watch_rows.is_some()
+            && self.watch_run_order.len() == app.active_runs.len()
+            && app
+                .active_runs
+                .iter()
+                .all(|(id, run)| self.watch_run_order.get(id) == Some(&(run.status == "running")))
+            && self.watch_invocations == app.live_executions;
+        if unchanged {
+            return;
+        }
+        self.watch_run_order = app
+            .active_runs
+            .iter()
+            .map(|(id, run)| (id.clone(), run.status == "running"))
+            .collect();
+        self.watch_invocations.clone_from(&app.live_executions);
+        self.watch_rows = Some(
+            app.watch_ids()
+                .into_iter()
+                .map(|key| {
+                    let invocation = app
+                        .live_executions
+                        .get(&key)
+                        .map(|execution| InvocationRow {
+                            stage: execution.stage.clone(),
+                            stage_type: execution.stage_type.clone(),
+                            stage_run_id: execution.stage_run_id.clone(),
+                        });
+                    (key, invocation)
+                })
+                .collect(),
+        );
+    }
+
     pub fn new() -> Self {
         Self {
+            watch_pending: false,
+            watch_execution: None,
+            watch_rows: None,
+            watch_run_order: HashMap::new(),
+            watch_invocations: HashMap::new(),
             stream_lines: VecDeque::new(),
             stream_tail_kind: None,
             stream_tail_open: false,
             streamed_agent_text: String::new(),
+            stream_invocation: None,
+            invocation_agent_text: HashMap::new(),
         }
     }
 
@@ -1259,6 +1392,7 @@ impl RunsView {
     pub fn push_stream_line(&mut self, line: String) {
         if let Ok(obj) = serde_json::from_str::<serde_json::Value>(&line) {
             let kind = classify_stream_value(&obj);
+            self.select_stream_invocation(stream_invocation(&obj));
 
             match kind.as_deref() {
                 Some("text") => {
@@ -1321,12 +1455,39 @@ impl RunsView {
         self.trim_stream_lines();
     }
 
+    fn select_stream_invocation(&mut self, invocation: Option<StreamInvocation>) {
+        if self.stream_invocation == invocation {
+            return;
+        }
+        self.invocation_agent_text.insert(
+            self.stream_invocation.take(),
+            std::mem::take(&mut self.streamed_agent_text),
+        );
+        self.streamed_agent_text = self
+            .invocation_agent_text
+            .remove(&invocation)
+            .unwrap_or_default();
+        self.stream_invocation = invocation;
+        // Only adjacent fragments may coalesce; never append across a sibling.
+        self.stream_tail_kind = None;
+        self.stream_tail_open = false;
+    }
+
     /// Clear the inline stream pane's log buffer.
+    #[cfg(test)]
+    pub(crate) fn stream_contains(&self, text: &str) -> bool {
+        self.stream_lines.iter().any(|line| line.contains(text))
+    }
+
     pub fn clear_stream(&mut self) {
+        self.watch_pending = false;
+        self.watch_execution = None;
         self.stream_lines.clear();
         self.stream_tail_kind = None;
         self.stream_tail_open = false;
         self.streamed_agent_text.clear();
+        self.stream_invocation = None;
+        self.invocation_agent_text.clear();
     }
 
     /// Emit text lines for a given kind, optionally coalescing adjacent
@@ -1541,6 +1702,25 @@ impl RunsView {
         Line::from(Span::styled(text, style))
     }
 
+    fn invocation_row(invocation: &InvocationRow, selected: bool) -> Line<'static> {
+        let style = if selected {
+            Style::default()
+                .fg(DEFAULT_THEME.midnight)
+                .bg(DEFAULT_THEME.cursor)
+                .add_modifier(Modifier::BOLD)
+        } else {
+            Style::default().fg(DEFAULT_THEME.text)
+        };
+        let marker = if selected { "▶" } else { " " };
+        Line::from(Span::styled(
+            format!(
+                "{marker}   ↳ {} [{}] {}",
+                invocation.stage, invocation.stage_type, invocation.stage_run_id
+            ),
+            style,
+        ))
+    }
+
     fn render_table(&self, area: Rect, buf: &mut Buffer, ctx: &RenderContext) {
         for y in 0..area.height {
             for x in 0..area.width {
@@ -1626,7 +1806,14 @@ impl RunsView {
             area.width,
             body_rows,
         );
-        if runs.is_empty() {
+        let rows: Vec<(&str, Option<&InvocationRow>)> = match &self.watch_rows {
+            Some(rows) => rows
+                .iter()
+                .map(|(key, row)| (key.as_str(), row.as_ref()))
+                .collect(),
+            None => runs.iter().map(|(id, _)| (id.as_str(), None)).collect(),
+        };
+        if rows.is_empty() {
             Paragraph::new(vec![Line::from(Span::styled(
                 "  no gremlins",
                 Style::default().fg(DEFAULT_THEME.subtle),
@@ -1639,17 +1826,19 @@ impl RunsView {
             // table body.
             let selected_idx = ctx
                 .watch_selection
-                .and_then(|selected| runs.iter().position(|(id, _)| (*id).as_str() == selected))
+                .and_then(|selected| rows.iter().position(|(id, _)| *id == selected))
                 .unwrap_or(0);
-            let run_lines: Vec<Line<'static>> = runs
+            let run_lines: Vec<Line<'static>> = rows
                 .iter()
-                .map(|(id, run)| {
-                    Self::run_row(
-                        (*id).as_str(),
-                        run,
-                        ctx.watch_selection == Some((*id).as_str()),
-                        &widths,
-                    )
+                .map(|(id, invocation)| {
+                    let selected = ctx.watch_selection == Some(*id);
+                    if let Some(invocation) = invocation {
+                        Self::invocation_row(invocation, selected)
+                    } else if let Some(run) = ctx.active_runs.get(*id) {
+                        Self::run_row(id, run, selected, &widths)
+                    } else {
+                        Line::default()
+                    }
                 })
                 .collect();
 
@@ -1714,6 +1903,8 @@ impl RunsView {
 
         let header_label = if stream_error.is_some() {
             "◆ stream error: "
+        } else if self.watch_pending {
+            "◆ connecting: "
         } else {
             "◆ following: "
         };
@@ -1770,7 +1961,7 @@ impl RunsView {
                     .fg(DEFAULT_THEME.danger)
                     .add_modifier(Modifier::BOLD),
             )));
-        } else if finished {
+        } else if finished && !self.watch_pending {
             footer_lines.push(Line::from(Span::styled(
                 "  ◆ stream finished",
                 Style::default()
@@ -2080,6 +2271,117 @@ mod tests {
     /// Create a LiveArea<TestBackend> with the given dimensions.
     fn new_live(cols: u16, rows: u16) -> LiveArea<TestBackend> {
         LiveArea::with_backend(TestBackend::new(cols, rows), cols, rows)
+    }
+
+    #[test]
+    fn aggregate_retention_keeps_live_turns_and_exact_target_history() {
+        use crate::tui::app::{LiveExecution, Target};
+
+        let mut live = new_live(90, 20);
+        let mut app = App::new();
+        let selector = Target::StageExecution {
+            run_id: "run".into(),
+            stage: "review".into(),
+        };
+        let invocation = |index: usize| Target::Invocation {
+            run_id: "run".into(),
+            stage: "review".into(),
+            stage_run_id: index.to_string(),
+        };
+        let execution = LiveExecution {
+            run_id: "run".into(),
+            stage: "review".into(),
+            stage_type: "exec".into(),
+            stage_run_id: "0".into(),
+        };
+        app.live_executions.insert(execution.key(), execution);
+        live.with_target_transcript(&invocation(2), |transcript, _| {
+            transcript.submit_prompt("exact draft".into());
+            transcript.push_response("exact transcript");
+        });
+        for index in 0..ENDED_INVOCATIONS_PER_SELECTOR + 5 {
+            live.with_invocation_transcript(&selector, &invocation(index), |transcript, _| {
+                if index == 1 {
+                    transcript.submit_prompt("in progress".into());
+                } else {
+                    transcript.push_transcript_line(format!("ended {index}"));
+                }
+            });
+        }
+        // Prune background aggregates even while the watch screen is visible.
+        app.show_runs();
+        live.show_runs();
+        live.compose(&app).unwrap();
+        let states = &live.invocation_states[&selector];
+        assert_eq!(states.len(), ENDED_INVOCATIONS_PER_SELECTOR + 2);
+        assert!(states.iter().any(|(target, _)| *target == invocation(0)));
+        assert!(states.iter().any(|(target, _)| *target == invocation(1)));
+        assert!(!states.iter().any(|(target, _)| *target == invocation(2)));
+        assert_eq!(states[2].0, invocation(5));
+        assert!(live.target_has_current_turn(&invocation(2)));
+        live.with_target_transcript(&invocation(2), |transcript, _| {
+            assert_eq!(transcript.response_accumulator(), "exact transcript");
+        });
+
+        app.live_executions.clear();
+        live.with_invocation_transcript(&selector, &invocation(1), |transcript, _| {
+            transcript.finish_turn();
+        });
+        live.compose(&app).unwrap();
+        let states = &live.invocation_states[&selector];
+        assert_eq!(states.len(), ENDED_INVOCATIONS_PER_SELECTOR);
+        assert_eq!(states[0].0, invocation(5));
+    }
+
+    #[test]
+    fn watch_rows_reuse_snapshot_and_invalidate_order_and_invocation_changes() {
+        use crate::tui::app::{ActiveRun, LiveExecution};
+
+        let mut app = App::new();
+        app.active_runs
+            .insert("a".into(), ActiveRun::new("running"));
+        app.active_runs.insert("b".into(), ActiveRun::new("done"));
+        let mut view = RunsView::new();
+        view.snapshot_watch_rows(&app);
+        let rows = view.watch_rows.as_ref().unwrap().as_ptr();
+        view.snapshot_watch_rows(&app);
+        assert_eq!(view.watch_rows.as_ref().unwrap().as_ptr(), rows);
+        app.active_runs.get_mut("a").unwrap().prompt_tokens = Some(100);
+        view.snapshot_watch_rows(&app);
+        assert_eq!(view.watch_rows.as_ref().unwrap().as_ptr(), rows);
+
+        app.active_runs.get_mut("a").unwrap().status = "done".into();
+        app.active_runs.get_mut("b").unwrap().status = "running".into();
+        view.snapshot_watch_rows(&app);
+        assert_eq!(view.watch_rows.as_ref().unwrap()[0].0, "b");
+
+        let execution = LiveExecution {
+            run_id: "a".into(),
+            stage: "review".into(),
+            stage_type: "agent".into(),
+            stage_run_id: "first".into(),
+        };
+        let key = execution.key();
+        app.live_executions.insert(key.clone(), execution);
+        view.snapshot_watch_rows(&app);
+        assert_eq!(view.watch_rows.as_ref().unwrap().len(), 3);
+        app.live_executions.get_mut(&key).unwrap().stage_type = "exec".into();
+        view.snapshot_watch_rows(&app);
+        let invocation = view.watch_rows.as_ref().unwrap()[2].1.as_ref().unwrap();
+        assert_eq!(invocation.stage_type, "exec");
+        app.live_executions.remove(&key);
+        app.active_runs.remove("b");
+        app.active_runs
+            .insert("c".into(), ActiveRun::new("running"));
+        view.snapshot_watch_rows(&app);
+        let ids: Vec<_> = view
+            .watch_rows
+            .as_ref()
+            .unwrap()
+            .iter()
+            .map(|row| row.0.as_str())
+            .collect();
+        assert_eq!(ids, ["c", "a"]);
     }
 
     #[test]
@@ -3580,6 +3882,78 @@ mod tests {
     }
 
     #[test]
+    fn watch_invocations_render_in_selection_order_with_full_identity() {
+        use crate::tui::app::LiveExecution;
+
+        let mut live = new_live(160, 20);
+        let mut app = App::new();
+        app.active_runs
+            .insert("runner".into(), ActiveRun::new("running"));
+        app.active_runs
+            .insert("finished".into(), ActiveRun::new("done"));
+        for (key, stage, kind, id) in [
+            (
+                "inv-a",
+                "build",
+                "agent",
+                "full-invocation-shared-prefix-0001",
+            ),
+            (
+                "inv-b",
+                "build",
+                "agent",
+                "full-invocation-shared-prefix-0002",
+            ),
+            ("inv-c", "test", "exec", "full-invocation-test-0003"),
+        ] {
+            app.live_executions.insert(
+                key.into(),
+                LiveExecution {
+                    run_id: "runner".into(),
+                    stage: stage.into(),
+                    stage_type: kind.into(),
+                    stage_run_id: id.into(),
+                },
+            );
+        }
+        app.screen = Screen::Runs;
+        live.show_runs();
+        live.compose(&app).unwrap();
+        let visible = dump_buffer(live.backend().buffer());
+        let mut last = 0;
+        for key in app.watch_ids() {
+            let needle = app
+                .live_executions
+                .get(&key)
+                .map(|execution| execution.stage_run_id.as_str())
+                .unwrap_or(&key);
+            let offset = visible[last..]
+                .find(needle)
+                .unwrap_or_else(|| panic!("missing or out-of-order {needle}:\n{visible}"));
+            last += offset + needle.len();
+        }
+        assert!(visible.contains("build [agent]"));
+        assert!(visible.contains("test [exec]"));
+        assert!(visible.contains("1 running · 2 total"));
+
+        app.watch_selection = Some("inv-b".into());
+        let mut live = new_live(160, 5);
+        live.show_runs();
+        live.compose(&app).unwrap();
+        let visible = dump_buffer(live.backend().buffer());
+        assert!(
+            visible.contains("▶   ↳ build [agent] full-invocation-shared-prefix-0002"),
+            "{visible}"
+        );
+
+        app.live_executions.remove("inv-b");
+        app.ensure_watch_selection();
+        live.compose(&app).unwrap();
+        let visible = dump_buffer(live.backend().buffer());
+        assert!(!visible.contains("full-invocation-shared-prefix-0002"));
+    }
+
+    #[test]
     fn watch_table_shows_finished_runs() {
         let mut live = new_live(40, 8);
         let mut app = App::new();
@@ -4092,6 +4466,62 @@ Buffer:
             "expected done_summary: {}",
             v.stream_lines[1]
         );
+    }
+
+    fn push_invocation_stream(view: &mut RunsView, invocation: &str, kind: &str, text: &str) {
+        view.push_stream_line(
+            serde_json::json!({
+                "type": kind, "run_id": "run", "correlation_stage": "agent",
+                "stage_run_id": invocation, "text": text
+            })
+            .to_string(),
+        );
+    }
+
+    #[test]
+    fn push_stream_line_sibling_done_only_keeps_its_answer() {
+        let mut v = RunsView::new();
+        push_invocation_stream(&mut v, "a", "stream_chunk", "A streamed");
+        push_invocation_stream(&mut v, "b", "done", "B final");
+        push_invocation_stream(&mut v, "a", "done", "A streamed");
+
+        assert_eq!(stream_texts(&v), vec!["A streamed", "B final"]);
+    }
+
+    #[test]
+    fn push_stream_line_sibling_interleaving_never_joins_lines() {
+        let mut v = RunsView::new();
+        for kind in ["stream_chunk", "reasoning_chunk"] {
+            push_invocation_stream(&mut v, "a", kind, "A1");
+            push_invocation_stream(&mut v, "b", kind, "B1");
+            push_invocation_stream(&mut v, "a", kind, "A2");
+            push_invocation_stream(&mut v, "a", kind, "A3");
+            push_invocation_stream(&mut v, "b", kind, "B2");
+        }
+        push_invocation_stream(&mut v, "a", "done", "A1A2A3");
+        push_invocation_stream(&mut v, "b", "done", "B1B2");
+
+        assert_eq!(
+            stream_texts(&v),
+            vec!["A1", "B1", "A2A3", "B2", "A1", "B1", "A2A3", "B2"]
+        );
+    }
+
+    #[test]
+    fn push_stream_line_sibling_reset_only_clears_its_own_reconciliation() {
+        let mut v = RunsView::new();
+        push_invocation_stream(&mut v, "a", "stream_chunk", "A");
+        push_invocation_stream(&mut v, "b", "stream_chunk", "B");
+        push_invocation_stream(&mut v, "a", "stream_reset", "");
+        push_invocation_stream(&mut v, "b", "done", "B");
+        push_invocation_stream(&mut v, "a", "done", "A final");
+
+        assert_eq!(stream_texts(&v), vec!["A", "B", "A final"]);
+        v.clear_stream();
+        assert!(v.invocation_agent_text.is_empty());
+        assert!(v.stream_invocation.is_none());
+        push_invocation_stream(&mut v, "b", "done", "B fresh");
+        assert_eq!(stream_texts(&v), vec!["B fresh"]);
     }
 
     #[test]

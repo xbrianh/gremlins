@@ -2,6 +2,29 @@
 
 use serde_json::{json, Value};
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) struct Invocation {
+    pub run_id: String,
+    pub stage: String,
+    pub stage_type: String,
+    pub stage_run_id: String,
+}
+
+pub(super) fn invocation_from_frame(frame: &Value) -> Option<Invocation> {
+    let field = |key: &str| {
+        frame[key]
+            .as_str()
+            .filter(|s| !s.is_empty())
+            .map(str::to_owned)
+    };
+    Some(Invocation {
+        run_id: field("run_id").or_else(|| field("id"))?,
+        stage: field("correlation_stage").or_else(|| field("stage"))?,
+        stage_type: field("stage_type")?,
+        stage_run_id: field("stage_run_id")?,
+    })
+}
+
 #[derive(Debug, Clone, Eq, PartialEq)]
 pub(crate) struct Execution {
     pub run_id: String,
