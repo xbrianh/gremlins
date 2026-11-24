@@ -254,7 +254,7 @@ impl LoopState {
             _ = cancel.cancelled() => {
                 return Err(cancelled_error());
             }
-            b = self.prepare_stream_request(tool_defs, opts, nested) => b?,
+            b = self.prepare_stream_request(model, tool_defs, opts, nested) => b?,
         };
 
         // Emit unconditionally — the executor-side subscriber owns the
@@ -324,11 +324,21 @@ impl LoopState {
     /// and apply the caller's generation parameters.
     pub(super) async fn prepare_stream_request(
         &mut self,
+        model: &DynModel<Completion>,
         tool_defs: &[ToolDefinition],
         opts: &LoopOpts<'_>,
         nested: bool,
     ) -> Result<CompletionRequest, ClientError> {
         let effective_system = self.system_prompt.clone().or_else(|| opts.preamble.clone());
+        let mut context = crate::clients::compaction::ResolvedRequestContext {
+            model: model.id().unwrap_or_default().to_string(),
+            system: effective_system.clone(),
+            tools: tool_defs.to_vec(),
+            extra: opts.extra.clone(),
+            temperature: opts.temperature,
+            max_tokens: opts.max_tokens,
+        };
+        self.conv.set_request_context(context.clone());
         let script = self
             .conv
             .render_turn(nested, effective_system)
@@ -339,24 +349,11 @@ impl LoopState {
                 }
             })?;
 
-        let mut builder = CompletionRequest::new(script.next_user_prompt)
-            .messages(script.messages)
-            .tools(tool_defs.to_vec());
-        if let Some(ref sys) = script.system_prompt {
-            builder = builder.preamble(sys.clone());
-        } else if let Some(preamble) = opts.preamble.clone() {
-            builder = builder.preamble(preamble);
-        }
-        if let Some(params) = opts.extra.clone() {
-            builder = builder.additional_params(params);
-        }
-        if let Some(t) = opts.temperature {
-            builder = builder.temperature(t);
-        }
-        if let Some(mt) = opts.max_tokens {
-            builder = builder.max_tokens(mt);
-        }
-        Ok(builder)
+        context.system = script.system_prompt.or_else(|| opts.preamble.clone());
+        self.conv.set_request_context(context.clone());
+        let mut messages = script.messages;
+        messages.push(script.next_user_prompt);
+        Ok(context.request(&messages))
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -1797,6 +1794,54 @@ mod tests {
             }
         }
         lines
+    }
+
+    #[tokio::test]
+    async fn normal_builder_installs_resolved_context_and_appends_prompt_once() {
+        use crate::conversation::standard::StandardConversation;
+        let model: DynModel<Completion> = rig_core::providers::anthropic::Anthropic::new("offline")
+            .completion("effective-model")
+            .into();
+        let conv =
+            StandardConversation::new("pending", false, Some(vec![Message::user("history")]), None);
+        let mut state = LoopState::new(
+            Some("system".into()),
+            "pending",
+            Box::new(conv),
+            0,
+            0,
+            false,
+            InteractiveSession::unattached(),
+            1,
+            false,
+            "context-test",
+        );
+        let mut opts = loop_opts(None);
+        opts.extra = Some(serde_json::json!({"thinking": {"type": "adaptive"}}));
+        opts.temperature = Some(0.5);
+        opts.max_tokens = Some(1024);
+        let request = state
+            .prepare_stream_request(&model, &[], &opts, false)
+            .await
+            .unwrap();
+        let context = state.conv.request_context().expect("resolved context");
+        assert_eq!(context.model, "effective-model");
+        assert_eq!(context.system.as_deref(), Some("system"));
+        assert_eq!(context.extra, opts.extra);
+        assert_eq!(context.temperature, opts.temperature);
+        assert_eq!(context.max_tokens, opts.max_tokens);
+        assert_eq!(
+            request
+                .chat_history
+                .iter()
+                .map(|m| m.as_ref().clone())
+                .collect::<Vec<_>>(),
+            vec![
+                Message::system("system"),
+                Message::user("history"),
+                Message::user("pending")
+            ]
+        );
     }
 
     #[test]

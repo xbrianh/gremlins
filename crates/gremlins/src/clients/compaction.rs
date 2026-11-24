@@ -1,12 +1,43 @@
-//! [`compaction_block_as_message`] helper — the only public item in this module
-//! now that dispatch has been inlined into [`StandardConversation`].
+//! Shared resolved request inputs and signed-compaction replay helpers.
 //!
 //! Compaction orchestration state lives in
 //! [`crate::conversation::compaction::CompactionState`].
 //! Local-compaction helpers live in [`crate::conversation::compaction`].
 
 use rig_core::completion::message::{Api, Origin};
-use rig_core::completion::Message;
+use rig_core::completion::{CompletionRequest, Message, ToolDefinition};
+use serde::{Deserialize, Serialize};
+use serde_json::Value;
+
+/// The resolved inputs shared by normal completion and server compaction.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct ResolvedRequestContext {
+    pub(crate) model: String,
+    pub(crate) system: Option<String>,
+    pub(crate) tools: Vec<ToolDefinition>,
+    pub(crate) extra: Option<Value>,
+    pub(crate) temperature: Option<f64>,
+    pub(crate) max_tokens: Option<u64>,
+}
+
+impl ResolvedRequestContext {
+    pub(crate) fn request(&self, messages: &[Message]) -> CompletionRequest {
+        let mut request = CompletionRequest::from(messages.to_vec()).tools(self.tools.clone());
+        if let Some(system) = &self.system {
+            request = request.preamble(system.clone());
+        }
+        if let Some(extra) = &self.extra {
+            request = request.additional_params(extra.clone());
+        }
+        if let Some(temperature) = self.temperature {
+            request = request.temperature(temperature);
+        }
+        if let Some(max_tokens) = self.max_tokens {
+            request = request.max_tokens(max_tokens);
+        }
+        request
+    }
+}
 
 use crate::clients::protocol::CompactionBlock;
 
@@ -97,6 +128,7 @@ mod tests {
     use rig_core::wire::{Body, Mode, Operation, Wire};
 
     use crate::clients::backend::{Backend, RunParams};
+    use crate::clients::conversation::Conversation;
     use crate::clients::error::ClientError;
     use crate::clients::interactive::InteractiveSession;
     use crate::clients::protocol::{CompactionResult, CompletedRun};
@@ -129,7 +161,7 @@ mod tests {
             self.provider
         }
         fn model(&self) -> &str {
-            MODEL
+            "configured-model-not-effective-model"
         }
         fn supports_compaction(&self) -> bool {
             true
@@ -137,10 +169,15 @@ mod tests {
         async fn compact(
             &self,
             messages: &[Message],
-            system: Option<&str>,
+            context: &ResolvedRequestContext,
             instructions: Option<&str>,
         ) -> Result<Option<CompactionResult>, ClientError> {
-            assert_eq!(system, Some("system"));
+            assert_eq!(context.system.as_deref(), Some("system"));
+            assert_eq!(context.model, MODEL);
+            assert_eq!(
+                serde_json::to_value(context).unwrap(),
+                serde_json::to_value(crate::clients::compaction::tests::context()).unwrap()
+            );
             assert_eq!(instructions, Some("instructions"));
             *self.received.lock().unwrap() = messages.to_vec();
             if !self.server_summary {
@@ -160,6 +197,46 @@ mod tests {
             received: Mutex::new(vec![]),
             server_summary: true,
         })
+    }
+
+    fn context() -> ResolvedRequestContext {
+        ResolvedRequestContext {
+            model: MODEL.into(),
+            system: Some("system".into()),
+            tools: vec![ToolDefinition {
+                name: ToolName::new("Do").unwrap(),
+                description: "resolved tool".into(),
+                parameters: json!({"type": "object", "properties": {}}),
+                annotations: Default::default(),
+            }],
+            extra: Some(json!({"thinking": {"type": "adaptive"}})),
+            temperature: Some(0.7),
+            max_tokens: Some(4096),
+        }
+    }
+
+    #[test]
+    fn resolved_request_uses_exact_history_and_roundtrips() {
+        let context: ResolvedRequestContext =
+            serde_json::from_value(serde_json::to_value(context()).unwrap()).unwrap();
+        for messages in [vec![], older_prefix(), retained()] {
+            let request = context.request(&messages);
+            assert_eq!(
+                request
+                    .chat_history
+                    .iter()
+                    .map(|m| m.as_ref().clone())
+                    .collect::<Vec<_>>(),
+                std::iter::once(Message::system("system"))
+                    .chain(messages)
+                    .collect::<Vec<_>>()
+            );
+            let json = serde_json::to_value(request).unwrap();
+            assert_eq!(json["tools"], serde_json::to_value(&context.tools).unwrap());
+            assert_eq!(json["additional_params"], context.extra.clone().unwrap());
+            assert_eq!(json["temperature"], 0.7);
+            assert_eq!(json["max_tokens"], 4096);
+        }
     }
 
     fn full_block() -> CompactionBlock {
@@ -295,6 +372,7 @@ mod tests {
         let mut history = prefix.clone();
         history.extend(retained());
         let mut conv = StandardConversation::new(NEXT, true, Some(history), Some(backend.clone()));
+        conv.set_request_context(context());
         let report = conv
             .compact(Some("system"), Some("instructions"))
             .await
@@ -321,6 +399,24 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn missing_context_skips_server_and_uses_local_fallback() {
+        let backend = backend("anthropic");
+        let mut history = older_prefix();
+        history.extend(retained());
+        let mut conv = StandardConversation::new(NEXT, true, Some(history), Some(backend.clone()));
+        conv.set_local_summarizer(|_, _, _, _| {
+            Box::pin(async { Some((Message::assistant("LOCAL SUMMARY"), None, None)) })
+        });
+        let report = conv.compact(None, None).await.expect("local fallback");
+        assert!(matches!(
+            report.strategy,
+            crate::conversation::compaction::CompactionStrategy::Local
+        ));
+        assert!(backend.received.lock().unwrap().is_empty());
+        assert!(conv.request_context().is_none());
+    }
+
+    #[tokio::test]
     async fn local_compaction_commits_plain_summary_and_sanitized_tail() {
         let backend = Arc::new(CompactionBackend {
             provider: "anthropic",
@@ -332,12 +428,13 @@ mod tests {
         history.extend(retained());
         let mut conv = StandardConversation::new(NEXT, true, Some(history), Some(backend.clone()));
         conv.set_local_summarizer(|spec, messages, instructions, system| {
-            assert_eq!(spec, format!("anthropic/{MODEL}"));
+            assert_eq!(spec, "anthropic/configured-model-not-effective-model");
             assert_eq!(messages, older_prefix());
             assert_eq!(instructions, Some("instructions"));
             assert_eq!(system, Some("system"));
             Box::pin(async { Some((Message::assistant("LOCAL SUMMARY"), Some(67), Some(8))) })
         });
+        conv.set_request_context(context());
         let report = conv
             .compact(Some("system"), Some("instructions"))
             .await
@@ -390,7 +487,7 @@ mod tests {
         history.extend(retained());
         let mut conv = StandardConversation::new(NEXT, true, Some(history), Some(backend));
         conv.set_local_summarizer(|spec, messages, _, _| {
-            assert_eq!(spec, format!("openai/{MODEL}"));
+            assert_eq!(spec, "openai/configured-model-not-effective-model");
             assert_eq!(messages, older_prefix());
             Box::pin(async { Some((Message::assistant("OTHER SUMMARY"), None, None)) })
         });

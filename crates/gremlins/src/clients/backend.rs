@@ -213,19 +213,19 @@ pub trait Backend: Send + Sync {
 
     /// Whether this backend natively supports server-side compaction.
     /// The default is `false`; only [`AnthropicBackend`] returns `true`.
-    /// Callers use this to branch: server compaction vs. local compaction
-    /// is a construction-time decision, not a runtime fallback.
+    /// Server compaction also requires a resolved request context; callers
+    /// fall back to local summarization when unavailable or unsuccessful.
     fn supports_compaction(&self) -> bool {
         false
     }
 
     /// Request server-side compaction.
     /// Returns `Ok(None)` when the backend doesn't support compaction (the
-    /// caller skips compaction for this turn).
+    /// caller can fall back to local summarization).
     async fn compact(
         &self,
         _messages: &[rig_core::completion::Message],
-        _system_prompt: Option<&str>,
+        _context: &crate::clients::compaction::ResolvedRequestContext,
         _instructions: Option<&str>,
     ) -> Result<Option<CompactionResult>, ClientError> {
         Ok(None)
