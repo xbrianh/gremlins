@@ -789,10 +789,10 @@ mod tests {
                 .unwrap();
             let mut messages = script.messages;
             messages.push(script.next_user_prompt);
-            self.requests
-                .lock()
-                .unwrap()
-                .push((params.prompt.clone(), messages));
+            {
+                let mut requests = self.requests.lock().unwrap();
+                requests.push((params.prompt.clone(), messages));
+            }
             if params.label == "chat-0001" {
                 conversation.set_preserve_reasoning(true);
                 conversation.finalize(
