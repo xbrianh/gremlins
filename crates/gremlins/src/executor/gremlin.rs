@@ -37,6 +37,7 @@ use serde_json::{Map, Value};
 use crate::artifacts::uri::Uri;
 use crate::clients::cancel::CancelToken;
 use crate::clients::client::{Client, ModelURI};
+use crate::clients::execution_input::InputRegistry;
 use crate::clients::interactive::{InteractiveSession, InteractiveSessionFactory};
 use crate::config;
 use crate::core::proc::{run_logged_commands, sanitize_log_filename};
@@ -305,6 +306,8 @@ pub struct Gremlin {
     pub(crate) cancel_token: Option<Arc<CancelToken>>,
     /// Installed by the supervisor for this run only (never inherited by forks).
     pub(crate) interactive_sessions: Option<InteractiveSessionFactory>,
+    /// Execution-scoped input endpoints shared with parallel children.
+    pub(crate) execution_inputs: InputRegistry,
     /// Clean commands inherited from the pipeline definition. Forked children
     /// carry a copy so that workspace teardown (e.g. git worktree remove)
     /// runs even though the child's own definition (a StageSpec) has none.
@@ -615,6 +618,7 @@ impl Gremlin {
             runtime_config,
             cancel_token: None,
             interactive_sessions: None,
+            execution_inputs: InputRegistry::default(),
             clean_cmds: Vec::new(),
             enclosing_task_models: None,
             enclosing_model: None,
@@ -768,6 +772,7 @@ impl Gremlin {
             runtime_config,
             cancel_token: None,
             interactive_sessions: None,
+            execution_inputs: InputRegistry::default(),
             clean_cmds: Vec::new(),
             enclosing_task_models,
             enclosing_model,
@@ -1251,6 +1256,7 @@ impl Gremlin {
             runtime_config: self.runtime_config.clone(),
             cancel_token: self.cancel_token.clone(),
             interactive_sessions: None,
+            execution_inputs: self.execution_inputs.clone(),
             clean_cmds: self.clean_cmds.clone(),
             enclosing_task_models: enclosing_task_models.cloned(),
             enclosing_model: effective_model.cloned(),
@@ -2649,6 +2655,7 @@ mod tests {
             runtime_config: RuntimeConfig::default(),
             cancel_token: None,
             interactive_sessions: None,
+            execution_inputs: InputRegistry::default(),
             clean_cmds: Vec::new(),
             enclosing_task_models: None,
             enclosing_model: None,

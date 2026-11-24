@@ -32,6 +32,14 @@ impl StageInvocation {
         invocation
     }
 
+    pub(crate) fn input_identity(&self) -> crate::clients::execution_input::ExecutionIdentity {
+        crate::clients::execution_input::ExecutionIdentity {
+            run_id: self.run_id.clone(),
+            stage_name: self.name.clone(),
+            stage_run_id: self.stage_run_id.clone(),
+        }
+    }
+
     pub(crate) fn corr_id(&self) -> CorrId {
         self.corr_id.clone()
     }

@@ -24,6 +24,9 @@ pub(crate) use copilot_test_support::{
     copilot_test_catalog_base, copilot_test_exchange_url, copilot_test_refresh_url,
 };
 pub(crate) mod error;
+// Internal endpoint; provider-loop consumption arrives separately.
+#[allow(dead_code)]
+pub(crate) mod execution_input;
 pub(crate) mod format;
 pub mod github_auth;
 pub(crate) mod interactive;

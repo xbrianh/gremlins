@@ -141,10 +141,16 @@ pub(crate) async fn run_agent(
     } else {
         gremlin.next_pipeline_interactive_session(&invocation.stage_run_id, accepts_commands)
     };
-    let interactive = match session {
+    let mut interactive = match session {
         Ok(session) => session,
         Err(error) => return Err(stage_failed(&agent.name, error)),
     };
+    interactive.bind_input(
+        &gremlin.execution_inputs,
+        invocation.input_identity(),
+        accepts_commands,
+        gremlin.cancel_token.as_deref(),
+    );
     let corr_id = invocation.corr_id();
     let framework_subs = gremlin.framework_subs(&agent.name);
     let _attempt = gremlin.state.read_str("attempt");
@@ -998,6 +1004,7 @@ mod tests {
             runtime_config: RuntimeConfig::snapshot(None),
             cancel_token: None,
             interactive_sessions: None,
+            execution_inputs: Default::default(),
             clean_cmds: vec![],
             enclosing_task_models: None,
             enclosing_model: None,

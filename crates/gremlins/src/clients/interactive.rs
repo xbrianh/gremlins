@@ -7,6 +7,9 @@ use std::sync::{Arc, Mutex, Weak};
 static NEXT_LEASE_ID: AtomicU64 = AtomicU64::new(1);
 
 use crate::clients::cancel::{CancelListener, CancelToken};
+use crate::clients::execution_input::{
+    Correction, ExecutionIdentity, InputReceiver, InputRegistry, InputRevoker, InputSender,
+};
 use crate::clients::protocol::UsageStats;
 use tokio::sync::{mpsc, oneshot, Notify};
 
@@ -152,6 +155,7 @@ impl PauseState {
 #[derive(Default)]
 pub(crate) struct PauseSlot {
     state: Mutex<PauseState>,
+    input_revoker: Mutex<Option<Arc<InputRevoker>>>,
     /// Only chat slots may reserve debugger commands between executions.
     chat: bool,
     requested: Arc<Notify>,
@@ -218,6 +222,14 @@ impl PauseSlot {
     fn end_execution(&self, nonce: u64, signal: &EndSignal) {
         let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
         signal.signal();
+        if let Some(revoker) = self
+            .input_revoker
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .as_ref()
+        {
+            revoker.revoke();
+        }
         let matches = match &*state {
             PauseState::Requested(_, n, _, _)
             | PauseState::DebuggerRequested(_, n, _, _)
@@ -286,9 +298,22 @@ impl EndSignal {
 /// The published run handle points to one execution at a time. A debugger
 /// snapshots its target *before* validating the active leaf against the store.
 #[derive(Clone, Debug, Default)]
-pub(crate) struct InteractiveHandle(Arc<Mutex<DebugTarget>>, Arc<PauseSlot>);
+pub(crate) struct InteractiveHandle(
+    Arc<Mutex<DebugTarget>>,
+    Arc<PauseSlot>,
+    Arc<Mutex<InputRegistry>>,
+);
 
 impl InteractiveHandle {
+    pub(crate) fn set_input_registry(&self, registry: InputRegistry) {
+        *self.2.lock().unwrap() = registry;
+    }
+
+    #[allow(dead_code)] // Internal callers convert separately from legacy attachments.
+    pub(crate) fn input_sender(&self, identity: &ExecutionIdentity) -> Option<InputSender> {
+        self.2.lock().unwrap().sender(identity)
+    }
+
     pub(crate) fn target(&self) -> DebugTarget {
         self.0.lock().unwrap().clone()
     }
@@ -677,6 +702,17 @@ pub(crate) struct InteractiveSessionFactory {
 impl Drop for InteractiveSessionFactory {
     fn drop(&mut self) {
         self.reservation_slot.close_registration();
+        if let Some(slot) = &self.current_slot {
+            slot.current_end_signal().signal();
+            if let Some(revoker) = slot
+                .input_revoker
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .as_ref()
+            {
+                revoker.revoke();
+            }
+        }
     }
 }
 
@@ -708,6 +744,7 @@ impl InteractiveSessionFactory {
                 ..DebugTarget::default()
             })),
             registration_slot.clone(),
+            Arc::default(),
         );
         (
             Self {
@@ -860,6 +897,14 @@ impl InteractiveSessionFactory {
         if let Some(previous) = &previous {
             let mut previous_state = previous.state.lock().unwrap_or_else(|e| e.into_inner());
             previous.current_end_signal().signal();
+            if let Some(revoker) = previous
+                .input_revoker
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .as_ref()
+            {
+                revoker.revoke();
+            }
             previous.requested.notify_waiters();
             // Every unaccepted request belongs to this execution. Revoke it;
             // only the independent between-turn reservation can be handed on.
@@ -947,12 +992,18 @@ impl InteractiveSessionFactory {
             terminal: inherited_terminal,
             end_signal,
             accepts_commands,
+            input_identity: None,
+            input: None,
+            input_revoker: None,
         }
     }
 }
 
 #[derive(Debug, Default)]
 pub struct InteractiveSession {
+    input_identity: Option<ExecutionIdentity>,
+    input: Option<InputReceiver>,
+    input_revoker: Option<Arc<InputRevoker>>,
     slot: Arc<PauseSlot>,
     /// Identifies this execution so commands can be checked against the
     /// correct agent loop invocation.
@@ -972,11 +1023,56 @@ pub struct InteractiveSession {
 /// observers, so the drop is a no-op there.
 impl Drop for InteractiveSession {
     fn drop(&mut self) {
+        if let Some(revoker) = &self.input_revoker {
+            revoker.revoke();
+        }
         self.slot.end_execution(self.nonce, &self.end_signal);
     }
 }
 
 impl InteractiveSession {
+    /// Bind only after backend selection, using stage-entry identity rather than
+    /// the independently prepared legacy chat/debugger target.
+    pub(crate) fn bind_input(
+        &mut self,
+        registry: &InputRegistry,
+        identity: ExecutionIdentity,
+        accepts_commands: bool,
+        cancel: Option<&CancelToken>,
+    ) {
+        assert!(
+            self.input_identity.is_none(),
+            "execution input already bound"
+        );
+        self.input_identity = Some(identity.clone());
+        if accepts_commands {
+            let (receiver, revoker) = registry.register(identity, |revoker| {
+                if let Some(cancel) = cancel {
+                    cancel.listen(revoker.clone());
+                }
+                *self
+                    .slot
+                    .input_revoker
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner()) = Some(revoker.clone());
+                if self.end_signal.is_ended() {
+                    revoker.revoke();
+                }
+            });
+            self.input = Some(receiver);
+            self.input_revoker = Some(revoker);
+        }
+    }
+
+    /// Poll execution input without exposing the receiver to providers.
+    #[allow(dead_code)] // Pending provider conversion.
+    pub(crate) fn try_recv_input(&mut self) -> Result<Correction, mpsc::error::TryRecvError> {
+        self.input
+            .as_mut()
+            .ok_or(mpsc::error::TryRecvError::Disconnected)?
+            .try_recv()
+    }
+
     pub fn unattached() -> Self {
         Self::default()
     }
@@ -1186,6 +1282,10 @@ impl InteractiveSession {
         }
     }
 }
+
+#[cfg(test)]
+#[path = "interactive/input_tests.rs"]
+mod input_tests;
 
 #[cfg(test)]
 mod tests {

@@ -881,6 +881,7 @@ mod tests {
             runtime_config,
             cancel_token: None,
             interactive_sessions: None,
+            execution_inputs: Default::default(),
             clean_cmds: Vec::new(),
             enclosing_task_models: None,
             enclosing_model: None,

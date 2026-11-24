@@ -36,6 +36,7 @@ pub(crate) fn setup_gremlin_channels(
     } else {
         InteractiveSessionFactory::for_pipeline()
     };
+    interactive_handle.set_input_registry(gremlin.execution_inputs.clone());
     sessions.set_run_id(gremlin.id.to_string());
     gremlin.interactive_sessions = Some(sessions);
 
