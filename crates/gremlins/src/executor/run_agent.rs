@@ -811,9 +811,9 @@ mod tests {
                     conversation: Some(params.prepopulated_conversation),
                 });
             }
-            if params.cancel_token.is_some() {
+            if let Some(cancel_token) = &params.cancel_token {
                 self.started.notify_one();
-                params.cancel_token.as_ref().unwrap().cancelled().await;
+                cancel_token.cancelled().await;
                 return Err(ClientError::Cancelled);
             }
             Err(ClientError::Runtime {
@@ -903,10 +903,7 @@ mod tests {
         })
         .await
         .expect("backend must start and observe cancellation");
-        assert!(
-            matches!(result, Err(RunError::Cancelled)),
-            "{result:?}"
-        );
+        assert!(matches!(result, Err(RunError::Cancelled)), "{result:?}");
         let b_prompt = backend.requests.lock().unwrap()[1].0.clone();
         assert!(b_prompt.ends_with(CHAT_B));
         let b_json = gremlin
