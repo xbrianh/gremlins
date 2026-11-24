@@ -139,15 +139,20 @@ impl StandardConversation {
     /// Even a signed server summary does not certify preserved-thinking models,
     /// suffix boundaries, or unchanged system/tools, so discard stale signatures.
     pub(crate) fn commit_compaction(&mut self, summary: Message, kept: &[Message]) {
-        let anthropic = self
+        let unstamped_anthropic = self
             .backend
             .as_ref()
             .is_some_and(|backend| backend.name() == "anthropic");
         let mut history = Vec::with_capacity(1 + kept.len());
         history.push(summary);
         history.extend(kept.iter().cloned().filter_map(|mut message| {
-            if anthropic {
-                if let Message::Assistant(turn) = &mut message {
+            if let Message::Assistant(turn) = &mut message {
+                // Replay follows the turn's origin, not the provider doing compaction.
+                let anthropic = turn
+                    .origin
+                    .as_ref()
+                    .map_or(unstamped_anthropic, |origin| origin.provider == "anthropic");
+                if anthropic {
                     turn.content.retain(|block| !is_compacted_reasoning(block));
                     if turn.content.is_empty() {
                         return None;
@@ -157,6 +162,8 @@ impl StandardConversation {
             Some(message)
         }));
         self.history = history;
+        // `render_turn` owns the auto-compaction persistence signal; manual
+        // `/compact` persists committed_history() as a full replacement directly.
     }
 
     /// Run compaction on the current history. Called by the `/compact` TUI
@@ -237,6 +244,7 @@ fn is_compacted_reasoning(block: &AssistantContent) -> bool {
         AssistantContent::ToolCall(call) => call.native.as_ref(),
         AssistantContent::Image(image) => image.native.as_ref(),
         AssistantContent::Opaque(opaque) => return is_thinking_item(&opaque.item),
+        // Preserve other content: only known reasoning or native thinking is stale.
         _ => None,
     };
     native.is_some_and(|native| is_thinking_item(&native.item))

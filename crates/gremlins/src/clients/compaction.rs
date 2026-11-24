@@ -190,6 +190,7 @@ mod tests {
         let mut messages = vec![
             Message::user("RETAINED USER"),
             assistant(vec![
+                AssistantContent::Reasoning(Reasoning::new("REASONING WITHOUT NATIVE")),
                 AssistantContent::Reasoning(Reasoning::new("SIGNED REASONING"))
                     .with_native(thinking()),
                 AssistantContent::Text(Text::new("redacted projection"))
@@ -264,6 +265,20 @@ mod tests {
             committed.len(),
             22,
             "summary plus retained user/tool exchange; thinking-only turn removed"
+        );
+        let Message::Assistant(turn) = &committed[2] else {
+            panic!("retained mixed assistant turn must survive");
+        };
+        assert_eq!(
+            turn.content.len(),
+            2,
+            "only visible text and tool call survive"
+        );
+        assert!(
+            turn.content
+                .iter()
+                .all(|block| !matches!(block, AssistantContent::Reasoning(_))),
+            "reasoning without native data must be removed before wire encoding"
         );
         let restored = artifact_roundtrip(committed.clone());
         assert_eq!(restored, committed);
@@ -346,7 +361,12 @@ mod tests {
         let conv =
             StandardConversation::new(NEXT, true, Some(kept.clone()), Some(backend("anthropic")));
         assert_eq!(conv.committed_history(), kept);
-        let encoded = body_with_prompt(artifact_roundtrip(conv.committed_history()), MODEL, NEXT);
+        let mut signed_control = artifact_roundtrip(conv.committed_history());
+        // This control isolates signed replay; plain reasoning is checked in committed history.
+        if let Message::Assistant(turn) = &mut signed_control[1] {
+            turn.content.remove(0);
+        }
+        let encoded = body_with_prompt(signed_control, MODEL, NEXT);
         assert_eq!(
             encoded["messages"][1]["content"],
             json!([
@@ -359,16 +379,54 @@ mod tests {
         assert_eq!(encoded["messages"][3]["content"], json!([thinking()]));
     }
 
+    #[tokio::test]
+    async fn other_provider_compaction_sanitizes_anthropic_origin_before_switching_back() {
+        let backend = Arc::new(CompactionBackend {
+            provider: "openai",
+            received: Mutex::new(vec![]),
+            server_summary: false,
+        });
+        let mut history = older_prefix();
+        history.extend(retained());
+        let mut conv = StandardConversation::new(NEXT, true, Some(history), Some(backend));
+        conv.set_local_summarizer(|spec, messages, _, _| {
+            assert_eq!(spec, format!("openai/{MODEL}"));
+            assert_eq!(messages, older_prefix());
+            Box::pin(async { Some((Message::assistant("OTHER SUMMARY"), None, None)) })
+        });
+        conv.compact(Some("system"), Some("instructions"))
+            .await
+            .expect("other provider local compaction succeeds");
+        // The harness replays persisted history on the original Anthropic model.
+        assert_compacted_wire(&conv, json!({"type": "text", "text": "OTHER SUMMARY"}));
+    }
+
     #[test]
-    fn other_provider_compaction_preserves_retained_reasoning() {
-        let kept = retained();
-        let mut conv =
-            StandardConversation::new(NEXT, true, Some(older_prefix()), Some(backend("openai")));
-        let summary = Message::assistant("OTHER SUMMARY");
-        conv.commit_compaction(summary.clone(), &kept);
-        let mut expected = vec![summary];
-        expected.extend(kept);
-        assert_eq!(artifact_roundtrip(conv.committed_history()), expected);
+    fn compaction_respects_non_anthropic_origins_and_unstamped_fallback() {
+        for provider in ["openai", "anthropic"] {
+            let mut kept = retained();
+            for message in &mut kept {
+                if let Message::Assistant(turn) = message {
+                    turn.origin = Some(Origin::new(
+                        Api::from_static("openai.responses"),
+                        "openai",
+                        "other-model",
+                    ));
+                }
+            }
+            kept.push(Message::Assistant(AssistantMessage::new(vec![
+                AssistantContent::Reasoning(Reasoning::new("UNSTAMPED REASONING")),
+            ])));
+            let mut conv = StandardConversation::new(NEXT, true, None, Some(backend(provider)));
+            let summary = Message::assistant("OTHER SUMMARY");
+            conv.commit_compaction(summary.clone(), &kept);
+            if provider == "anthropic" {
+                kept.pop();
+            }
+            let mut expected = vec![summary];
+            expected.extend(kept);
+            assert_eq!(artifact_roundtrip(conv.committed_history()), expected);
+        }
     }
 
     fn block() -> CompactionBlock {
