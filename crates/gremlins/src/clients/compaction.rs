@@ -402,6 +402,77 @@ mod tests {
         );
     }
 
+    #[test]
+    fn children_inherit_backend_until_explicitly_selected() {
+        let parent = StandardConversation::new(NEXT, true, None, Some(backend("anthropic")));
+        for mut child in [parent.fork(), parent.spawn_child("child prompt")] {
+            assert_eq!(child.request_provider(), Some("anthropic"));
+            assert!(child.request_context().is_none());
+            let history = child.messages();
+            child.set_request_context(context());
+            child.set_request_backend(Some(backend("openai")));
+            assert_eq!(child.request_provider(), Some("openai"));
+            assert!(child.request_context().is_none());
+            assert_eq!(child.messages(), history);
+            assert_eq!(parent.request_provider(), Some("anthropic"));
+
+            // Reselecting even the same provider must invalidate resolved inputs.
+            child.set_request_context(context());
+            child.set_request_backend(Some(backend("openai")));
+            assert!(child.request_context().is_none());
+            child.set_request_context(context());
+            child.set_request_backend(None);
+            assert_eq!(child.request_provider(), None);
+            assert!(child.request_context().is_none());
+        }
+    }
+
+    #[tokio::test]
+    async fn selected_backend_requires_matching_nonempty_context_for_server_compaction() {
+        // Include two empty providers: equality alone must not authorize server compaction.
+        for (selected_provider, context_provider, server) in [
+            ("anthropic", "anthropic", true),
+            ("openai", "anthropic", false),
+            ("anthropic", "openai", false),
+            ("anthropic", "", false),
+            ("", "", false),
+        ] {
+            let original = backend("original");
+            let selected = backend(selected_provider);
+            let mut history = older_prefix();
+            history.extend(retained());
+            let mut conv =
+                StandardConversation::new(NEXT, true, Some(history), Some(original.clone()));
+            conv.set_request_context(context());
+            conv.set_request_backend(Some(selected.clone()));
+            assert!(conv.request_context().is_none());
+            assert_eq!(conv.request_provider(), Some(selected_provider));
+            let mut resolved = context();
+            resolved.provider = context_provider.into();
+            conv.set_request_context(resolved);
+            conv.set_local_summarizer(|spec, messages, _, _| {
+                assert!(spec.ends_with("/configured-model-not-effective-model"));
+                assert_eq!(messages, older_prefix());
+                Box::pin(async { Some((Message::assistant("LOCAL SUMMARY"), None, None)) })
+            });
+            let report = conv
+                .compact(Some("system"), Some("instructions"))
+                .await
+                .expect("server or local summary");
+            assert_eq!(
+                matches!(
+                    report.strategy,
+                    crate::conversation::compaction::CompactionStrategy::Server
+                ),
+                server,
+                "selected={selected_provider:?}, context={context_provider:?}",
+            );
+            assert_eq!(!selected.received.lock().unwrap().is_empty(), server);
+            assert!(original.received.lock().unwrap().is_empty());
+            assert_eq!(report.compaction_block.is_some(), server);
+        }
+    }
+
     #[tokio::test]
     async fn missing_context_skips_server_and_uses_local_fallback() {
         let backend = backend("anthropic");

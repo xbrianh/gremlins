@@ -150,6 +150,7 @@ fn make_task_runner_at_depth(
                 // never consults the task-models lookup.
                 let parent_selection = TaskModel {
                     model: model.clone(),
+                    backend: None,
                     temperature,
                     max_tokens,
                     extra: extra.clone(),
@@ -171,7 +172,7 @@ fn make_task_runner_at_depth(
                         None => Ok((parent_selection.clone(), None)),
                     }
                 };
-                let (selected, _selected_spec) = match selection {
+                let (selected, selected_spec) = match selection {
                     Ok(selection) => selection,
                     Err(reason) => {
                         return tools::ToolOutcome::text(format!("Task error: {reason}"));
@@ -227,7 +228,10 @@ fn make_task_runner_at_depth(
                     Some(super::system_prompts::task_system_prompt(&work_root))
                 };
 
-                let prepopulated_conversation = parent_conversation;
+                let mut prepopulated_conversation = parent_conversation;
+                if selected_spec.is_some() {
+                    prepopulated_conversation.set_request_backend(selected.backend.clone());
+                }
 
                 let result = super::agent_loop::run_agent_loop_nested(
                     selected_model.clone(),
@@ -305,6 +309,7 @@ mod tests {
         let model = rig_core::test_utils::MockCompletionModel::from_turns([]);
         TaskModel {
             model: model.erase(),
+            backend: None,
             temperature: None,
             max_tokens: None,
             extra: None,
@@ -357,6 +362,7 @@ mod tests {
     async fn task_model_selector_builds_matched_model_or_defaults() {
         let target = TaskModel {
             model: rig_core::test_utils::MockCompletionModel::from_turns([]).erase(),
+            backend: None,
             temperature: Some(0.2),
             max_tokens: Some(123),
             extra: Some(serde_json::json!({ "parallel_tool_calls": true })),
@@ -799,6 +805,7 @@ mod tests {
             crate::clients::agent::task_models::sync_factory(move |_spec: &str| {
                 Ok(TaskModel {
                     model: child_handle.clone().erase(),
+                    backend: None,
                     temperature: Some(0.7),
                     max_tokens: Some(8192),
                     extra: Some(target_extra_for_factory.clone()),
@@ -910,6 +917,7 @@ mod tests {
                 match spec {
                     "mapped/scout" => Ok(TaskModel {
                         model: mapped_for_factory.clone().erase(),
+                        backend: None,
                         temperature: Some(0.7),
                         max_tokens: Some(8192),
                         extra: Some(mapped_options.clone()),
@@ -917,6 +925,7 @@ mod tests {
                     }),
                     "stage/model" => Ok(TaskModel {
                         model: stage_for_factory.clone().erase(),
+                        backend: None,
                         temperature: Some(0.2),
                         max_tokens: Some(2048),
                         extra: Some(stage_options.clone()),
@@ -2105,6 +2114,7 @@ mod tests {
                 crate::clients::agent::task_models::sync_factory(move |_spec: &str| {
                     Ok(TaskModel {
                         model: child_handle.clone().erase(),
+                        backend: None,
                         temperature: None,
                         max_tokens: None,
                         extra: None,

@@ -530,11 +530,11 @@ mod tests {
         }
     }
 
-    async fn compact_matches_unary_wire(auth: &str) {
+    async fn compact_matches_streaming_wire(auth: &str) {
         use rig_core::completion::message::{
             AssistantContent, AssistantMessage, Reasoning, ToolCall, ToolFunction,
         };
-        use rig_core::completion::{Message, ToolDefinition};
+        use rig_core::completion::{CompletionRequest, Message, ToolDefinition};
         use rig_core::message::{Origin, ToolName};
         use rig_core::wire::{Body, Mode, Operation, Wire};
         use serde_json::json;
@@ -607,18 +607,22 @@ mod tests {
             Message::tool_result(call.id, call.function.name, "tool output"),
         ];
         let driver = client.completion(&context.model);
-        let prepared = <Completion as Operation>::prepare(
-            context.request(messages.clone()),
-            &driver.wire.describe(),
-        )
-        .unwrap();
-        let encoded = driver.wire.encode(prepared, Mode::Unary).unwrap();
+        // Build the ordinary completion independently of context.request so a
+        // regression in the compaction request builder cannot affect both sides.
+        let request = CompletionRequest::from(messages.clone())
+            .preamble(context.system.clone().unwrap())
+            .tools(context.tools.clone())
+            .additional_params(context.extra.clone().unwrap())
+            .temperature(context.temperature.unwrap())
+            .max_tokens(context.max_tokens.unwrap());
+        let prepared =
+            <Completion as Operation>::prepare(request, &driver.wire.describe()).unwrap();
+        let encoded = driver.wire.encode(prepared, Mode::Streaming).unwrap();
         let Body::Bytes(bytes) = encoded.request.body() else {
             panic!("JSON body")
         };
-        let mut expected: serde_json::Value = serde_json::from_slice(bytes).unwrap();
-        // Compare against the same unary wire mode without discarding fields.
-        expected["compaction"] = json!({"type": "summarize", "instructions": "keep decisions"});
+        let streaming: serde_json::Value = serde_json::from_slice(bytes).unwrap();
+        assert_eq!(streaming["stream"], true);
         let token = Arc::new(CompactToken(Default::default()));
         let dynamic = auth == "dynamic";
         let backend: Arc<dyn Backend> = if dynamic {
@@ -667,7 +671,29 @@ mod tests {
             context.extra.as_ref().unwrap()["compaction"]["type"],
             "caller-value"
         );
-        assert_eq!(body, expected);
+        // Streaming and compaction must carry the same resolved inputs and
+        // exact history; only transport mode and compaction instructions differ.
+        for field in [
+            "model",
+            "system",
+            "messages",
+            "tools",
+            "temperature",
+            "max_tokens",
+            "thinking",
+        ] {
+            assert!(streaming.get(field).is_some(), "missing reference {field}");
+            assert_eq!(body[field], streaming[field], "payload field {field}");
+        }
+        // Some wire versions apply cache control to system/tool/message blocks
+        // (compared above) rather than retaining a top-level field.
+        assert_eq!(body.get("cache_control"), streaming.get("cache_control"));
+        // Compaction remains unary even though the reference uses streaming.
+        assert!(body.get("stream").is_none() || body["stream"] == false);
+        assert_eq!(
+            body["compaction"],
+            json!({"type": "summarize", "instructions": "keep decisions"})
+        );
         assert!(headers.starts_with("POST /gateway/v1/messages HTTP/1.1\r\n"));
         let headers = headers.to_lowercase();
         assert!(headers.contains("anthropic-version: 2023-06-01"));
@@ -712,18 +738,18 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn production_compact_matches_unary_wire_static_api_key() {
-        compact_matches_unary_wire("api-key").await;
+    async fn production_compact_matches_streaming_wire_static_api_key() {
+        compact_matches_streaming_wire("api-key").await;
     }
 
     #[tokio::test]
-    async fn production_compact_matches_unary_wire_static_token() {
-        compact_matches_unary_wire("token").await;
+    async fn production_compact_matches_streaming_wire_static_token() {
+        compact_matches_streaming_wire("token").await;
     }
 
     #[tokio::test]
-    async fn production_compact_matches_unary_wire_dynamic() {
-        compact_matches_unary_wire("dynamic").await;
+    async fn production_compact_matches_streaming_wire_dynamic() {
+        compact_matches_streaming_wire("dynamic").await;
     }
 
     fn scrub_anthropic_env(guard: &mut EnvGuard) {

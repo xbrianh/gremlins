@@ -1195,6 +1195,7 @@ mod tests {
             .expect("replacement installs a selector even without task overrides");
         let parent = TaskModel {
             model: rig_core::test_utils::MockCompletionModel::from_turns([]).erase(),
+            backend: None,
             temperature: None,
             max_tokens: None,
             extra: None,

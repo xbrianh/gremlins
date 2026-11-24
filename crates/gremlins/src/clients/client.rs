@@ -334,6 +334,7 @@ pub(crate) async fn resolve_model(spec: &str) -> Result<super::agent::task::Task
     let preserve_reasoning = matches!(client.provider(), "azure-openai" | "anthropic");
     Ok(super::agent::task::TaskModel {
         model,
+        backend: Some(backend),
         temperature: resolved.temperature,
         max_tokens: resolved.max_tokens,
         extra: resolved.additional_value(),

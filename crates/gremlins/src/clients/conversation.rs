@@ -238,6 +238,13 @@ pub(crate) trait Conversation: Send + Sync {
     /// run's actual preserve-reasoning setting rather than a hardcoded `false`.
     fn set_preserve_reasoning(&mut self, _preserve: bool) {}
 
+    /// Select the backend for subsequent requests, invalidating stale request context.
+    fn set_request_backend(
+        &mut self,
+        _backend: Option<std::sync::Arc<dyn crate::clients::backend::Backend>>,
+    ) {
+    }
+
     fn set_request_context(
         &mut self,
         _context: crate::clients::compaction::ResolvedRequestContext,

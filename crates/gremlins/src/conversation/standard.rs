@@ -192,11 +192,11 @@ impl StandardConversation {
         let to_compact = self.history[..cut].to_vec();
 
         // ── Server-side compaction ──
-        if let Some(context) = self
-            .request_context
-            .as_ref()
-            .filter(|context| backend.supports_compaction() && context.provider == backend.name())
-        {
+        if let Some(context) = self.request_context.as_ref().filter(|context| {
+            backend.supports_compaction()
+                && !context.provider.is_empty()
+                && context.provider == backend.name()
+        }) {
             match backend.compact(&to_compact, context, instructions).await {
                 Ok(Some(r)) if r.block.is_some() => {
                     let signed = r.block.unwrap();
@@ -276,6 +276,11 @@ impl Conversation for StandardConversation {
             local_summarizer: self.local_summarizer,
             request_context: self.request_context.clone(),
         })
+    }
+
+    fn set_request_backend(&mut self, backend: Option<Arc<dyn Backend>>) {
+        self.backend = backend;
+        self.request_context = None;
     }
 
     fn set_request_context(&mut self, context: ResolvedRequestContext) {
@@ -772,6 +777,7 @@ mod tests {
             crate::clients::agent::task_models::sync_factory(move |_spec: &str| {
                 Ok(crate::clients::agent::task::TaskModel {
                     model: child_handle.clone().erase(),
+                    backend: None,
                     temperature: None,
                     max_tokens: None,
                     extra: None,

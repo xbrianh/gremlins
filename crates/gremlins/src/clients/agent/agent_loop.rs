@@ -4444,6 +4444,7 @@ mod tests {
                 assert_eq!(spec, "openai/mini", "factory receives the matched spec");
                 Ok(super::super::task::TaskModel {
                     model: child_handle.clone().erase(),
+                    backend: None,
                     temperature: None,
                     max_tokens: None,
                     extra: None,
@@ -4507,6 +4508,230 @@ mod tests {
             task_result.contains("# Scout"),
             "task result should carry its kind header, got: {task_result}"
         );
+    }
+
+    // Observe contexts at the conversation boundary, not merely the selector output.
+    #[derive(Clone)]
+    struct ContextProbe {
+        inner: Box<dyn crate::clients::conversation::Conversation>,
+        seen: std::sync::Arc<
+            std::sync::Mutex<Vec<crate::clients::compaction::ResolvedRequestContext>>,
+        >,
+    }
+
+    #[async_trait::async_trait]
+    impl crate::clients::conversation::Conversation for ContextProbe {
+        fn clone_box(&self) -> Box<dyn crate::clients::conversation::Conversation> {
+            Box::new(self.clone())
+        }
+        fn record_prose(&mut self, text: &str) {
+            self.inner.record_prose(text);
+        }
+        fn record_turn(
+            &mut self,
+            text: &str,
+            reasoning: &[Reasoning],
+            calls: &[rig_core::completion::message::ToolCall],
+            tokens: Option<u64>,
+            origin: Option<rig_core::completion::message::Origin>,
+        ) {
+            self.inner
+                .record_turn(text, reasoning, calls, tokens, origin);
+        }
+        fn finish_turn(&mut self, results: Vec<Message>) {
+            self.inner.finish_turn(results);
+        }
+        fn record_interrupted_response(&mut self, text: String, reasoning: &[Reasoning]) {
+            self.inner.record_interrupted_response(text, reasoning);
+        }
+        fn pop_last_assistant_turn(&mut self) {
+            self.inner.pop_last_assistant_turn();
+        }
+        async fn render_turn(
+            &mut self,
+            nested: bool,
+            system: Option<String>,
+        ) -> Result<
+            crate::clients::conversation::TurnScript,
+            crate::clients::conversation::TurnScriptError,
+        > {
+            self.seen.lock().unwrap().push(
+                self.inner
+                    .request_context()
+                    .expect("context installed before render"),
+            );
+            self.inner.render_turn(nested, system).await
+        }
+        fn finalize(
+            &mut self,
+            turn: usize,
+            text: &str,
+            reasoning: &[Reasoning],
+            done: Option<&rig_core::completion::message::ToolCall>,
+        ) -> crate::clients::conversation::RunArtifact {
+            self.inner.finalize(turn, text, reasoning, done)
+        }
+        fn fork(&self) -> Box<dyn crate::clients::conversation::Conversation> {
+            Box::new(Self {
+                inner: self.inner.fork(),
+                seen: self.seen.clone(),
+            })
+        }
+        fn spawn_child(&self, prompt: &str) -> Box<dyn crate::clients::conversation::Conversation> {
+            Box::new(Self {
+                inner: self.inner.spawn_child(prompt),
+                seen: self.seen.clone(),
+            })
+        }
+        fn set_next_prompt(&mut self, prompt: &str) {
+            self.inner.set_next_prompt(prompt);
+        }
+        fn inject_operator(&mut self, text: &str) {
+            self.inner.inject_operator(text);
+        }
+        fn done_rejected(
+            &mut self,
+            text: &str,
+            reasoning: &[Reasoning],
+            calls: &[rig_core::completion::message::ToolCall],
+            results: Vec<Message>,
+            prompt: Message,
+        ) {
+            self.inner
+                .done_rejected(text, reasoning, calls, results, prompt);
+        }
+        fn messages(&self) -> Vec<Message> {
+            self.inner.messages()
+        }
+        fn set_preserve_reasoning(&mut self, preserve: bool) {
+            self.inner.set_preserve_reasoning(preserve);
+        }
+        fn set_request_backend(
+            &mut self,
+            backend: Option<std::sync::Arc<dyn crate::clients::backend::Backend>>,
+        ) {
+            self.inner.set_request_backend(backend);
+        }
+        fn set_request_context(
+            &mut self,
+            context: crate::clients::compaction::ResolvedRequestContext,
+        ) {
+            self.inner.set_request_context(context);
+        }
+        fn request_provider(&self) -> Option<&str> {
+            self.inner.request_provider()
+        }
+        fn request_context(&self) -> Option<crate::clients::compaction::ResolvedRequestContext> {
+            self.inner.request_context()
+        }
+    }
+
+    struct NamedBackend(&'static str);
+
+    #[async_trait::async_trait]
+    impl crate::clients::backend::Backend for NamedBackend {
+        async fn run(
+            &self,
+            _: crate::clients::backend::RunParams,
+            _: InteractiveSession,
+        ) -> Result<crate::clients::protocol::CompletedRun, ClientError> {
+            unreachable!("only backend identity is used")
+        }
+        fn model(&self) -> &str {
+            "mock"
+        }
+        fn name(&self) -> &'static str {
+            self.0
+        }
+    }
+
+    #[tokio::test]
+    async fn task_child_request_context_uses_selected_backend() {
+        use crate::clients::agent::task_models::{sync_factory, TaskModel, TaskModelSelector};
+        use crate::conversation::standard::StandardConversation;
+        use crate::task_kind::TaskKind;
+        use rig_core::test_utils::{MockCompletionModel, MockStreamEvent};
+        use std::sync::{Arc, Mutex};
+
+        // Fork ignores even an explicit mapping; unmapped Implement inherits.
+        for (kind, mapped, expected) in [
+            (TaskKind::Scout, true, "child"),
+            (TaskKind::Implement, true, "child"),
+            (TaskKind::Fork, true, "parent"),
+            (TaskKind::Implement, false, "parent"),
+        ] {
+            let dir = tempfile::tempdir().unwrap();
+            let done = || {
+                vec![
+                    MockStreamEvent::tool_call(
+                        "done",
+                        "Done",
+                        serde_json::json!({"summary": "ok"}),
+                    ),
+                    MockStreamEvent::final_response_with_default_usage(),
+                ]
+            };
+            let parent = MockCompletionModel::from_stream_turns([
+                vec![
+                    MockStreamEvent::tool_call(
+                        "task",
+                        "Task",
+                        serde_json::json!({"kind": kind.to_string(), "prompt": "work"}),
+                    ),
+                    MockStreamEvent::final_response_with_default_usage(),
+                ],
+                done(),
+                done(),
+            ]);
+            let child = MockCompletionModel::from_stream_turns([done()]);
+            let factory = sync_factory(move |_| {
+                Ok(TaskModel {
+                    model: child.clone().erase(),
+                    backend: Some(Arc::new(NamedBackend("child"))),
+                    temperature: None,
+                    max_tokens: None,
+                    extra: None,
+                    preserve_reasoning: None,
+                })
+            });
+            let seen = Arc::new(Mutex::new(Vec::new()));
+            let conv = ContextProbe {
+                inner: Box::new(StandardConversation::new(
+                    "go",
+                    false,
+                    None,
+                    Some(Arc::new(NamedBackend("parent"))),
+                )),
+                seen: seen.clone(),
+            };
+            let mut ctx = test_ctx(Some(dir.path().to_path_buf()), None);
+            ctx.idle_timeout = 5.0;
+            ctx.params.idle_timeout = Some(5.0);
+            ctx.params.task_models = TaskModelSelector::new(
+                HashMap::from([(
+                    if mapped { kind } else { TaskKind::Scout },
+                    "test/model".into(),
+                )]),
+                factory,
+            );
+            ctx.params.prepopulated_conversation = Box::new(conv.clone());
+            ctx.prepopulated_conversation = Box::new(conv);
+            run_agent_loop(
+                parent.erase(),
+                "go",
+                ctx,
+                CancelToken::new(),
+                loop_opts(None),
+                InteractiveSession::unattached(),
+            )
+            .await
+            .unwrap();
+            let contexts = seen.lock().unwrap();
+            assert_eq!(contexts.len(), 3, "parent, child, parent for {kind}");
+            assert_eq!(contexts[0].provider, "parent");
+            assert_eq!(contexts[1].provider, expected, "child context for {kind}");
+            assert_eq!(contexts[2].provider, "parent");
+        }
     }
 
     // ── max_tokens propagation tests ─────────────────────────────────
@@ -4658,6 +4883,7 @@ mod tests {
             crate::clients::agent::task_models::sync_factory(move |_spec: &str| {
                 Ok(super::super::task::TaskModel {
                     model: child_handle.clone().erase(),
+                    backend: None,
                     temperature: None,
                     max_tokens: Some(8192),
                     extra: None,
@@ -4885,6 +5111,7 @@ mod tests {
             crate::clients::agent::task_models::sync_factory(move |_spec: &str| {
                 Ok(super::super::task::TaskModel {
                     model: child_handle.clone().erase(),
+                    backend: None,
                     temperature: None,
                     max_tokens: None,
                     extra: None,
