@@ -191,13 +191,13 @@ fn format_file_ops(read_files: &[String], modified_files: &[String]) -> String {
 
 // ── Tool-result truncation ───────────────────────────────────────────
 
-/// Truncate tool-result content blocks in `messages` for the
-/// summarization request. Returns a new vec with truncated messages.
+/// Prepare a local summarization request copy: remove reasoning and truncate
+/// tool results without changing the original conversation.
 fn truncate_for_summarization(messages: &[Message]) -> Vec<Message> {
     messages
         .iter()
-        .map(|msg| match msg {
-            Message::User { content } => Message::User {
+        .filter_map(|msg| match msg {
+            Message::User { content } => Some(Message::User {
                 content: content
                     .iter()
                     .map(|c| match c {
@@ -210,8 +210,23 @@ fn truncate_for_summarization(messages: &[Message]) -> Vec<Message> {
                         other => other.clone(),
                     })
                     .collect(),
-            },
-            other => other.clone(),
+            }),
+            Message::Assistant(turn) => {
+                let content: Vec<_> = turn
+                    .content
+                    .iter()
+                    .filter(|block| !matches!(block, AssistantContent::Reasoning(_)))
+                    .cloned()
+                    .collect();
+                if content.is_empty() {
+                    None
+                } else {
+                    let mut prepared = turn.clone();
+                    prepared.content = content;
+                    Some(Message::Assistant(prepared))
+                }
+            }
+            other => Some(other.clone()),
         })
         .collect()
 }
@@ -383,6 +398,82 @@ mod tests {
         Message::Assistant(AssistantMessage::new(vec![AssistantContent::Text(
             Text::new(s.into()),
         )]))
+    }
+
+    #[test]
+    fn summarization_preserves_plain_messages() {
+        let history = paired_history(2);
+        assert_eq!(truncate_for_summarization(&history), history);
+    }
+
+    #[test]
+    fn summarization_removes_reasoning_and_truncates_tool_results_only_in_copy() {
+        use rig_core::completion::message::{
+            Api, Origin, Reasoning, ToolCall, ToolFunction, ToolName,
+        };
+        use serde_json::json;
+
+        let signed =
+            AssistantContent::Reasoning(Reasoning::new("private reasoning")).with_native(json!({
+                "type": "thinking",
+                "thinking": "private reasoning",
+                "signature": "original-signature"
+            }));
+        let redacted = AssistantContent::Reasoning(Reasoning {
+            text: String::new(),
+            redacted: true,
+            native: None,
+        })
+        .with_native(json!({"type": "redacted_thinking", "data": "encrypted-payload"}));
+        let visible = AssistantContent::Text(Text::new("Reading the file."))
+            .with_native(json!({"type": "text", "text": "Reading the file."}));
+        let call = ToolCall::from_wire(
+            "call-1",
+            ToolFunction::new(ToolName::new("Read").unwrap(), json!({"file_path": "a.rs"})),
+        );
+        let call_block = AssistantContent::ToolCall(call.clone()).with_native(json!({
+            "type": "tool_use", "id": "call-1", "name": "Read", "input": {"file_path": "a.rs"}
+        }));
+        let turn = AssistantMessage::new(vec![
+            signed.clone(),
+            visible.clone(),
+            redacted.clone(),
+            call_block.clone(),
+        ])
+        .with_origin(Origin::new(
+            Api::from_static("anthropic.messages"),
+            "anthropic",
+            "claude-sonnet-4-6",
+        ));
+        let full_result = "x".repeat(TOOL_RESULT_MAX_CHARS + 37);
+        let history = vec![
+            user_msg("Read a.rs"),
+            Message::Assistant(AssistantMessage::new(vec![signed, redacted])),
+            Message::Assistant(turn.clone()),
+            Message::tool_result(call.id.clone(), call.function.name.clone(), &full_result),
+            asst_msg("The file has been read."),
+        ];
+        let original = history.clone();
+
+        let prepared = truncate_for_summarization(&history);
+        let mut expected_turn = turn;
+        expected_turn.content = vec![visible, call_block];
+        let expected = vec![
+            history[0].clone(),
+            Message::Assistant(expected_turn),
+            Message::tool_result(
+                call.id,
+                call.function.name,
+                format!(
+                    "{}…\n[37 more chars truncated]",
+                    "x".repeat(TOOL_RESULT_MAX_CHARS)
+                ),
+            ),
+            history[4].clone(),
+        ];
+        assert_eq!(prepared, expected);
+        // Equality includes native signatures/payloads and the full tool result.
+        assert_eq!(history, original);
     }
 
     #[test]
