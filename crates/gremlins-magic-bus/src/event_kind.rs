@@ -133,6 +133,9 @@ pub enum EventKind {
     #[serde(rename = "stage_boundary")]
     StageBoundary {
         id: String,
+        // Legacy boundaries predate invocation identities; new producers always supply one.
+        #[serde(default)]
+        stage_id: String,
         stage: String,
         stage_type: String,
         active: bool,
@@ -222,5 +225,28 @@ impl EventKind {
                 | EventKind::SystemWarning { .. }
                 | EventKind::OperatorMessage { .. }
         )
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::EventKind;
+
+    #[test]
+    fn stage_boundary_accepts_legacy_payload_and_preserves_new_identity() {
+        let legacy = serde_json::json!({
+            "type": "stage_boundary",
+            "id": "run",
+            "stage": "agent",
+            "stage_type": "agent",
+            "active": true
+        });
+        let event: EventKind = serde_json::from_value(legacy.clone()).unwrap();
+        assert!(matches!(event, EventKind::StageBoundary { stage_id, .. } if stage_id.is_empty()));
+
+        let mut current = legacy;
+        current["stage_id"] = "invocation-id".into();
+        let event: EventKind = serde_json::from_value(current.clone()).unwrap();
+        assert_eq!(serde_json::to_value(event).unwrap(), current);
     }
 }

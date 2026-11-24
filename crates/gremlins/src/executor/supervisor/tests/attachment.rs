@@ -321,6 +321,7 @@ async fn run_attachment_follows_agent_to_exec_with_exact_scope_and_bus_display_s
         },
         EventKind::StageBoundary {
             id: id.into(),
+            stage_id: "exec-execution".into(),
             stage: "exec".into(),
             stage_type: "exec".into(),
             active: true,

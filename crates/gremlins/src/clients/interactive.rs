@@ -744,6 +744,26 @@ impl InteractiveSessionFactory {
         accepts_commands: bool,
         cancel: Option<&CancelToken>,
     ) -> Result<InteractiveSession, &'static str> {
+        self.next_session_with_identity(None, accepts_commands, cancel)
+    }
+
+    /// Bind a pipeline execution to its stage ID before publishing it.
+    /// An already prepared chat execution retains its announced identity.
+    pub(crate) fn next_session_for_stage(
+        &mut self,
+        stage_id: &str,
+        accepts_commands: bool,
+        cancel: Option<&CancelToken>,
+    ) -> Result<InteractiveSession, &'static str> {
+        self.next_session_with_identity(Some(stage_id), accepts_commands, cancel)
+    }
+
+    fn next_session_with_identity(
+        &mut self,
+        stage_id: Option<&str>,
+        accepts_commands: bool,
+        cancel: Option<&CancelToken>,
+    ) -> Result<InteractiveSession, &'static str> {
         if let Some(mut session) = self.prepared.take() {
             // The prepared session's identity has already been published.
             // Never replace it if backend selection disagrees; fail the caller's
@@ -760,7 +780,7 @@ impl InteractiveSessionFactory {
             }
             return Ok(session);
         }
-        Ok(self.mint(accepts_commands, cancel))
+        Ok(self.mint(stage_id, accepts_commands, cancel))
     }
 
     /// Drop only a prepared execution. An absent preparation is a no-op.
@@ -784,7 +804,7 @@ impl InteractiveSessionFactory {
         accepts_commands: bool,
         cancel: Option<&CancelToken>,
     ) -> String {
-        let mut session = self.mint(accepts_commands, cancel);
+        let mut session = self.mint(None, accepts_commands, cancel);
         if let Some(terminal) = self.next_terminal.take() {
             if let Some(previous) = &session.terminal {
                 previous.transfer_to(&terminal);
@@ -808,7 +828,12 @@ impl InteractiveSessionFactory {
 
     /// Mint a fresh execution: signal the previous one's end, bump the nonce,
     /// publish the execution ID and handle, and sweep stale pause state.
-    fn mint(&mut self, accepts_commands: bool, cancel: Option<&CancelToken>) -> InteractiveSession {
+    fn mint(
+        &mut self,
+        stage_id: Option<&str>,
+        accepts_commands: bool,
+        cancel: Option<&CancelToken>,
+    ) -> InteractiveSession {
         let outgoing_terminal = self.prepared.as_ref().and_then(|s| s.terminal.clone());
         let previous = self.current_slot.take();
         let mut reservation = self
@@ -900,7 +925,11 @@ impl InteractiveSessionFactory {
         let nonce = self.next_nonce;
         self.next_nonce = self.next_nonce.wrapping_add(1);
         slot.nonce.store(nonce, Ordering::Release);
-        slot.set_execution_id(format!("exec-{}", uuid::Uuid::new_v4()));
+        slot.set_execution_id(
+            stage_id
+                .map(str::to_owned)
+                .unwrap_or_else(|| format!("exec-{}", uuid::Uuid::new_v4())),
+        );
         let end_signal = slot.current_end_signal();
         if let Some(cancel) = cancel {
             cancel.listen(slot.clone());
@@ -1468,6 +1497,64 @@ mod tests {
             second_handle.target().nonce()
         );
         drop((first, second));
+    }
+
+    #[tokio::test]
+    async fn supplied_stage_identity_preserves_successor_lease() {
+        let (mut sessions, handle) = InteractiveSessionFactory::for_pipeline();
+        let mut first = sessions
+            .next_session_for_stage("review:agent", true, None)
+            .unwrap();
+        let old_target = handle.target();
+        assert_eq!(old_target.execution_id(), Some("review:agent"));
+        assert_eq!(first.snapshot().execution_id(), Some("review:agent"));
+        let old_lease = old_target.attach().unwrap();
+        assert!(first.accept_pause());
+
+        let mut second = sessions
+            .next_session_for_stage("review:agent", true, None)
+            .unwrap();
+        let target = handle.target();
+        assert_eq!(target.execution_id(), Some("review:agent"));
+        assert_ne!(old_target.nonce(), target.nonce());
+        assert!(old_target.end_signal().is_ended());
+        let lease = target.attach().unwrap();
+        assert!(second.accept_pause());
+        drop((old_lease, first));
+        assert!(second.is_attached());
+        assert!(!target.end_signal().is_ended());
+        assert!(matches!(target.attach(), Err(AttachError::Busy)));
+        drop(lease);
+    }
+
+    #[tokio::test]
+    async fn supplied_stage_identity_is_readonly_when_commands_unsupported() {
+        let (mut sessions, handle) = InteractiveSessionFactory::for_pipeline();
+        let mut session = sessions
+            .next_session_for_stage("plan", false, None)
+            .unwrap();
+        let target = handle.target();
+        assert_eq!(target.execution_id(), Some("plan"));
+        assert_eq!(session.snapshot().execution_id(), Some("plan"));
+        assert!(!target.accepts_commands());
+        assert!(matches!(target.attach(), Err(AttachError::Busy)));
+        assert!(matches!(target.attach_debugger(), Err(AttachError::Busy)));
+        assert!(!session.accept_pause());
+        drop(session);
+        assert!(target.end_signal().is_ended());
+    }
+
+    #[tokio::test]
+    async fn supplied_stage_does_not_replace_prepared_chat_identity() {
+        let (mut sessions, handle) = InteractiveSessionFactory::for_chat();
+        let announced = sessions.prepare_next_with_commands(true, None);
+        let target = handle.target();
+        let _session = sessions
+            .next_session_for_stage("ignored", true, None)
+            .unwrap();
+        assert_eq!(handle.target().execution_id(), Some(announced.as_str()));
+        assert_eq!(handle.target().nonce(), target.nonce());
+        assert!(!target.end_signal().is_ended());
     }
 
     #[tokio::test]

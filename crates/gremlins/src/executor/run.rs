@@ -22,7 +22,7 @@ use crate::executor::gremlin::Gremlin;
 use crate::executor::gremlin::{GremlinConfig, WorkDir};
 use crate::executor::parallel::run_parallel;
 
-use crate::executor::stage_boundary::send_stage_boundary;
+use crate::executor::stage_boundary::StageInvocation;
 use crate::executor::state;
 use crate::executor::state::StateStore;
 use crate::executor::vars;
@@ -71,6 +71,8 @@ async fn run_stage_scoped(
     enclosing_model: Option<&ModelURI>,
     enclosing_task_models: Option<&IndexMap<String, String>>,
 ) -> Result<(), RunError> {
+    // Every dispatched stage gets boundaries, including stages omitted from display state.
+    let invocation = StageInvocation::enter(gremlin.id.as_str(), stage.name(), stage.stage_type());
     let _ = gremlin.state.read_str("attempt");
     let tm = gremlin.enclosing_task_models.clone();
     let enc_tm = enclosing_task_models.or(tm.as_ref());
@@ -110,9 +112,6 @@ async fn run_stage_scoped(
     if is_leaf {
         gremlin.state.set_stage_path(stage.name(), None, sequences);
     }
-    if display_stage.is_some() {
-        send_stage_boundary(gremlin.id.as_str(), stage.name(), stage.stage_type());
-    }
     if is_leaf {
         emit_event(EventKind::StageTransition {
             id: gremlin.id.to_string(),
@@ -126,6 +125,7 @@ async fn run_stage_scoped(
             crate::executor::run_agent::run_agent(
                 stage,
                 gremlin,
+                &invocation,
                 scope,
                 &stage_usage_path,
                 enc_model,
@@ -145,11 +145,8 @@ async fn run_stage_scoped(
         ExecutorStage::Done => Ok(()),
     };
 
-    if display_stage.is_some() {
-        if is_leaf {
-            gremlin.state.finish_scoped_leaf();
-        }
-        send_stage_boundary(gremlin.id.as_str(), "", "other");
+    if display_stage.is_some() && is_leaf {
+        gremlin.state.finish_scoped_leaf();
     }
     gremlin.state.patch(
         &[],
@@ -589,11 +586,9 @@ impl Gremlin {
                     stage.stage_type()
                 ),
             });
-            send_stage_boundary(self.id.as_str(), stage.name(), stage.stage_type());
 
             let stage_result = run_stage(&stage, self).await;
             self.loop_iter = saved_loop_iter;
-            send_stage_boundary(self.id.as_str(), "", "other");
 
             match stage_result {
                 Ok(()) => {}
@@ -636,7 +631,6 @@ impl Gremlin {
 
     /// Reap clients, fold subprocess cost into total, write terminal state.
     fn finish(&mut self, exit_code: i32) {
-        send_stage_boundary(self.id.as_str(), "", "other");
         let msg = format!("finished (exit_code={exit_code})");
         emit_event(EventKind::LogLine {
             id: self.id.to_string(),

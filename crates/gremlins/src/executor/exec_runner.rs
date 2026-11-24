@@ -625,6 +625,7 @@ mod tests {
         // yielding to the bridge: all real process output must already be queued.
         emit_event(EventKind::StageBoundary {
             id: id.clone(),
+            stage_id: "drain-execution".into(),
             stage: prepared.name.clone(),
             stage_type: "exec".into(),
             active: false,

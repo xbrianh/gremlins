@@ -74,6 +74,7 @@ fn leaf_corr_id(run_id: &str, session: &crate::clients::interactive::Interactive
 pub(crate) async fn run_agent(
     node: &ExecutorStage,
     gremlin: &mut Gremlin,
+    invocation: &crate::executor::stage_boundary::StageInvocation,
     scope: &str,
     stage_usage_path: &str,
     enclosing_model: Option<&ModelURI>,
@@ -142,11 +143,21 @@ pub(crate) async fn run_agent(
         }
     };
     let accepts_commands = backend.accepts_interactive_commands();
-    let interactive = match gremlin.next_interactive_session_with_commands(accepts_commands) {
+    // Chat keeps its prepared-turn identity; the caller still owns the invocation boundaries.
+    let session = if is_chat {
+        gremlin.next_interactive_session_with_commands(accepts_commands)
+    } else {
+        gremlin.next_pipeline_interactive_session(&invocation.stage_id, accepts_commands)
+    };
+    let interactive = match session {
         Ok(session) => session,
         Err(error) => return Err(stage_failed(&agent.name, error)),
     };
-    let corr_id = leaf_corr_id(gremlin.id.as_str(), &interactive);
+    let corr_id = if is_chat {
+        leaf_corr_id(gremlin.id.as_str(), &interactive)
+    } else {
+        invocation.corr_id()
+    };
     let framework_subs = gremlin.framework_subs(&agent.name);
     let _attempt = gremlin.state.read_str("attempt");
     let loop_iter = gremlin.loop_iter.clone();
@@ -1250,7 +1261,12 @@ mod tests {
         };
         install_test_backend(&spec, backend.clone());
         let node = gremlin.definition.next_stage().await.unwrap();
-        let error = run_agent(&node, &mut gremlin, "", "", None, None)
+        let invocation = crate::executor::stage_boundary::StageInvocation::enter(
+            gremlin.id.as_str(),
+            node.name(),
+            node.stage_type(),
+        );
+        let error = run_agent(&node, &mut gremlin, &invocation, "", "", None, None)
             .await
             .expect_err("capture backend deliberately fails");
         assert!(error.to_string().contains(CAPTURED), "{error}");

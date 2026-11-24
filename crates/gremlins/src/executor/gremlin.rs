@@ -354,6 +354,26 @@ impl Gremlin {
         )
     }
 
+    /// Bind a pipeline session to the stage identity with resolved capabilities.
+    pub(crate) fn next_pipeline_interactive_session(
+        &mut self,
+        stage_id: &str,
+        accepts_commands: bool,
+    ) -> Result<InteractiveSession, String> {
+        self.interactive_sessions.as_mut().map_or_else(
+            || Ok(InteractiveSession::unattached()),
+            |sessions| {
+                sessions
+                    .next_session_for_stage(
+                        stage_id,
+                        accepts_commands,
+                        self.cancel_token.as_deref(),
+                    )
+                    .map_err(str::to_owned)
+            },
+        )
+    }
+
     /// Mint the next interactive session eagerly and return its execution_id.
     ///
     /// Chat turns call this at turn start to announce the execution identity

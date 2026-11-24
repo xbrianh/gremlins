@@ -59,6 +59,7 @@ use super::run_registry::{RunRegistry, RunState};
 enum RunEvent {
     StageBoundary {
         id: String,
+        stage_id: String,
         stage: String,
         stage_type: String,
         active: bool,
@@ -91,11 +92,13 @@ impl RunEvent {
         match kind {
             EventKind::StageBoundary {
                 id,
+                stage_id,
                 stage,
                 stage_type,
                 active,
             } => Some(Self::StageBoundary {
                 id: id.clone(),
+                stage_id: stage_id.clone(),
                 stage: stage.clone(),
                 stage_type: stage_type.clone(),
                 active: *active,

@@ -86,6 +86,8 @@ pub mod run_agent;
 pub mod run_exec;
 pub mod socket;
 pub(crate) mod stage_boundary;
+#[cfg(test)]
+mod stage_invocation_tests;
 pub mod state;
 pub mod supervisor;
 pub mod vars;

@@ -66,7 +66,6 @@ pub(crate) async fn run_gremlin_task(
                 id: gremlin.id.to_string(),
                 line: format!("error: {e}"),
             });
-            crate::executor::stage_boundary::send_stage_boundary(gremlin.id.as_str(), "", "other");
             gremlin.state.write_terminal_state(1);
             1
         }
