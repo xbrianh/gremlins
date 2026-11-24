@@ -441,12 +441,11 @@ pub(crate) async fn run_agent(
                 gremlin.state.accumulate_token_usage(&delta);
                 state::emit_stage_token_usage(gremlin.state.store_ref(), &stage_path, &delta);
             }
-            // On cancellation, persist the conversation so the next turn
-            // can recover the interrupted task's context.
+            // Earlier turns remain authoritative in their own artifacts. Persist
+            // only this prompt so cancellation cannot replay the signed prefix.
             if matches!(&error, ClientError::Cancelled) && is_chat {
                 if let Some(turn_num) = chat_turn {
-                    let mut messages = canonical_prefix;
-                    messages.push(Message::user(prepared.user_prompt()));
+                    let messages = [Message::user(prepared.user_prompt())];
                     if let Err(e) =
                         persist_chat_conversation_turn(gremlin, turn_num, &messages).await
                     {
@@ -745,6 +744,232 @@ mod tests {
             native_definition: None,
         };
         (sandbox, gremlin)
+    }
+
+    const CHAT_A: &str = "A: remember the cobalt lighthouse";
+    const CHAT_B: &str = "B: investigate the interrupted amber bridge";
+    const CHAT_C: &str = "C: continue with the violet observatory";
+
+    fn signed_chat_reasoning() -> rig_core::completion::message::Reasoning {
+        use rig_core::completion::message::{AssistantContent, Reasoning};
+        let content = AssistantContent::Reasoning(Reasoning {
+            text: "A: distinctive private reasoning".into(),
+            redacted: false,
+            native: None,
+        })
+        .with_native(serde_json::json!({
+            "type": "thinking",
+            "thinking": "A: distinctive private reasoning",
+            "signature": "A-signed-reasoning-do-not-change"
+        }));
+        let AssistantContent::Reasoning(reasoning) = content else {
+            unreachable!()
+        };
+        reasoning
+    }
+
+    #[derive(Default)]
+    struct ChatCancellationBackend {
+        requests: Mutex<Vec<(String, Vec<Message>)>>,
+        started: tokio::sync::Notify,
+    }
+
+    #[async_trait::async_trait]
+    impl Backend for ChatCancellationBackend {
+        async fn run(
+            &self,
+            mut params: RunParams,
+            _interactive: InteractiveSession,
+        ) -> Result<CompletedRun, ClientError> {
+            let conversation = &mut params.prepopulated_conversation;
+            conversation.set_next_prompt(&params.prompt);
+            let script = conversation
+                .render_turn(false, params.system_prompt.clone())
+                .await
+                .unwrap();
+            let mut messages = script.messages;
+            messages.push(script.next_user_prompt);
+            {
+                let mut requests = self.requests.lock().unwrap();
+                requests.push((params.prompt.clone(), messages));
+            }
+            if params.label == "chat-0001" {
+                conversation.set_preserve_reasoning(true);
+                conversation.finalize(
+                    1,
+                    "A: the cobalt lighthouse is recorded",
+                    &[signed_chat_reasoning()],
+                    None,
+                );
+                return Ok(CompletedRun {
+                    exit_code: 0,
+                    text_result: Some("A: the cobalt lighthouse is recorded".into()),
+                    summary: None,
+                    events: None,
+                    cost_usd: None,
+                    token_usage: None,
+                    conversation: Some(params.prepopulated_conversation),
+                });
+            }
+            if let Some(cancel_token) = &params.cancel_token {
+                self.started.notify_one();
+                cancel_token.cancelled().await;
+                return Err(ClientError::Cancelled);
+            }
+            Err(ClientError::Runtime {
+                message: CAPTURED.into(),
+            })
+        }
+
+        fn model(&self) -> &str {
+            ""
+        }
+    }
+
+    async fn chat_node(turn: usize, prompt: &str) -> ExecutorStage {
+        let stage = AgentBuilder::new(format!("chat-{turn:04}"))
+            .prompt(prompt)
+            .build()
+            .unwrap();
+        let mut definition = StaticDefinition::new(
+            "chat-test".into(),
+            PathBuf::from("test.yaml"),
+            ModelURI::parse("cmd/run-agent-chat-cancellation").unwrap(),
+            Bootstrap::default(),
+            vec![stage],
+            None,
+            vec![],
+            serde_json::Value::Null,
+            None,
+        );
+        crate::definition::GremlinDefinition::next_stage(&mut definition)
+            .await
+            .unwrap()
+    }
+
+    async fn assert_cancelled_chat_recovery(retry: bool) {
+        let stage = AgentBuilder::new("chat-0001")
+            .prompt(CHAT_A)
+            .build()
+            .unwrap();
+        let (_sandbox, mut gremlin) = test_gremlin(stage);
+        gremlin.runtime_config.default_task_models = None;
+        gremlin.runtime_config.resolved_model_selection = None;
+        let spec = if retry {
+            "cmd/chat-cancel-retry"
+        } else {
+            "cmd/chat-cancel-next"
+        };
+        gremlin.client = Client::parse(spec).unwrap();
+        gremlin.model_override = Some(spec.into());
+        gremlin.state.patch(
+            &[],
+            serde_json::json!({"kind": "chat"}).as_object().unwrap(),
+        );
+        let backend = Arc::new(ChatCancellationBackend::default());
+        install_test_backend(spec, backend.clone());
+        let a = chat_node(1, CHAT_A).await;
+        run_agent(&a, &mut gremlin, "", "", None, None)
+            .await
+            .unwrap();
+        let a_json = gremlin
+            .state
+            .content(&conversation_uri(1), None)
+            .await
+            .unwrap();
+        let a_messages = messages_from_conversation(&a_json).unwrap();
+        assert_eq!(a_messages.len(), 2);
+        let a_prompt = backend.requests.lock().unwrap()[0].0.clone();
+        assert_eq!(
+            serde_json::to_value(&a_messages[0]).unwrap(),
+            serde_json::to_value(Message::user(&a_prompt)).unwrap()
+        );
+        assert!(a_prompt.ends_with(CHAT_A));
+        assert!(a_json.contains("A-signed-reasoning-do-not-change"));
+        assert!(a_json.contains("A: the cobalt lighthouse is recorded"));
+
+        let b = chat_node(2, CHAT_B).await;
+        let token = crate::clients::cancel::CancelToken::new();
+        gremlin.cancel_token = Some(token.clone());
+        let cancel_after_request = async {
+            backend.started.notified().await;
+            token.cancel();
+        };
+        let (result, ()) = tokio::time::timeout(std::time::Duration::from_secs(10), async {
+            tokio::join!(
+                run_agent(&b, &mut gremlin, "", "", None, None),
+                cancel_after_request
+            )
+        })
+        .await
+        .expect("backend must start and observe cancellation");
+        assert!(matches!(result, Err(RunError::Cancelled)), "{result:?}");
+        let b_prompt = backend.requests.lock().unwrap()[1].0.clone();
+        assert!(b_prompt.ends_with(CHAT_B));
+        let b_json = gremlin
+            .state
+            .content(&conversation_uri(2), None)
+            .await
+            .unwrap();
+        assert_eq!(
+            gremlin
+                .state
+                .content(&conversation_uri(1), None)
+                .await
+                .unwrap(),
+            a_json
+        );
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(&b_json).unwrap(),
+            serde_json::to_value([Message::user(&b_prompt)]).unwrap()
+        );
+
+        gremlin.cancel_token = None;
+        let next = if retry {
+            chat_node(2, CHAT_B).await
+        } else {
+            chat_node(3, CHAT_C).await
+        };
+        let error = run_agent(&next, &mut gremlin, "", "", None, None)
+            .await
+            .unwrap_err();
+        assert!(error.to_string().contains(CAPTURED), "{error}");
+        let requests = backend.requests.lock().unwrap().clone();
+        assert_eq!(requests.len(), 3);
+        assert!(requests[2].0.ends_with(if retry { CHAT_B } else { CHAT_C }));
+        let mut expected = a_messages;
+        expected.push(Message::user(&b_prompt));
+        expected.push(Message::user(&requests[2].0));
+        assert_eq!(
+            serde_json::to_value(&requests[2].1).unwrap(),
+            serde_json::to_value(expected).unwrap()
+        );
+        assert_eq!(
+            gremlin
+                .state
+                .content(&conversation_uri(1), None)
+                .await
+                .unwrap(),
+            a_json
+        );
+        assert_eq!(
+            gremlin
+                .state
+                .content(&conversation_uri(2), None)
+                .await
+                .unwrap(),
+            b_json
+        );
+    }
+
+    #[tokio::test]
+    async fn cancelled_chat_next_turn_replays_each_message_once() {
+        assert_cancelled_chat_recovery(false).await;
+    }
+
+    #[tokio::test]
+    async fn cancelled_chat_retry_preserves_signed_history_and_turn_local_artifact() {
+        assert_cancelled_chat_recovery(true).await;
     }
 
     async fn capture_dispatch(name: &str, replacement: bool, expected: &str) -> RunParams {
