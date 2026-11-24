@@ -212,17 +212,13 @@ fn truncate_for_summarization(messages: &[Message]) -> Vec<Message> {
                     .collect(),
             }),
             Message::Assistant(turn) => {
-                let content: Vec<_> = turn
+                let mut prepared = turn.clone();
+                prepared
                     .content
-                    .iter()
-                    .filter(|block| !matches!(block, AssistantContent::Reasoning(_)))
-                    .cloned()
-                    .collect();
-                if content.is_empty() {
+                    .retain(|block| !matches!(block, AssistantContent::Reasoning(_)));
+                if prepared.content.is_empty() {
                     None
                 } else {
-                    let mut prepared = turn.clone();
-                    prepared.content = content;
                     Some(Message::Assistant(prepared))
                 }
             }
