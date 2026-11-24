@@ -354,6 +354,82 @@ async fn repeated_leaf_has_distinct_stage_run_filters_inside_one_sequence_pair()
 }
 
 #[tokio::test]
+async fn nested_leaf_transition_keeps_display_payload_but_uses_leaf_invocation_route() {
+    let stage = SequenceBuilder::new("outer")
+        .stage(
+            SequenceBuilder::new("inner")
+                .stage(exec("leaf", "true"))
+                .build()
+                .unwrap(),
+        )
+        .build()
+        .unwrap();
+    let (_sandbox, mut gremlin, node) = fixture(stage);
+    let prefix = CorrId::new().with_run(gremlin.id.as_str());
+    let mut all = Subscription::new(prefix.clone());
+    let mut leaf = Subscription::new(prefix.clone().with_stage("leaf"));
+    let mut outer = Subscription::new(prefix.with_stage("outer"));
+    run_stage(&node, &mut gremlin).await.unwrap();
+    let events = all.drain();
+    let transitions: Vec<_> = events
+        .iter()
+        .filter(|event| matches!(event.kind(), EventKind::StageTransition { .. }))
+        .collect();
+    assert_eq!(transitions.len(), 1);
+    let transition = transitions[0];
+    let EventKind::StageTransition {
+        id,
+        stage,
+        sub_stage,
+    } = transition.kind()
+    else {
+        unreachable!();
+    };
+    assert_eq!(id, gremlin.id.as_str());
+    assert_eq!(stage, "outer");
+    assert_eq!(sub_stage.as_deref(), Some("leaf"));
+    let selected = leaf.drain();
+    let pair: Vec<_> = selected
+        .iter()
+        .filter(|e| is_boundary(e))
+        .cloned()
+        .collect();
+    assert_pair(&pair, gremlin.id.as_str(), "leaf", "exec");
+    assert_eq!(transition.corr_id(), pair[0].corr_id());
+    assert!(pair[0].sequence() < transition.sequence());
+    assert!(transition.sequence() < pair[1].sequence());
+    assert_eq!(
+        selected
+            .iter()
+            .filter(|event| { matches!(event.kind(), EventKind::StageTransition { .. }) })
+            .count(),
+        1
+    );
+    assert!(!outer
+        .drain()
+        .iter()
+        .any(|event| { matches!(event.kind(), EventKind::StageTransition { .. }) }));
+
+    // Exact invocation filtering must include the transition in history and exclude reruns.
+    let (sub, _, history) = init_bus()
+        .subscribe_with_history(SubscriberRegistration::lossless(
+            transition.corr_id().clone(),
+        ))
+        .unwrap();
+    let _guard = BusSubGuard::new(sub);
+    let history_transitions: Vec<_> = history
+        .events
+        .iter()
+        .filter(|event| matches!(event.kind(), EventKind::StageTransition { .. }))
+        .collect();
+    assert_eq!(history_transitions.len(), 1);
+    assert_eq!(history_transitions[0].sequence(), transition.sequence());
+    let mut exact = Subscription::new(transition.corr_id().clone());
+    run_stage(&node, &mut gremlin).await.unwrap();
+    assert!(exact.drain().is_empty());
+}
+
+#[tokio::test]
 async fn skipped_sequence_closes_itself_without_dispatching_its_leaf() {
     let stage = SequenceBuilder::new("skip")
         .skip_if_exists("artifact://ready")
@@ -611,13 +687,9 @@ impl Backend for FailingBackend {
     ) -> Result<CompletedRun, ClientError> {
         assert_eq!(interactive.accepts_commands(), !self.readonly);
         assert_eq!(interactive.snapshot().accepts_commands(), !self.readonly);
-        let stage_run_id = interactive.snapshot().stage_run_id().unwrap().to_owned();
-        let corr = CorrId::new()
-            .with_run(params.gremlin_id.as_deref().unwrap())
-            .with_stage("agent")
-            .with_stage_run_id(&stage_run_id);
+        let corr = params.output_corr_id.as_ref().unwrap();
         gremlins_magic_bus::emit_corr_event(
-            &corr,
+            corr,
             EventKind::LogLine {
                 id: params.gremlin_id.clone().unwrap(),
                 line: "backend entered".into(),
@@ -742,6 +814,174 @@ async fn task_abort_drops_nested_invocations_and_closes_both_pairs() {
 #[tokio::test]
 async fn readonly_backend_receives_the_stage_run_target_identity() {
     backend_case(true, false, true).await;
+}
+
+struct ChatBackend {
+    wait_for_cancel: bool,
+    fail: bool,
+}
+
+#[async_trait::async_trait]
+impl Backend for ChatBackend {
+    async fn run(
+        &self,
+        params: RunParams,
+        interactive: InteractiveSession,
+    ) -> Result<CompletedRun, ClientError> {
+        assert!(interactive.accepts_commands());
+        // Capture input identity independently; output must use the supplied invocation route.
+        let session = interactive.snapshot();
+        gremlins_magic_bus::emit_corr_event(
+            params.output_corr_id.as_ref().unwrap(),
+            EventKind::LogLine {
+                id: params.gremlin_id.clone().unwrap(),
+                line: format!("chat backend session: {}", session.stage_run_id().unwrap()),
+            },
+        );
+        gremlins_magic_bus::emit_corr_event(
+            params.output_corr_id.as_ref().unwrap(),
+            EventKind::StreamChunk {
+                text: "CHAT_MARKER".into(),
+            },
+        );
+        if self.wait_for_cancel {
+            params.cancel_token.as_ref().unwrap().cancelled().await;
+        }
+        if self.fail {
+            return Err(ClientError::Runtime {
+                message: "scripted chat failure".into(),
+            });
+        }
+        Ok(CompletedRun {
+            exit_code: 0,
+            text_result: Some("chat output".into()),
+            summary: None,
+            events: None,
+            cost_usd: None,
+            token_usage: None,
+            conversation: None,
+        })
+    }
+
+    fn model(&self) -> &str {
+        "invocation-chat-test"
+    }
+
+    fn accepts_interactive_commands(&self) -> bool {
+        true
+    }
+}
+
+#[tokio::test]
+async fn chat_output_uses_invocation_identity_without_replacing_prepared_input_target() {
+    // Repeat the same turn name, including on failure, to catch identity reuse.
+    for mode in ["success", "failure", "cancel", "abort"] {
+        let spec = format!("cmd/chat-invocation-{}", state::token_hex(8));
+        install_test_backend(
+            &spec,
+            Arc::new(ChatBackend {
+                wait_for_cancel: matches!(mode, "cancel" | "abort"),
+                fail: mode != "success",
+            }),
+        );
+        let stage = AgentBuilder::new("chat-0001")
+            .model(ModelURI::parse(&spec).unwrap())
+            .prompt("hi")
+            .build()
+            .unwrap();
+        let (_sandbox, mut gremlin, node) = fixture(stage);
+        gremlin.state.patch(
+            &[],
+            &[("kind".into(), serde_json::json!("chat"))]
+                .into_iter()
+                .collect(),
+        );
+        let (sessions, handle) = crate::clients::interactive::InteractiveSessionFactory::for_chat();
+        gremlin.interactive_sessions = Some(sessions);
+        let id = gremlin.id.to_string();
+        let mut bus = Subscription::new(CorrId::new().with_run(&id));
+        let node = Arc::new(node);
+        let mut invocation_ids = HashSet::new();
+        let mut session_ids = HashSet::new();
+        for _ in 0..if mode == "abort" { 1 } else { 2 } {
+            let token = CancelToken::new();
+            gremlin.cancel_token = Some(token.clone());
+            let target = gremlin
+                .prepare_interactive_target_with_commands(true)
+                .unwrap();
+            let session_id = target.stage_run_id().unwrap().to_owned();
+            assert!(session_ids.insert(session_id.clone()));
+            let execution_end = target.end_signal();
+            let stage = node.clone();
+            let mut task = tokio::spawn(async move {
+                let result = run_stage(&stage, &mut gremlin).await;
+                (gremlin, result)
+            });
+            let mut events = Vec::new();
+            tokio::time::timeout(Duration::from_secs(10), async {
+                loop {
+                    let gremlins_magic_bus::Recv::Event(event) = bus.rx.recv().await else {
+                        panic!("bus closed");
+                    };
+                    let entered = matches!(event.kind(), EventKind::LogLine { line, .. }
+                        if line.starts_with("chat backend session: "));
+                    events.push(event);
+                    if entered {
+                        break;
+                    }
+                }
+            })
+            .await
+            .expect("chat backend was not dispatched");
+            let marker = events.last().unwrap().clone();
+            assert!(matches!(marker.kind(), EventKind::LogLine { line, .. }
+                if line == &format!("chat backend session: {session_id}")));
+            assert_eq!(handle.target().stage_run_id(), Some(session_id.as_str()));
+            assert_eq!(handle.target().nonce(), target.nonce());
+            assert_ne!(marker.corr_id().stage_run_id(), Some(session_id.as_str()));
+            if mode == "abort" {
+                task.abort();
+            } else if mode == "cancel" {
+                token.cancel();
+            }
+            let joined = tokio::time::timeout(Duration::from_secs(10), &mut task)
+                .await
+                .unwrap();
+            // Recover ownership for another invocation, except when deliberately aborted.
+            let recovered = if mode == "abort" {
+                match joined {
+                    Err(error) => assert!(error.is_cancelled()),
+                    Ok(_) => panic!("aborted chat task completed"),
+                }
+                None
+            } else {
+                let (g, result) = joined.unwrap();
+                assert_eq!(result.is_ok(), mode == "success", "{result:?}");
+                Some(g)
+            };
+            events.extend(bus.drain());
+            let pair: Vec<_> = events.iter().filter(|e| is_boundary(e)).cloned().collect();
+            assert_pair(&pair, &id, "chat-0001", "agent");
+            assert!(invocation_ids.insert(pair[0].corr_id().stage_run_id().unwrap().to_owned()));
+            assert_eq!(marker.corr_id(), pair[0].corr_id());
+            let chunks: Vec<_> = events.iter().filter(|event| {
+                matches!(event.kind(), EventKind::StreamChunk { text } if text == "CHAT_MARKER")
+            }).collect();
+            assert_eq!(chunks.len(), 1);
+            assert_eq!(chunks[0].corr_id(), pair[0].corr_id());
+            assert!(pair[0].sequence() < chunks[0].sequence());
+            assert!(chunks[0].sequence() < pair[1].sequence());
+            assert!(pair[0].sequence() < marker.sequence());
+            assert!(marker.sequence() < pair[1].sequence());
+            assert!(execution_end.is_ended());
+            assert_eq!(target.stage_run_id(), Some(session_id.as_str()));
+            if let Some(g) = recovered {
+                gremlin = g;
+            } else {
+                break;
+            }
+        }
+    }
 }
 
 #[tokio::test]

@@ -393,7 +393,7 @@ pub(crate) async fn handle_session_aux(
         "log" => {
             handle_log(&request, &registry, reader, &writer).await;
         }
-        "attach" => {
+        "attach" | "watch" => {
             handle_attach(&request, &registry, reader, &writer).await;
         }
         _ => {

@@ -1,5 +1,46 @@
 # Attachment and watch replay protocol
 
+## Read-only filtered bus watch
+
+Both the control socket and verified session auxiliary socket accept:
+
+```json
+{"op":"watch","id":"RUN","stage":"build","stage_run_id":"INVOCATION","replay":true,"session_id":"SESSION"}
+```
+
+`id` is required. `stage` and `stage_run_id` are optional nonempty strings;
+when both are supplied, both must match. Retired `stage_id` and `execution_id`
+keys are rejected, including inside `target`; watch does not accept `target`.
+Unknown request fields are rejected rather than silently broadening a selector.
+Supported envelope fields are `op`, `session_id`, and `req_id`; `scope`, if
+supplied, must be `"run"`. Session verification and run resolution precede
+subscription and acknowledgment.
+No input registration or pause lease is consulted or acquired.
+
+The server registers a bounded, lag-tolerant correlation subscription before
+sending `watched`, with `id`, `scope:"run"`, `stage`, `stage_run_id`, and the
+negotiated `replay` boolean. Absent filters are reported as null. A run watch
+survives stage changes; a stage-name watch includes later invocations of that
+name; an invocation watch never follows a replacement.
+
+Frames retain native payloads and sequences, adding correlation `run_id` and,
+when present, `stage` and `stage_run_id`. If a native payload already declares a
+different `stage` (such as an enclosing display stage on `stage_transition`),
+that payload is preserved and `correlation_stage` identifies the invocation's
+stage instead. Payload `id` remains untouched (for
+example, a tool call ID). Descendant runs match the parent selector but retain
+their actual run identity; unrelated runs and internal `prompt_request` traffic
+are excluded. Child completion does not terminate the parent watch.
+
+Replay uses the bus's atomic retained snapshot and live receiver: an optional
+`history_gap` with native watermarks precedes retained matching frames, then a
+`replay_checkpoint` reports completeness and watermarks before live delivery.
+Live mailbox overflow is a separate `lagged` report. Live-only watches send no
+checkpoint. Commands receive a read-only error and close only that watch;
+disconnection releases the subscription, never the execution.
+
+The older `attach` request remains available unchanged.
+
 ## Passive run scope
 
 A dedicated JSON-lines connection sends:

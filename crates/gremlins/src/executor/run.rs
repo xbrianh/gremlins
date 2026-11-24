@@ -129,11 +129,14 @@ async fn run_stage_scoped(
         gremlin.state.set_stage_path(stage.name(), None, sequences);
     }
     if is_leaf {
-        emit_event(EventKind::StageTransition {
-            id: gremlin.id.to_string(),
-            stage: display_stage.unwrap_or(stage.name()).to_owned(),
-            sub_stage: display_stage.map(|_| stage.name().to_owned()),
-        });
+        emit_corr_event(
+            &invocation.corr_id(),
+            EventKind::StageTransition {
+                id: gremlin.id.to_string(),
+                stage: display_stage.unwrap_or(stage.name()).to_owned(),
+                sub_stage: display_stage.map(|_| stage.name().to_owned()),
+            },
+        );
     }
 
     let result = match stage {

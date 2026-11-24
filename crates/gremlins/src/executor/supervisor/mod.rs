@@ -255,7 +255,7 @@ async fn handle_connection(
             break Some((request, reader));
         }
 
-        if op == "attach" {
+        if op == "attach" || op == "watch" {
             // Stop the global event-forwarding task before handing
             // off to the scoped attachment handler.  If a prior
             // request already opened the event gate, unrelated

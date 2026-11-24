@@ -166,6 +166,59 @@ async fn write_run_history(
     id: &str,
     history: HistorySnapshot<EventKind>,
 ) -> Result<bool, String> {
+    write_history(writer, PassiveStream::Run(id), history).await
+}
+
+/// Protocol policy only: delivery ordering and I/O are shared below. Watch
+/// terminal state is gated by its selector; run state includes invisible starts.
+#[derive(Clone, Copy)]
+enum PassiveStream<'a> {
+    Run(&'a str),
+    Watch(&'a gremlins_magic_bus::CorrId),
+}
+
+impl PassiveStream<'_> {
+    fn frame(self, dispatch: &DispatchEvent<EventKind>) -> Option<Value> {
+        match self {
+            Self::Run(id) => run_display_frame(dispatch, id),
+            Self::Watch(filter) => watch_frame(dispatch, filter),
+        }
+    }
+
+    fn terminal_update(self, dispatch: &DispatchEvent<EventKind>, displayed: bool) -> Option<bool> {
+        let id = match self {
+            Self::Run(id) => id,
+            Self::Watch(filter) if displayed => filter.run().expect("watch run"),
+            Self::Watch(_) => return None,
+        };
+        if dispatch.corr_id().run() != Some(id) || !event_run_id_matches(dispatch.kind(), id) {
+            return None;
+        }
+        match dispatch.kind() {
+            EventKind::RunStarted { .. } => Some(false),
+            _ if watch_parent_terminal(dispatch, id) => Some(true),
+            _ => None,
+        }
+    }
+
+    fn checkpoint(self) -> Value {
+        match self {
+            Self::Run(id) => serde_json::json!({
+                "type": "replay_checkpoint", "id": id, "scope": "run",
+            }),
+            Self::Watch(filter) => serde_json::json!({
+                "type": "replay_checkpoint", "id": filter.run(), "scope": "run",
+                "stage": filter.stage(), "stage_run_id": filter.stage_run_id(),
+            }),
+        }
+    }
+}
+
+async fn write_history(
+    writer: &SharedWriter,
+    stream: PassiveStream<'_>,
+    history: HistorySnapshot<EventKind>,
+) -> Result<bool, String> {
     if !history.complete {
         writer
             .write_json_line(&serde_json::json!({
@@ -178,28 +231,45 @@ async fn write_run_history(
     }
     let mut terminal = false;
     for dispatch in history.events {
-        if dispatch.corr_id().run() == Some(id) && event_run_id_matches(dispatch.kind(), id) {
-            match dispatch.kind() {
-                EventKind::RunStarted { .. } => terminal = false,
-                EventKind::RunCompleted { .. }
-                | EventKind::RunFailed { .. }
-                | EventKind::RunStopped { .. } => terminal = true,
-                _ => {}
-            }
+        let frame = stream.frame(&dispatch);
+        if let Some(update) = stream.terminal_update(&dispatch, frame.is_some()) {
+            terminal = update;
         }
-        if let Some(value) = run_display_frame(&dispatch, id) {
+        if let Some(value) = frame {
             writer.write_json_line(&value).await?;
         }
     }
-    writer
-        .write_json_line(&serde_json::json!({
-            "type": "replay_checkpoint", "id": id, "scope": "run",
-            "complete": history.complete,
-            "through_sequence": history.through_sequence,
-            "evicted_through_sequence": history.evicted_through_sequence,
-        }))
-        .await?;
+    let mut checkpoint = stream.checkpoint();
+    checkpoint["complete"] = serde_json::json!(history.complete);
+    checkpoint["through_sequence"] = serde_json::json!(history.through_sequence);
+    checkpoint["evicted_through_sequence"] = serde_json::json!(history.evicted_through_sequence);
+    writer.write_json_line(&checkpoint).await?;
     Ok(terminal)
+}
+
+/// Returns true after a terminal event or closure; delivery failures propagate.
+async fn forward_passive(
+    writer: &SharedWriter,
+    stream: PassiveStream<'_>,
+    event: Recv<EventKind>,
+) -> Result<bool, String> {
+    match event {
+        Recv::Event(dispatch) => {
+            let frame = stream.frame(&dispatch);
+            let terminal = stream.terminal_update(&dispatch, frame.is_some()) == Some(true);
+            if let Some(frame) = frame {
+                writer.write_json_line(&frame).await?;
+            }
+            Ok(terminal)
+        }
+        Recv::Lagged(skipped) => {
+            let frame = serde_json::to_value(RunEvent::Lagged { skipped })
+                .map_err(|error| error.to_string())?;
+            writer.write_json_line(&frame).await?;
+            Ok(false)
+        }
+        Recv::Closed => Ok(true),
+    }
 }
 
 pub(super) fn retired_target_error(request: &Value) -> Option<Value> {
@@ -232,6 +302,10 @@ pub(crate) async fn handle_attach(
     reader: BufReader<tokio::net::unix::OwnedReadHalf>,
     writer: &SharedWriter,
 ) {
+    if request.get("op").and_then(Value::as_str) == Some("watch") {
+        handle_watch(request, registry, reader, writer).await;
+        return;
+    }
     if let Some(error) = retired_target_error(request) {
         let _ = writer.write_json_line(&error).await;
         return;
@@ -256,6 +330,189 @@ pub(crate) async fn handle_attach(
     match scope {
         "conversation" => handle_conversation_attach(request, id, registry, reader, writer).await,
         _ => handle_run_attach(request, id, registry, reader, writer).await,
+    }
+}
+
+// ── Read-only, correlation-filtered watch ─────────────────────────────
+
+fn watch_filter(request: &Value) -> Result<(gremlins_magic_bus::CorrId, bool), String> {
+    let fields = request
+        .as_object()
+        .ok_or("watch request must be an object")?;
+    for key in fields.keys() {
+        if !matches!(
+            key.as_str(),
+            "op" | "id" | "session_id" | "req_id" | "scope" | "stage" | "stage_run_id" | "replay"
+        ) {
+            return Err(format!("unsupported watch field '{key}'"));
+        }
+    }
+    let id = request
+        .get("id")
+        .and_then(Value::as_str)
+        .filter(|id| !id.is_empty())
+        .ok_or("missing or invalid 'id' field")?;
+    validate_gremlin_id(id).map_err(|_| format!("invalid gremlin id {id:?}"))?;
+    if let Some(scope) = request.get("scope") {
+        if scope.as_str() != Some("run") {
+            return Err("watch scope must be 'run'".into());
+        }
+    }
+    let mut filter = gremlins_magic_bus::CorrId::new().with_run(id);
+    for key in ["stage", "stage_run_id"] {
+        if let Some(value) = request.get(key) {
+            let value = value
+                .as_str()
+                .filter(|value| !value.is_empty())
+                .ok_or_else(|| format!("'{key}' must be a nonempty string"))?;
+            filter = if key == "stage" {
+                filter.with_stage(value)
+            } else {
+                filter.with_stage_run_id(value)
+            };
+        }
+    }
+    let replay = match request.get("replay") {
+        None => false,
+        Some(value) => value.as_bool().ok_or("'replay' must be a boolean")?,
+    };
+    Ok((filter, replay))
+}
+
+fn watch_frame(
+    dispatch: &DispatchEvent<EventKind>,
+    filter: &gremlins_magic_bus::CorrId,
+) -> Option<Value> {
+    let corr = dispatch.corr_id();
+    if !corr.matches_prefix(filter) {
+        return None;
+    }
+    // A matching watch selector always includes a run.
+    debug_assert!(corr.run().is_some());
+    let run = corr
+        .run()
+        .filter(|run| event_run_id_matches(dispatch.kind(), run))?;
+    if matches!(dispatch.kind(), EventKind::PromptRequest { .. }) {
+        return None;
+    }
+    let mut frame = if matches!(dispatch.kind(), EventKind::RunStarted { .. }) {
+        serde_json::to_value(dispatch.kind()).ok()?
+    } else {
+        run_kind_frame(dispatch.kind())?
+    };
+    frame["sequence"] = serde_json::json!(dispatch.sequence());
+    frame["run_id"] = serde_json::json!(run);
+    if let Some(stage) = corr.stage() {
+        // Display transitions can name an enclosing stage. Keep that payload
+        // intact and expose the leaf invocation route separately when needed.
+        if frame.get("stage").is_some_and(|value| value != stage) {
+            frame["correlation_stage"] = serde_json::json!(stage);
+        } else {
+            frame["stage"] = serde_json::json!(stage);
+        }
+    }
+    if let Some(stage_run_id) = corr.stage_run_id() {
+        frame["stage_run_id"] = serde_json::json!(stage_run_id);
+    }
+    Some(frame)
+}
+
+fn watch_parent_terminal(dispatch: &DispatchEvent<EventKind>, id: &str) -> bool {
+    dispatch.corr_id().run() == Some(id)
+        && event_run_id_matches(dispatch.kind(), id)
+        && matches!(
+            dispatch.kind(),
+            EventKind::RunCompleted { .. }
+                | EventKind::RunFailed { .. }
+                | EventKind::RunStopped { .. }
+        )
+}
+
+async fn write_watch_history(
+    writer: &SharedWriter,
+    filter: &gremlins_magic_bus::CorrId,
+    history: HistorySnapshot<EventKind>,
+) -> Result<bool, String> {
+    write_history(writer, PassiveStream::Watch(filter), history).await
+}
+
+/// Observe native history/live events without acquiring an input lease.
+/// Shared entry point for control and verified auxiliary socket dispatch.
+pub(crate) async fn handle_watch(
+    request: &Value,
+    registry: &Arc<RunRegistry>,
+    mut reader: BufReader<OwnedReadHalf>,
+    writer: &SharedWriter,
+) {
+    if let Some(error) = retired_target_error(request) {
+        let _ = writer.write_json_line(&error).await;
+        return;
+    }
+    let (filter, replay) = match watch_filter(request) {
+        Ok(selection) => selection,
+        Err(error) => {
+            let _ = writer.write_json_line(&error_response(&error)).await;
+            return;
+        }
+    };
+    let id = filter.run().expect("validated watch id");
+    if registry.get_run_store(id).await.is_none() {
+        let _ = writer
+            .write_json_line(&error_response(&format!("gremlin {id} is not running")))
+            .await;
+        return;
+    }
+    let bus = gremlins_magic_bus::init_bus();
+    let registration =
+        gremlins_magic_bus::SubscriberRegistration::lag_tolerant(filter.clone(), 256);
+    let (sub, mut rx, history) = if replay {
+        let (sub, rx, history) = bus
+            .subscribe_with_history(registration)
+            .expect("valid watch subscription");
+        (sub, rx, Some(history))
+    } else {
+        let (sub, rx) = bus
+            .subscribe(registration)
+            .expect("valid watch subscription");
+        (sub, rx, None)
+    };
+    let _guard = BusSubGuard::new(sub);
+    if writer
+        .write_json_line(&serde_json::json!({
+            "type": "watched", "id": id, "scope": "run", "replay": replay,
+            "stage": filter.stage(), "stage_run_id": filter.stage_run_id(),
+        }))
+        .await
+        .is_err()
+    {
+        return;
+    }
+    if let Some(history) = history {
+        match write_watch_history(writer, &filter, history).await {
+            Ok(false) => {}
+            Ok(true) | Err(_) => return,
+        }
+    }
+    loop {
+        tokio::select! {
+            biased;
+            command = socket::read_json_line(&mut reader) => {
+                if let Ok(Some(command)) = command {
+                    let error = retired_target_error(&command).unwrap_or_else(||
+                        error_response("watch is read-only; commands are not accepted"));
+                    let _ = writer.write_json_line(&error).await;
+                }
+                break;
+            }
+            event = rx.recv() => {
+                if !matches!(
+                    forward_passive(writer, PassiveStream::Watch(&filter), event).await,
+                    Ok(false)
+                ) {
+                    break;
+                }
+            }
+        }
     }
 }
 
@@ -311,40 +568,11 @@ async fn handle_run_attach(
     loop {
         tokio::select! {
             result = bus_rx.recv() => {
-                match result {
-                    Recv::Event(dispatch) => {
-                        // Bus run subscriptions also receive descendants. Never
-                        // display or terminate on another run's events.
-                        if dispatch.corr_id().run() != Some(id) {
-                            continue;
-                        }
-                        let kind = dispatch.kind();
-                        if !event_run_id_matches(kind, id) {
-                            continue;
-                        }
-                        if let Some(value) = run_display_frame(&dispatch, id) {
-                            if writer.write_json_line(&value).await.is_err() {
-                                break;
-                            }
-                        }
-                        // RunCompleted, RunFailed, RunStopped → terminal.
-                        if matches!(
-                            kind,
-                            EventKind::RunCompleted { .. }
-                                | EventKind::RunFailed { .. }
-                                | EventKind::RunStopped { .. }
-                        ) {
-                            break;
-                        }
-                    }
-                    Recv::Lagged(skipped) => {
-                        let payload = serde_json::to_value(&RunEvent::Lagged { skipped })
-                            .unwrap_or(serde_json::Value::Null);
-                        if writer.write_json_line(&payload).await.is_err() {
-                            break;
-                        }
-                    }
-                    Recv::Closed => break,
+                if !matches!(
+                    forward_passive(writer, PassiveStream::Run(id), result).await,
+                    Ok(false)
+                ) {
+                    break;
                 }
             }
             command = socket::read_json_line(&mut reader) => {
@@ -1539,6 +1767,374 @@ pub(crate) mod delivery_busy_gate {
 mod routing_tests {
     use super::*;
     use crate::clients::interactive::{AttachError, InteractiveSessionFactory};
+
+    #[tokio::test]
+    async fn passive_forwarding_preserves_selector_terminal_and_lag_rules() {
+        use gremlins_magic_bus::CorrId;
+        let filter = CorrId::new().with_run("parent").with_stage("build");
+        let (client, server) = tokio::net::UnixStream::pair().unwrap();
+        let (_, write) = server.into_split();
+        let writer = SharedWriter::new(write);
+        let mut reader = BufReader::new(client);
+        let stopped =
+            |corr, id: &str| DispatchEvent::new(corr, EventKind::RunStopped { id: id.into() });
+        let parent = stopped(CorrId::new().with_run("parent"), "parent");
+        let watch = PassiveStream::Watch(&filter);
+        let run = PassiveStream::Run("parent");
+        // A stage watch must not close on a parent event outside its selector.
+        assert!(
+            !forward_passive(&writer, watch, Recv::Event(parent.clone()))
+                .await
+                .unwrap()
+        );
+        // Nor may either protocol close on mismatched payload identity.
+        let mismatched = stopped(filter.clone(), "other");
+        for stream in [watch, run] {
+            assert!(
+                !forward_passive(&writer, stream, Recv::Event(mismatched.clone()))
+                    .await
+                    .unwrap()
+            );
+            assert!(!forward_passive(&writer, stream, Recv::Lagged(3))
+                .await
+                .unwrap());
+            let frame = socket::read_json_line(&mut reader).await.unwrap().unwrap();
+            assert_eq!(frame, serde_json::json!({"type": "lagged", "skipped": 3}));
+        }
+        // Payloads without run IDs must still obey the legacy attachment's
+        // exact correlation gate, even though the bus includes descendants.
+        let child_output = DispatchEvent::new(
+            CorrId::new().with_run("parent:child"),
+            EventKind::StreamChunk {
+                text: "child output".into(),
+            },
+        );
+        assert!(run.frame(&child_output).is_none());
+        assert!(!forward_passive(&writer, run, Recv::Event(child_output))
+            .await
+            .unwrap());
+        // Descendant terminal events are visible to watch, but are not terminal.
+        let child = stopped(
+            CorrId::new().with_run("parent:child").with_stage("build"),
+            "parent:child",
+        );
+        assert!(!forward_passive(&writer, run, Recv::Event(child.clone()))
+            .await
+            .unwrap());
+        assert!(!forward_passive(&writer, watch, Recv::Event(child))
+            .await
+            .unwrap());
+        let frame = socket::read_json_line(&mut reader).await.unwrap().unwrap();
+        assert_eq!(frame["run_id"], "parent:child");
+        assert!(forward_passive(&writer, run, Recv::Event(parent))
+            .await
+            .unwrap());
+        let frame = socket::read_json_line(&mut reader).await.unwrap().unwrap();
+        assert_eq!(frame["type"], "run_stopped");
+        assert!(frame.get("run_id").is_none());
+        let parent = stopped(filter.clone(), "parent");
+        assert!(forward_passive(&writer, watch, Recv::Event(parent))
+            .await
+            .unwrap());
+        let frame = socket::read_json_line(&mut reader).await.unwrap().unwrap();
+        assert_eq!(frame["stage"], "build");
+        for stream in [watch, run] {
+            assert!(forward_passive(&writer, stream, Recv::Closed)
+                .await
+                .unwrap());
+        }
+    }
+
+    #[test]
+    fn watch_rejects_invalid_selectors_without_broadening() {
+        for invalid in [
+            serde_json::json!(null),
+            serde_json::json!(""),
+            serde_json::json!(7),
+            serde_json::json!({}),
+        ] {
+            for key in ["id", "stage", "stage_run_id", "scope"] {
+                let mut request = serde_json::json!({"id": "watch-test"});
+                request[key] = invalid.clone();
+                assert!(watch_filter(&request).is_err(), "{request}");
+            }
+        }
+        assert!(
+            watch_filter(&serde_json::json!({"id": "watch-test", "scope": "conversation"}))
+                .is_err()
+        );
+        assert!(watch_filter(&serde_json::json!({"id": "watch-test", "target": {}})).is_err());
+        assert!(
+            retired_target_error(&serde_json::json!({"target": {"execution_id": "old"}})).is_some()
+        );
+    }
+
+    #[tokio::test]
+    async fn watch_native_replay_filters_descendants_and_preserves_tool_identity() {
+        use gremlins_magic_bus::{Bus, CorrId, SubscriberRegistration, TryRecvError};
+        let bus = Bus::new();
+        let filter = CorrId::new()
+            .with_run("watch-test")
+            .with_stage("build")
+            .with_stage_run_id("execution");
+        let child = CorrId::new()
+            .with_run("watch-test:child")
+            .with_stage("build")
+            .with_stage_run_id("execution");
+        bus.emit(DispatchEvent::new(
+            child.clone(),
+            EventKind::RunStarted {
+                id: "watch-test:child".into(),
+                definition: "test".into(),
+                stage: "build".into(),
+            },
+        ));
+        bus.emit(DispatchEvent::new(
+            child.clone(),
+            EventKind::RunStopped {
+                id: "watch-test".into(),
+            },
+        ));
+        bus.emit(DispatchEvent::new(
+            child.clone(),
+            EventKind::PromptRequest {
+                id: "watch-test:child".into(),
+                json: "secret".into(),
+            },
+        ));
+        bus.emit(DispatchEvent::new(
+            child.clone(),
+            EventKind::RunStopped {
+                id: "watch-test:child".into(),
+            },
+        ));
+        bus.emit(DispatchEvent::new(
+            CorrId::new().with_run("watch-test:childish"),
+            EventKind::StreamChunk {
+                text: "wrong execution".into(),
+            },
+        ));
+        let (_, mut rx, history) = bus
+            .subscribe_with_history(SubscriberRegistration::lag_tolerant(filter.clone(), 256))
+            .unwrap();
+        assert!(matches!(rx.try_recv(), Err(TryRecvError::Empty)));
+        bus.emit_async(DispatchEvent::new(
+            child,
+            EventKind::StreamChunk {
+                text: "live".into(),
+            },
+        ))
+        .await;
+        let (client, server) = tokio::net::UnixStream::pair().unwrap();
+        let (_, write) = server.into_split();
+        let writer = SharedWriter::new(write);
+        assert!(!write_watch_history(&writer, &filter, history)
+            .await
+            .unwrap());
+        let live = watch_frame(&rx.try_recv().unwrap(), &filter).unwrap();
+        writer.write_json_line(&live).await.unwrap();
+        let mut reader = BufReader::new(client);
+        for (kind, sequence) in [("run_started", 1), ("run_stopped", 4)] {
+            let frame = socket::read_json_line(&mut reader).await.unwrap().unwrap();
+            assert_eq!(frame["type"], kind);
+            assert_eq!(frame["sequence"], sequence);
+            assert_eq!(frame["run_id"], "watch-test:child");
+            assert_eq!(frame["stage"], "build");
+            assert_eq!(frame["stage_run_id"], "execution");
+        }
+        let checkpoint = socket::read_json_line(&mut reader).await.unwrap().unwrap();
+        assert_eq!(checkpoint["type"], "replay_checkpoint");
+        assert_eq!(checkpoint["through_sequence"], 5);
+        assert_eq!(
+            socket::read_json_line(&mut reader).await.unwrap().unwrap()["sequence"],
+            6
+        );
+        // Tool ids are payload identities, not run ids.
+        let tool: EventKind = serde_json::from_value(serde_json::json!({
+            "type": "tool_output_chunk", "id": "tool-42", "name": "shell", "call": "ls", "text": "output"
+        }))
+        .unwrap();
+        let frame = watch_frame(&DispatchEvent::new(filter.clone(), tool), &filter).unwrap();
+        assert_eq!(frame["id"], "tool-42");
+        assert_eq!(frame["run_id"], "watch-test");
+    }
+
+    #[tokio::test]
+    async fn watch_gap_keeps_native_watermarks_and_parent_terminal() {
+        use gremlins_magic_bus::{Bus, CorrId, SubscriberRegistration};
+        let bus = Bus::with_history_limits(1, 1);
+        let filter = CorrId::new().with_run("watch-gap");
+        bus.emit(DispatchEvent::new(
+            filter.clone(),
+            EventKind::StreamChunk {
+                text: "evicted".into(),
+            },
+        ));
+        bus.emit(DispatchEvent::new(
+            filter.clone(),
+            EventKind::RunStopped {
+                id: "watch-gap".into(),
+            },
+        ));
+        let (_, _, history) = bus
+            .subscribe_with_history(SubscriberRegistration::lag_tolerant(filter.clone(), 256))
+            .unwrap();
+        let (client, server) = tokio::net::UnixStream::pair().unwrap();
+        let (_, write) = server.into_split();
+        let writer = SharedWriter::new(write);
+        assert!(write_watch_history(&writer, &filter, history)
+            .await
+            .unwrap());
+        let mut reader = BufReader::new(client);
+        let gap = socket::read_json_line(&mut reader).await.unwrap().unwrap();
+        assert_eq!(gap["type"], "history_gap");
+        assert_eq!(gap["through_sequence"], 2);
+        assert_eq!(gap["evicted_through_sequence"], 1);
+        let terminal = socket::read_json_line(&mut reader).await.unwrap().unwrap();
+        assert_eq!(terminal["type"], "run_stopped");
+        assert_eq!(terminal["sequence"], 2);
+        let checkpoint = socket::read_json_line(&mut reader).await.unwrap().unwrap();
+        assert_eq!(checkpoint["type"], "replay_checkpoint");
+        assert_eq!(checkpoint["complete"], false);
+        assert_eq!(checkpoint["through_sequence"], 2);
+        assert_eq!(checkpoint["evicted_through_sequence"], 1);
+    }
+
+    #[tokio::test]
+    async fn watch_native_replay_buffers_live_output_while_history_is_blocked() {
+        use gremlins_magic_bus::{Bus, CorrId, SubscriberRegistration, TryRecvError};
+        use std::time::Duration;
+
+        for overflow in [false, true] {
+            let bus = Bus::with_history_limits(2, 3);
+            let filter = CorrId::new()
+                .with_run("watch-blocked")
+                .with_stage("build")
+                .with_stage_run_id("execution");
+            let foreign = CorrId::new().with_run("other-run");
+            let payload = "repeated output\n".repeat(512 * 1024);
+            let output = EventKind::StreamChunk {
+                text: payload.clone(),
+            };
+            for (corr, kind) in [
+                (
+                    foreign.clone(),
+                    EventKind::StreamChunk {
+                        text: "evicted".into(),
+                    },
+                ),
+                (filter.clone(), output.clone()),
+                (
+                    foreign.clone(),
+                    EventKind::StreamChunk {
+                        text: "foreign".into(),
+                    },
+                ),
+                (
+                    foreign.clone(),
+                    EventKind::StreamChunk {
+                        text: "foreign tail".into(),
+                    },
+                ),
+            ] {
+                bus.emit(DispatchEvent::new(corr, kind));
+            }
+            let (_sub, mut rx, history) = bus
+                .subscribe_with_history(SubscriberRegistration::lag_tolerant(filter.clone(), 2))
+                .unwrap();
+            assert!(!history.complete);
+            assert_eq!(history.through_sequence, 4);
+            assert_eq!(history.evicted_through_sequence, 1);
+            assert_eq!(history.events.len(), 1);
+            assert_eq!(history.events[0].sequence(), 2);
+            assert!(matches!(rx.try_recv(), Err(TryRecvError::Empty)));
+
+            let (client, server) = tokio::net::UnixStream::pair().unwrap();
+            let (_, write) = server.into_split();
+            let writer = SharedWriter::new(write);
+            let replay_filter = filter.clone();
+            let (blocked_tx, blocked_rx) = tokio::sync::oneshot::channel();
+            let (resume_tx, resume_rx) = tokio::sync::oneshot::channel();
+            let send = tokio::spawn(async move {
+                let replay = write_watch_history(&writer, &replay_filter, history);
+                tokio::pin!(replay);
+                // Keep the same future alive: the undrained socket cannot fit this output.
+                assert!(tokio::time::timeout(Duration::from_millis(50), &mut replay)
+                    .await
+                    .is_err());
+                blocked_tx.send(()).unwrap();
+                resume_rx.await.unwrap();
+                assert!(!replay.await.unwrap());
+                if overflow {
+                    assert!(matches!(rx.recv().await, Recv::Lagged(1)));
+                    writer
+                        .write_json_line(&serde_json::json!({
+                            "type": "lagged", "skipped": 1,
+                        }))
+                        .await
+                        .unwrap();
+                }
+                for _ in 0..if overflow { 2 } else { 1 } {
+                    let Recv::Event(dispatch) = rx.recv().await else {
+                        panic!("expected native live output");
+                    };
+                    writer
+                        .write_json_line(&watch_frame(&dispatch, &replay_filter).unwrap())
+                        .await
+                        .unwrap();
+                }
+                assert!(matches!(rx.try_recv(), Err(TryRecvError::Empty)));
+            });
+            tokio::time::timeout(Duration::from_secs(5), blocked_rx)
+                .await
+                .unwrap()
+                .unwrap();
+            let count = if overflow { 3 } else { 1 };
+            for _ in 0..count {
+                bus.emit_async(DispatchEvent::new(filter.clone(), output.clone()))
+                    .await;
+            }
+            bus.emit_async(DispatchEvent::new(
+                foreign,
+                EventKind::StreamChunk {
+                    text: "filtered live output".into(),
+                },
+            ))
+            .await;
+            resume_tx.send(()).unwrap();
+
+            let mut reader = BufReader::new(client);
+            let mut expected = vec![
+                serde_json::json!({"type": "history_gap", "reason": "history_incomplete",
+                    "through_sequence": 4, "evicted_through_sequence": 1}),
+                serde_json::json!({"type": "stream_chunk", "text": payload, "sequence": 2,
+                    "run_id": "watch-blocked", "stage": "build", "stage_run_id": "execution"}),
+                serde_json::json!({"type": "replay_checkpoint", "id": "watch-blocked", "scope": "run",
+                    "stage": "build", "stage_run_id": "execution", "complete": false,
+                    "through_sequence": 4, "evicted_through_sequence": 1}),
+            ];
+            if overflow {
+                expected.push(serde_json::json!({"type": "lagged", "skipped": 1}));
+            }
+            for sequence in if overflow { 6..=7 } else { 5..=5 } {
+                expected.push(serde_json::json!({"type": "stream_chunk", "text": payload,
+                    "sequence": sequence, "run_id": "watch-blocked", "stage": "build",
+                    "stage_run_id": "execution"}));
+            }
+            tokio::time::timeout(Duration::from_secs(10), async {
+                for frame in expected {
+                    assert_eq!(
+                        socket::read_json_line(&mut reader).await.unwrap().unwrap(),
+                        frame
+                    );
+                }
+                send.await.unwrap();
+                assert!(socket::read_json_line(&mut reader).await.unwrap().is_none());
+            })
+            .await
+            .unwrap();
+        }
+    }
 
     #[tokio::test]
     async fn run_replay_is_native_filtered_and_checkpointed_before_future() {

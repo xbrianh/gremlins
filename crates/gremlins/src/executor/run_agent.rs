@@ -23,7 +23,7 @@ use crate::executor::state;
 use crate::executor::state::{Checkout, Collision, FileSystemStateStore};
 use crate::executor::RunError;
 use crate::task_kind::TaskKind;
-use gremlins_magic_bus::{emit_corr_event, CorrId, EventKind};
+use gremlins_magic_bus::{emit_corr_event, EventKind};
 use indexmap::IndexMap;
 use rig_core::completion::Message;
 
@@ -61,14 +61,6 @@ pub(crate) fn resolve_task_models(
 ) -> Result<HashMap<TaskKind, String>, config::ConfigError> {
     let effective = config::merge_task_models_runtime(global, enclosing, stage);
     config::parse_task_models_map(effective.as_ref())
-}
-
-fn leaf_corr_id(run_id: &str, session: &crate::clients::interactive::InteractiveSession) -> CorrId {
-    let mut corr_id = CorrId::new().with_run(run_id);
-    if let Some(stage_run_id) = session.snapshot().stage_run_id() {
-        corr_id = corr_id.with_stage_run_id(stage_run_id);
-    }
-    corr_id
 }
 
 pub(crate) async fn run_agent(
@@ -143,7 +135,7 @@ pub(crate) async fn run_agent(
         }
     };
     let accepts_commands = backend.accepts_interactive_commands();
-    // Chat keeps its prepared-turn identity; the caller still owns the invocation boundaries.
+    // Chat input keeps its prepared session identity, independently of output correlation.
     let session = if is_chat {
         gremlin.next_interactive_session_with_commands(accepts_commands)
     } else {
@@ -153,11 +145,7 @@ pub(crate) async fn run_agent(
         Ok(session) => session,
         Err(error) => return Err(stage_failed(&agent.name, error)),
     };
-    let corr_id = if is_chat {
-        leaf_corr_id(gremlin.id.as_str(), &interactive)
-    } else {
-        invocation.corr_id()
-    };
+    let corr_id = invocation.corr_id();
     let framework_subs = gremlin.framework_subs(&agent.name);
     let _attempt = gremlin.state.read_str("attempt");
     let loop_iter = gremlin.loop_iter.clone();
@@ -924,10 +912,13 @@ mod tests {
         let (mut sessions, _) = InteractiveSessionFactory::for_chat();
         let first = sessions.next_session();
         let expected = first.snapshot().stage_run_id().unwrap().to_owned();
-        let corr_id = leaf_corr_id(id, &first);
+        let invocation =
+            crate::executor::stage_boundary::StageInvocation::enter(id, "turn-1", "agent");
+        let corr_id = invocation.corr_id();
+        assert_ne!(corr_id.stage_run_id(), Some(expected.as_str()));
         let successor = sessions.next_session();
         assert_ne!(successor.snapshot().stage_run_id(), Some(expected.as_str()));
-        assert_eq!(leaf_corr_id(id, &first), corr_id);
+        assert_eq!(invocation.corr_id(), corr_id);
         let (sub, mut rx) = subscribe_run(id);
         let _guard = gremlins_magic_bus::connection::BusSubGuard::new(sub);
         emit_corr_event(
@@ -944,11 +935,9 @@ mod tests {
             panic!("missing leaf event")
         };
         assert_eq!(event.corr_id().run(), Some(id));
-        assert_eq!(event.corr_id().stage_run_id(), Some(expected.as_str()));
-        assert_eq!(
-            leaf_corr_id(id, &InteractiveSession::unattached()).stage_run_id(),
-            None
-        );
+        assert_eq!(event.corr_id(), &corr_id);
+        assert_eq!(event.corr_id().stage(), Some("turn-1"));
+        assert_eq!(first.snapshot().stage_run_id(), Some(expected.as_str()));
     }
 
     const CAPTURED: &str = "deliberate run_agent dispatch capture";

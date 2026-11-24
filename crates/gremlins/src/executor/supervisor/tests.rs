@@ -1846,3 +1846,6 @@ async fn artifact_exists_handler_validates_the_entire_request() {
         assert!(result.get("missing").is_none());
     }
 }
+
+#[path = "tests/watch.rs"]
+mod socket_watch;
