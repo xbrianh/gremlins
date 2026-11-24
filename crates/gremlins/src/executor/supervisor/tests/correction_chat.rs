@@ -48,9 +48,20 @@ async fn frame(reader: &mut BufReader<OwnedReadHalf>) -> Value {
         .expect("socket closed")
 }
 
+fn assert_new_identity_only(frame: &Value) {
+    assert!(
+        frame["stage_run_id"]
+            .as_str()
+            .is_some_and(|id| !id.is_empty()),
+        "{frame}"
+    );
+    assert!(frame.get("execution_id").is_none(), "{frame}");
+    assert!(frame.get("stage_id").is_none(), "{frame}");
+}
+
 fn correction_target(started: &Value) -> Value {
     json!({"id": started["id"], "nonce": started["nonce"],
-        "execution_id": started["execution_id"]})
+        "stage_run_id": started["stage_run_id"]})
 }
 
 async fn assert_start_snapshot(
@@ -65,14 +76,15 @@ async fn assert_start_snapshot(
     assert_eq!(current.id, started["id"].as_str().unwrap());
     assert_eq!(current.turn.as_deref(), Some(turn));
     assert_eq!(
-        current.execution_id.as_deref(),
-        started["execution_id"].as_str()
+        current.stage_run_id.as_deref(),
+        started["stage_run_id"].as_str()
     );
     let (interactive, _, _) = registry.get_run_interactive(&current.id).await.unwrap();
     let target = interactive.target();
     assert_eq!(started["nonce"], target.nonce());
-    assert_eq!(started["execution_id"].as_str(), target.execution_id());
-    assert!(target.execution_id().is_some_and(|id| !id.is_empty()));
+    assert_eq!(started["stage_run_id"].as_str(), target.stage_run_id());
+    assert!(target.stage_run_id().is_some_and(|id| !id.is_empty()));
+    assert_new_identity_only(started);
 }
 
 async fn assert_no_frame(reader: &mut BufReader<OwnedReadHalf>) {
@@ -128,7 +140,7 @@ async fn second_prompt_is_gated_and_each_start_matches_live_snapshot_then_become
     let ack = frame(&mut reader).await;
     assert_eq!(ack["type"], "ok");
     assert!(ack.get("nonce").is_none());
-    assert!(ack.get("execution_id").is_none());
+    assert!(ack.get("stage_run_id").is_none());
     let first = read_until_type(&mut reader, "turn_started").await;
     assert_start_snapshot(&registry, &session, &first, "first").await;
     let (_, held) = pending_request(&provider).await;
@@ -150,7 +162,7 @@ async fn second_prompt_is_gated_and_each_start_matches_live_snapshot_then_become
         if response["type"] == "ok" {
             assert_eq!(response["id"], first["id"]);
             assert!(response.get("nonce").is_none());
-            assert!(response.get("execution_id").is_none());
+            assert!(response.get("stage_run_id").is_none());
             break;
         }
         assert_ne!(response["type"], "turn_started", "start escaped the gate");
@@ -180,7 +192,7 @@ async fn second_prompt_is_gated_and_each_start_matches_live_snapshot_then_become
     assert_start_snapshot(&registry, &session, &second, "second").await;
     assert_eq!(first["id"], second["id"]);
     assert_ne!(first["nonce"], second["nonce"]);
-    assert_ne!(first["execution_id"], second["execution_id"]);
+    assert_ne!(first["stage_run_id"], second["stage_run_id"]);
     let correction = "Use the revised plan in this live turn.";
     send_chat(
         &mut write,
@@ -199,24 +211,25 @@ async fn second_prompt_is_gated_and_each_start_matches_live_snapshot_then_become
     let delivered = read_until_type(&mut reader, "delivered").await;
     assert_eq!(delivered["id"], second["id"]);
     assert_eq!(delivered["nonce"], second["nonce"]);
-    assert_eq!(delivered["execution_id"], second["execution_id"]);
+    assert_eq!(delivered["stage_run_id"], second["stage_run_id"]);
+    assert_new_identity_only(&delivered);
     assert_eq!(delivered["req_id"], "live-second-correction");
     let (incorporated, held) = pending_request(&provider).await;
     // Follow the owner's identity change while the second execution is held live.
-    for (nonce, execution_id, expected) in [
+    for (nonce, stage_run_id, expected) in [
         (
             second["nonce"].as_u64().unwrap() + 1,
-            second["execution_id"].as_str().unwrap(),
+            second["stage_run_id"].as_str().unwrap(),
             "error",
         ),
         (
             second["nonce"].as_u64().unwrap(),
-            first["execution_id"].as_str().unwrap(),
+            first["stage_run_id"].as_str().unwrap(),
             "error",
         ),
         (
             second["nonce"].as_u64().unwrap(),
-            second["execution_id"].as_str().unwrap(),
+            second["stage_run_id"].as_str().unwrap(),
             "attached",
         ),
     ] {
@@ -233,7 +246,7 @@ async fn second_prompt_is_gated_and_each_start_matches_live_snapshot_then_become
             client.get_mut(),
             &json!({
                 "op": "attach", "scope": "conversation", "session_id": write.1,
-                "id": second["id"], "nonce": nonce, "execution_id": execution_id,
+                "id": second["id"], "nonce": nonce, "stage_run_id": stage_run_id,
             }),
         )
         .await
@@ -242,7 +255,8 @@ async fn second_prompt_is_gated_and_each_start_matches_live_snapshot_then_become
         assert_eq!(response["type"], expected, "{response}");
         if expected == "attached" {
             assert_eq!(response["nonce"], second["nonce"]);
-            assert_eq!(response["execution_id"], second["execution_id"]);
+            assert_eq!(response["stage_run_id"], second["stage_run_id"]);
+            assert_new_identity_only(&response);
         }
         drop(client);
         aux.await.unwrap();
@@ -318,18 +332,18 @@ async fn reregistered_same_nonce_rejects_old_execution_and_invalid_targets_witho
     let (interactive, _, _) = registry.get_run_interactive(id).await.unwrap();
     let live = interactive.target();
     assert_eq!(old_target.nonce(), live.nonce());
-    assert_ne!(old_target.execution_id(), live.execution_id());
-    let target = json!({"id": id, "nonce": live.nonce(), "execution_id": live.execution_id()});
+    assert_ne!(old_target.stage_run_id(), live.stage_run_id());
+    let target = json!({"id": id, "nonce": live.nonce(), "stage_run_id": live.stage_run_id()});
     let mut wrong_nonce = target.clone();
     wrong_nonce["nonce"] = json!(live.nonce() + 1);
     let mut wrong_execution = target.clone();
-    wrong_execution["execution_id"] = json!("mismatched");
+    wrong_execution["stage_run_id"] = json!("mismatched");
     let mut old_descriptor = target.clone();
-    old_descriptor["execution_id"] = json!(old_target.execution_id());
+    old_descriptor["stage_run_id"] = json!(old_target.stage_run_id());
     for (target, expected) in [
         (wrong_nonce, "stale"),
-        (wrong_execution, "execution_id mismatch"),
-        (old_descriptor, "execution_id mismatch"),
+        (wrong_execution, "stage_run_id mismatch"),
+        (old_descriptor, "stage_run_id mismatch"),
     ] {
         send_chat(
             &mut write,
@@ -357,7 +371,7 @@ async fn reregistered_same_nonce_rejects_old_execution_and_invalid_targets_witho
     send_chat(
         &mut write,
         json!({"op": "chat", "text": "read-only correction",
-        "target": {"id": id, "nonce": target.nonce(), "execution_id": target.execution_id()}}),
+        "target": {"id": id, "nonce": target.nonce(), "stage_run_id": target.stage_run_id()}}),
     )
     .await;
     let response = frame(&mut reader).await;
@@ -367,6 +381,110 @@ async fn reregistered_same_nonce_rejects_old_execution_and_invalid_targets_witho
     assert!(session.get_chat_handle().await.is_none());
     assert!(session.get_chat_gremlin_keys().await.is_empty());
     assert_eq!(session.get_chat_ids().await, vec![id.to_string()]);
+    send_chat(&mut write, json!({"op": "close_session"})).await;
+    assert_eq!(frame(&mut reader).await["type"], "ok");
+    task.await.unwrap();
+}
+
+#[tokio::test]
+async fn retired_target_keys_are_rejected_before_resolution_without_delivery() {
+    use crate::clients::cancel::CancelToken;
+
+    let (_sandbox, project, _) = sandbox_dirs(None);
+    let (registry, _) = spawn_test_actor().await;
+    let (mut reader, mut write, session, task) = main_socket(&registry).await;
+    let id = "pipeline-retired-correction";
+    let gremlin = create_chat_gremlin(
+        id,
+        &model("cmd/echo"),
+        "helpful",
+        &project,
+        &Default::default(),
+    )
+    .unwrap();
+    gremlin
+        .state
+        .patch(&[], json!({"kind": "pipeline"}).as_object().unwrap());
+    let mut gremlin = registry
+        .register_chat_gremlin(id.into(), gremlin, CancelToken::new())
+        .await;
+    let mut execution = gremlin.next_interactive_session();
+    let (interactive, _, _) = registry.get_run_interactive(id).await.unwrap();
+    let live = interactive.target();
+    for key in ["execution_id", "stage_id"] {
+        for with_new_key in [false, true] {
+            // The missing run proves retired-key validation precedes resolution;
+            // the live run proves rejection never acquires a pause or command.
+            for target_id in ["missing-retired-target", id] {
+                for retired_value in [json!(live.stage_run_id()), Value::Null] {
+                    let mut target = json!({"id": target_id, "nonce": live.nonce()});
+                    target[key] = retired_value;
+                    if with_new_key {
+                        target["stage_run_id"] = json!(live.stage_run_id());
+                    }
+                    send_chat(
+                        &mut write,
+                        json!({"op": "chat", "text": "must not be delivered", "target": target}),
+                    )
+                    .await;
+                    let response = frame(&mut reader).await;
+                    assert_eq!(response["type"], "error", "{response}");
+                    assert_eq!(
+                        response["message"],
+                        format!("target.{key} is retired; use target.stage_run_id"),
+                        "{response}"
+                    );
+                    assert!(!execution.accept_pause(), "retired target acquired a pause");
+                    assert!(!execution.is_attached());
+                    let mut command = std::pin::pin!(execution.next_command());
+                    std::future::poll_fn(|cx| {
+                        assert!(
+                            !matches!(command.as_mut().poll(cx), Poll::Ready(Some(_))),
+                            "unexpected delivery"
+                        );
+                        Poll::Ready(())
+                    })
+                    .await;
+                    assert_no_frame(&mut reader).await;
+                    assert!(session.get_current_turn().await.is_none());
+                    assert!(session.get_chat_handle().await.is_none());
+                    assert!(session.get_chat_ids().await.is_empty());
+                }
+            }
+        }
+    }
+    for key in ["stage_id", "execution_id", "stage_run_id"] {
+        for with_target in [false, true] {
+            for value in [json!(live.stage_run_id()), Value::Null] {
+                let mut request = json!({"op": "chat", "text": "must not start a turn"});
+                request[key] = value;
+                if with_target {
+                    request["target"] = json!({
+                        "id": id, "nonce": live.nonce(),
+                        "stage_run_id": live.stage_run_id()
+                    });
+                }
+                send_chat(&mut write, request).await;
+                let response = frame(&mut reader).await;
+                assert_eq!(response["type"], "error", "{response}");
+                assert_eq!(
+                    response["message"],
+                    "top-level stage-run selectors are not supported; use target with id, nonce, and stage_run_id"
+                );
+                assert!(!execution.accept_pause());
+                assert!(!execution.is_attached());
+                assert!(!execution.execution_ended());
+                assert_no_frame(&mut reader).await;
+                assert!(session.get_current_turn().await.is_none());
+                assert!(session.get_chat_handle().await.is_none());
+                assert!(session.get_chat_ids().await.is_empty());
+            }
+        }
+    }
+    assert!(!execution.execution_ended());
+    assert!(registry.contains_run(id).await);
+    drop(execution);
+    registry.stop_run(id).await.unwrap();
     send_chat(&mut write, json!({"op": "close_session"})).await;
     assert_eq!(frame(&mut reader).await["type"], "ok");
     task.await.unwrap();
@@ -403,30 +521,30 @@ async fn correction_rejects_malformed_targets_without_starting_chat() {
         ("target/number", json!(1), "target must be an object"),
         ("target/string", json!("run"), "target must be an object"),
         ("target/array", json!([]), "target must be an object"),
-        ("id/missing", json!({"nonce": 1, "execution_id": "execution"}), "target.id is required"),
-        ("id/null", json!({"id": null, "nonce": 1, "execution_id": "execution"}), "target.id is required"),
-        ("id/bool", json!({"id": false, "nonce": 1, "execution_id": "execution"}), "target.id is required"),
-        ("id/number", json!({"id": 1, "nonce": 1, "execution_id": "execution"}), "target.id is required"),
-        ("id/array", json!({"id": [], "nonce": 1, "execution_id": "execution"}), "target.id is required"),
-        ("id/object", json!({"id": {}, "nonce": 1, "execution_id": "execution"}), "target.id is required"),
-        ("id/empty", json!({"id": "", "nonce": 1, "execution_id": "execution"}), "target.id is required"),
-        ("nonce/missing", json!({"id": "missing-run", "execution_id": "execution"}), "target.nonce is required"),
-        ("nonce/null", json!({"id": "missing-run", "nonce": null, "execution_id": "execution"}), "target.nonce is required"),
-        ("nonce/bool", json!({"id": "missing-run", "nonce": false, "execution_id": "execution"}), "target.nonce is required"),
-        ("nonce/string", json!({"id": "missing-run", "nonce": "1", "execution_id": "execution"}), "target.nonce is required"),
-        ("nonce/zero", json!({"id": "missing-run", "nonce": 0, "execution_id": "execution"}), "target.nonce is required"),
-        ("nonce/negative", json!({"id": "missing-run", "nonce": -1, "execution_id": "execution"}), "target.nonce is required"),
-        ("nonce/fraction", json!({"id": "missing-run", "nonce": 1.5, "execution_id": "execution"}), "target.nonce is required"),
-        ("nonce/array", json!({"id": "missing-run", "nonce": [], "execution_id": "execution"}), "target.nonce is required"),
-        ("nonce/object", json!({"id": "missing-run", "nonce": {}, "execution_id": "execution"}), "target.nonce is required"),
-        ("execution_id/missing", json!({"id": "missing-run", "nonce": 1}), "target.execution_id is required"),
-        ("execution_id/null", json!({"id": "missing-run", "nonce": 1, "execution_id": null}), "target.execution_id is required"),
-        ("execution_id/bool", json!({"id": "missing-run", "nonce": 1, "execution_id": false}), "target.execution_id is required"),
-        ("execution_id/number", json!({"id": "missing-run", "nonce": 1, "execution_id": 1}), "target.execution_id is required"),
-        ("execution_id/array", json!({"id": "missing-run", "nonce": 1, "execution_id": []}), "target.execution_id is required"),
-        ("execution_id/object", json!({"id": "missing-run", "nonce": 1, "execution_id": {}}), "target.execution_id is required"),
-        ("execution_id/empty", json!({"id": "missing-run", "nonce": 1, "execution_id": ""}), "target.execution_id is required"),
-        ("another session owns the chat", json!({"id": id, "nonce": 1, "execution_id": "execution"}), "not owned by this session"),
+        ("id/missing", json!({"nonce": 1, "stage_run_id": "execution"}), "target.id is required"),
+        ("id/null", json!({"id": null, "nonce": 1, "stage_run_id": "execution"}), "target.id is required"),
+        ("id/bool", json!({"id": false, "nonce": 1, "stage_run_id": "execution"}), "target.id is required"),
+        ("id/number", json!({"id": 1, "nonce": 1, "stage_run_id": "execution"}), "target.id is required"),
+        ("id/array", json!({"id": [], "nonce": 1, "stage_run_id": "execution"}), "target.id is required"),
+        ("id/object", json!({"id": {}, "nonce": 1, "stage_run_id": "execution"}), "target.id is required"),
+        ("id/empty", json!({"id": "", "nonce": 1, "stage_run_id": "execution"}), "target.id is required"),
+        ("nonce/missing", json!({"id": "missing-run", "stage_run_id": "execution"}), "target.nonce is required"),
+        ("nonce/null", json!({"id": "missing-run", "nonce": null, "stage_run_id": "execution"}), "target.nonce is required"),
+        ("nonce/bool", json!({"id": "missing-run", "nonce": false, "stage_run_id": "execution"}), "target.nonce is required"),
+        ("nonce/string", json!({"id": "missing-run", "nonce": "1", "stage_run_id": "execution"}), "target.nonce is required"),
+        ("nonce/zero", json!({"id": "missing-run", "nonce": 0, "stage_run_id": "execution"}), "target.nonce is required"),
+        ("nonce/negative", json!({"id": "missing-run", "nonce": -1, "stage_run_id": "execution"}), "target.nonce is required"),
+        ("nonce/fraction", json!({"id": "missing-run", "nonce": 1.5, "stage_run_id": "execution"}), "target.nonce is required"),
+        ("nonce/array", json!({"id": "missing-run", "nonce": [], "stage_run_id": "execution"}), "target.nonce is required"),
+        ("nonce/object", json!({"id": "missing-run", "nonce": {}, "stage_run_id": "execution"}), "target.nonce is required"),
+        ("stage_run_id/missing", json!({"id": "missing-run", "nonce": 1}), "target.stage_run_id is required"),
+        ("stage_run_id/null", json!({"id": "missing-run", "nonce": 1, "stage_run_id": null}), "target.stage_run_id is required"),
+        ("stage_run_id/bool", json!({"id": "missing-run", "nonce": 1, "stage_run_id": false}), "target.stage_run_id is required"),
+        ("stage_run_id/number", json!({"id": "missing-run", "nonce": 1, "stage_run_id": 1}), "target.stage_run_id is required"),
+        ("stage_run_id/array", json!({"id": "missing-run", "nonce": 1, "stage_run_id": []}), "target.stage_run_id is required"),
+        ("stage_run_id/object", json!({"id": "missing-run", "nonce": 1, "stage_run_id": {}}), "target.stage_run_id is required"),
+        ("stage_run_id/empty", json!({"id": "missing-run", "nonce": 1, "stage_run_id": ""}), "target.stage_run_id is required"),
+        ("another session owns the chat", json!({"id": id, "nonce": 1, "stage_run_id": "execution"}), "not owned by this session"),
     ];
     for (case, target, expected) in cases {
         send_chat(
@@ -510,7 +628,7 @@ async fn exercise_targeted_failure(phase: CorrectionWait, trigger: CorrectionFai
             json!({"op": "chat", "text": "Use the revised plan.",
             "req_id": "correction-1", "target": {
                 "id": id, "nonce": target.nonce(),
-                "execution_id": target.execution_id(),
+                "stage_run_id": target.stage_run_id(),
             }}),
         )
         .await;
@@ -572,7 +690,8 @@ async fn exercise_targeted_failure(phase: CorrectionWait, trigger: CorrectionFai
             assert_eq!(dropped["type"], "correction_dropped");
             assert_eq!(dropped["id"], id);
             assert_eq!(dropped["req_id"], "correction-1");
-            assert_eq!(dropped["execution_id"], target.execution_id().unwrap());
+            assert_eq!(dropped["stage_run_id"], target.stage_run_id().unwrap());
+            assert_new_identity_only(&dropped);
             assert_eq!(
                 dropped["reason"],
                 if phase == CorrectionWait::Incorporation {

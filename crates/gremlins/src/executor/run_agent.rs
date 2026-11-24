@@ -65,8 +65,8 @@ pub(crate) fn resolve_task_models(
 
 fn leaf_corr_id(run_id: &str, session: &crate::clients::interactive::InteractiveSession) -> CorrId {
     let mut corr_id = CorrId::new().with_run(run_id);
-    if let Some(execution_id) = session.snapshot().execution_id() {
-        corr_id = corr_id.with_execution_id(execution_id);
+    if let Some(stage_run_id) = session.snapshot().stage_run_id() {
+        corr_id = corr_id.with_stage_run_id(stage_run_id);
     }
     corr_id
 }
@@ -95,7 +95,7 @@ pub(crate) async fn run_agent(
         stage_key(scope, &agent.name)
     };
 
-    // Chat turns publish their execution identity before TurnStarted. If setup
+    // Chat turns publish their stage run identity before TurnStarted. If setup
     // fails before we take that prepared session, revoke it rather than leaving
     // the announced execution live. Pipeline sessions are not published yet.
     let is_chat = gremlin.state.read_str("kind") == "chat";
@@ -147,7 +147,7 @@ pub(crate) async fn run_agent(
     let session = if is_chat {
         gremlin.next_interactive_session_with_commands(accepts_commands)
     } else {
-        gremlin.next_pipeline_interactive_session(&invocation.stage_id, accepts_commands)
+        gremlin.next_pipeline_interactive_session(&invocation.stage_run_id, accepts_commands)
     };
     let interactive = match session {
         Ok(session) => session,
@@ -923,10 +923,10 @@ mod tests {
         let id = "executor-leaf-producer-identity";
         let (mut sessions, _) = InteractiveSessionFactory::for_chat();
         let first = sessions.next_session();
-        let expected = first.snapshot().execution_id().unwrap().to_owned();
+        let expected = first.snapshot().stage_run_id().unwrap().to_owned();
         let corr_id = leaf_corr_id(id, &first);
         let successor = sessions.next_session();
-        assert_ne!(successor.snapshot().execution_id(), Some(expected.as_str()));
+        assert_ne!(successor.snapshot().stage_run_id(), Some(expected.as_str()));
         assert_eq!(leaf_corr_id(id, &first), corr_id);
         let (sub, mut rx) = subscribe_run(id);
         let _guard = gremlins_magic_bus::connection::BusSubGuard::new(sub);
@@ -944,9 +944,9 @@ mod tests {
             panic!("missing leaf event")
         };
         assert_eq!(event.corr_id().run(), Some(id));
-        assert_eq!(event.corr_id().execution_id(), Some(expected.as_str()));
+        assert_eq!(event.corr_id().stage_run_id(), Some(expected.as_str()));
         assert_eq!(
-            leaf_corr_id(id, &InteractiveSession::unattached()).execution_id(),
+            leaf_corr_id(id, &InteractiveSession::unattached()).stage_run_id(),
             None
         );
     }

@@ -23,7 +23,7 @@ use gremlins_magic_bus::{emit_corr_event, CorrId, EventKind};
 fn producer_corr_id(
     output_corr_id: Option<&CorrId>,
     run_id: &str,
-    execution_id: Option<&str>,
+    stage_run_id: Option<&str>,
 ) -> CorrId {
     if let Some(corr_id) = output_corr_id {
         return corr_id.clone();
@@ -32,8 +32,8 @@ fn producer_corr_id(
     if !run_id.is_empty() {
         corr_id = corr_id.with_run(run_id);
     }
-    if let Some(execution_id) = execution_id {
-        corr_id = corr_id.with_execution_id(execution_id);
+    if let Some(stage_run_id) = stage_run_id {
+        corr_id = corr_id.with_stage_run_id(stage_run_id);
     }
     corr_id
 }
@@ -46,7 +46,7 @@ mod attribution_tests {
     fn producer_identity_keeps_run_and_execution_separate() {
         let corr = producer_corr_id(None, "parent:child", Some("opaque:execution"));
         assert_eq!(corr.run(), Some("parent:child"));
-        assert_eq!(corr.execution_id(), Some("opaque:execution"));
+        assert_eq!(corr.stage_run_id(), Some("opaque:execution"));
         let payload = EventKind::LogLine {
             id: corr.run().unwrap().to_owned(),
             line: "hello".into(),
@@ -62,7 +62,7 @@ mod attribution_tests {
         let route = CorrId::new()
             .with_run("pipeline")
             .with_stage("implement")
-            .with_execution_id("stage-execution")
+            .with_stage_run_id("stage-execution")
             .with_attempt(2);
         assert_eq!(
             producer_corr_id(Some(&route), "other-run", Some("current-target")),
@@ -115,7 +115,7 @@ mod attribution_tests {
         let route = CorrId::new()
             .with_run(run_id)
             .with_stage("implement")
-            .with_execution_id("pipeline-stage")
+            .with_stage_run_id("pipeline-stage")
             .with_attempt(3);
         let (sub, mut events) = gremlins_magic_bus::subscribe_run(run_id);
         let _guard = gremlins_magic_bus::connection::BusSubGuard::new(sub);
@@ -160,9 +160,9 @@ esac
 
         backend.reap_all(run_id);
         let successor = factory.next_session_with_commands(false, None).unwrap();
-        assert_ne!(handle.target().execution_id(), route.execution_id());
+        assert_ne!(handle.target().stage_run_id(), route.stage_run_id());
         let mut other = RunParams::empty();
-        let other_route = route.clone().with_execution_id("other-stage-execution");
+        let other_route = route.clone().with_stage_run_id("other-stage-execution");
         other.gremlin_id = Some(run_id.into());
         other.output_corr_id = Some(other_route.clone());
         other.prompt = "other prompt".into();
@@ -181,7 +181,7 @@ esac
                 .contains(expected));
         }
         let api: &dyn Backend = &backend;
-        let unknown_route = route.clone().with_execution_id("unknown-invocation");
+        let unknown_route = route.clone().with_stage_run_id("unknown-invocation");
         assert!(matches!(
             api.resume_for(&unknown_route).await,
             Err(ClientError::Runtime { message }) if message.contains("no context")
@@ -226,7 +226,7 @@ printf '%s\n' '{"type":"result","subtype":"success","result":"done","cost_usd":0
         let session = factory.next_session_with_commands(false, None).unwrap();
         let route = CorrId::new()
             .with_run(run_id)
-            .with_execution_id(session.snapshot().execution_id().unwrap());
+            .with_stage_run_id(session.snapshot().stage_run_id().unwrap());
         let mut params = RunParams::empty();
         params.gremlin_id = Some(run_id.into());
         let completed = backend.run(params, session).await.unwrap();
@@ -240,7 +240,7 @@ printf '%s\n' '{"type":"result","subtype":"success","result":"done","cost_usd":0
     fn invocation_params(run_id: &str, execution: &str) -> (RunParams, CorrId) {
         let route = CorrId::new()
             .with_run(run_id)
-            .with_execution_id(execution);
+            .with_stage_run_id(execution);
         let mut params = RunParams::empty();
         params.gremlin_id = Some(run_id.into());
         params.output_corr_id = Some(route.clone());
@@ -420,11 +420,11 @@ printf '%s\n' '{"type":"result","subtype":"success","result":"done"}'
     fn missing_identity_does_not_invent_an_execution() {
         let corr = producer_corr_id(None, "run", None);
         assert_eq!(corr.run(), Some("run"));
-        assert_eq!(corr.execution_id(), None);
+        assert_eq!(corr.stage_run_id(), None);
         assert_eq!(producer_corr_id(None, "", None), CorrId::new());
         let corr = producer_corr_id(None, "", Some("execution"));
         assert_eq!(corr.run(), None);
-        assert_eq!(corr.execution_id(), Some("execution"));
+        assert_eq!(corr.stage_run_id(), Some("execution"));
     }
 }
 
@@ -985,7 +985,7 @@ impl Backend for CmdBackend {
         let corr_id = producer_corr_id(
             params.output_corr_id.as_ref(),
             &gremlin_id,
-            snapshot.execution_id(),
+            snapshot.stage_run_id(),
         );
         let mut context = CmdContext {
             prompt: effective_prompt.clone(),

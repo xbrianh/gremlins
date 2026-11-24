@@ -601,7 +601,7 @@ mod tests {
             .with_run(&run)
             .with_stage("agent")
             .with_attempt(7)
-            .with_execution_id("execution-original");
+            .with_stage_run_id("execution-original");
         let corr_id = ctx.corr_id.clone();
         let payload_id = ctx.message_prefix.clone();
         // Run-only subscriptions would hide progress routed to the wrong stage/execution.
@@ -692,7 +692,7 @@ mod tests {
                 | EventKind::ToolResult { .. }
                 | EventKind::LogLine { .. } => {
                     assert_eq!(event.corr_id(), &corr_id);
-                    assert_eq!(event.corr_id().execution_id(), Some("execution-original"));
+                    assert_eq!(event.corr_id().stage_run_id(), Some("execution-original"));
                 }
                 _ => continue,
             }
@@ -1069,7 +1069,7 @@ mod tests {
         ctx.message_prefix = "recursive-task-payload".into();
         ctx.corr_id = gremlins_magic_bus::CorrId::new()
             .with_run(&run)
-            .with_execution_id("recursive-execution")
+            .with_stage_run_id("recursive-execution")
             .with_stage("nested-agent")
             .with_attempt(3);
         let corr_id = ctx.corr_id.clone();

@@ -13,8 +13,8 @@ pub(crate) fn execution_corr_id(
     if !run_id.is_empty() {
         corr = corr.with_run(run_id);
     }
-    if let Some(id) = session.snapshot().execution_id() {
-        corr = corr.with_execution_id(id);
+    if let Some(id) = session.snapshot().stage_run_id() {
+        corr = corr.with_stage_run_id(id);
     }
     corr
 }
@@ -28,20 +28,20 @@ mod tests {
     fn producer_identity_is_captured_from_the_executing_session() {
         let (mut sessions, _) = InteractiveSessionFactory::for_chat();
         let first = sessions.next_session();
-        let expected = first.snapshot().execution_id().unwrap().to_owned();
+        let expected = first.snapshot().stage_run_id().unwrap().to_owned();
         let corr = execution_corr_id("producer-run", &first);
         let successor = sessions.next_session();
-        assert_ne!(successor.snapshot().execution_id(), Some(expected.as_str()));
+        assert_ne!(successor.snapshot().stage_run_id(), Some(expected.as_str()));
         assert_eq!(corr.run(), Some("producer-run"));
-        assert_eq!(corr.execution_id(), Some(expected.as_str()));
+        assert_eq!(corr.stage_run_id(), Some(expected.as_str()));
         assert_eq!(execution_corr_id("producer-run", &first), corr);
     }
 
     #[test]
-    fn unattached_producer_does_not_invent_execution_identity() {
+    fn unattached_producer_does_not_invent_stage_run_identity() {
         let corr = execution_corr_id("", &InteractiveSession::unattached());
         assert_eq!(corr.run(), None);
-        assert_eq!(corr.execution_id(), None);
+        assert_eq!(corr.stage_run_id(), None);
     }
 }
 

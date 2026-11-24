@@ -3099,13 +3099,13 @@ mod tests {
             .with_run(&run)
             .with_stage("implement")
             .with_attempt(2)
-            .with_execution_id("invocation-execution");
+            .with_stage_run_id("invocation-execution");
         let (_guard, mut rx) = subscribe_log(&run);
         let (mut sessions, _) = InteractiveSessionFactory::for_chat();
         let current_target = sessions.next_session();
         assert_ne!(
-            current_target.snapshot().execution_id(),
-            route.execution_id()
+            current_target.snapshot().stage_run_id(),
+            route.stage_run_id()
         );
         // Headless producers are independent of whichever interactive target is current.
         let session = InteractiveSession::unattached();
@@ -3139,7 +3139,7 @@ mod tests {
                 matches!(event.kind(), EventKind::LogLine { line, .. } if line.contains("retry:"));
         }
         let successor = sessions.next_session();
-        assert_ne!(successor.snapshot().execution_id(), route.execution_id());
+        assert_ne!(successor.snapshot().stage_run_id(), route.stage_run_id());
         tokio::time::advance(Duration::from_secs(3)).await;
         assert_eq!(
             handle.await.unwrap().unwrap().text_result.as_deref(),

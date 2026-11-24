@@ -939,7 +939,7 @@ mod tests {
         let events = drain_events(&mut rx);
         assert!(events.iter().any(|event| {
             matches!(event.kind(), EventKind::LogLine { line, .. } if line.contains("finished ("))
-                && event.corr_id().execution_id().is_none()
+                && event.corr_id().stage_run_id().is_none()
         }));
     }
 
@@ -1005,7 +1005,7 @@ mod tests {
         assert!(events
             .iter()
             .any(|event| matches!(event.kind(), EventKind::Bail { .. })
-                && event.corr_id().execution_id().is_none()));
+                && event.corr_id().stage_run_id().is_none()));
     }
 
     #[tokio::test]

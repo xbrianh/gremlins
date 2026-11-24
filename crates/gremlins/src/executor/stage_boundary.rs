@@ -8,7 +8,7 @@ use gremlins_magic_bus::{emit_corr_event, CorrId, EventKind};
 /// Publication retains the bus's intentional panic on poisoned state; it must not
 /// be used after a panic has poisoned the bus.
 pub(crate) struct StageInvocation {
-    pub(crate) stage_id: String,
+    pub(crate) stage_run_id: String,
     corr_id: CorrId,
     run_id: String,
     name: String,
@@ -17,13 +17,13 @@ pub(crate) struct StageInvocation {
 
 impl StageInvocation {
     pub(crate) fn enter(run_id: &str, name: &str, stage_type: &str) -> Self {
-        let stage_id = super::state::token_hex(16);
+        let stage_run_id = super::state::token_hex(16);
         let invocation = Self {
             corr_id: CorrId::new()
                 .with_run(run_id)
                 .with_stage(name)
-                .with_execution_id(&stage_id),
-            stage_id,
+                .with_stage_run_id(&stage_run_id),
+            stage_run_id,
             run_id: run_id.to_owned(),
             name: name.to_owned(),
             stage_type: stage_type.to_owned(),
@@ -42,7 +42,7 @@ impl StageInvocation {
             EventKind::StageBoundary {
                 id: self.run_id.clone(),
                 stage: self.name.clone(),
-                stage_id: self.stage_id.clone(),
+                stage_run_id: self.stage_run_id.clone(),
                 stage_type: self.stage_type.clone(),
                 active,
             },

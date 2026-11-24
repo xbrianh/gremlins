@@ -98,18 +98,18 @@ run -> stage -> turn -> tool -> attempt
   `r:abc`. A `None` prefix field is a wildcard for that segment only.
 - Run filters retain colon-component ancestor matching: run `parent` matches
   `parent:child`, but not `parentish`. Other fields match exactly.
-- `with_execution_id(impl Into<String>)` sets an optional opaque execution id;
-  `execution_id() -> Option<&str>` borrows it. Colons have no hierarchy meaning
-  in execution ids. An omitted execution filter is a wildcard, including for
-  legacy events without an execution id. A set filter requires an exact value.
+- `with_stage_run_id(impl Into<String>)` sets an optional opaque stage-run id;
+  `stage_run_id() -> Option<&str>` borrows it. Colons have no hierarchy meaning
+  in stage-run ids. An omitted stage-run filter is a wildcard, including for
+  legacy events without a stage-run id. A set filter requires an exact value.
   This field is routing metadata only; the bus does not attribute events at
   registration or dequeue time.
-- The tagged string form is `r:<run>:s:<stage>:t:<turn>:c:<tool>:a:<attempt>:x:<execution_id>`,
+- The tagged string form is `r:<run>:s:<stage>:t:<turn>:c:<tool>:a:<attempt>:x:<stage_run_id>`,
   in that fixed order. Legacy forms without `x` are unchanged,
   with missing segments omitted. String values may contain `:` and `\`, escaped
   as `\:` and `\\` on render, so `to_string().parse::<CorrId>()` always
   round-trips. String segments must be non-empty.
-- `with_run`/`with_stage`/`with_tool`/`with_execution_id` panic on empty values; `try_parse` rejects
+- `with_run`/`with_stage`/`with_tool`/`with_stage_run_id` panic on empty values; `try_parse` rejects
   them with `ParseCorrIdError::EmptyValue`.
 
 ### Delivery policies
@@ -143,7 +143,7 @@ Bounded and lag-tolerant channels require a non-zero capacity
   run history and register live delivery atomically. It returns
   `(sub, rx, HistorySnapshot<P>)`; history is separate from the live mailbox.
   Matching uses the same full prefix (including descendant runs, stage,
-  execution id, etc.) as live routing. The snapshot is an atomic history/live
+  stage-run id, etc.) as live routing. The snapshot is an atomic history/live
   cut, with original envelopes in emission order.
 - `HistorySnapshot` has `events: Vec<DispatchEvent<P>>`, `complete: bool`,
   `through_sequence: u64`, and `evicted_through_sequence: u64`.
@@ -163,7 +163,7 @@ Bounded and lag-tolerant channels require a non-zero capacity
   They assert no persisted coverage and must not suppress positive live sequences.
   Callbacks may re-enter the bus or wait for emissions.
 - Sequences are process-local, not durable identities across daemon restarts.
-  Exact persisted execution-scoped agent history/live merging is deferred; the
+  Exact persisted stage-run-scoped agent history/live merging is deferred; the
   atomic in-memory history/live cut does not establish that guarantee.
 - `subscribe_run_with_history(id, capacity)` exposes this with lag-tolerant live
   delivery. Overflow still reports lag. Bounded history introduces no new

@@ -130,7 +130,7 @@ async fn reusable_chat_gremlin_id_returns_none_when_done_turn_has_no_gremlin() {
         cancel: super::CancelToken::new(),
         done: rx,
         hard: Arc::new(AtomicBool::new(false)),
-        execution_id: None,
+        stage_run_id: None,
     };
     session_task.set_current_turn(turn).await;
     // gremlin was stopped externally — chat_gremlins is empty
@@ -1126,7 +1126,7 @@ async fn chat_model_falls_back_to_run_map_while_turn_is_in_flight() {
         cancel: super::CancelToken::new(),
         done: done_rx,
         hard: Arc::new(AtomicBool::new(false)),
-        execution_id: None,
+        stage_run_id: None,
     };
     session_task.set_current_turn(turn).await;
 
@@ -1296,7 +1296,7 @@ async fn stop_session_chat_gremlin_removes_ownership_and_cancels_turn() {
         cancel: cancel.clone(),
         done: done_rx,
         hard: Arc::new(AtomicBool::new(false)),
-        execution_id: None,
+        stage_run_id: None,
     };
     session_task.set_current_turn(turn).await;
     session_task.add_chat_id("chat-stop").await;

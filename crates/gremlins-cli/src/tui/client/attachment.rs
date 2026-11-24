@@ -94,8 +94,8 @@ impl DaemonClient {
             };
             if is_broadcast(&value)
                 || value
-                    .get("execution_id")
-                    .is_some_and(|v| v != &pinned.execution_id)
+                    .get("stage_run_id")
+                    .is_some_and(|v| v != &pinned.stage_run_id)
                 || value
                     .get("nonce")
                     .is_some_and(|v| v.as_u64() != Some(pinned.nonce))

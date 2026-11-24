@@ -13,7 +13,7 @@
 //!
 //! # String form
 //!
-//! The tagged form is `r:<run>:s:<stage>:t:<turn>:c:<tool>:a:<attempt>:x:<execution_id>`, with
+//! The tagged form is `r:<run>:s:<stage>:t:<turn>:c:<tool>:a:<attempt>:x:<stage_run_id>`, with
 //! missing segments omitted entirely. String segment values may contain `:`
 //! and `\`; both are escaped on render (`\:` and `\\`) and unescaped on parse,
 //! so `to_string().parse::<CorrId>()` always round-trips for a valid
@@ -36,7 +36,7 @@ pub struct CorrId {
     turn: Option<u64>,
     tool: Option<String>,
     attempt: Option<u32>,
-    execution_id: Option<String>,
+    stage_run_id: Option<String>,
 }
 
 impl CorrId {
@@ -70,16 +70,16 @@ impl CorrId {
         self
     }
 
-    /// Set an opaque execution identity, independent of the run hierarchy.
+    /// Set an opaque stage-run identity, independent of the run hierarchy.
     ///
     /// Panics if the value is empty, like the other string segment builders.
-    pub fn with_execution_id(mut self, value: impl Into<String>) -> Self {
-        self.execution_id = Some(into_segment(value));
+    pub fn with_stage_run_id(mut self, value: impl Into<String>) -> Self {
+        self.stage_run_id = Some(into_segment(value));
         self
     }
 
-    pub fn execution_id(&self) -> Option<&str> {
-        self.execution_id.as_deref()
+    pub fn stage_run_id(&self) -> Option<&str> {
+        self.stage_run_id.as_deref()
     }
 
     pub fn run(&self) -> Option<&str> {
@@ -110,20 +110,20 @@ impl CorrId {
     /// **Run** uses component-wise ancestor matching on colon-delimited
     /// hierarchy levels: `r:parent` matches `r:parent:child` and
     /// `r:parent:child:grand`. All other fields, including the opaque
-    /// **execution id**, remain exact-match: `r:ab` does *not* match `r:abc`.
+    /// **stage-run id**, remain exact-match: `r:ab` does *not* match `r:abc`.
     pub fn matches_prefix(&self, prefix: &CorrId) -> bool {
         run_matches_ancestor(prefix.run.as_deref(), self.run.as_deref())
             && segment_matches(&self.stage, &prefix.stage)
             && segment_matches(&self.turn, &prefix.turn)
             && segment_matches(&self.tool, &prefix.tool)
             && segment_matches(&self.attempt, &prefix.attempt)
-            && segment_matches(&self.execution_id, &prefix.execution_id)
+            && segment_matches(&self.stage_run_id, &prefix.stage_run_id)
     }
 
-    /// Parse the tagged string form, with optional `x:<execution_id>` last.
+    /// Parse the tagged string form, with optional `x:<stage_run_id>` last.
     ///
     /// Segments must appear in the fixed run -> stage -> turn -> tool ->
-    /// attempt -> execution id order and each tag may appear at most once. String values may
+    /// attempt -> stage-run id order and each tag may appear at most once. String values may
     /// use `\:` and `\\` escapes for literal `:` and `\` characters.
     pub fn try_parse(s: &str) -> Result<Self, ParseCorrIdError> {
         let parsed = split_segments(s.as_bytes())?;
@@ -258,7 +258,7 @@ fn interpret_segments(
                         .map_err(|_| ParseCorrIdError::InvalidInteger)?,
                 )
             }
-            b'x' => corr_id.execution_id = Some(value),
+            b'x' => corr_id.stage_run_id = Some(value),
             _ => unreachable!("segment tags are validated by split_segments"),
         }
 
@@ -364,8 +364,8 @@ impl fmt::Display for CorrId {
             segments.push(format!("a:{attempt}"));
         }
 
-        if let Some(execution_id) = &self.execution_id {
-            segments.push(format!("x:{}", escape_segment(execution_id)));
+        if let Some(stage_run_id) = &self.stage_run_id {
+            segments.push(format!("x:{}", escape_segment(stage_run_id)));
         }
 
         f.write_str(&segments.join(":"))
@@ -391,7 +391,7 @@ pub enum ParseCorrIdError {
     EmptyValue,
     /// The same segment tag appears more than once.
     DuplicateTag,
-    /// Segments violate run -> stage -> turn -> tool -> attempt -> execution id order.
+    /// Segments violate run -> stage -> turn -> tool -> attempt -> stage-run id order.
     OutOfOrder,
     /// A `\` escape is not followed by `\` or `:`.
     InvalidEscape,
@@ -448,38 +448,42 @@ mod tests {
     }
 
     #[test]
-    fn execution_id_round_trips_as_an_opaque_string() {
-        assert_eq!(full().execution_id(), None);
-        for value in ["exec-123", r"opaque:雪\:x:value", "00042"] {
+    fn stage_run_id_round_trips_as_an_opaque_string() {
+        assert_eq!(full().stage_run_id(), None);
+        for value in ["stage-run-123", r"opaque:雪\:x:value", "00042"] {
             for base in [CorrId::new(), full()] {
-                let corr_id = base.with_execution_id(value.to_owned());
-                assert_eq!(corr_id.execution_id(), Some(value));
+                let corr_id = base.with_stage_run_id(value.to_owned());
+                assert_eq!(corr_id.stage_run_id(), Some(value));
                 assert_eq!(corr_id.to_string().parse::<CorrId>().unwrap(), corr_id);
             }
         }
         assert_eq!(
-            full().with_execution_id(r"e:x\y").to_string(),
+            full().with_stage_run_id(r"e:x\y").to_string(),
             r"r:abc123:s:reviews/checks:t:3:c:call_0:a:1:x:e\:x\\y"
         );
     }
 
     #[test]
-    fn execution_id_matching_is_exact_and_optional() {
-        let prefix = CorrId::new().with_execution_id("exec");
-        assert!(full().with_execution_id("exec").matches_prefix(&prefix));
-        for value in ["exec:child", "execution", "other"] {
-            assert!(!full().with_execution_id(value).matches_prefix(&prefix));
+    fn stage_run_id_matching_is_exact_and_optional() {
+        let a = full().with_stage_run_id("A");
+        let b = full().with_stage_run_id("A:child");
+        let prefix = CorrId::new().with_stage_run_id("A");
+        assert!(a.matches_prefix(&prefix));
+        assert!(!b.matches_prefix(&prefix));
+        for value in ["AB", "other"] {
+            assert!(!full().with_stage_run_id(value).matches_prefix(&prefix));
         }
         assert!(!full().matches_prefix(&prefix));
-        assert!(full().with_execution_id("exec").matches_prefix(&full()));
-        assert!(full()
-            .with_execution_id("exec")
-            .matches_prefix(&CorrId::new()));
-        assert_ne!(full(), full().with_execution_id("exec"));
+        let unset = full();
+        assert!(a.matches_prefix(&unset));
+        assert!(b.matches_prefix(&unset));
+        assert!(a.matches_prefix(&CorrId::new()));
+        assert!(b.matches_prefix(&CorrId::new()));
+        assert_ne!(full(), a);
     }
 
     #[test]
-    fn execution_id_parser_validation() {
+    fn stage_run_id_parser_validation() {
         for (input, expected) in [
             ("x:", ParseCorrIdError::EmptyValue),
             ("x:a:x:b", ParseCorrIdError::DuplicateTag),
@@ -492,8 +496,8 @@ mod tests {
 
     #[test]
     #[should_panic(expected = "non-empty")]
-    fn empty_execution_id_is_rejected() {
-        CorrId::new().with_execution_id("");
+    fn empty_stage_run_id_is_rejected() {
+        CorrId::new().with_stage_run_id("");
     }
 
     #[test]

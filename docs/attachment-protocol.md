@@ -27,7 +27,7 @@ client, or stage-stream envelope. Lifecycle records remain:
 
 | Type | Fields |
 |---|---|
-| `stage_boundary` | `id`, `stage`, `stage_type`, `active` |
+| `stage_boundary` | `id`, `stage_run_id`, `stage`, `stage_type`, `active` |
 | `stage_transition` | `id`, `stage`, optional `sub_stage` |
 | `run_completed` | `id`, `exit_code` |
 | `run_failed` | `id`, `exit_code`, `error` |
@@ -141,10 +141,16 @@ native record for routing; it is not a daemon wire envelope.
 
 ## Conversation scope and debug CLI
 
-Conversation attachment remains separate: it binds an execution and supports
+Conversation attachment remains separate: it binds a stage run and supports
 observation/control or debugger pause-on-entry for interactive agents. Exec
-stages remain read-only. Capability and execution/nonce validation determine
+stages remain read-only. Capability and stage-run/nonce validation determine
 whether operator messages may be sent; run attachment grants none of this.
+
+`stage_run_id` is the opaque invocation identity, distinct from the run `id`
+and the reusable stage name `stage`. Conversation acknowledgments and targeted
+requests use `stage_run_id`; pin both it and `nonce` when targeting a particular
+live invocation. A repeated stage or a new chat turn has a new stage run ID.
+Historical run artifacts are not rewritten by this naming change.
 
 The standalone debug CLI already sends:
 

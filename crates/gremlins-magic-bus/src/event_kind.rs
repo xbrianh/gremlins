@@ -65,7 +65,7 @@ pub enum EventKind {
 
     // ── From InteractiveEvent ─────────────────────────────────────────
     #[serde(rename = "turn_started")]
-    TurnStarted { execution_id: String },
+    TurnStarted { stage_run_id: String },
     #[serde(rename = "ready")]
     Ready { turn: usize },
     #[serde(rename = "turn_complete")]
@@ -133,9 +133,9 @@ pub enum EventKind {
     #[serde(rename = "stage_boundary")]
     StageBoundary {
         id: String,
-        // Legacy boundaries predate invocation identities; new producers always supply one.
+        // Legacy boundaries predate stage-run identities; new producers always supply one.
         #[serde(default)]
-        stage_id: String,
+        stage_run_id: String,
         stage: String,
         stage_type: String,
         active: bool,
@@ -242,10 +242,12 @@ mod tests {
             "active": true
         });
         let event: EventKind = serde_json::from_value(legacy.clone()).unwrap();
-        assert!(matches!(event, EventKind::StageBoundary { stage_id, .. } if stage_id.is_empty()));
+        assert!(
+            matches!(event, EventKind::StageBoundary { stage_run_id, .. } if stage_run_id.is_empty())
+        );
 
         let mut current = legacy;
-        current["stage_id"] = "invocation-id".into();
+        current["stage_run_id"] = "stage-run-id".into();
         let event: EventKind = serde_json::from_value(current.clone()).unwrap();
         assert_eq!(serde_json::to_value(event).unwrap(), current);
     }

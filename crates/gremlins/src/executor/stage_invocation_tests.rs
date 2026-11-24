@@ -124,7 +124,7 @@ fn assert_pair(events: &[DispatchEvent<EventKind>], run: &str, name: &str, kind:
         let EventKind::StageBoundary {
             id,
             stage,
-            stage_id,
+            stage_run_id,
             stage_type,
             active,
         } = event.kind()
@@ -135,10 +135,10 @@ fn assert_pair(events: &[DispatchEvent<EventKind>], run: &str, name: &str, kind:
         assert_eq!(stage, name);
         assert_eq!(stage_type, kind);
         assert_eq!(*active, expected_active);
-        assert!(!stage_id.is_empty());
+        assert!(!stage_run_id.is_empty());
         assert_eq!(event.corr_id().run(), Some(run));
         assert_eq!(event.corr_id().stage(), Some(name));
-        assert_eq!(event.corr_id().execution_id(), Some(stage_id.as_str()));
+        assert_eq!(event.corr_id().stage_run_id(), Some(stage_run_id.as_str()));
     }
 }
 
@@ -261,7 +261,7 @@ async fn exec_subscription_after_start_replays_start_then_streams_and_end() {
         let envelope = first_line.corr_id();
         assert_eq!(envelope.run(), Some(id.as_str()));
         assert_eq!(envelope.stage(), Some("replay"));
-        assert!(envelope.execution_id().is_some_and(|id| !id.is_empty()));
+        assert!(envelope.stage_run_id().is_some_and(|id| !id.is_empty()));
         assert_eq!(retained.events[1].corr_id(), envelope);
         assert!(matches!(
             retained.events[1].kind(),
@@ -282,7 +282,7 @@ fn exec(name: &str, command: &str) -> StageSpec {
 }
 
 #[tokio::test]
-async fn repeated_leaf_has_distinct_execution_filters_inside_one_sequence_pair() {
+async fn repeated_leaf_has_distinct_stage_run_filters_inside_one_sequence_pair() {
     let stage = SequenceBuilder::new("repeat")
         .max_iterations(2)
         .stage(exec(
@@ -323,20 +323,20 @@ async fn repeated_leaf_has_distinct_execution_filters_inside_one_sequence_pair()
         assert_exec_envelopes(&selected, pair);
     }
     assert_ne!(
-        leaves[0].corr_id().execution_id(),
-        leaves[2].corr_id().execution_id()
+        leaves[0].corr_id().stage_run_id(),
+        leaves[2].corr_id().stage_run_id()
     );
     let mut ids = HashSet::new();
     for event in [&all[0], &leaves[0], &leaves[2]] {
-        assert!(ids.insert(event.corr_id().execution_id().unwrap()));
+        assert!(ids.insert(event.corr_id().stage_run_id().unwrap()));
     }
     assert!(other.drain().is_empty());
 
-    // Subscribe to one exact execution and dispatch the same leaf again: it must not leak.
+    // Subscribe to one exact stage run and dispatch the same leaf again: it must not leak.
     let mut exact = Subscription::new(leaves[0].corr_id().clone());
     run_stage(&node, &mut gremlin).await.unwrap();
     assert!(exact.drain().is_empty());
-    // Native bus history uses the same execution prefix for both halves.
+    // Native bus history uses the same stage run prefix for both halves.
     let (sub, _, history) = init_bus()
         .subscribe_with_history(SubscriberRegistration::lossless(
             leaves[0].corr_id().clone(),
@@ -520,7 +520,7 @@ impl Backend for RetryingAgentBackend {
             requests: self.requests.clone(),
             corr: params.output_corr_id.clone().unwrap(),
         };
-        assert!(transport.corr.execution_id().is_some());
+        assert!(transport.corr.stage_run_id().is_some());
         let model =
             rig_core::driver::Model::new(rig_core::test_utils::MockScript::default(), transport);
         let prompt = params.prompt.clone();
@@ -586,8 +586,8 @@ async fn model_request_retry_stays_inside_one_agent_invocation() {
         assert_eq!(prompt.corr_id(), call.corr_id());
         assert_eq!(call.corr_id().run(), boundaries[0].corr_id().run());
         assert_eq!(
-            call.corr_id().execution_id(),
-            boundaries[0].corr_id().execution_id()
+            call.corr_id().stage_run_id(),
+            boundaries[0].corr_id().stage_run_id()
         );
         assert!(boundaries[0].sequence() < prompt.sequence());
         assert!(prompt.sequence() < call.sequence());
@@ -611,11 +611,11 @@ impl Backend for FailingBackend {
     ) -> Result<CompletedRun, ClientError> {
         assert_eq!(interactive.accepts_commands(), !self.readonly);
         assert_eq!(interactive.snapshot().accepts_commands(), !self.readonly);
-        let execution = interactive.snapshot().execution_id().unwrap().to_owned();
+        let stage_run_id = interactive.snapshot().stage_run_id().unwrap().to_owned();
         let corr = CorrId::new()
             .with_run(params.gremlin_id.as_deref().unwrap())
             .with_stage("agent")
-            .with_execution_id(&execution);
+            .with_stage_run_id(&stage_run_id);
         gremlins_magic_bus::emit_corr_event(
             &corr,
             EventKind::LogLine {
@@ -679,8 +679,8 @@ async fn backend_case(cancel: bool, abort: bool, readonly: bool) {
         let target = interactive.target();
         assert_eq!(target.accepts_commands(), !readonly);
         assert_eq!(
-            target.execution_id(),
-            events.last().unwrap().corr_id().execution_id()
+            target.stage_run_id(),
+            events.last().unwrap().corr_id().stage_run_id()
         );
         if readonly {
             assert!(target.attach().is_err());
@@ -720,7 +720,7 @@ async fn backend_case(cancel: bool, abort: bool, readonly: bool) {
     assert_eq!(
         marker.corr_id(),
         boundaries[1].corr_id(),
-        "pipeline session must use invocation identity"
+        "pipeline session must use stage run identity"
     );
     assert!(boundaries[1].sequence() < marker.sequence());
     assert!(marker.sequence() < boundaries[2].sequence());
@@ -740,7 +740,7 @@ async fn task_abort_drops_nested_invocations_and_closes_both_pairs() {
 }
 
 #[tokio::test]
-async fn readonly_backend_receives_the_invocation_target_identity() {
+async fn readonly_backend_receives_the_stage_run_target_identity() {
     backend_case(true, false, true).await;
 }
 
@@ -761,7 +761,7 @@ async fn backend_setup_failure_closes_both_pairs_without_publishing_a_session() 
     let (sessions, interactive) =
         crate::clients::interactive::InteractiveSessionFactory::for_pipeline();
     let before = interactive.target();
-    assert_eq!(before.execution_id(), None);
+    assert_eq!(before.stage_run_id(), None);
     gremlin.interactive_sessions = Some(sessions);
     let mut bus = Subscription::new(CorrId::new().with_run(gremlin.id.as_str()));
     let error = run_stage(&node, &mut gremlin).await.unwrap_err();
@@ -770,7 +770,7 @@ async fn backend_setup_failure_closes_both_pairs_without_publishing_a_session() 
         "{error}"
     );
     let after = interactive.target();
-    assert_eq!(after.execution_id(), None);
+    assert_eq!(after.stage_run_id(), None);
     assert_eq!(after.nonce(), before.nonce());
     assert!(!after.accepts_commands());
     let events = bus.boundaries();

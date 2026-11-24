@@ -177,7 +177,7 @@ async fn tool_output_nested_clone_preserves_execution_attribution() {
     parent.corr_id = CorrId::new()
         .with_run("test.tools.nested-correlation")
         .with_stage("agent")
-        .with_execution_id("execution-original");
+        .with_stage_run_id("execution-original");
     let mut nested = parent.clone();
     nested.id_prefix = "task.child.".into();
     let (_sub, mut rx) = subscribe_run("test.tools.nested-correlation");
@@ -188,7 +188,7 @@ async fn tool_output_nested_clone_preserves_execution_attribution() {
     for (id, text) in [("call_0", "parent"), ("task.child.call_0", "nested")] {
         let event = next_tool_event(&mut rx).await;
         assert_eq!(event.corr_id(), &parent.corr_id);
-        assert_eq!(event.corr_id().execution_id(), Some("execution-original"));
+        assert_eq!(event.corr_id().stage_run_id(), Some("execution-original"));
         match event.into_kind() {
             EventKind::ToolOutputChunk {
                 id: actual,
@@ -211,7 +211,7 @@ async fn skill_loaded_uses_correlation_but_preserves_payload_id() {
     c.corr_id = CorrId::new()
         .with_run("test.tools.skill-correlation")
         .with_stage("agent")
-        .with_execution_id("skill-execution");
+        .with_stage_run_id("skill-execution");
     c.discovered_skills = Some(Arc::new(vec![crate::skills::LoadedSkill {
         skill: crate::skills::Skill {
             name: "pdf".into(),

@@ -11,7 +11,7 @@
 //!   Displays `StageBoundary`, `StageTransition`, `RunCompleted`, etc.
 //! - **`conversation`** — pinned to one execution (one agent-loop
 //!   invocation). Only `conversation`-scoped attachments can inject text.
-//!   Supply both `nonce` and `execution_id` to require a particular live
+//!   Supply both `nonce` and `stage_run_id` to require a particular live
 //!   execution (e.g. the one identified by the owner's `turn_started` frame).
 //!   A mismatch rejects the attachment before observation or control begins.
 //!
@@ -59,7 +59,7 @@ use super::run_registry::{RunRegistry, RunState};
 enum RunEvent {
     StageBoundary {
         id: String,
-        stage_id: String,
+        stage_run_id: String,
         stage: String,
         stage_type: String,
         active: bool,
@@ -92,13 +92,13 @@ impl RunEvent {
         match kind {
             EventKind::StageBoundary {
                 id,
-                stage_id,
+                stage_run_id,
                 stage,
                 stage_type,
                 active,
             } => Some(Self::StageBoundary {
                 id: id.clone(),
-                stage_id: stage_id.clone(),
+                stage_run_id: stage_run_id.clone(),
                 stage: stage.clone(),
                 stage_type: stage_type.clone(),
                 active: *active,
@@ -202,6 +202,26 @@ async fn write_run_history(
     Ok(terminal)
 }
 
+pub(super) fn retired_target_error(request: &Value) -> Option<Value> {
+    for key in ["stage_id", "execution_id"] {
+        if request.get(key).is_some() {
+            return Some(error_response(&format!(
+                "retired '{key}' field; use 'stage_run_id'"
+            )));
+        }
+        if request
+            .get("target")
+            .and_then(|target| target.get(key))
+            .is_some()
+        {
+            return Some(error_response(&format!(
+                "target.{key} is retired; use target.stage_run_id"
+            )));
+        }
+    }
+    None
+}
+
 // ── Entry points ───────────────────────────────────────────────────────
 
 /// Read the first request from an attachment stream and dispatch based on
@@ -212,6 +232,10 @@ pub(crate) async fn handle_attach(
     reader: BufReader<tokio::net::unix::OwnedReadHalf>,
     writer: &SharedWriter,
 ) {
+    if let Some(error) = retired_target_error(request) {
+        let _ = writer.write_json_line(&error).await;
+        return;
+    }
     let id = request.get("id").and_then(|v| v.as_str()).unwrap_or("");
     if id.is_empty() {
         let resp = error_response("missing 'id' field");
@@ -323,9 +347,13 @@ async fn handle_run_attach(
                     Recv::Closed => break,
                 }
             }
-            _ = socket::read_json_line(&mut reader) => {
-                // Client sent something — ignore (passive only) or use
-                // for detach in future.
+            command = socket::read_json_line(&mut reader) => {
+                if let Ok(Some(command)) = command {
+                    if let Some(error) = retired_target_error(&command) {
+                        if writer.write_json_line(&error).await.is_err() { break; }
+                        continue;
+                    }
+                }
                 break;
             }
         }
@@ -376,6 +404,10 @@ pub(crate) async fn handle_conversation_attach(
     mut reader: BufReader<tokio::net::unix::OwnedReadHalf>,
     writer: &SharedWriter,
 ) {
+    if let Some(error) = retired_target_error(request) {
+        let _ = writer.write_json_line(&error).await;
+        return;
+    }
     // 1. Resolve the interactive handle from the registry.
     let Some((handle, store, mut run_state)) = registry.get_run_interactive(id).await else {
         let resp = error_response(&format!("gremlin {id} is not running"));
@@ -388,15 +420,15 @@ pub(crate) async fn handle_conversation_attach(
     #[cfg(test)]
     setup_gate::wait(id).await;
     let execution_nonce = target.nonce();
-    let mut execution_id = target.execution_id().map(|s| s.to_string());
+    let mut stage_run_id = target.stage_run_id().map(|s| s.to_string());
     // Validate against the immutable snapshot used by the command loop, never
     // against a second lookup that might already describe a successor.
-    if request.get("nonce").is_some() || request.get("execution_id").is_some() {
-        let expected_id = request.get("execution_id").and_then(Value::as_str);
+    if request.get("nonce").is_some() || request.get("stage_run_id").is_some() {
+        let expected_id = request.get("stage_run_id").and_then(Value::as_str);
         if between_turn
             || request.get("nonce").and_then(Value::as_u64) != Some(execution_nonce)
             || expected_id.is_none()
-            || expected_id != execution_id.as_deref()
+            || expected_id != stage_run_id.as_deref()
         {
             let _ = writer
                 .write_json_line(&error_response("requested execution is not active"))
@@ -445,7 +477,7 @@ pub(crate) async fn handle_conversation_attach(
     let (stream_sub, mut evt_rx) = subscribe_run_lag_tolerant(id, 256);
     let _stream_guard = BusSubGuard::new(stream_sub);
 
-    // 6. Emit attachment acknowledgment with execution identity and a
+    // 6. Emit attachment acknowledgment with stage run identity and a
     //    stable execution nonce. Capabilities are computed from the actual
     //    target's backend capability, not merely its stage type.
     let mut caps = vec!["observe"];
@@ -456,7 +488,7 @@ pub(crate) async fn handle_conversation_attach(
         "type": "attached",
         "scope": "conversation",
         "id": id,
-        "execution_id": execution_id,
+        "stage_run_id": stage_run_id,
         "nonce": execution_nonce,
         "capabilities": caps,
     });
@@ -493,7 +525,7 @@ pub(crate) async fn handle_conversation_attach(
     // Preserve explicit reservations across chat registration gaps.
     if mode == "passive" || (!between_turn && !target.accepts_commands()) {
         handle_passive_conversation(
-            execution_id.as_deref(),
+            stage_run_id.as_deref(),
             &mut reader,
             writer,
             &mut evt_rx,
@@ -508,7 +540,7 @@ pub(crate) async fn handle_conversation_attach(
     let mut attachment = None;
     if mode == "debugger" {
         let lease = if between_turn {
-            handle.attach_next_turn_debugger(execution_id.clone())
+            handle.attach_next_turn_debugger(stage_run_id.clone())
         } else {
             target.attach_debugger()
         };
@@ -529,7 +561,7 @@ pub(crate) async fn handle_conversation_attach(
             writer,
             id,
             readiness_end.as_ref(),
-            Some((&mut evt_rx, execution_id.as_deref())),
+            Some((&mut evt_rx, stage_run_id.as_deref())),
         )
         .await;
         target = match readiness {
@@ -542,7 +574,7 @@ pub(crate) async fn handle_conversation_attach(
         };
         // Only an explicit between-turn debugger reservation may bind a new
         // execution. Ordinary viewers and corrections retain their snapshot.
-        execution_id = target.execution_id().map(str::to_owned);
+        stage_run_id = target.stage_run_id().map(str::to_owned);
         end_signal = target.end_signal();
         attachment = Some(lease);
     }
@@ -553,6 +585,10 @@ pub(crate) async fn handle_conversation_attach(
             result = socket::read_json_line(&mut reader) => {
                 match result {
                     Ok(Some(cmd)) => {
+                        if let Some(error) = retired_target_error(&cmd) {
+                            if writer.write_json_line(&error).await.is_err() { break; }
+                            continue;
+                        }
                         let op = cmd.get("op").and_then(Value::as_str).unwrap_or("");
                         let req_id = cmd.get("req_id").and_then(Value::as_str).map(|s| s.to_string());
                         if op == "detach" {
@@ -585,16 +621,16 @@ pub(crate) async fn handle_conversation_attach(
                                 Ok(lease) => lease,
                                 Err(error) => { report_attach_error(writer, error).await; continue; }
                             };
-                            if let Err(failure) = wait_for_ready_view(&mut lease, &mut run_state, &mut reader, writer, id, Some(&end_signal), Some((&mut evt_rx, execution_id.as_deref()))).await {
+                            if let Err(failure) = wait_for_ready_view(&mut lease, &mut run_state, &mut reader, writer, id, Some(&end_signal), Some((&mut evt_rx, stage_run_id.as_deref()))).await {
                                 drop(lease);
-                                let dropped = (op == "message").then(|| message_outcome(false, id, target.nonce(), target.execution_id(), req_id.as_deref()));
+                                let dropped = (op == "message").then(|| message_outcome(false, id, target.nonce(), target.stage_run_id(), req_id.as_deref()));
                                 report_readiness_failure(writer, failure, dropped).await;
                                 break;
                             }
                             attachment = Some(lease);
                         }
                         let should_break = if op == "message" {
-                            deliver_message(&cmd, req_id, id, target.nonce(), target.execution_id(),
+                            deliver_message(&cmd, req_id, id, target.nonce(), target.stage_run_id(),
                                 writer, &mut reader, &mut run_state, &end_signal, &mut attachment, temporary, &mut evt_rx).await
                         } else {
                             tokio::select! {
@@ -614,7 +650,7 @@ pub(crate) async fn handle_conversation_attach(
                 }
             }
             _ = end_signal.wait(), if attachment.is_none() => {
-                drain_display(&mut evt_rx, execution_id.as_deref(), writer).await;
+                drain_display(&mut evt_rx, stage_run_id.as_deref(), writer).await;
                 break;
             }
             result = evt_rx.recv(), if !end_signal.is_ended() => {
@@ -624,7 +660,7 @@ pub(crate) async fn handle_conversation_attach(
                             // The lease carries the reliable completion, including summary.
                             continue;
                         }
-                        if let Some(p) = matching_display(&dispatch, execution_id.as_deref()) {
+                        if let Some(p) = matching_display(&dispatch, stage_run_id.as_deref()) {
                             let done = p["type"] == "done";
                             let written = if done {
                                 write_terminal_view(writer, &p).await
@@ -634,7 +670,7 @@ pub(crate) async fn handle_conversation_attach(
                             if done { break; }
                             if !written && !(end_signal.is_ended() && attachment.is_some()) {
                                 if end_signal.is_ended() {
-                                    drain_display(&mut evt_rx, execution_id.as_deref(), writer).await;
+                                    drain_display(&mut evt_rx, stage_run_id.as_deref(), writer).await;
                                 }
                                 break;
                             }
@@ -649,7 +685,7 @@ pub(crate) async fn handle_conversation_attach(
                         if !write_view(writer, &payload, Some(&end_signal)).await
                             && !(end_signal.is_ended() && attachment.is_some()) {
                             if end_signal.is_ended() {
-                                drain_display(&mut evt_rx, execution_id.as_deref(), writer).await;
+                                drain_display(&mut evt_rx, stage_run_id.as_deref(), writer).await;
                             }
                             break;
                         }
@@ -711,7 +747,7 @@ async fn deliver_message(
     req_id: Option<String>,
     id: &str,
     nonce: u64,
-    execution_id: Option<&str>,
+    stage_run_id: Option<&str>,
     writer: &SharedWriter,
     reader: &mut BufReader<OwnedReadHalf>,
     run_state: &mut watch::Receiver<RunState>,
@@ -754,7 +790,9 @@ async fn deliver_message(
                 }
                 #[cfg(test)]
                 delivery_busy_gate::wait(id).await;
-                let frame = error_response("busy delivering correction");
+                let frame = frame.as_ref().ok().and_then(Option::as_ref)
+                    .and_then(retired_target_error)
+                    .unwrap_or_else(|| error_response("busy delivering correction"));
                 let write = write_view(writer, &frame, Some(end));
                 tokio::pin!(write);
                 let written = tokio::select! {
@@ -776,7 +814,7 @@ async fn deliver_message(
             event = evt_rx.recv() => {
                 #[cfg(test)]
                 delivery_display_gate::wait(id).await;
-                let display = forward_display(event, execution_id, writer, Some(end));
+                let display = forward_display(event, stage_run_id, writer, Some(end));
                 tokio::pin!(display);
                 let forwarded = tokio::select! {
                     biased;
@@ -805,7 +843,7 @@ async fn deliver_message(
     if temporary {
         drop(attachment.take());
     }
-    let frame = message_outcome(delivered, id, nonce, execution_id, req_id.as_deref());
+    let frame = message_outcome(delivered, id, nonce, stage_run_id, req_id.as_deref());
     if delivered {
         // Confirmation is a command outcome, not an observation. Expiration
         // cannot retract it; bound only the flush after execution has ended.
@@ -838,13 +876,13 @@ fn message_outcome(
     delivered: bool,
     id: &str,
     nonce: u64,
-    execution_id: Option<&str>,
+    stage_run_id: Option<&str>,
     req_id: Option<&str>,
 ) -> Value {
     serde_json::json!({
         "type": if delivered { "delivered" } else { "correction_dropped" },
         "scope": "conversation", "id": id, "nonce": nonce,
-        "execution_id": execution_id, "req_id": req_id,
+        "stage_run_id": stage_run_id, "req_id": req_id,
     })
 }
 
@@ -967,10 +1005,10 @@ async fn readiness_display_completion(
     // End has latched. Flush queued output in order without its end fence,
     // bounding the whole scan rather than giving each frame a fresh timeout.
     let scanned = tokio::time::timeout(std::time::Duration::from_secs(1), async {
-        if let Some((events, execution_id)) = display {
+        if let Some((events, stage_run_id)) = display {
             for _ in 0..256 {
                 let frame = match events.try_recv() {
-                    Ok(dispatch) => matching_display(&dispatch, *execution_id),
+                    Ok(dispatch) => matching_display(&dispatch, *stage_run_id),
                     Err(gremlins_magic_bus::TryRecvError::Lagged(skipped)) => {
                         Some(serde_json::json!({
                             "type": "lagged", "scope": "conversation", "skipped": skipped,
@@ -1048,7 +1086,10 @@ async fn wait_for_ready_view(
         let ready = tokio::select! {
             biased;
             frame = socket::read_json_line(reader) => {
-                if matches!(frame, Ok(Some(_))) {
+                if let Ok(Some(command)) = &frame {
+                    if let Some(error) = retired_target_error(command) {
+                        return Err(ReadinessFailure::Error(error));
+                    }
                     return Err(ReadinessFailure::Error(error_response(
                         "command received before ready; attachment closed",
                     )));
@@ -1080,16 +1121,16 @@ async fn wait_for_ready_view(
                     None => std::future::pending().await,
                 }
             } => {
-                let execution_id = display.as_ref().and_then(|(_, id)| *id);
+                let stage_run_id = display.as_ref().and_then(|(_, id)| *id);
                 let forwarded = match event {
-                    Recv::Event(dispatch) => match matching_display(&dispatch, execution_id) {
+                    Recv::Event(dispatch) => match matching_display(&dispatch, stage_run_id) {
                         Some(frame) if frame["type"] == "done" => {
                             return Err(ReadinessFailure::Completed(frame));
                         }
                         Some(frame) => write_view(writer, &frame, end).await,
                         None => true,
                     },
-                    event => forward_display(event, execution_id, writer, end).await,
+                    event => forward_display(event, stage_run_id, writer, end).await,
                 };
                 if !forwarded {
                     return Err(if end.is_some_and(EndSignal::is_ended) {
@@ -1137,7 +1178,7 @@ async fn wait_for_ready_view(
 /// Socket EOF or the latched snapshot end signal closes the viewer, even
 /// without a terminal bus event. Buffered successor events never retarget it.
 async fn handle_passive_conversation(
-    execution_id: Option<&str>,
+    stage_run_id: Option<&str>,
     reader: &mut BufReader<tokio::net::unix::OwnedReadHalf>,
     writer: &SharedWriter,
     evt_rx: &mut gremlins_magic_bus::ReceiverHalf<EventKind>,
@@ -1154,17 +1195,17 @@ async fn handle_passive_conversation(
         tokio::select! {
             biased;
             _ = &mut end => {
-                drain_display(evt_rx, execution_id, writer).await;
+                drain_display(evt_rx, stage_run_id, writer).await;
                 break;
             }
             _ = socket::read_json_line(reader) => break,
             result = evt_rx.recv() => {
                 let done = matches!(&result, Recv::Event(dispatch)
-                    if dispatch.corr_id().execution_id() == execution_id
+                    if dispatch.corr_id().stage_run_id() == stage_run_id
                         && matches!(dispatch.kind(), EventKind::Done { .. }));
-                if !forward_display(result, execution_id, writer, Some(&end_signal)).await || done {
+                if !forward_display(result, stage_run_id, writer, Some(&end_signal)).await || done {
                     if !done && end_signal.is_ended() {
-                        drain_display(evt_rx, execution_id, writer).await;
+                        drain_display(evt_rx, stage_run_id, writer).await;
                     }
                     break;
                 }
@@ -1174,21 +1215,21 @@ async fn handle_passive_conversation(
     }
 }
 
-// All viewer phases use this exact execution match. Missing execution identity
+// All viewer phases use this exact stage run match. Missing stage run identity
 // is never a wildcard: registration-only viewers must not follow the next turn.
 fn matching_display(
     dispatch: &gremlins_magic_bus::DispatchEvent<EventKind>,
-    execution_id: Option<&str>,
+    stage_run_id: Option<&str>,
 ) -> Option<Value> {
-    let expected = execution_id?;
-    if dispatch.corr_id().execution_id() != Some(expected) {
+    let expected = stage_run_id?;
+    if dispatch.corr_id().stage_run_id() != Some(expected) {
         return None;
     }
     let mut frame = conversation_display_event(dispatch.kind())?;
     if matches!(dispatch.kind(), EventKind::Ready { .. }) {
         frame["type"] = serde_json::json!("execution_ready");
         frame["id"] = serde_json::json!(dispatch.corr_id().run());
-        frame["execution_id"] = serde_json::json!(expected);
+        frame["stage_run_id"] = serde_json::json!(expected);
     }
     frame
         .as_object_mut()?
@@ -1212,12 +1253,12 @@ async fn write_view(writer: &SharedWriter, frame: &Value, end: Option<&EndSignal
 
 async fn forward_display(
     event: Recv<EventKind>,
-    execution_id: Option<&str>,
+    stage_run_id: Option<&str>,
     writer: &SharedWriter,
     end: Option<&EndSignal>,
 ) -> bool {
     let frame = match event {
-        Recv::Event(dispatch) => matching_display(&dispatch, execution_id),
+        Recv::Event(dispatch) => matching_display(&dispatch, stage_run_id),
         Recv::Lagged(skipped) => Some(serde_json::json!({
             "type": "lagged", "scope": "conversation", "skipped": skipped,
         })),
@@ -1243,14 +1284,14 @@ async fn write_terminal_view(writer: &SharedWriter, frame: &Value) -> bool {
 // display after that signal, without following a successor or blocking forever.
 async fn drain_display(
     events: &mut gremlins_magic_bus::ReceiverHalf<EventKind>,
-    execution_id: Option<&str>,
+    stage_run_id: Option<&str>,
     writer: &SharedWriter,
 ) {
     let _ = tokio::time::timeout(std::time::Duration::from_secs(1), async {
         for _ in 0..256 {
             match events.try_recv() {
                 Ok(dispatch) => {
-                    if let Some(frame) = matching_display(&dispatch, execution_id) {
+                    if let Some(frame) = matching_display(&dispatch, stage_run_id) {
                         let done = frame["type"] == "done";
                         if !write_view(writer, &frame, None).await || done {
                             break;
@@ -1841,9 +1882,9 @@ mod routing_tests {
             let run = format!("readiness-ordered-{with_done}");
             let (sub, mut events) = subscribe_run_lag_tolerant(&run, 256);
             let _guard = BusSubGuard::new(sub);
-            let corr = CorrId::new().with_run(&run).with_execution_id("target");
+            let corr = CorrId::new().with_run(&run).with_stage_run_id("target");
             emit_corr_event(
-                &CorrId::new().with_run(&run).with_execution_id("foreign"),
+                &CorrId::new().with_run(&run).with_stage_run_id("foreign"),
                 EventKind::StreamChunk {
                     text: "foreign".into(),
                 },
@@ -1912,7 +1953,7 @@ mod routing_tests {
         gremlins_magic_bus::emit_corr_event(
             &gremlins_magic_bus::CorrId::new()
                 .with_run(run)
-                .with_execution_id("target"),
+                .with_stage_run_id("target"),
             EventKind::StreamChunk {
                 text: "x".repeat(8 * 1024 * 1024),
             },
@@ -1958,7 +1999,7 @@ mod routing_tests {
             gremlins_magic_bus::emit_corr_event(
                 &gremlins_magic_bus::CorrId::new()
                     .with_run("readiness-priority")
-                    .with_execution_id("foreign"),
+                    .with_stage_run_id("foreign"),
                 EventKind::StreamChunk {
                     text: "foreign".into(),
                 },
@@ -1972,7 +2013,7 @@ mod routing_tests {
             &writer,
             "readiness-priority",
             Some(&end),
-            Some((&mut events, target.execution_id())),
+            Some((&mut events, target.stage_run_id())),
         )
         .await;
         assert!(result.is_ok());
@@ -2054,7 +2095,7 @@ mod routing_tests {
         let _guard = BusSubGuard::new(sub);
         let corr = CorrId::new()
             .with_run(run_id)
-            .with_execution_id("execution");
+            .with_stage_run_id("execution");
 
         for reason in ["resumed", "disconnect", MESSAGE_DELIVERED_REASON] {
             let ended = EventKind::Ended {

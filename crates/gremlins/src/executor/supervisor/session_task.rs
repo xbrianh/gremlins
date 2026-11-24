@@ -190,8 +190,8 @@ pub(crate) struct TurnSnapshot {
     pub id: String,
     pub turn: Option<String>,
     pub done: watch::Receiver<bool>,
-    /// The opaque execution ID the turn announced at start, if any.
-    pub execution_id: Option<String>,
+    /// The opaque stage-run ID the turn announced at start, if any.
+    pub stage_run_id: Option<String>,
 }
 
 /// Work extracted by `Teardown` and finished by a task spawned from the
@@ -854,7 +854,7 @@ async fn run_session_task(
                     id: cur.id.clone(),
                     turn: cur.turn.clone(),
                     done: cur.done.clone(),
-                    execution_id: cur.execution_id.clone(),
+                    stage_run_id: cur.stage_run_id.clone(),
                 });
                 let _ = respond.send(turn);
             }

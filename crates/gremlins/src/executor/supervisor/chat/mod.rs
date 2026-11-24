@@ -64,10 +64,10 @@ pub(crate) struct CurrentTurn {
     /// finished still proceeds immediately.
     pub(crate) done: watch::Receiver<bool>,
     pub(crate) hard: Arc<AtomicBool>,
-    /// The opaque execution ID published at turn start. The attachment
+    /// The opaque stage-run ID published at turn start. The attachment
     /// handler uses this to bind observation to one execution, not the
     /// resettable run-id/nonce pair.
-    pub(crate) execution_id: Option<String>,
+    pub(crate) stage_run_id: Option<String>,
 }
 
 pub(crate) fn base_process_env() -> &'static HashMap<String, String> {
@@ -95,6 +95,22 @@ pub(crate) async fn handle_chat(
     session_task: &SessionTaskHandle,
 ) {
     log::debug!("handle_chat: received chat request");
+
+    if ["stage_id", "execution_id", "stage_run_id"]
+        .iter()
+        .any(|key| request.get(key).is_some())
+    {
+        let _ = writer
+            .write_json_line(&error_response(
+                "top-level stage-run selectors are not supported; use target with id, nonce, and stage_run_id",
+            ))
+            .await;
+        return;
+    }
+    if let Some(error) = super::attachment::retired_target_error(request) {
+        let _ = writer.write_json_line(&error).await;
+        return;
+    }
 
     // The daemon owns the conversation; the session owns the gremlin. The
     // front-end never sends a gremlin id — it only addresses the session.
@@ -158,6 +174,16 @@ pub(crate) async fn handle_chat(
                 .await;
             return;
         };
+        for retired_key in ["stage_id", "execution_id"] {
+            if target_obj.contains_key(retired_key) {
+                let _ = writer
+                    .write_json_line(&error_response(&format!(
+                        "target.{retired_key} is retired; use target.stage_run_id"
+                    )))
+                    .await;
+                return;
+            }
+        }
         let target_id = target_obj.get("id").and_then(|v| v.as_str()).unwrap_or("");
         let target_nonce = target_obj
             .get("nonce")
@@ -177,13 +203,13 @@ pub(crate) async fn handle_chat(
             return;
         }
 
-        let Some(client_execution_id) = target_obj
-            .get("execution_id")
+        let Some(client_stage_run_id) = target_obj
+            .get("stage_run_id")
             .and_then(Value::as_str)
             .filter(|id| !id.is_empty())
         else {
             let _ = writer
-                .write_json_line(&error_response("target.execution_id is required"))
+                .write_json_line(&error_response("target.stage_run_id is required"))
                 .await;
             return;
         };
@@ -224,47 +250,47 @@ pub(crate) async fn handle_chat(
         };
 
         let debug_target = interactive.target();
-        let execution_id = debug_target.execution_id().map(|s| s.to_string());
+        let stage_run_id = debug_target.stage_run_id().map(|s| s.to_string());
         if debug_target.nonce() != target_nonce {
             let resp = error_response("execution has been replaced; target is stale");
             let _ = writer.write_json_line(&resp).await;
             return;
         }
-        // Validate the client-supplied execution ID. The authoritative
+        // Validate the client-supplied stage-run ID. The authoritative
         // descriptor is the one the turn announced at start
-        // (`CurrentTurn.execution_id`), not a value sampled from the run
+        // (`CurrentTurn.stage_run_id`), not a value sampled from the run
         // map after enqueue.
         //
         // Chat turns: reject if `CurrentTurn` hasn't published its
-        // execution_id yet — the live-target snapshot would describe the
+        // stage_run_id yet — the live-target snapshot would describe the
         // *previous* execution between `prepare_next` and the
         // `CurrentTurn` update. Pipeline runs (no matching turn) fall
-        // back to the live target's execution_id.
+        // back to the live target's stage_run_id.
         let current_turn = session_task.get_current_turn().await;
         let is_chat_turn = current_turn.as_ref().is_some_and(|cur| cur.id == target_id);
-        let announced_execution_id = current_turn
+        let announced_stage_run_id = current_turn
             .as_ref()
             .filter(|cur| cur.id == target_id)
-            .and_then(|cur| cur.execution_id.clone());
-        let bound_execution_id = if is_chat_turn {
+            .and_then(|cur| cur.stage_run_id.clone());
+        let bound_stage_run_id = if is_chat_turn {
             // For our own chat turn, only the announced descriptor is
             // authoritative. Don't fall back to the live target.
-            announced_execution_id
+            announced_stage_run_id
         } else {
             // Pipeline run or cross-session target: use the live
-            // target's execution_id as the binding descriptor.
-            announced_execution_id.or_else(|| execution_id.clone())
+            // target's stage_run_id as the binding descriptor.
+            announced_stage_run_id.or_else(|| stage_run_id.clone())
         };
         {
-            let client_eid = client_execution_id;
-            match bound_execution_id.as_deref() {
-                Some(actual) if actual != client_eid || execution_id.as_deref() != Some(actual) => {
-                    let resp = error_response("execution_id mismatch: target has been replaced");
+            let client_id = client_stage_run_id;
+            match bound_stage_run_id.as_deref() {
+                Some(actual) if actual != client_id || stage_run_id.as_deref() != Some(actual) => {
+                    let resp = error_response("stage_run_id mismatch: target has been replaced");
                     let _ = writer.write_json_line(&resp).await;
                     return;
                 }
                 None => {
-                    // No execution ID published yet for this
+                    // No stage-run ID published yet for this
                     // execution. For a chat turn this means
                     // `TurnStarted` hasn't been emitted; for a
                     // pipeline run it means the interactive slot
@@ -321,7 +347,7 @@ pub(crate) async fn handle_chat(
             .and_then(|v| v.as_str())
             .map(|s| s.to_string());
         let writer_for_error = writer.clone();
-        let execution_id_for_task = execution_id.clone();
+        let stage_run_id_for_task = stage_run_id.clone();
         let execution_end = debug_target.end_signal();
         tokio::spawn(async move {
             // Wait for the agent to accept the pause.
@@ -343,8 +369,8 @@ pub(crate) async fn handle_chat(
                     "reason": "agent exited before accepting pause",
                     "req_id": req_id,
                 });
-                if let Some(ref eid) = execution_id_for_task {
-                    payload["execution_id"] = serde_json::Value::String(eid.clone());
+                if let Some(ref stage_run_id) = stage_run_id_for_task {
+                    payload["stage_run_id"] = serde_json::Value::String(stage_run_id.clone());
                 }
                 let _ = writer_for_error.write_json_line(&payload).await;
                 return; // Attachment drop resets the pause slot.
@@ -364,8 +390,8 @@ pub(crate) async fn handle_chat(
                     "reason": format!("command channel closed: {}", e),
                     "req_id": req_id,
                 });
-                if let Some(ref eid) = execution_id_for_task {
-                    payload["execution_id"] = serde_json::Value::String(eid.clone());
+                if let Some(ref stage_run_id) = stage_run_id_for_task {
+                    payload["stage_run_id"] = serde_json::Value::String(stage_run_id.clone());
                 }
                 let _ = writer_for_error.write_json_line(&payload).await;
                 return;
@@ -385,8 +411,8 @@ pub(crate) async fn handle_chat(
                         "nonce": target_nonce,
                         "req_id": req_id,
                     });
-                    if let Some(ref eid) = execution_id_for_task {
-                        payload["execution_id"] = serde_json::Value::String(eid.clone());
+                    if let Some(ref stage_run_id) = stage_run_id_for_task {
+                        payload["stage_run_id"] = serde_json::Value::String(stage_run_id.clone());
                     }
                     let _ = writer_for_error.write_json_line(&payload).await;
                 }
@@ -397,8 +423,8 @@ pub(crate) async fn handle_chat(
                         "reason": "agent exited before incorporation",
                         "req_id": req_id,
                     });
-                    if let Some(ref eid) = execution_id_for_task {
-                        payload["execution_id"] = serde_json::Value::String(eid.clone());
+                    if let Some(ref stage_run_id) = stage_run_id_for_task {
+                        payload["stage_run_id"] = serde_json::Value::String(stage_run_id.clone());
                     }
                     let _ = writer_for_error.write_json_line(&payload).await;
                 }
@@ -541,11 +567,11 @@ pub(crate) async fn handle_chat(
     //    events themselves are unsolicited lines written by the task above and
     //    classified separately by the client read loop.
     //
-    //    Deliberately no `nonce` / `execution_id` here: the turn has not
+    //    Deliberately no `nonce` / `stage_run_id` here: the turn has not
     //    started yet (the prompt was only just queued), so any identity
     //    sampled from the run map now describes the *previous* execution.
-    //    The turn that starts publishes its execution identity on
-    //    `CurrentTurn.execution_id` (see `chat/turn.rs::run_turn`), and
+    //    The turn that starts publishes its stage run identity on
+    //    `CurrentTurn.stage_run_id` (see `chat/turn.rs::run_turn`), and
     //    attachments bind to that descriptor; corrections validate against it
     //    below.
     let ack = serde_json::json!({"id": handle.id, "status": "streaming"});

@@ -5,7 +5,7 @@ use serde_json::{json, Value};
 #[derive(Debug, Clone, Eq, PartialEq)]
 pub(crate) struct Execution {
     pub run_id: String,
-    pub execution_id: String,
+    pub stage_run_id: String,
     pub nonce: u64,
 }
 
@@ -13,7 +13,7 @@ impl Execution {
     pub(super) fn from_frame(frame: &Value) -> Option<Self> {
         Some(Self {
             run_id: frame["id"].as_str()?.to_owned(),
-            execution_id: frame["execution_id"]
+            stage_run_id: frame["stage_run_id"]
                 .as_str()
                 .filter(|s| !s.is_empty())?
                 .to_owned(),
@@ -40,7 +40,7 @@ impl Selector<'_> {
             }
             Self::Exact(execution) => {
                 req["id"] = json!(execution.run_id);
-                req["execution_id"] = json!(execution.execution_id);
+                req["stage_run_id"] = json!(execution.stage_run_id);
                 req["nonce"] = json!(execution.nonce);
             }
         }
@@ -68,7 +68,7 @@ impl Selector<'_> {
         if ack["type"] != "attached" || ack["scope"] != "conversation" {
             return Err("not attached to a conversation".into());
         }
-        let execution = Execution::from_frame(ack).ok_or("attachment has no execution identity")?;
+        let execution = Execution::from_frame(ack).ok_or("attachment has no stage_run_id")?;
         let matches = match self {
             Self::Run { run } => execution.run_id == *run,
             Self::Stage { run, stage } => execution.run_id == *run && ack["stage"] == *stage,
@@ -86,8 +86,35 @@ mod tests {
     use super::*;
 
     #[test]
+    fn exact_selector_sends_and_compares_advertised_stage_run_id() {
+        let ack: Value = serde_json::from_str(
+            r#"{"type":"attached","scope":"conversation","id":"run","stage_run_id":"advertised","nonce":5,"capabilities":["message"]}"#,
+        ).unwrap();
+        let bound = Selector::Run { run: "run" }.binding(&ack).unwrap();
+        assert_eq!(bound.stage_run_id, "advertised");
+        let exact = Selector::Exact(&bound);
+        assert_eq!(
+            exact.request("owner"),
+            json!({"op":"attach","scope":"conversation","mode":"control","session_id":"owner","id":"run","stage_run_id":"advertised","nonce":5})
+        );
+        assert_eq!(exact.binding(&ack).unwrap(), bound);
+        for (key, value) in [
+            ("stage_run_id", json!("replacement")),
+            ("nonce", json!(6)),
+            ("capabilities", json!(["observe"])),
+        ] {
+            let mut changed = ack.clone();
+            changed[key] = value;
+            assert!(exact.binding(&changed).is_err());
+        }
+        let mut missing = ack;
+        missing.as_object_mut().unwrap().remove("stage_run_id");
+        assert!(Execution::from_frame(&missing).is_none());
+    }
+
+    #[test]
     fn binds_only_the_requested_writable_stage() {
-        let ack = json!({"type":"attached", "scope":"conversation", "id":"run", "stage":"review", "execution_id":"A", "nonce":5, "capabilities":["message"]});
+        let ack = json!({"type":"attached", "scope":"conversation", "id":"run", "stage":"review", "stage_run_id":"A", "nonce":5, "capabilities":["message"]});
         let selector = Selector::Stage {
             run: "run",
             stage: "review",
@@ -96,12 +123,12 @@ mod tests {
             selector.request("owner"),
             json!({"op":"attach", "mode":"control", "scope":"conversation", "id":"run", "stage":"review", "session_id":"owner"})
         );
-        assert_eq!(selector.binding(&ack).unwrap().execution_id, "A");
+        assert_eq!(selector.binding(&ack).unwrap().stage_run_id, "A");
         for (key, other) in [
             ("id", json!("other")),
             ("stage", json!("successor")),
             ("nonce", Value::Null),
-            ("execution_id", json!("")),
+            ("stage_run_id", json!("")),
             ("capabilities", json!(["observe"])),
         ] {
             let mut wrong = ack.clone();

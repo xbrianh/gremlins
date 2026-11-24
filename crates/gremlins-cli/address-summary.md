@@ -12,15 +12,15 @@
    Changed `let delivery_task` to `let mut delivery_task`. The `JoinHandle` is polled via `&mut delivery_task` in the `tokio::select!` that awaits delivery confirmation.
 
 4. **`crates/gremlins/src/clients/interactive.rs`, line 134** — Missing `Debug` impl
-   Added a manual `impl std::fmt::Debug for PauseSlot`. `AtomicU64` (the `acquisition` field) does not implement `Debug`, so `#[derive(Debug)]` on `InteractiveSessionFactory` (which holds `Arc<PauseSlot>`) failed. The new impl composes only the debuggable fields (`state`, `nonce`, `execution_id`) and calls `finish_non_exhaustive()`.
+   Added a manual `impl std::fmt::Debug for PauseSlot`. `AtomicU64` (the `acquisition` field) does not implement `Debug`, so `#[derive(Debug)]` on `InteractiveSessionFactory` (which holds `Arc<PauseSlot>`) failed. The new impl composes only the debuggable fields (`state`, `nonce`, `stage_run_id`) and calls `finish_non_exhaustive()`.
 
 ## Correctness fixes
 
 5. **`crates/gremlins/src/executor/supervisor/chat/mod.rs`, line 253** — Silent ready-failure path
-   The `if (&mut attachment.ready).await.is_err()` branch returned without writing any frame, leaving the targeted correction request unanswered. Added a `correction_dropped` JSON frame (with execution_id when available) before the `return`.
+   The `if (&mut attachment.ready).await.is_err()` branch returned without writing any frame, leaving the targeted correction request unanswered. Added a `correction_dropped` JSON frame (with stage_run_id when available) before the `return`.
 
-6. **`crates/gremlins/src/executor/supervisor/chat/mod.rs`, line 211** — Missing execution ID validation
-   The targeted correction path validated only `nonce`, not the client-supplied execution ID. Added parsing of `target.execution_id` from the request and a mismatch check against `debug_target.execution_id()` before attaching. When the client supplies an execution ID that doesn't match the current target's, the handler responds with `"execution_id mismatch: target has been replaced"`.
+6. **`crates/gremlins/src/executor/supervisor/chat/mod.rs`, line 211** — Missing stage_run_id validation
+   The targeted correction path validated only `nonce`, not the client-supplied stage_run_id. Added parsing of `target.stage_run_id` from the request and a mismatch check against `debug_target.stage_run_id()` before attaching. When the client supplies a stage_run_id that doesn't match the current target's, the handler responds with `"stage_run_id mismatch: target has been replaced"`.
 
 ## Readability fix
 

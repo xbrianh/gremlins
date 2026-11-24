@@ -130,7 +130,7 @@ async fn pause_and_replay(
     let model = Model::new(MockScript::default(), transport.clone()).erase();
     let (mut sessions, handle) = InteractiveSessionFactory::for_chat();
     let session = sessions.next_session();
-    let execution_id = session.snapshot().execution_id().unwrap().to_owned();
+    let stage_run_id = session.snapshot().stage_run_id().unwrap().to_owned();
     let (sub, mut events) = subscribe_run(id);
     let _guard = BusSubGuard::new(sub);
     let agent = tokio::spawn(run_agent_loop(
@@ -156,7 +156,7 @@ async fn pause_and_replay(
             let Recv::Event(event) = events.recv().await else {
                 panic!("lost run events")
             };
-            assert_eq!(event.corr_id().execution_id(), Some(execution_id.as_str()));
+            assert_eq!(event.corr_id().stage_run_id(), Some(stage_run_id.as_str()));
             assert_eq!(event.corr_id().run(), Some(id));
             match event.kind() {
                 EventKind::StreamChunk { text } => {
@@ -197,7 +197,7 @@ async fn pause_and_replay(
     assert_eq!(run.text_result.as_deref(), Some("finished"));
     assert_eq!(run.token_usage.unwrap().turns, 1);
     while let Ok(event) = events.try_recv() {
-        assert_eq!(event.corr_id().execution_id(), Some(execution_id.as_str()));
+        assert_eq!(event.corr_id().stage_run_id(), Some(stage_run_id.as_str()));
         assert_eq!(event.corr_id().run(), Some(id));
     }
     assert!(

@@ -42,13 +42,20 @@ async fn standalone_debug_uses_conversation_attach_in_debugger_mode() {
         );
         socket::write_json_line(
             peer.get_mut(),
-            &json!({"type":"attached", "scope":"conversation"}),
+            &json!({"type":"attached", "scope":"conversation", "id":"run", "stage_run_id":"advertised", "nonce":9, "capabilities":["message"]}),
         )
         .await
         .unwrap();
+        // Only stage_run_id differs: neither frame belongs to this attachment.
+        for frame in [
+            json!({"type":"ready", "scope":"conversation", "id":"run", "stage_run_id":"replacement", "nonce":9}),
+            json!({"type":"error", "scope":"conversation", "id":"run", "stage_run_id":"replacement", "nonce":9, "message":"wrong invocation"}),
+        ] {
+            socket::write_json_line(peer.get_mut(), &frame).await.unwrap();
+        }
         socket::write_json_line(
             peer.get_mut(),
-            &json!({"type":"error", "message":"fixture stopped"}),
+            &json!({"type":"error", "scope":"conversation", "id":"run", "stage_run_id":"advertised", "nonce":9, "message":"fixture stopped"}),
         )
         .await
         .unwrap();
@@ -57,6 +64,8 @@ async fn standalone_debug_uses_conversation_attach_in_debugger_mode() {
         let stderr = String::from_utf8(output.stderr).unwrap();
         assert!(stderr.contains("attached (conversation)"), "{stderr}");
         assert!(stderr.contains("fixture stopped"), "{stderr}");
+        assert!(!stderr.contains("connected to gremlin"), "{stderr}");
+        assert!(!stderr.contains("wrong invocation"), "{stderr}");
         assert!(!stderr.contains("TTY"), "{stderr}");
     })
     .await

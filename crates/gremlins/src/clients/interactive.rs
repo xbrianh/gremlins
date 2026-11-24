@@ -159,21 +159,21 @@ pub(crate) struct PauseSlot {
     end_signal: Mutex<EndSignal>,
     /// Identifies this execution (one agent loop invocation).
     nonce: AtomicU64,
-    /// Opaque execution ID published alongside the nonce.
-    execution_id: Mutex<Option<String>>,
+    /// Opaque stage run ID published alongside the nonce.
+    stage_run_id: Mutex<Option<String>>,
     /// Actual backend capability for this execution.
     commands_supported: AtomicBool,
     /// Closed when the factory that owns a chat registration is dropped.
     registration_closed: AtomicBool,
 }
 
-// Keep diagnostics focused on execution identity and ownership state.
+// Keep diagnostics focused on stage run identity and ownership state.
 impl std::fmt::Debug for PauseSlot {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("PauseSlot")
             .field("state", &self.state)
             .field("nonce", &self.nonce)
-            .field("execution_id", &self.execution_id)
+            .field("stage_run_id", &self.stage_run_id)
             .finish_non_exhaustive()
     }
 }
@@ -188,17 +188,17 @@ impl CancelListener for PauseSlot {
 }
 
 impl PauseSlot {
-    /// Publish the opaque execution ID alongside the nonce.
+    /// Publish the opaque stage run ID alongside the nonce.
     ///
-    /// Callers publish the handle afterwards so nonce and execution ID are
+    /// Callers publish the handle afterwards so nonce and stage run ID are
     /// observed as one consistent snapshot.
-    pub(crate) fn set_execution_id(&self, id: String) {
-        *self.execution_id.lock().unwrap_or_else(|e| e.into_inner()) = Some(id);
+    pub(crate) fn set_stage_run_id(&self, id: String) {
+        *self.stage_run_id.lock().unwrap_or_else(|e| e.into_inner()) = Some(id);
     }
 
-    /// Read the opaque execution ID, if one has been published.
-    pub(crate) fn execution_id(&self) -> Option<String> {
-        self.execution_id
+    /// Read the opaque stage run ID, if one has been published.
+    pub(crate) fn stage_run_id(&self) -> Option<String> {
+        self.stage_run_id
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .clone()
@@ -320,7 +320,7 @@ impl InteractiveHandle {
 
     pub(crate) fn attach_next_turn_debugger(
         &self,
-        execution_id: Option<String>,
+        stage_run_id: Option<String>,
     ) -> Result<DebugAttachment, AttachError> {
         let slot = self.1.clone();
         let mut state = slot.state.lock().unwrap_or_else(|e| e.into_inner());
@@ -365,7 +365,7 @@ impl InteractiveHandle {
             nonce,
             acquisition,
             debugger: true,
-            execution_id,
+            stage_run_id,
             commands,
             ready,
             ended,
@@ -376,7 +376,7 @@ impl InteractiveHandle {
         *self.0.lock().unwrap() = DebugTarget {
             slot: Arc::downgrade(slot),
             nonce: slot.nonce.load(Ordering::Acquire),
-            execution_id: slot.execution_id(),
+            stage_run_id: slot.stage_run_id(),
             // Captured under the slot lock, in the same write that publishes
             // the nonce, so the snapshot's signal always belongs to the
             // snapshot's execution — never a successor's.
@@ -399,8 +399,8 @@ impl InteractiveHandle {
 pub(crate) struct DebugTarget {
     slot: Weak<PauseSlot>,
     nonce: u64,
-    /// The opaque execution ID captured when the target was published.
-    execution_id: Option<String>,
+    /// The opaque stage run ID captured when the target was published.
+    stage_run_id: Option<String>,
     /// The end signal for the execution this snapshot describes, captured
     /// atomically with `nonce` so it cannot be confused with a successor's.
     /// A passive target may be observed but cannot reserve command capabilities.
@@ -413,14 +413,14 @@ pub(crate) struct DebugTarget {
 }
 
 impl DebugTarget {
-    /// The execution identity captured when the target was published.
+    /// The stage run identity captured when the target was published.
     pub(crate) fn nonce(&self) -> u64 {
         self.nonce
     }
 
-    /// The opaque execution ID captured when the target was published.
-    pub(crate) fn execution_id(&self) -> Option<&str> {
-        self.execution_id.as_deref()
+    /// The opaque stage run ID captured when the target was published.
+    pub(crate) fn stage_run_id(&self) -> Option<&str> {
+        self.stage_run_id.as_deref()
     }
 
     #[allow(dead_code)]
@@ -462,7 +462,7 @@ impl DebugTarget {
         if slot.current_end_signal().is_ended() {
             return Err(AttachError::Stale);
         }
-        if self.execution_id != slot.execution_id() {
+        if self.stage_run_id != slot.stage_run_id() {
             return Err(AttachError::Stale);
         }
         if !self.commands_supported || !slot.commands_supported.load(Ordering::Acquire) {
@@ -496,7 +496,7 @@ impl DebugTarget {
             nonce: self.nonce,
             acquisition,
             debugger,
-            execution_id: self.execution_id.clone(),
+            stage_run_id: self.stage_run_id.clone(),
             commands,
             ready,
             ended,
@@ -526,9 +526,9 @@ pub(crate) struct DebugAttachment {
     acquisition: u64,
     /// Debugger reservations may be handed across chat-turn boundaries.
     debugger: bool,
-    /// The opaque execution ID captured at attach time. Lets the caller
+    /// The opaque stage run ID captured at attach time. Lets the caller
     /// correlate this lease with the execution it targeted.
-    execution_id: Option<String>,
+    stage_run_id: Option<String>,
     commands: mpsc::Sender<InteractiveCommand>,
     pub(crate) ready: oneshot::Receiver<()>,
     #[allow(dead_code)]
@@ -621,7 +621,7 @@ impl DebugAttachment {
         Ok(DebugTarget {
             slot: Arc::downgrade(&slot),
             nonce,
-            execution_id: slot.execution_id(),
+            stage_run_id: slot.stage_run_id(),
             end_signal,
             readonly: false,
             commands_supported: slot.commands_supported.load(Ordering::Acquire),
@@ -637,10 +637,10 @@ impl DebugAttachment {
             .is_none()
     }
 
-    /// The opaque execution ID captured when this lease was acquired.
+    /// The opaque stage run ID captured when this lease was acquired.
     #[allow(dead_code)]
-    pub(crate) fn execution_id(&self) -> Option<&str> {
-        self.execution_id.as_deref()
+    pub(crate) fn stage_run_id(&self) -> Option<&str> {
+        self.stage_run_id.as_deref()
     }
 
     pub(crate) fn try_send(
@@ -729,7 +729,7 @@ impl InteractiveSessionFactory {
     }
 
     /// Kept for the execution factory interface; run IDs are deliberately not
-    /// incorporated into public execution identities.
+    /// incorporated into public stage run identities.
     #[allow(dead_code)]
     pub(crate) fn set_run_id(&self, _id: String) {}
 
@@ -747,20 +747,20 @@ impl InteractiveSessionFactory {
         self.next_session_with_identity(None, accepts_commands, cancel)
     }
 
-    /// Bind a pipeline execution to its stage ID before publishing it.
+    /// Bind a pipeline execution to its stage run ID before publishing it.
     /// An already prepared chat execution retains its announced identity.
     pub(crate) fn next_session_for_stage(
         &mut self,
-        stage_id: &str,
+        stage_run_id: &str,
         accepts_commands: bool,
         cancel: Option<&CancelToken>,
     ) -> Result<InteractiveSession, &'static str> {
-        self.next_session_with_identity(Some(stage_id), accepts_commands, cancel)
+        self.next_session_with_identity(Some(stage_run_id), accepts_commands, cancel)
     }
 
     fn next_session_with_identity(
         &mut self,
-        stage_id: Option<&str>,
+        stage_run_id: Option<&str>,
         accepts_commands: bool,
         cancel: Option<&CancelToken>,
     ) -> Result<InteractiveSession, &'static str> {
@@ -780,7 +780,7 @@ impl InteractiveSessionFactory {
             }
             return Ok(session);
         }
-        Ok(self.mint(stage_id, accepts_commands, cancel))
+        Ok(self.mint(stage_run_id, accepts_commands, cancel))
     }
 
     /// Drop only a prepared execution. An absent preparation is a no-op.
@@ -789,9 +789,9 @@ impl InteractiveSessionFactory {
     }
 
     /// Mint the next execution eagerly and return its published
-    /// `execution_id`, stashing the session for its next-session call.
+    /// `stage_run_id`, stashing the session for its next-session call.
     ///
-    /// Chat turns use this to announce the execution identity at turn start,
+    /// Chat turns use this to announce the stage run identity at turn start,
     /// before `run_agent` asks for the session.
     #[allow(dead_code)]
     pub(crate) fn prepare_next(&mut self) -> String {
@@ -811,9 +811,9 @@ impl InteractiveSessionFactory {
             }
             session.terminal = Some(terminal);
         }
-        let execution_id = session.slot.execution_id().unwrap_or_default();
+        let stage_run_id = session.slot.stage_run_id().unwrap_or_default();
         self.prepared = Some(session);
-        execution_id
+        stage_run_id
     }
 
     /// Prepare and capture an execution from this factory, never a registry lookup.
@@ -827,10 +827,10 @@ impl InteractiveSessionFactory {
     }
 
     /// Mint a fresh execution: signal the previous one's end, bump the nonce,
-    /// publish the execution ID and handle, and sweep stale pause state.
+    /// publish the stage run ID and handle, and sweep stale pause state.
     fn mint(
         &mut self,
-        stage_id: Option<&str>,
+        stage_run_id: Option<&str>,
         accepts_commands: bool,
         cancel: Option<&CancelToken>,
     ) -> InteractiveSession {
@@ -925,8 +925,8 @@ impl InteractiveSessionFactory {
         let nonce = self.next_nonce;
         self.next_nonce = self.next_nonce.wrapping_add(1);
         slot.nonce.store(nonce, Ordering::Release);
-        slot.set_execution_id(
-            stage_id
+        slot.set_stage_run_id(
+            stage_run_id
                 .map(str::to_owned)
                 .unwrap_or_else(|| format!("exec-{}", uuid::Uuid::new_v4())),
         );
@@ -986,7 +986,7 @@ impl InteractiveSession {
         DebugTarget {
             slot: Arc::downgrade(&self.slot),
             nonce: self.nonce,
-            execution_id: self.slot.execution_id(),
+            stage_run_id: self.slot.stage_run_id(),
             readonly: false,
             commands_supported: self.accepts_commands,
             end_signal: self.end_signal.clone(),
@@ -1487,8 +1487,8 @@ mod tests {
         second_registration.set_run_id("same-run-id".into());
         let first = first_registration.next_session();
         let second = second_registration.next_session();
-        let first_id = first_handle.target().execution_id().unwrap().to_owned();
-        let second_id = second_handle.target().execution_id().unwrap().to_owned();
+        let first_id = first_handle.target().stage_run_id().unwrap().to_owned();
+        let second_id = second_handle.target().stage_run_id().unwrap().to_owned();
         assert_ne!(first_id, second_id);
         assert!(!first_id.contains("same-run-id"));
         assert!(!second_id.contains("same-run-id"));
@@ -1500,14 +1500,14 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn supplied_stage_identity_preserves_successor_lease() {
+    async fn supplied_stage_run_identity_preserves_successor_lease() {
         let (mut sessions, handle) = InteractiveSessionFactory::for_pipeline();
         let mut first = sessions
             .next_session_for_stage("review:agent", true, None)
             .unwrap();
         let old_target = handle.target();
-        assert_eq!(old_target.execution_id(), Some("review:agent"));
-        assert_eq!(first.snapshot().execution_id(), Some("review:agent"));
+        assert_eq!(old_target.stage_run_id(), Some("review:agent"));
+        assert_eq!(first.snapshot().stage_run_id(), Some("review:agent"));
         let old_lease = old_target.attach().unwrap();
         assert!(first.accept_pause());
 
@@ -1515,7 +1515,7 @@ mod tests {
             .next_session_for_stage("review:agent", true, None)
             .unwrap();
         let target = handle.target();
-        assert_eq!(target.execution_id(), Some("review:agent"));
+        assert_eq!(target.stage_run_id(), Some("review:agent"));
         assert_ne!(old_target.nonce(), target.nonce());
         assert!(old_target.end_signal().is_ended());
         let lease = target.attach().unwrap();
@@ -1528,14 +1528,14 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn supplied_stage_identity_is_readonly_when_commands_unsupported() {
+    async fn supplied_stage_run_identity_is_readonly_when_commands_unsupported() {
         let (mut sessions, handle) = InteractiveSessionFactory::for_pipeline();
         let mut session = sessions
             .next_session_for_stage("plan", false, None)
             .unwrap();
         let target = handle.target();
-        assert_eq!(target.execution_id(), Some("plan"));
-        assert_eq!(session.snapshot().execution_id(), Some("plan"));
+        assert_eq!(target.stage_run_id(), Some("plan"));
+        assert_eq!(session.snapshot().stage_run_id(), Some("plan"));
         assert!(!target.accepts_commands());
         assert!(matches!(target.attach(), Err(AttachError::Busy)));
         assert!(matches!(target.attach_debugger(), Err(AttachError::Busy)));
@@ -1552,7 +1552,7 @@ mod tests {
         let _session = sessions
             .next_session_for_stage("ignored", true, None)
             .unwrap();
-        assert_eq!(handle.target().execution_id(), Some(announced.as_str()));
+        assert_eq!(handle.target().stage_run_id(), Some(announced.as_str()));
         assert_eq!(handle.target().nonce(), target.nonce());
         assert!(!target.end_signal().is_ended());
     }
@@ -1574,10 +1574,10 @@ mod tests {
         let (mut sessions, handle) = InteractiveSessionFactory::for_pipeline();
         let _execution = sessions.next_session();
         let target = handle.target();
-        let identity = target.execution_id().map(str::to_owned);
+        let identity = target.stage_run_id().map(str::to_owned);
         let signal = target.end_signal();
         let passive = target.read_only();
-        assert_eq!(passive.execution_id().map(str::to_owned), identity);
+        assert_eq!(passive.stage_run_id().map(str::to_owned), identity);
         assert_eq!(passive.end_signal().is_ended(), signal.is_ended());
         assert!(matches!(passive.attach(), Err(AttachError::Busy)));
         assert!(matches!(passive.attach_debugger(), Err(AttachError::Busy)));
@@ -1620,12 +1620,12 @@ mod tests {
         let announced_id = sessions.prepare_next_with_commands(true, None);
 
         assert!(sessions.next_session_with_commands(false, None).is_err());
-        assert_eq!(handle.target().execution_id(), Some(announced_id.as_str()));
+        assert_eq!(handle.target().stage_run_id(), Some(announced_id.as_str()));
         assert!(handle.end_signal().unwrap().is_ended());
 
         let successor_id = sessions.prepare_next_with_commands(false, None);
         assert_ne!(successor_id, announced_id);
-        assert_eq!(handle.target().execution_id(), Some(successor_id.as_str()));
+        assert_eq!(handle.target().stage_run_id(), Some(successor_id.as_str()));
     }
 
     #[test]
@@ -1637,12 +1637,12 @@ mod tests {
 
         assert_eq!(original_target.nonce(), replacement_target.nonce());
         assert_ne!(
-            original_target.execution_id(),
-            replacement_target.execution_id()
+            original_target.stage_run_id(),
+            replacement_target.stage_run_id()
         );
         assert_eq!(
-            replacement_handle.target().execution_id(),
-            replacement_target.execution_id()
+            replacement_handle.target().stage_run_id(),
+            replacement_target.stage_run_id()
         );
         assert!(!original_target.end_signal().is_ended());
     }
@@ -1659,7 +1659,7 @@ mod tests {
         assert!(futures::poll!(&mut waiting).is_pending());
         (&mut lease.ready).await.unwrap();
         let bound = lease.bound_target().unwrap();
-        assert_eq!(bound.execution_id(), handle.target().execution_id());
+        assert_eq!(bound.stage_run_id(), handle.target().stage_run_id());
         assert_eq!(bound.nonce(), handle.target().nonce());
 
         let mut second = sessions.next_session();
@@ -1667,7 +1667,7 @@ mod tests {
         assert!(second.accept_pause());
         assert!(lease.bound_target().is_err());
         assert!(bound.end_signal().is_ended());
-        assert_ne!(bound.execution_id(), handle.target().execution_id());
+        assert_ne!(bound.stage_run_id(), handle.target().stage_run_id());
         assert!(replacement.bound_target().is_ok());
     }
 
@@ -1982,7 +1982,7 @@ mod tests {
             Err(AttachError::Stale)
         ));
         let debugger = chat_handle
-            .attach_next_turn_debugger(ended_target.execution_id.clone())
+            .attach_next_turn_debugger(ended_target.stage_run_id.clone())
             .unwrap();
         let mut next = chat.next_session();
         assert!(next.accept_pause());

@@ -46,7 +46,7 @@ pub(crate) struct StreamState {
 
 /// Emit a stream-json event to stderr (via `log`).
 /// When `on_log` is provided, it is also called with each formatted log line.
-/// The caller owns bus emission and captures the producer's execution identity.
+/// The caller owns bus emission and captures the producer's stage run identity.
 pub(crate) fn emit_event(
     prefix: &str,
     evt: &Value,

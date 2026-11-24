@@ -235,9 +235,9 @@ async fn run_turn(
         .unwrap_or(false);
     gremlin.cancel_token = Some(turn_cancel.clone());
     let starting_target = gremlin.prepare_interactive_target_with_commands(accepts_commands);
-    let execution_id = starting_target
+    let stage_run_id = starting_target
         .as_ref()
-        .and_then(|target| target.execution_id().map(str::to_owned));
+        .and_then(|target| target.stage_run_id().map(str::to_owned));
 
     // Announce the in-flight turn so cancel / stop / compact can find it.
     session_task
@@ -247,13 +247,13 @@ async fn run_turn(
             cancel: turn_cancel.clone(),
             done: done_rx,
             hard: hard.clone(),
-            execution_id: execution_id.clone(),
+            stage_run_id: stage_run_id.clone(),
         })
         .await;
 
     let mut corr_id = gremlins_magic_bus::CorrId::new().with_run(id);
-    if let Some(execution_id) = execution_id.as_deref() {
-        corr_id = corr_id.with_execution_id(execution_id);
+    if let Some(stage_run_id) = stage_run_id.as_deref() {
+        corr_id = corr_id.with_stage_run_id(stage_run_id);
     }
     let runner = TurnRunner::new(TurnRunnerCfg {
         id: id.to_string(),
@@ -268,20 +268,20 @@ async fn run_turn(
         hard,
     });
 
-    // Announce this turn's execution identity before any stream event so the
+    // Announce this turn's stage run identity before any stream event so the
     // client can target a correction at exactly this execution. Chat gremlins
     // always carry an interactive factory; `None` (no factory) is a naked-run
     // case where there is nothing to target.
-    if let Some(execution_id) = execution_id {
+    if let Some(stage_run_id) = stage_run_id {
         let mut event = serde_json::to_value(EventKind::TurnStarted {
-            execution_id: execution_id.clone(),
+            stage_run_id: stage_run_id.clone(),
         })
         .expect("TurnStarted must serialize");
         event["id"] = serde_json::json!(id);
         event["turn"] = serde_json::json!(runner.turn);
         event["nonce"] = serde_json::json!(starting_target
             .as_ref()
-            .expect("starting target must exist when execution_id is known")
+            .expect("starting target must exist when stage_run_id is known")
             .nonce());
         runner.write(event).await;
     }

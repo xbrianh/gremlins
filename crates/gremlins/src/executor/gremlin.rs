@@ -354,10 +354,10 @@ impl Gremlin {
         )
     }
 
-    /// Bind a pipeline session to the stage identity with resolved capabilities.
+    /// Bind a pipeline session to the stage run ID with resolved capabilities.
     pub(crate) fn next_pipeline_interactive_session(
         &mut self,
-        stage_id: &str,
+        stage_run_id: &str,
         accepts_commands: bool,
     ) -> Result<InteractiveSession, String> {
         self.interactive_sessions.as_mut().map_or_else(
@@ -365,7 +365,7 @@ impl Gremlin {
             |sessions| {
                 sessions
                     .next_session_for_stage(
-                        stage_id,
+                        stage_run_id,
                         accepts_commands,
                         self.cancel_token.as_deref(),
                     )
@@ -374,9 +374,9 @@ impl Gremlin {
         )
     }
 
-    /// Mint the next interactive session eagerly and return its execution_id.
+    /// Mint the next interactive session eagerly and return its stage_run_id.
     ///
-    /// Chat turns call this at turn start to announce the execution identity
+    /// Chat turns call this at turn start to announce the stage run identity
     /// before `run_agent` asks for the session via
     /// [`Self::next_interactive_session`], which then hands back the prepared
     /// session instead of minting another one.
@@ -407,7 +407,7 @@ impl Gremlin {
 
     /// Drop an eagerly prepared interactive session when turn setup aborts
     /// before the stage runner consumes it. The session drop revokes the
-    /// published execution identity and wakes any observers of that execution.
+    /// published stage run identity and wakes any observers of that execution.
     pub(crate) fn discard_prepared_interactive_session(&mut self) {
         if let Some(sessions) = self.interactive_sessions.as_mut() {
             sessions.discard_prepared();
@@ -1840,16 +1840,16 @@ mod tests {
         );
         let (sessions, handle) = crate::clients::interactive::InteractiveSessionFactory::for_chat();
         gremlin.interactive_sessions = Some(sessions);
-        let execution_id = gremlin
+        let stage_run_id = gremlin
             .prepare_interactive_session_with_commands(true)
             .unwrap();
         let mut pending = handle.target().attach().unwrap();
-        assert_eq!(handle.target().execution_id(), Some(execution_id.as_str()));
+        assert_eq!(handle.target().stage_run_id(), Some(stage_run_id.as_str()));
 
         gremlin.discard_prepared_interactive_session();
         assert!(handle.end_signal().unwrap().is_ended());
         assert!((&mut pending.ready).now_or_never().unwrap().is_err());
-        assert_eq!(handle.target().execution_id(), Some(execution_id.as_str()));
+        assert_eq!(handle.target().stage_run_id(), Some(stage_run_id.as_str()));
     }
 
     #[test]

@@ -15,7 +15,7 @@ Terminal UI for the `gremlins` CLI. Built on **ratatui** with **crossterm** for 
 | `client.rs` | Persistent `DaemonClient`. Long-lived socket for request/response + unsolicited `DaemonEvent` broadcast. Also dedicated `follow_log()` and passive native `follow_run()` connections. |
 | `client/attachment.rs` | Persistent attachment transport: socket handshake, ack validation, execution/nonce pinning, command writes, terminal/disconnect frames, and abort-on-drop lifetime. Exposes execution/value frames, never UI targets or generations. |
 | `watch_replay.rs` | Watch history/live handoff: exact complete native replay; incomplete replay displays a persisted tail and all original native frames without deduplication, then follows the original subscription. |
-| `protocol.rs` | Shared wire selectors and execution identities. `observed_binding()` allows read-only streams; `binding()` additionally requires correction capability. |
+| `protocol.rs` | Shared wire selectors and stage_run_id identities. `observed_binding()` allows read-only streams; `binding()` additionally requires correction capability. |
 | `commands.rs` | Slash-command dispatch. Returns `CommandResult` — the event loop handles each variant. |
 | `editor.rs` | Stub wired to `Ctrl+G`. Appends placeholder to transcript. |
 
@@ -41,7 +41,7 @@ run()
       │    4. status_rx    — run-status refresh
       │    5. log_rx       — log-follow lines (dedicated connections)
       │    6. result_rx    — socket-op results
-      │    7. chat_rx      — home chat events with turn/execution identity
+      │    7. chat_rx      — home chat events with turn/stage_run_id identity
       │    8. attach_rx    — selected stage's AttachmentFrame stream
       │    9. delivery_rx  — correction delivery receipts
       │   10. reset_rx / model_rx — session reset and model-query results
@@ -112,7 +112,7 @@ These steps apply to a new prompt on `Target::Home`; selected-stage text uses th
 - Watch Enter observes the selected conversation without pausing or otherwise intervening. `/debug <id>` selects the same chat with pause-on-entry for an interactive agent only; exec stages remain read-only.
 - Ordinary composer text becomes a correction for the attached interactive execution (`Submission::Correction` → `deliver_correction()` → `delivery_rx`). It resumes the same execution, not a new chat or replacement run. No separate debug prompt or command channel exists.
 - `AttachmentFrame` arrives on `attach_rx`; `apply_attachment_frame()` routes response, reasoning, tool output/results, operator messages, and terminal frames into the target's shared transcript via `with_target_transcript()`.
-- The attachment pins execution identity and nonce; generation/target checks reject stale frames. Only an `attached` acknowledgment advertising `message` grants a correction address. Read-only stages still stream.
+- The attachment pins stage_run_id and nonce; generation/target checks reject stale frames. Only an `attached` acknowledgment advertising `message` grants a correction address. Read-only stages still stream.
 - `done` / `ended` / `detached` clear the correction address and finish the target's turn. Detaching or switching away does not cancel execution. Home `chat_rx` events always update `Target::Home`, even while another target is displayed.
 
 ## Rendering

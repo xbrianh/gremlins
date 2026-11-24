@@ -109,7 +109,7 @@ impl Fixture {
         apply_attachment_frame(&mut self.app, &mut self.live, &mut self.attachment, frame);
     }
 
-    async fn attach(&mut self, mode: &str, execution: &str) -> BufReader<UnixStream> {
+    async fn attach(&mut self, mode: &str, stage_run_id: &str) -> BufReader<UnixStream> {
         self.app
             .upsert_run_from_ls(&json!({"id":"run", "stage":"review", "status":"running"}));
         match mode {
@@ -122,7 +122,7 @@ impl Fixture {
             read(&mut peer).await,
             json!({"op":"attach", "scope":"conversation", "id":"run", "stage":"review", "session_id":"test", "mode":mode})
         );
-        self.receive(&mut peer, json!({"type":"attached", "scope":"conversation", "id":"run", "stage":"review", "execution_id":execution, "nonce":9, "capabilities":["message"]})).await;
+        self.receive(&mut peer, json!({"type":"attached", "scope":"conversation", "id":"run", "stage":"review", "stage_run_id":stage_run_id, "nonce":9, "capabilities":["message"]})).await;
         assert_eq!(self.app.screen, Screen::Chat);
         assert_eq!(
             self.app.selected_target,
@@ -251,7 +251,7 @@ async fn watch_home_preserves_idle_and_streaming_drafts_without_attachment_or_se
     f.assert_unsent();
     let owner = protocol::Execution {
         run_id: "home".into(),
-        execution_id: "owner".into(),
+        stage_run_id: "owner".into(),
         nonce: 7,
     };
     f.app
@@ -303,28 +303,46 @@ async fn session_install_uses_authoritative_identity_before_turn_started() {
 }
 
 #[tokio::test]
-async fn unknown_stage_attaches_run_only_and_adopts_ack_target() {
+async fn unknown_stage_adopts_and_stores_advertised_stage_run_id() {
     let mut f = Fixture::with_socket();
     f.debug("unlisted");
     let mut peer = f.peer().await;
     let request = read(&mut peer).await;
     assert_eq!(request["id"], "unlisted");
     assert!(request.get("stage").is_none());
-    f.receive(&mut peer, json!({"type":"attached", "scope":"conversation", "id":"unlisted", "stage":"review", "execution_id":"exec", "nonce":9, "capabilities":["message"]})).await;
+    f.receive(&mut peer, json!({"type":"attached", "scope":"conversation", "id":"unlisted", "stage":"review", "stage_run_id":"exec", "nonce":9, "capabilities":["message"]})).await;
     let target = Target::StageExecution {
         run_id: "unlisted".into(),
         stage: "review".into(),
     };
     assert_eq!(f.app.selected_target, target);
-    assert_eq!(f.attachment.target, Some(target));
+    assert_eq!(f.attachment.target, Some(target.clone()));
+    let mut input = input_buffer::InputBuffer::new();
+    input.replace_all("correction");
+    let Submission::Correction { execution, .. } =
+        f.app.conversations.submit(&target, &input, false)
+    else {
+        panic!("advertised stage_run_id must enable correction selection")
+    };
+    assert_eq!(execution.stage_run_id, "exec");
+    assert_eq!(execution.nonce, 9);
+    assert_eq!(f.attachment.execution.as_ref(), Some(&execution));
+    for foreign in [
+        json!({"type":"stream_chunk", "stage_run_id":"other", "nonce":9, "text":"wrong stage run"}),
+        json!({"type":"stream_chunk", "stage_run_id":"exec", "nonce":10, "text":"wrong nonce"}),
+    ] {
+        socket::write_json_line(peer.get_mut(), &foreign)
+            .await
+            .unwrap();
+    }
     f.receive(
         &mut peer,
-        json!({"type":"stream_chunk", "text":"adopted stream"}),
+        json!({"type":"stream_chunk", "stage_run_id":"exec", "nonce":9, "text":"adopted stream"}),
     )
     .await;
     assert_eq!(f.live.response_text(), "adopted stream");
     assert_eq!(
-        f.attachment.execution.as_ref().unwrap().execution_id,
+        f.attachment.execution.as_ref().unwrap().stage_run_id,
         "exec"
     );
     drop(peer);
@@ -396,7 +414,7 @@ async fn watch_partial_correction_then_exit_closes_without_execution_control() {
     else {
         panic!("expected correction")
     };
-    assert_eq!(execution.execution_id, "original");
+    assert_eq!(execution.stage_run_id, "original");
     send_attachment_correction(&mut f.app, &mut f.live, &f.attachment, id, &text);
     assert_eq!(
         f.live.response_text(),
@@ -552,7 +570,7 @@ async fn watch_and_debug_use_aux_modes_identity_controls_and_detach() {
         let mut peer = f.attach(mode, "exec").await;
         let execution = f.attachment.execution.as_ref().unwrap();
         assert_eq!(execution.run_id, "run");
-        assert_eq!(execution.execution_id, "exec");
+        assert_eq!(execution.stage_run_id, "exec");
         assert_eq!(execution.nonce, 9);
         assert_eq!(
             f.app.conversation_status(&f.app.selected_target),

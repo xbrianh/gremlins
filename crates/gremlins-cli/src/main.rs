@@ -1319,6 +1319,15 @@ async fn log_gremlin(id: &str) -> Result<(), String> {
     Ok(())
 }
 
+fn debug_frame_matches(frame: &Value, attachment: &Value) -> bool {
+    ["id", "scope", "stage_run_id", "nonce"].iter().all(|key| {
+        match (frame.get(key), attachment.get(key)) {
+            (Some(actual), Some(expected)) => actual == expected,
+            _ => true, // Session-level frames may omit invocation identity.
+        }
+    })
+}
+
 /// Interactive debug session for a running gremlin.
 ///
 /// Connects to the executor socket, sends
@@ -1395,6 +1404,7 @@ async fn debug_gremlin(id: &str) -> Result<(), String> {
     });
 
     let mut stdin_closed = false;
+    let mut attachment = None;
     loop {
         let line = if stdin_closed {
             match sock_rx.recv().await {
@@ -1442,6 +1452,12 @@ async fn debug_gremlin(id: &str) -> Result<(), String> {
             }
         };
 
+        if let (Some(frame), Some(bound)) = (&line, &attachment) {
+            if !debug_frame_matches(frame, bound) {
+                continue;
+            }
+        }
+
         match line {
             Some(ref l) if l.get("type").and_then(|v| v.as_str()) == Some("error") => {
                 let msg = l
@@ -1452,6 +1468,9 @@ async fn debug_gremlin(id: &str) -> Result<(), String> {
                 return Err(msg.to_string());
             }
             Some(ref l) if l.get("type").and_then(|v| v.as_str()) == Some("attached") => {
+                if attachment.is_none() {
+                    attachment = Some(l.clone());
+                }
                 log::debug!("debug: received attached for {id}");
                 let scope = l
                     .get("scope")
@@ -1498,10 +1517,14 @@ async fn debug_gremlin(id: &str) -> Result<(), String> {
     while stdin_rx.try_recv().is_ok() {}
 
     // Spawn a reader task to print agent events from the socket channel.
-    // Frames are conversation-scoped; the `scope` field is informational
-    // and ignored here.
+    // Keep displaying only the invocation advertised by the attachment.
     let read_handle = tokio::spawn(async move {
         while let Some(Ok(Some(line))) = sock_rx.recv().await {
+            if let Some(bound) = &attachment {
+                if !debug_frame_matches(&line, bound) {
+                    continue;
+                }
+            }
             let typ = line.get("type").and_then(|v| v.as_str()).unwrap_or("");
             match typ {
                 "turn_complete" => {

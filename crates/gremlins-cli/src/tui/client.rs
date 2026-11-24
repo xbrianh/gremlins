@@ -1490,7 +1490,7 @@ mod correction_tests {
             raw_tx: mpsc::unbounded_channel().0,
         });
         let reader = tokio::spawn(read_loop(BufReader::new(reader), out, Arc::default()));
-        socket::write_json_line(&mut peer, &json!({"type":"turn_started", "chat_turn":"owner-turn", "id":"home", "execution_id":"exec-home", "nonce":23})).await.unwrap();
+        socket::write_json_line(&mut peer, &json!({"type":"turn_started", "chat_turn":"owner-turn", "id":"home", "stage_run_id":"exec-home", "nonce":23})).await.unwrap();
         drop(peer);
         reader.await.unwrap();
         let (kind, turn, target) = chat_rx.recv().await.unwrap();
@@ -1500,7 +1500,7 @@ mod correction_tests {
             target,
             Some(Execution {
                 run_id: "home".into(),
-                execution_id: "exec-home".into(),
+                stage_run_id: "exec-home".into(),
                 nonce: 23
             })
         );
@@ -1510,13 +1510,13 @@ mod correction_tests {
     fn execution() -> Execution {
         Execution {
             run_id: "pipeline".into(),
-            execution_id: "exec-stage".into(),
+            stage_run_id: "exec-stage".into(),
             nonce: 9,
         }
     }
 
     fn frame(kind: &str) -> Value {
-        json!({"type":kind,"id":"pipeline","nonce":9,"scope":"conversation","execution_id":"exec-stage"})
+        json!({"type":kind,"id":"pipeline","nonce":9,"scope":"conversation","stage_run_id":"exec-stage"})
     }
 
     fn attached() -> Value {
@@ -1534,7 +1534,7 @@ mod correction_tests {
             let attach = socket::read_json_line(&mut peer).await.unwrap().unwrap();
             assert_eq!(
                 attach,
-                json!({"op":"attach", "scope":"conversation", "mode":"control", "id":"pipeline", "execution_id":"exec-stage", "nonce":9,"session_id":"owner"})
+                json!({"op":"attach", "scope":"conversation", "mode":"control", "id":"pipeline", "stage_run_id":"exec-stage", "nonce":9,"session_id":"owner"})
             );
             socket::write_json_line(peer.get_mut(), &ack).await.unwrap();
             if expect_message {
@@ -1555,7 +1555,11 @@ mod correction_tests {
         });
         let result = match attach_conversation(client, "owner", Selector::Exact(&execution())).await
         {
-            Ok((stream, bound)) => send_correction(stream, &bound, 17, "  stop here\n").await,
+            Ok((stream, bound)) => {
+                assert_eq!(bound.stage_run_id, "exec-stage");
+                assert_eq!(bound, execution());
+                send_correction(stream, &bound, 17, "  stop here\n").await
+            }
             Err(reason) => Err(reason),
         };
         server.await.unwrap();
@@ -1563,7 +1567,7 @@ mod correction_tests {
     }
 
     #[tokio::test]
-    async fn correction_receipt_ignores_scoped_display_and_correlates_submission() {
+    async fn correction_sends_only_stage_run_id_and_compares_receipt_identity() {
         let mut delivered = frame("delivered");
         delivered["req_id"] = json!("17");
         exchange(
@@ -1575,7 +1579,7 @@ mod correction_tests {
         .unwrap();
         for (field, wrong) in [
             ("req_id", json!("16")),
-            ("execution_id", json!("next")),
+            ("stage_run_id", json!("next")),
             ("nonce", json!(10)),
             ("id", json!("home")),
         ] {
@@ -1590,7 +1594,7 @@ mod correction_tests {
     async fn stale_and_read_only_attachments_receive_no_message() {
         for (field, wrong) in [
             ("capabilities", json!(["observe"])),
-            ("execution_id", json!("replacement")),
+            ("stage_run_id", json!("replacement")),
             ("id", json!("foreign")),
             ("nonce", json!(11)),
         ] {

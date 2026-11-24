@@ -1066,7 +1066,7 @@ mod tests {
             Target::Home,
             Some(Execution {
                 run_id: "run".into(),
-                execution_id: "home".into(),
+                stage_run_id: "home".into(),
                 nonce: 4,
             }),
         );
@@ -1097,7 +1097,7 @@ mod tests {
             Target::Home,
             Some(Execution {
                 run_id: "home".into(),
-                execution_id: "original".into(),
+                stage_run_id: "original".into(),
                 nonce: 5,
             }),
         );

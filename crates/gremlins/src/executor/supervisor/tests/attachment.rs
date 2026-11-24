@@ -32,6 +32,18 @@ use crate::test_support::Sandbox;
 
 // ── Helpers shared by both test groups ──────────────────────────────────
 
+fn assert_only_stage_run_id(frame: &Value) {
+    assert!(frame.get("stage_id").is_none(), "{frame}");
+    assert!(frame.get("execution_id").is_none(), "{frame}");
+}
+
+fn assert_retired_key_error(frame: &Value, retired: &str) {
+    assert_eq!(frame["type"], "error", "{frame}");
+    let error = frame.to_string();
+    assert!(error.contains(retired), "{frame}");
+    assert!(error.contains("stage_run_id"), "{frame}");
+}
+
 /// Returns a `BufReader` connected to a spawned handler (fire-and-forget).
 fn connect(registry: &Arc<RunRegistry>, id: &str) -> BufReader<UnixStream> {
     let (server, client) = UnixStream::pair().unwrap();
@@ -182,6 +194,7 @@ async fn drive<T>(
 async fn attach_ack(client: &mut BufReader<UnixStream>) -> Value {
     let ack = socket::read_json_line(client).await.unwrap().unwrap();
     assert_eq!(ack["type"], "attached");
+    assert_only_stage_run_id(&ack);
     ack
 }
 
@@ -264,6 +277,124 @@ async fn run_frame(client: &mut BufReader<UnixStream>) -> Value {
 }
 
 #[tokio::test]
+async fn retired_target_keys_rejected_on_initial_attach_before_resolution() {
+    timeout(Duration::from_secs(10), async {
+        let id = "retired-initial-attach";
+        let (registry, mut gremlin, _dir) = synthetic_run(id).await;
+        let first = gremlin.next_interactive_session();
+        let target = first.snapshot();
+        drop(first);
+        let mut session = gremlin.next_interactive_session();
+        assert_ne!(target.stage_run_id(), session.snapshot().stage_run_id());
+        for retired in ["stage_id", "execution_id"] {
+            for with_new_key in [false, true] {
+                for scope in ["conversation", "run"] {
+                    // Missing runs must report the retired key before resolution too.
+                    for requested_id in [id, "missing-retired-attach"] {
+                        let mut request = json!({
+                            "op":"attach", "scope":scope, "id":requested_id,
+                            "mode":"debugger"
+                        });
+                        request[retired] = json!(target.stage_run_id().unwrap());
+                        if with_new_key {
+                            request["stage_run_id"] = json!(target.stage_run_id().unwrap());
+                            request["nonce"] = json!(target.nonce());
+                        }
+                        for nested in [false, true] {
+                            let mut request = request.clone();
+                            if nested {
+                                let value =
+                                    request.as_object_mut().unwrap().remove(retired).unwrap();
+                                request["target"] = json!({retired: value});
+                            }
+                            let (client, server) = UnixStream::pair().unwrap();
+                            let (read, write) = server.into_split();
+                            let writer = SharedWriter::new(write);
+                            let handler = crate::executor::supervisor::attachment::handle_attach(
+                                &request,
+                                &registry,
+                                BufReader::new(read),
+                                &writer,
+                            );
+                            let mut client = BufReader::new(client);
+                            let (_, response) = tokio::join!(handler, run_frame(&mut client));
+                            assert_retired_key_error(&response, retired);
+                            assert!(!session.accept_pause(), "rejected attach acquired a pause");
+                            assert!(!session.is_attached(), "rejected attach acquired ownership");
+                        }
+                    }
+                }
+            }
+        }
+        assert!(
+            !matches!(
+                timeout(Duration::from_millis(20), session.next_command()).await,
+                Ok(Some(_))
+            ),
+            "rejected attach delivered a command"
+        );
+        assert!(
+            !session.execution_ended(),
+            "rejection ended the live execution"
+        );
+        assert!(registry.contains_run(id).await);
+    })
+    .await
+    .unwrap();
+}
+
+#[tokio::test]
+async fn retired_target_keys_rejected_in_stream_without_delivery() {
+    timeout(Duration::from_secs(10), async {
+        let id = "retired-stream-command";
+        let (registry, mut gremlin, _dir) = synthetic_run(id).await;
+        let mut session = gremlin.next_interactive_session();
+        let (mut client, handler) = connection(&registry, id);
+        let handler = tokio::spawn(handler);
+        let ack = attach_ack(&mut client).await;
+        waiting_for_ready(&mut client).await;
+        debugger_ready(&mut session, &mut client).await;
+        for retired in ["stage_id", "execution_id"] {
+            for with_new_key in [false, true] {
+                for op in ["message", "talk", "continue", "bail", "quit", "detach"] {
+                    let mut command = json!({
+                        "op":op, "text":"must not be delivered", "req_id":"retired"
+                    });
+                    command[retired] = ack["stage_run_id"].clone();
+                    if with_new_key {
+                        command["stage_run_id"] = ack["stage_run_id"].clone();
+                        command["nonce"] = ack["nonce"].clone();
+                    }
+                    socket::write_json_line(client.get_mut(), &command).await.unwrap();
+                    let response = tokio::select! {
+                        Some(command) = session.next_command() => panic!("retired key delivered: {command:?}"),
+                        response = next_response(&mut client) => response,
+                    };
+                    assert_retired_key_error(&response, retired);
+                }
+            }
+        }
+        socket::write_json_line(client.get_mut(), &json!({"op":"detach"})).await.unwrap();
+        handler.await.unwrap();
+        let mut detached = false;
+        while let Some(frame) = socket::read_json_line(&mut client).await.unwrap() {
+            assert_ne!(frame["type"], "delivered", "{frame}");
+            assert_ne!(frame["type"], "operator_message", "{frame}");
+            detached |= frame["type"] == "detached";
+        }
+        assert!(detached, "rejected commands must leave the attachment usable");
+        assert!(
+            !matches!(
+                timeout(Duration::from_millis(20), session.next_command()).await,
+                Ok(Some(_))
+            ),
+            "rejected command was queued for delivery"
+        );
+        assert!(!session.execution_ended(), "detach ended the live execution");
+    }).await.unwrap();
+}
+
+#[tokio::test]
 async fn run_attachment_follows_agent_to_exec_with_exact_scope_and_bus_display_schema() {
     use gremlins_magic_bus::{emit_corr_event, CorrId};
     let id = "run-display-scope";
@@ -272,7 +403,7 @@ async fn run_attachment_follows_agent_to_exec_with_exact_scope_and_bus_display_s
     let (mut client, task) = run_connection(&registry, id);
     let attached = run_frame(&mut client).await;
     assert_eq!(attached["capabilities"], json!(["observe"]));
-    let corr = CorrId::new().with_run(id).with_execution_id("agent-one");
+    let corr = CorrId::new().with_run(id).with_stage_run_id("agent-one");
     let child = format!("{id}:child");
     emit_corr_event(
         &CorrId::new().with_run(&child),
@@ -321,7 +452,7 @@ async fn run_attachment_follows_agent_to_exec_with_exact_scope_and_bus_display_s
         },
         EventKind::StageBoundary {
             id: id.into(),
-            stage_id: "exec-execution".into(),
+            stage_run_id: "exec-execution".into(),
             stage: "exec".into(),
             stage_type: "exec".into(),
             active: true,
@@ -346,6 +477,10 @@ async fn run_attachment_follows_agent_to_exec_with_exact_scope_and_bus_display_s
         assert!(sequence > previous_sequence);
         previous_sequence = sequence;
         frame.as_object_mut().unwrap().remove("sequence");
+        assert_only_stage_run_id(&frame);
+        if frame["type"] == "stage_boundary" {
+            assert_eq!(frame["stage_run_id"], "exec-execution");
+        }
         assert_eq!(frame, expected);
     }
     assert!(!session.accept_pause(), "run attachment acquired a pause");
@@ -540,7 +675,7 @@ async fn observed_readiness_is_not_control_readiness() {
             gremlins_magic_bus::emit_corr_event(
                 &gremlins_magic_bus::CorrId::new()
                     .with_run(&id)
-                    .with_execution_id(ack["execution_id"].as_str().unwrap()),
+                    .with_stage_run_id(ack["stage_run_id"].as_str().unwrap()),
                 EventKind::Ready { turn: 7 },
             );
             let frame = loop {
@@ -628,7 +763,7 @@ async fn incorporation_releases_temporary_lease_while_display_is_blocked() {
         drop(filler);
         let (entered, release) =
             crate::executor::supervisor::attachment::delivery_display_gate::install(id);
-        emit_text(id, ack["execution_id"].as_str().unwrap(), "blocked display");
+        emit_text(id, ack["stage_run_id"].as_str().unwrap(), "blocked display");
         tokio::select! {
             _ = &mut handler => panic!("handler ended before display"),
             result = entered => result.unwrap(),
@@ -660,7 +795,8 @@ async fn incorporation_releases_temporary_lease_while_display_is_blocked() {
         assert_eq!(frame["req_id"], "blocked-display");
         assert_eq!(frame["id"], id);
         assert_eq!(frame["nonce"], ack["nonce"]);
-        assert_eq!(frame["execution_id"], ack["execution_id"]);
+        assert_eq!(frame["stage_run_id"], ack["stage_run_id"]);
+        assert_only_stage_run_id(&frame);
         detach_after_delivery(&mut client, &mut handler, "blocked-display").await;
         assert!(
             session.is_attached(),
@@ -720,10 +856,11 @@ async fn readonly_control_and_debugger_entry_stream_without_pause_or_ended() {
             )
             .await;
             assert_eq!(attached["capabilities"], json!(["observe"]));
-            assert_eq!(attached["execution_id"], target.execution_id().unwrap());
+            assert_eq!(attached["stage_run_id"], target.stage_run_id().unwrap());
+            assert_only_stage_run_id(&attached);
             pending_once(&mut handler).await;
             assert!(!session.accept_pause(), "read-only entry requested a pause");
-            emit_text(&id, target.execution_id().unwrap(), "read-only output");
+            emit_text(&id, target.stage_run_id().unwrap(), "read-only output");
             let output = drive(
                 &format!("read-only output: mode={mode:?}"),
                 &mut handler,
@@ -734,6 +871,7 @@ async fn readonly_control_and_debugger_entry_stream_without_pause_or_ended() {
             .unwrap();
             assert_eq!(output["type"], "stream_chunk", "{output}");
             assert_eq!(output["text"], "read-only output");
+            assert_only_stage_run_id(&output);
             drop(session);
             handler.await;
             assert!(
@@ -792,7 +930,7 @@ async fn confirmed_message_survives_execution_end_scenario(
         frame = attach_ack(&mut client) => frame,
     };
     assert!(ack["nonce"].is_u64(), "{context}: {ack}");
-    assert!(ack["execution_id"].is_string(), "{context}: {ack}");
+    assert!(ack["stage_run_id"].is_string(), "{context}: {ack}");
     tokio::select! {
         _ = &mut handler => panic!("{context}: handler ended before readiness"),
         _ = waiting_for_ready(&mut client) => {}
@@ -817,7 +955,7 @@ async fn confirmed_message_survives_execution_end_scenario(
         ConfirmationSchedule::DuringDisplay => {
             let (entered, release) =
                 crate::executor::supervisor::attachment::delivery_display_gate::install(&id);
-            emit_text(&id, ack["execution_id"].as_str().unwrap(), gated_text);
+            emit_text(&id, ack["stage_run_id"].as_str().unwrap(), gated_text);
             tokio::select! {
                 _ = &mut handler => panic!("{context}: handler ended before delivery display gate"),
                 result = entered => result.unwrap(),
@@ -865,7 +1003,7 @@ async fn confirmed_message_survives_execution_end_scenario(
                 assert_eq!(frame["id"], id, "{context}: {frame}");
                 assert_eq!(frame["nonce"], ack["nonce"], "{context}: {frame}");
                 assert_eq!(
-                    frame["execution_id"], ack["execution_id"],
+                    frame["stage_run_id"], ack["stage_run_id"],
                     "{context}: {frame}"
                 );
             }
@@ -1002,7 +1140,7 @@ async fn successful_delivery_under_backpressure(queue_message: bool) {
             frame = wait_for(&mut client, |f| f["type"] == "delivered") => frame,
         };
         assert_eq!(first["req_id"], "first");
-        for key in ["id", "nonce", "execution_id"] {
+        for key in ["id", "nonce", "stage_run_id"] {
             assert_eq!(first[key], ack[key], "delivery changed {key}");
         }
         if queue_message {
@@ -1022,7 +1160,7 @@ async fn successful_delivery_under_backpressure(queue_message: bool) {
             }
         }
         assert!(!session.is_attached());
-        emit_text(&id, ack["execution_id"].as_str().unwrap(), "still viewing A");
+        emit_text(&id, ack["stage_run_id"].as_str().unwrap(), "still viewing A");
         tokio::select! {
             _ = &mut handler => panic!("attachment did not resume viewing A"),
             _ = wait_for(&mut client, |f| f["text"] == "still viewing A") => {}
@@ -1074,7 +1212,7 @@ async fn message_interrupted(accepted: bool, end_execution: bool) {
                 assert_eq!(frame["scope"], "conversation");
                 assert_eq!(frame["id"], id);
                 assert_eq!(frame["nonce"], ack["nonce"]);
-                assert_eq!(frame["execution_id"], ack["execution_id"]);
+                assert_eq!(frame["stage_run_id"], ack["stage_run_id"]);
                 assert_eq!(frame["req_id"], "interrupted");
             }
         }
@@ -1156,7 +1294,7 @@ async fn retained_debugger_message_keeps_ownership_until_replaced() {
         assert_eq!(delivered["req_id"], "retained-1");
         assert_eq!(delivered["id"], id);
         assert_eq!(delivered["nonce"], ack["nonce"]);
-        assert_eq!(delivered["execution_id"], ack["execution_id"]);
+        assert_eq!(delivered["stage_run_id"], ack["stage_run_id"]);
         assert!(
             session.has_accepted_acquisition(),
             "message released debugger ownership"
@@ -1340,7 +1478,7 @@ async fn old_default_attachment_cannot_bind_same_nonce_replacement() {
         let mut session = replacement.next_interactive_session();
         let (handle, _, _) = registry.get_run_interactive(id).await.unwrap();
         assert_eq!(ack["nonce"], handle.target().nonce());
-        assert_ne!(ack["execution_id"], json!(handle.target().execution_id()));
+        assert_ne!(ack["stage_run_id"], json!(handle.target().stage_run_id()));
         socket::write_json_line(
             client.get_mut(),
             &json!({"op":"message", "text":"stale correction"}),
@@ -1469,7 +1607,7 @@ async fn default_attach_during_live_request_only_pauses_for_immediate_correction
         assert_eq!(response["req_id"], "live-correction");
         assert_eq!(response["id"], id);
         assert_eq!(response["nonce"], ack["nonce"]);
-        assert_eq!(response["execution_id"], ack["execution_id"]);
+        assert_eq!(response["stage_run_id"], ack["stage_run_id"]);
         let mut confirmations = usize::from(response["type"] == "delivered");
         // No continue/quit is sent. Temporary ownership must release itself,
         // and the very next model request must contain the incorporated text.
@@ -1524,7 +1662,7 @@ fn emit_text(id: &str, execution: &str, text: &str) {
     gremlins_magic_bus::emit_corr_event(
         &gremlins_magic_bus::CorrId::new()
             .with_run(id)
-            .with_execution_id(execution),
+            .with_stage_run_id(execution),
         EventKind::StreamChunk { text: text.into() },
     );
 }
@@ -1613,7 +1751,7 @@ async fn buffered_viewers_do_not_cross_same_name_replacement() {
             let fresh_task = tokio::spawn(handler);
             let b_ack = socket::read_json_line(&mut fresh).await.unwrap().unwrap();
             assert_eq!(b_ack["type"], "attached");
-            assert_ne!(a_ack["execution_id"], b_ack["execution_id"]);
+            assert_ne!(a_ack["stage_run_id"], b_ack["stage_run_id"]);
             assert_ne!(a_ack["nonce"], b_ack["nonce"]);
             stream_answer(&mut b_stream, "B live", false).await;
             wait_for(&mut fresh, |f| f["type"] == "stream_chunk" && f["text"] == "B live").await;
@@ -1652,7 +1790,7 @@ fn emit_debugger_done(id: &str, execution: &str, summary: &str) {
     gremlins_magic_bus::emit_corr_event(
         &gremlins_magic_bus::CorrId::new()
             .with_run(id)
-            .with_execution_id(execution),
+            .with_stage_run_id(execution),
         EventKind::Done {
             text: "A answer".into(),
             summary: summary.into(),
@@ -1682,7 +1820,7 @@ async fn debugger_bus_done_and_lease_done_complete_once_with_or_without_executio
             let id = format!("debugger-completion-{end_before_poll}");
             let (registry, mut gremlin, _dir) = synthetic_run(&id).await;
             let mut session = gremlin.next_interactive_session();
-            let execution = session.snapshot().execution_id().unwrap().to_owned();
+            let execution = session.snapshot().stage_run_id().unwrap().to_owned();
             let (mut client, handler) = connection(&registry, &id);
             let handler = tokio::spawn(handler);
             wait_for(&mut client, |f| f["type"] == "status").await;
@@ -1715,7 +1853,7 @@ async fn debugger_bus_done_and_lease_done_complete_once_with_or_without_executio
             drop(session);
             let mut successor = gremlin.next_interactive_session();
             assert!(!successor.accept_pause(), "debugger reserved successor");
-            emit_text(&id, successor.snapshot().execution_id().unwrap(), "B live");
+            emit_text(&id, successor.snapshot().stage_run_id().unwrap(), "B live");
             handler.await.unwrap();
             drain_debugger_done(&mut client, usize::from(!end_before_poll)).await;
             drop(successor);
@@ -1733,7 +1871,7 @@ async fn debugger_done_while_waiting_for_ready_completes_once_without_pausing_su
             let id = format!("debugger-done-before-ready-{end_before_poll}");
             let (registry, mut gremlin, _dir) = synthetic_run(&id).await;
             let session = gremlin.next_interactive_session();
-            let execution = session.snapshot().execution_id().unwrap().to_owned();
+            let execution = session.snapshot().stage_run_id().unwrap().to_owned();
             let (mut client, handler) = connection(&registry, &id);
             tokio::pin!(handler);
             tokio::select! {
@@ -1755,7 +1893,7 @@ async fn debugger_done_while_waiting_for_ready_completes_once_without_pausing_su
             drop(session);
             let mut successor = gremlin.next_interactive_session();
             assert!(!successor.accept_pause(), "debugger reserved successor");
-            emit_text(&id, successor.snapshot().execution_id().unwrap(), "B live");
+            emit_text(&id, successor.snapshot().stage_run_id().unwrap(), "B live");
             drain_debugger_done(&mut client, 0).await;
             drop(successor);
             registry.stop_run(&id).await.unwrap();
@@ -1773,11 +1911,11 @@ async fn debugger_quit_resumes_observing_same_execution_until_done() {
         let id = "debugger-quit-resumes-observation";
         let (registry, mut gremlin, _dir) = synthetic_run(id).await;
         let mut session = gremlin.next_interactive_session();
-        let execution = session.snapshot().execution_id().unwrap().to_owned();
+        let execution = session.snapshot().stage_run_id().unwrap().to_owned();
         let (mut client, handler) = connection(&registry, id);
         let handler = tokio::spawn(handler);
         let ack = wait_for(&mut client, |f| f["type"] == "attached").await;
-        assert_eq!(ack["execution_id"], execution);
+        assert_eq!(ack["stage_run_id"], execution);
         wait_for(&mut client, |f| {
             f["type"] == "status" && f["stage"] == "waiting_for_ready"
         })
@@ -1806,7 +1944,7 @@ async fn debugger_quit_resumes_observing_same_execution_until_done() {
         drop(session);
         let mut successor = gremlin.next_interactive_session();
         assert!(!successor.accept_pause(), "quit reserved successor");
-        emit_text(id, successor.snapshot().execution_id().unwrap(), "B live");
+        emit_text(id, successor.snapshot().stage_run_id().unwrap(), "B live");
         handler.await.unwrap();
         drain_debugger_done(&mut client, 0).await;
         drop(successor);
@@ -1832,7 +1970,7 @@ async fn debugger_setup_expiry(gate: SetupExpiryGate) {
         };
         let (registry, mut gremlin, _dir) = synthetic_run(id).await;
         let a = gremlin.next_interactive_session();
-        let execution = a.snapshot().execution_id().unwrap().to_owned();
+        let execution = a.snapshot().stage_run_id().unwrap().to_owned();
         let (entered, release) = match gate {
             SetupExpiryGate::BeforeAck => setup_gate::install(id),
             SetupExpiryGate::BeforeLease => receiver_gate::install(id),
@@ -1846,7 +1984,7 @@ async fn debugger_setup_expiry(gate: SetupExpiryGate) {
         if matches!(gate, SetupExpiryGate::BeforeLease) {
             let ack = socket::read_json_line(&mut client).await.unwrap().unwrap();
             assert_eq!(ack["type"], "attached");
-            assert_eq!(ack["execution_id"], execution, "{ack}");
+            assert_eq!(ack["stage_run_id"], execution, "{ack}");
         }
         drop(a);
         release.send(()).unwrap();
@@ -2003,10 +2141,10 @@ async fn replacement_during_delivery_drops_correction_and_leaves_b_clean() {
             .unwrap()
             .0
             .target()
-            .execution_id()
+            .stage_run_id()
             .unwrap()
             .to_owned();
-        assert_ne!(b_execution, ack["execution_id"].as_str().unwrap());
+        assert_ne!(b_execution, ack["stage_run_id"].as_str().unwrap());
         emit_text(id, &b_execution, "B must not reach A");
         let agent = gremlin.client.run(
             RunParams {
@@ -2031,7 +2169,7 @@ async fn replacement_during_delivery_drops_correction_and_leaves_b_clean() {
             if frame["type"] == "correction_dropped" {
                 dropped += 1;
                 assert_eq!(frame["req_id"], "replace-in-flight");
-                assert_eq!(frame["execution_id"], ack["execution_id"]);
+                assert_eq!(frame["stage_run_id"], ack["stage_run_id"]);
             }
         }
         assert_eq!(dropped, 1);

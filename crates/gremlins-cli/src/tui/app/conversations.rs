@@ -1,5 +1,5 @@
 //! Bind operator input when it is composed, not when Enter is pressed.
-//! Target names survive repeated executions; execution identities do not.
+//! Target names survive repeated executions; stage_run_id values do not.
 
 use super::{Execution, InputBuffer, Target};
 use std::collections::HashMap;
@@ -223,7 +223,7 @@ mod tests {
     fn execution(run: &str, nonce: u64) -> Execution {
         Execution {
             run_id: run.into(),
-            execution_id: format!("{run}-{nonce}"),
+            stage_run_id: format!("{run}-{nonce}"),
             nonce,
         }
     }
@@ -481,7 +481,7 @@ mod tests {
             let draft = input("not for the next turn");
             let old = execution("run", 1);
             let next = Execution {
-                execution_id: "successor".into(),
+                stage_run_id: "successor".into(),
                 ..old.clone()
             };
             state.set_execution(target.clone(), Some(old.clone()));
@@ -491,7 +491,7 @@ mod tests {
                 state.submit(&target, &draft, false),
                 Submission::Blocked(_)
             ));
-            // Only the execution ID changes within the same run and nonce.
+            // Only the stage_run_id changes within the same run and nonce.
             state.set_execution(target.clone(), Some(next));
             assert!(state.retain_target(&target));
             assert!(state.drafts.contains_key(&target));

@@ -188,7 +188,7 @@ pub trait Backend: Send + Sync {
     }
 
     /// Resume a specific invocation, independent of later backend use.
-    /// Callers retain the invocation's output route, including its execution ID.
+    /// Callers retain the invocation's output route, including its stage run ID.
     /// A run ID alone cannot distinguish stages sharing a backend. Backends that
     /// cannot select per-invocation state fail rather than resume another run.
     async fn resume_for(

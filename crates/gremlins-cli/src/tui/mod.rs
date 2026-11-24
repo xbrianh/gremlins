@@ -2824,9 +2824,9 @@ async fn run_app(live_area: &mut LiveArea) -> io::Result<()> {
                 }
 
                 match event {
-                    gremlins_magic_bus::EventKind::TurnStarted { execution_id } => {
+                    gremlins_magic_bus::EventKind::TurnStarted { stage_run_id } => {
                         if let Some(turn) = event_turn.as_deref().filter(|turn| active_turn.as_deref() == Some(*turn)) {
-                            log::debug!("chat turn started: execution_id={execution_id}");
+                            log::debug!("chat turn started: stage_run_id={stage_run_id}");
                             if let Some(execution) = &execution {
                                 app.home_run_id = Some(execution.run_id.clone());
                             }
@@ -3263,7 +3263,7 @@ mod attachment_tests {
             target.clone(),
             Some(protocol::Execution {
                 run_id: "run".into(),
-                execution_id: "execution".into(),
+                stage_run_id: "execution".into(),
                 nonce: 7,
             }),
         );
@@ -3359,7 +3359,7 @@ mod attachment_tests {
         let (mut app, mut live, mut attachment, target) = correction_fixture();
         let execution = protocol::Execution {
             run_id: "run".into(),
-            execution_id: "execution".into(),
+            stage_run_id: "execution".into(),
             nonce: 7,
         };
         attachment.execution = Some(execution.clone());
@@ -3528,7 +3528,7 @@ mod attachment_tests {
         let mut live = LiveArea::with_backend(ratatui::backend::TestBackend::new(80, 24), 80, 24);
         let execution = protocol::Execution {
             run_id: "chat".into(),
-            execution_id: "turn".into(),
+            stage_run_id: "turn".into(),
             nonce: 7,
         };
         app.conversations
@@ -3584,7 +3584,7 @@ mod attachment_tests {
         let mut live = LiveArea::with_backend(ratatui::backend::TestBackend::new(80, 24), 80, 24);
         let execution = protocol::Execution {
             run_id: "chat".into(),
-            execution_id: "turn".into(),
+            stage_run_id: "turn".into(),
             nonce: 7,
         };
         app.conversations
@@ -3630,7 +3630,7 @@ mod attachment_tests {
         live.select_conversation(&mut app, target.clone());
         let execution = protocol::Execution {
             run_id: "run".into(),
-            execution_id: "execution".into(),
+            stage_run_id: "execution".into(),
             nonce: 7,
         };
         let frame = |kind: &str| AttachmentFrame {
@@ -3705,7 +3705,7 @@ mod attachment_tests {
         };
         let execution = protocol::Execution {
             run_id: "run".into(),
-            execution_id: "A".into(),
+            stage_run_id: "A".into(),
             nonce: 1,
         };
         let attachment = Attachment {
@@ -3720,7 +3720,7 @@ mod attachment_tests {
             value: serde_json::json!({}),
         };
         assert!(attachment.accepts(&frame));
-        frame.execution.as_mut().unwrap().execution_id = "B".into();
+        frame.execution.as_mut().unwrap().stage_run_id = "B".into();
         assert!(!attachment.accepts(&frame));
     }
 
@@ -4283,7 +4283,7 @@ mod tests {
         let mut active_turn = Some(String::from("old"));
         let execution = |turn: &str, nonce| Execution {
             run_id: "session".into(),
-            execution_id: turn.into(),
+            stage_run_id: turn.into(),
             nonce,
         };
         app.active_request = true;

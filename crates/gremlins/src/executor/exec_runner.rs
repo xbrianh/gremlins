@@ -631,7 +631,7 @@ mod tests {
         let route = CorrId::new()
             .with_run(&id)
             .with_stage("drain")
-            .with_execution_id("drain-execution");
+            .with_stage_run_id("drain-execution");
         prepared.output_corr_id = Some(route.clone());
         let state = StateData::with_state_dir(tmp.path());
         let result = run_shell(&prepared, &state).await;
@@ -645,7 +645,7 @@ mod tests {
         // yielding to the bridge: all real process output must already be queued.
         emit_event(EventKind::StageBoundary {
             id: id.clone(),
-            stage_id: "drain-execution".into(),
+            stage_run_id: "drain-execution".into(),
             stage: prepared.name.clone(),
             stage_type: "exec".into(),
             active: false,

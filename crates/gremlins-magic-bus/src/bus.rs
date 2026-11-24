@@ -417,16 +417,16 @@ mod tests {
             let base = CorrId::new()
                 .with_run("parent")
                 .with_stage("build")
-                .with_execution_id("exec");
+                .with_stage_run_id("exec");
             let ids = [
                 base.clone(),
                 CorrId::new()
                     .with_run("parent:child")
                     .with_stage("build")
-                    .with_execution_id("exec"),
+                    .with_stage_run_id("exec"),
                 base.clone().with_run("parentish"),
                 base.clone().with_stage("test"),
-                base.clone().with_execution_id("exec:child"),
+                base.clone().with_stage_run_id("exec:child"),
                 CorrId::new(),
             ];
             let events: Vec<_> = ids
@@ -714,15 +714,15 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn execution_filters_route_exactly_without_changing_run_filters() {
+    async fn stage_run_filters_route_exactly_without_changing_run_filters() {
         for asynchronous in [false, true] {
             let bus: Bus<Payload> = Bus::new();
             let prefixes = [
                 CorrId::new(),
                 CorrId::new().with_run("parent"),
-                CorrId::new().with_execution_id("exec"),
-                CorrId::new().with_run("parent").with_execution_id("exec"),
-                CorrId::new().with_run("other").with_execution_id("exec"),
+                CorrId::new().with_stage_run_id("exec"),
+                CorrId::new().with_run("parent").with_stage_run_id("exec"),
+                CorrId::new().with_run("other").with_stage_run_id("exec"),
             ];
             let mut receivers: Vec<_> = prefixes
                 .into_iter()
@@ -734,10 +734,10 @@ mod tests {
                 .collect();
             let base = CorrId::new().with_run("parent:child").with_stage("build");
             let events = [
-                base.clone().with_execution_id("exec"),
-                base.clone().with_execution_id("exec:child"),
-                base.clone().with_execution_id("execution"),
-                base.clone().with_execution_id("other"),
+                base.clone().with_stage_run_id("exec"),
+                base.clone().with_stage_run_id("exec:child"),
+                base.clone().with_stage_run_id("exec-longer"),
+                base.clone().with_stage_run_id("other"),
                 base,
             ];
             for (index, corr_id) in events.into_iter().enumerate() {
