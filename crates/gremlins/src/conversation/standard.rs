@@ -16,7 +16,8 @@
 //! [`StandardConversation::compact`] is an on-demand method that
 //! replaces the oldest history messages with a signed compaction
 //! block (server) or a plain summary (local). The most recent
-//! `KEEP_RECENT` user+assistant pairs are preserved verbatim.
+//! `KEEP_RECENT` user+assistant pairs are preserved, except that retained
+//! Anthropic assistant reasoning is removed after successful compaction.
 //! It is called by the `/compact` TUI command handler and, when
 //! [`render_turn`](StandardConversation::render_turn) observes a previous
 //! turn whose prompt token count exceeded the configured
@@ -24,7 +25,7 @@
 //! byte-size gate.
 
 use async_trait::async_trait;
-use rig_core::completion::message::{Origin, Reasoning, ToolCall};
+use rig_core::completion::message::{AssistantContent, Origin, Reasoning, ToolCall};
 use rig_core::completion::Message;
 use std::sync::Arc;
 
@@ -115,6 +116,30 @@ impl StandardConversation {
         self.compaction_threshold_tokens = threshold;
     }
 
+    /// Install a successful summary, sanitizing only the retained Anthropic tail.
+    /// Even a signed server summary does not certify preserved-thinking models,
+    /// suffix boundaries, or unchanged system/tools, so discard stale signatures.
+    pub(crate) fn commit_compaction(&mut self, summary: Message, kept: &[Message]) {
+        let anthropic = self
+            .backend
+            .as_ref()
+            .is_some_and(|backend| backend.name() == "anthropic");
+        let mut history = Vec::with_capacity(1 + kept.len());
+        history.push(summary);
+        history.extend(kept.iter().cloned().filter_map(|mut message| {
+            if anthropic {
+                if let Message::Assistant(turn) = &mut message {
+                    turn.content.retain(|block| !is_compacted_reasoning(block));
+                    if turn.content.is_empty() {
+                        return None;
+                    }
+                }
+            }
+            Some(message)
+        }));
+        self.history = history;
+    }
+
     /// Run compaction on the current history. Called by the `/compact` TUI
     /// command handler.
     ///
@@ -146,10 +171,8 @@ impl StandardConversation {
             {
                 Ok(Some(r)) if r.block.is_some() => {
                     let signed = r.block.unwrap();
-                    let mut new_history = Vec::with_capacity(1 + kept.len());
-                    new_history.push(compaction_block_as_message(&signed, backend.model()));
-                    new_history.extend_from_slice(&kept);
-                    self.history = new_history;
+                    let summary = compaction_block_as_message(&signed, backend.model());
+                    self.commit_compaction(summary, &kept);
                     return Some(CompactionReport {
                         strategy: CompactionStrategy::Server,
                         messages_compacted: to_compact.len(),
@@ -173,10 +196,7 @@ impl StandardConversation {
         if let Some((summary_msg, input_tokens, output_tokens)) =
             run_local_compaction(&spec, &to_compact, instructions, system_prompt).await
         {
-            let mut new_history = Vec::with_capacity(1 + kept.len());
-            new_history.push(summary_msg);
-            new_history.extend_from_slice(&kept);
-            self.history = new_history;
+            self.commit_compaction(summary_msg, &kept);
             return Some(CompactionReport {
                 strategy: CompactionStrategy::Local,
                 messages_compacted: to_compact.len(),
@@ -189,6 +209,25 @@ impl StandardConversation {
 
         None
     }
+}
+
+fn is_compacted_reasoning(block: &AssistantContent) -> bool {
+    let native = match block {
+        AssistantContent::Reasoning(_) => return true,
+        AssistantContent::Text(text) => text.native.as_ref(),
+        AssistantContent::ToolCall(call) => call.native.as_ref(),
+        AssistantContent::Image(image) => image.native.as_ref(),
+        AssistantContent::Opaque(opaque) => return is_thinking_item(&opaque.item),
+        _ => None,
+    };
+    native.is_some_and(|native| is_thinking_item(&native.item))
+}
+
+fn is_thinking_item(item: &serde_json::Value) -> bool {
+    matches!(
+        item.get("type").and_then(serde_json::Value::as_str),
+        Some("thinking" | "redacted_thinking")
+    )
 }
 
 #[async_trait]
