@@ -645,49 +645,42 @@ mod tests {
         let original = DispatchEvent::new(CorrId::new().with_run("X"), Payload(1));
         bus.emit(original.clone());
         bus.emit_async(original.clone()).await;
-        let first = lossless.try_recv().unwrap();
-        assert_eq!(first.sequence(), 1);
-        assert_eq!(first.clone().sequence(), 1);
-        // Re-emitting an already stamped envelope must also get a fresh sequence.
-        bus.emit_async(first.clone()).await;
-        assert_eq!(original.sequence(), 0);
-        assert_eq!(first.sequence(), 1);
-        assert_eq!(lossless.try_recv().unwrap().sequence(), 2);
-        assert_eq!(lossless.try_recv().unwrap().sequence(), 3);
-        let history = snapshot(&bus, None);
-        assert_eq!(history.through_sequence, 3);
-        for (index, retained) in history.events.iter().enumerate() {
-            let sequence = index as u64 + 1;
-            assert_eq!(retained.sequence(), sequence);
-            assert_eq!(retained.clone().sequence(), sequence);
-            assert_eq!(broadcast.try_recv().unwrap().sequence(), sequence);
-            assert_eq!(bounded.try_recv().unwrap().sequence(), sequence);
-            assert_same(retained, &original);
-        }
-        assert_eq!(history.events.len(), 3);
-    }
-
-    #[test]
-    fn identical_envelopes_are_not_deduplicated_across_snapshot_live_cut() {
-        let bus = Bus::with_history_limits(10, 10);
-        let event = DispatchEvent::new(CorrId::new().with_run("same"), Payload(7));
-        bus.emit(event.clone());
-        bus.emit(event.clone());
         let (_, mut rx, history) = bus
             .subscribe_with_history(SubscriberRegistration::lossless(CorrId::new()))
             .unwrap();
         assert_eq!(history.events.len(), 2);
         assert_eq!(history.through_sequence, 2);
-        for retained in &history.events {
-            assert_same(retained, &event);
+        for (index, retained) in history.events.iter().enumerate() {
+            assert_eq!(retained.sequence(), index as u64 + 1);
+            assert_same(retained, &original);
         }
         assert!(matches!(rx.try_recv(), Err(TryRecvError::Empty)));
-        bus.emit(event.clone());
-        assert_same(&rx.try_recv().unwrap(), &event);
+        let stamped = history.events[0].clone();
+        assert_eq!(stamped.sequence(), 1);
+        bus.emit_async(stamped.clone()).await;
+        assert_eq!(stamped.sequence(), 1);
+        assert_eq!(original.sequence(), 0);
+        let live = rx.try_recv().unwrap();
+        assert_eq!(live.sequence(), 3);
+        assert_same(&live, &original);
         assert!(matches!(rx.try_recv(), Err(TryRecvError::Empty)));
         let later = snapshot(&bus, None);
         assert_eq!(later.events.len(), 3);
         assert_eq!(later.through_sequence, 3);
+        for (index, retained) in later.events.iter().enumerate() {
+            let sequence = index as u64 + 1;
+            assert_eq!(retained.sequence(), sequence);
+            assert_eq!(retained.clone().sequence(), sequence);
+            assert_same(retained, &original);
+            for delivered in [
+                lossless.try_recv().unwrap(),
+                broadcast.try_recv().unwrap(),
+                bounded.try_recv().unwrap(),
+            ] {
+                assert_eq!(delivered.sequence(), sequence);
+                assert_same(&delivered, retained);
+            }
+        }
     }
 
     #[tokio::test]

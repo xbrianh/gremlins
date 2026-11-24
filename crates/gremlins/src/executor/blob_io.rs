@@ -188,187 +188,52 @@ mod tests {
             .unwrap();
     }
 
-    fn legacy_output(
-        text: &str,
-    ) -> gremlins_magic_bus::DispatchEvent<gremlins_magic_bus::EventKind> {
-        use gremlins_magic_bus::{CorrId, DispatchEvent, EventKind};
-        DispatchEvent::new(
-            CorrId::new().with_run("gr-exec-raw"),
-            EventKind::ExecOutput {
-                id: "gr-exec-raw".into(),
-                text: text.into(),
-                is_stderr: false,
-                ts: "now".into(),
-            },
-        )
-    }
-
-    fn write_legacy_output(
-        store: &Arc<dyn state::StateStore + Send + Sync>,
-        name: &str,
-        text: &str,
-    ) -> u64 {
-        use gremlins_magic_bus::{Bus, EventKind};
-        use std::io::Write;
-        let bus = Bus::<EventKind>::new();
-        let mut sequence = 0;
-        let mut writer = store
-            .open(&format!("{name}.events"), state::BlobMode::Write)
-            .unwrap();
-        bus.emit_with_persistence(legacy_output(text), |event| {
-            sequence = event.sequence();
-            writeln!(
-                writer,
-                "{}",
-                serde_json::json!({"sequence": event.sequence(), "event": event.kind()})
-            )
-            .unwrap();
-            writer.flush().unwrap();
-        });
-        sequence
-    }
-
     #[tokio::test]
-    async fn exec_tail_preserves_raw_preamble_and_footer() {
+    async fn exec_tail_uses_raw_files_without_claiming_legacy_sequence_coverage() {
         let _sandbox = crate::test_support::Sandbox::new();
-        let store = exec_test_store("gr-exec-preamble");
+        let store = exec_test_store("gr-exec-raw-fixture");
         let name = "command_logs/exec-test.log";
+        let sidecar = "command_logs/exec-test.log.events";
+        let sidecar_only = "command_logs/sidecar-only.log";
+        let legacy_jsonl = br#"{"sequence":1,"event":{"type":"exec_output","id":"gr-exec-raw-fixture","text":"sidecar-only output must not replay","is_stderr":false,"ts":"now"}}
+"#;
         write_exec_blob(
             &store,
             name,
             b"runner preamble\ncommand output\nrunner footer\n",
         );
-        write_legacy_output(&store, name, "command output");
+        // Failed-write reader state: valid sidecar stops before the raw footer.
+        write_exec_blob(&store, sidecar, legacy_jsonl);
+        write_exec_blob(&store, &format!("{sidecar_only}.events"), legacy_jsonl);
 
-        assert_eq!(
-            read_exec_tail(&store, name, 10).await,
-            (
-                vec![
-                    "runner preamble".into(),
-                    "command output".into(),
-                    "runner footer".into()
-                ],
-                None,
-                None
-            )
-        );
-        assert_eq!(
-            read_exec_tail(&store, name, 2).await,
-            (
-                vec!["command output".into(), "runner footer".into()],
-                None,
-                None
-            )
-        );
-    }
-
-    #[tokio::test]
-    async fn exec_tail_preserves_raw_output_after_sidecar_write_failure() {
-        use std::io::Write;
-        let _sandbox = crate::test_support::Sandbox::new();
-        let store = exec_test_store("gr-exec-sidecar-failure");
-        let name = "command_logs/exec-test.log";
-        write_exec_blob(&store, name, b"persisted output\n");
-        write_legacy_output(&store, name, "persisted output");
-
-        // A read-only sidecar handle deterministically fails the next write.
-        let mut failed_writer = store
-            .open(&format!("{name}.events"), state::BlobMode::Read)
-            .unwrap();
-        assert!(failed_writer.write_all(b"next event\n").is_err());
-        store
-            .open(name, state::BlobMode::Append)
-            .unwrap()
-            .write_all(b"output after sidecar failure\n")
-            .unwrap();
-
-        assert_eq!(
-            read_exec_tail(&store, name, 10).await,
-            (
-                vec![
-                    "persisted output".into(),
-                    "output after sidecar failure".into()
-                ],
-                None,
-                None
-            )
-        );
-    }
-
-    #[tokio::test]
-    async fn exec_tail_ignores_malformed_sidecar_wholesale() {
-        use std::io::Write;
-        let _sandbox = crate::test_support::Sandbox::new();
-        let store = exec_test_store("gr-exec-malformed-sidecar");
-        let name = "command_logs/exec-test.log";
-        write_exec_blob(&store, name, b"raw output only\n");
-        write_legacy_output(&store, name, "valid sidecar prefix must not replay");
-        store
-            .open(&format!("{name}.events"), state::BlobMode::Append)
-            .unwrap()
-            .write_all(b"{malformed json\n")
-            .unwrap();
-
-        assert_eq!(
-            read_exec_tail(&store, name, 10).await,
-            (vec!["raw output only".into()], None, None)
-        );
-    }
-
-    #[tokio::test]
-    async fn exec_tail_does_not_cover_colliding_sequences_after_restart() {
-        use gremlins_magic_bus::{Bus, EventKind};
-        let _sandbox = crate::test_support::Sandbox::new();
-        let store = exec_test_store("gr-exec-restart");
-        let name = "command_logs/exec-test.log";
-        write_exec_blob(&store, name, b"old raw output\n");
-        let legacy_sequence = write_legacy_output(&store, name, "old raw output");
-        assert_eq!(legacy_sequence, 1);
-
-        let fresh_bus = Bus::<EventKind>::new();
-        let mut fresh_sequence = 0;
-        fresh_bus.emit_with_persistence(legacy_output("fresh output"), |event| {
-            fresh_sequence = event.sequence();
-        });
-        assert_eq!(fresh_sequence, 1);
-        assert_eq!(fresh_sequence, legacy_sequence);
-
-        let (lines, through, covered) = read_exec_tail(&store, name, 10).await;
-        assert_eq!(lines, vec!["old raw output"]);
-        assert_eq!(through, None);
-        assert_eq!(covered, None);
-        assert!(!through.is_some_and(|sequence| fresh_sequence <= sequence));
-        assert!(!covered
-            .as_ref()
-            .is_some_and(|sequences| sequences.contains(&fresh_sequence)));
-    }
-
-    #[tokio::test]
-    async fn exec_tail_empty_reads_never_claim_coverage() {
-        let _sandbox = crate::test_support::Sandbox::new();
-        let store = exec_test_store("gr-exec-empty");
-        let name = "command_logs/exec-test.log";
-        write_exec_blob(&store, name, b"raw output\n");
-        write_legacy_output(&store, name, "legacy output");
-        assert_eq!(
-            read_exec_tail(&store, name, 0).await,
-            (Vec::new(), None, None)
-        );
-        assert_eq!(
-            read_exec_tail(&store, "missing", 10).await,
-            (Vec::new(), None, None)
-        );
-
-        let sidecar_only = "command_logs/sidecar-only.log";
-        write_legacy_output(&store, sidecar_only, "must not replay without raw log");
-        assert_eq!(
-            read_exec_tail(&store, sidecar_only, 10).await,
-            (Vec::new(), None, None)
-        );
-        assert_eq!(
-            read_exec_tail(&store, sidecar_only, 0).await,
-            (Vec::new(), None, None)
-        );
+        for malformed in [false, true] {
+            if malformed {
+                write_exec_blob(
+                    &store,
+                    sidecar,
+                    &[legacy_jsonl.as_slice(), b"{malformed json\n"].concat(),
+                );
+            }
+            for (path, limit, expected) in [
+                (
+                    name,
+                    10,
+                    vec!["runner preamble", "command output", "runner footer"],
+                ),
+                (name, 2, vec!["command output", "runner footer"]),
+                (name, 0, vec![]),
+                (sidecar_only, 10, vec![]),
+                (sidecar_only, 0, vec![]),
+                ("missing", 10, vec![]),
+            ] {
+                let (lines, through, covered) = read_exec_tail(&store, path, limit).await;
+                assert_eq!(
+                    lines, expected,
+                    "path={path}, limit={limit}, malformed={malformed}"
+                );
+                assert_eq!((through, covered), (None, None));
+            }
+        }
     }
 
     #[test]

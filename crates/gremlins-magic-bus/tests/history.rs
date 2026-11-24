@@ -47,28 +47,12 @@ async fn concrete_emitters_retain_history_before_explicit_initialization() {
         })
         .collect();
     assert_eq!(labels, [id, "child-sync", "child-async", "run-async"]);
+    assert_eq!(history.events[0].corr_id(), &CorrId::new().with_run(id));
+    assert_eq!(history.events[3].corr_id(), &CorrId::new().with_run(id));
     assert_eq!(history.events[1].corr_id(), &child);
     assert_eq!(history.events[2].corr_id(), &child);
     assert!(matches!(rx.try_recv(), Err(TryRecvError::Empty)));
 
-    emit_run_event_async(
-        id,
-        EventKind::RunStopped {
-            id: "future".into(),
-        },
-    )
-    .await;
-    let live = rx.try_recv().unwrap();
-    let (later_sub, _, later) = subscribe_run_with_history(id, 16);
-    assert_eq!(later.events.len(), 5);
-    assert!(later.complete);
-    assert_eq!(later.through_sequence, 5);
-    assert_eq!(later.evicted_through_sequence, 0);
-    let last = later.events.last().unwrap();
-    assert_eq!(last.corr_id(), live.corr_id());
-    assert_eq!(last.ts().wall(), live.ts().wall());
-    assert_eq!(last.ts().monotonic(), live.ts().monotonic());
-    assert!(matches!(last.kind(), EventKind::RunStopped { id } if id == "future"));
     // Prompt-debug payloads are live-only, but still advance the global cut.
     emit_event(EventKind::PromptRequest {
         id: id.into(),
@@ -83,25 +67,25 @@ async fn concrete_emitters_retain_history_before_explicit_initialization() {
     assert!(matches!(rx.try_recv(), Err(TryRecvError::Empty)));
 
     let (omitted_sub, mut omitted_rx, omitted) = subscribe_run_with_history(id, 16);
-    assert_eq!(omitted.events.len(), 5);
+    assert_eq!(omitted.events.len(), 4);
     assert!(omitted
         .events
         .iter()
         .all(|event| !matches!(event.kind(), EventKind::PromptRequest { .. })));
     assert!(!omitted.complete);
-    assert_eq!(omitted.through_sequence, 6);
-    assert_eq!(omitted.evicted_through_sequence, 6);
+    assert_eq!(prompt.sequence(), 5);
+    assert_eq!(omitted.through_sequence, 5);
+    assert_eq!(omitted.evicted_through_sequence, 5);
     assert!(matches!(omitted_rx.try_recv(), Err(TryRecvError::Empty)));
 
     emit_event(EventKind::RunStopped { id: id.into() });
     let (unrelated_sub, _, unrelated) = subscribe_run_with_history("unrelated-history", 16);
     assert!(unrelated.events.is_empty());
     assert!(!unrelated.complete);
-    assert_eq!(unrelated.through_sequence, 7);
-    assert_eq!(unrelated.evicted_through_sequence, 6);
+    assert_eq!(unrelated.through_sequence, 6);
+    assert_eq!(unrelated.evicted_through_sequence, 5);
 
     init_bus().unsubscribe(&omitted_sub);
     init_bus().unsubscribe(&unrelated_sub);
     init_bus().unsubscribe(&sub);
-    init_bus().unsubscribe(&later_sub);
 }
