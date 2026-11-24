@@ -1311,36 +1311,62 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn end_signal_fires_when_the_execution_drops() {
+    async fn end_signal_follows_execution_replacement_and_drop() {
+        use std::future::Future;
+        use std::sync::atomic::{AtomicBool, Ordering};
+        use std::task::{Context, Wake, Waker};
+
+        #[derive(Default)]
+        struct WakeFlag(AtomicBool);
+        impl Wake for WakeFlag {
+            fn wake(self: Arc<Self>) {
+                self.0.store(true, Ordering::SeqCst);
+            }
+        }
+
+        let first_wake = Arc::new(WakeFlag::default());
+        let first_waker = Waker::from(first_wake.clone());
+        let second_wake = Arc::new(WakeFlag::default());
+        let second_waker = Waker::from(second_wake.clone());
         let (mut sessions, handle) = InteractiveSessionFactory::for_chat();
-        let session = sessions.next_session();
+        let first = sessions.next_session();
+        let first_signal = handle.end_signal().expect("slot is live");
+        let first_wait = first_signal.wait();
+        tokio::pin!(first_wait);
+        assert!(first_wait
+            .as_mut()
+            .poll(&mut Context::from_waker(&first_waker))
+            .is_pending());
 
-        // Poll the observer to Pending so this covers an already-registered
-        // wakeup (the separate latch test covers a late waiter).
-        let signal = handle.end_signal().expect("slot is live");
-        let waiting = signal.wait();
-        tokio::pin!(waiting);
-        assert!(futures::poll!(&mut waiting).is_pending());
-
-        drop(session);
-        tokio::time::timeout(std::time::Duration::from_secs(1), &mut waiting)
+        let second = sessions.next_session();
+        assert!(first_wake.0.load(Ordering::SeqCst), "replacement wakes A");
+        tokio::time::timeout(std::time::Duration::from_secs(1), &mut first_wait)
             .await
-            .expect("end signal must fire when the execution ends");
-    }
-
-    #[tokio::test]
-    async fn end_signal_latches_so_a_late_waiter_still_observes_it() {
-        let (mut sessions, handle) = InteractiveSessionFactory::for_chat();
-        let session = sessions.next_session();
-        let signal = handle.end_signal().expect("slot is live");
-
-        // The execution ends *before* the observer registers: this is the
-        // window `notify_waiters` alone would drop. The latch must still make
-        // the wait complete.
-        drop(session);
-        tokio::time::timeout(std::time::Duration::from_secs(1), signal.wait())
+            .expect("replacement wakes the pending observer");
+        tokio::time::timeout(std::time::Duration::from_secs(1), first_signal.wait())
             .await
-            .expect("an already-ended execution must complete wait immediately");
+            .expect("replacement also latches the end for late observers");
+
+        let second_signal = handle.end_signal().expect("slot is live");
+        let second_wait = second_signal.wait();
+        tokio::pin!(second_wait);
+        assert!(second_wait
+            .as_mut()
+            .poll(&mut Context::from_waker(&second_waker))
+            .is_pending());
+        drop(first);
+        assert!(!second_wake.0.load(Ordering::SeqCst), "A must not wake B");
+        assert!(second_wait
+            .as_mut()
+            .poll(&mut Context::from_waker(&second_waker))
+            .is_pending());
+
+        // No successor is minted and the factory is still alive.
+        drop(second);
+        assert!(second_wake.0.load(Ordering::SeqCst), "B's own drop wakes B");
+        tokio::time::timeout(std::time::Duration::from_secs(1), &mut second_wait)
+            .await
+            .expect("dropping the current execution wakes its observer");
     }
 
     #[tokio::test]
@@ -1361,47 +1387,6 @@ mod tests {
                 .expect("replacement wakes the command wait")
                 .is_none()
         );
-    }
-
-    #[tokio::test]
-    async fn end_signal_fires_when_a_successor_execution_starts() {
-        let (mut sessions, handle) = InteractiveSessionFactory::for_chat();
-        let first = sessions.next_session();
-        let signal = handle.end_signal().expect("slot is live");
-        let waiting = signal.wait();
-        tokio::pin!(waiting);
-        assert!(futures::poll!(&mut waiting).is_pending());
-
-        // Minting the next execution replaces this one and wakes the already
-        // registered observer.
-        let _second = sessions.next_session();
-        tokio::time::timeout(std::time::Duration::from_secs(1), &mut waiting)
-            .await
-            .expect("a successor execution must wake the previous observer");
-        drop(first);
-    }
-
-    #[tokio::test]
-    async fn end_signal_rotates_per_execution() {
-        let (mut sessions, handle) = InteractiveSessionFactory::for_chat();
-        let first = sessions.next_session();
-        let first_signal = handle.end_signal().expect("slot is live");
-        let second = sessions.next_session();
-        let second_signal = handle.end_signal().expect("slot is live");
-
-        // Drop the old session, then directly poll the successor's waiter
-        // before dropping it. This fails if the old drop latched both signals.
-        drop(first);
-        let second_wait = second_signal.wait();
-        tokio::pin!(second_wait);
-        assert!(futures::poll!(&mut second_wait).is_pending());
-        assert!(first_signal.is_ended());
-        assert!(!second_signal.is_ended(), "successor signal ended early");
-
-        drop(second);
-        tokio::time::timeout(std::time::Duration::from_secs(1), &mut second_wait)
-            .await
-            .expect("the successor signal must latch on its own drop");
     }
 
     #[tokio::test]
@@ -1851,67 +1836,51 @@ mod tests {
         ));
     }
 
-    #[tokio::test]
-    async fn delayed_old_lease_drop_cannot_clear_a_replacement() {
-        let (mut sessions, handle) = InteractiveSessionFactory::for_chat();
-        let mut first = sessions.next_session();
-        let old = handle.target().attach().unwrap();
-        assert!(first.accept_pause());
+    #[test]
+    fn delayed_old_lease_drop_preserves_the_current_owner() {
+        enum Schedule {
+            ReplaceAccepted,
+            FinishThenAcquireOnSameExecution,
+            FinishThenAcquireOnSuccessor,
+        }
+        use Schedule::*;
 
-        // Replacing the execution releases its accepted slot. The old owner
-        // is deliberately retained to model delayed cleanup after replacement.
-        let _replacement_execution = sessions.next_session();
-        let replacement = handle.target().attach().unwrap();
-        drop(old);
-        assert!(matches!(handle.target().attach(), Err(AttachError::Busy)));
-        drop(replacement);
-        assert!(handle.target().attach().is_ok());
-    }
+        for schedule in [
+            ReplaceAccepted,
+            FinishThenAcquireOnSameExecution,
+            FinishThenAcquireOnSuccessor,
+        ] {
+            let (mut sessions, handle) = InteractiveSessionFactory::for_chat();
+            let mut first = sessions.next_session();
+            let lease_a = handle.target().attach().unwrap();
+            assert!(first.accept_pause());
 
-    #[tokio::test]
-    async fn delayed_old_lease_drop_cannot_clear_same_execution_replacement() {
-        let (mut sessions, handle) = InteractiveSessionFactory::for_chat();
-        let mut session = sessions.next_session();
-        let lease_a = handle.target().attach().unwrap();
-        assert!(session.accept_pause());
-        lease_a.try_send(InteractiveCommand::RunTurn).unwrap();
-        assert!(matches!(
-            session.next_command().await,
-            Some(InteractiveCommand::RunTurn)
-        ));
-        session.finish_attachment(DebugOutcome::Ended {
-            reason: "done".into(),
-        });
-
-        let lease_b = handle.target().attach().unwrap();
-        drop(lease_a);
-        assert!(matches!(handle.target().attach(), Err(AttachError::Busy)));
-        drop(lease_b);
-        assert!(handle.target().attach().is_ok());
-    }
-
-    #[tokio::test]
-    async fn delayed_old_lease_drop_cannot_clear_successor_pause() {
-        let (mut sessions, handle) = InteractiveSessionFactory::for_chat();
-        let mut first = sessions.next_session();
-        let old = handle.target().attach().unwrap();
-        assert!(first.accept_pause());
-        old.try_send(InteractiveCommand::RunTurn).unwrap();
-        assert!(matches!(
-            first.next_command().await,
-            Some(InteractiveCommand::RunTurn)
-        ));
-        first.finish_attachment(DebugOutcome::Ended {
-            reason: "done".into(),
-        });
-
-        let mut second = sessions.next_session();
-        let replacement = handle.target().attach().unwrap();
-        drop(old);
-        assert!(matches!(handle.target().attach(), Err(AttachError::Busy)));
-        assert!(second.accept_pause());
-        drop(replacement);
-        assert!(handle.target().attach().is_ok());
+            // Retain A across the trigger; only its delayed drop is under test.
+            let mut successor = match schedule {
+                ReplaceAccepted => Some(sessions.next_session()),
+                FinishThenAcquireOnSameExecution => {
+                    assert!(first.finish_attachment(DebugOutcome::Ended {
+                        reason: "done".into(),
+                    }));
+                    None
+                }
+                FinishThenAcquireOnSuccessor => {
+                    assert!(first.finish_attachment(DebugOutcome::Ended {
+                        reason: "done".into(),
+                    }));
+                    Some(sessions.next_session())
+                }
+            };
+            let lease_b = handle.target().attach().unwrap();
+            drop(lease_a);
+            assert!(matches!(handle.target().attach(), Err(AttachError::Busy)));
+            // Acceptance is per acquisition, not per session: finishing A clears
+            // its active inbox and returns the slot to Idle, so this accepts B
+            // even on the same execution. No idempotence is assumed.
+            assert!(successor.as_mut().unwrap_or(&mut first).accept_pause());
+            drop(lease_b);
+            assert!(handle.target().attach().is_ok());
+        }
     }
 
     #[tokio::test]
