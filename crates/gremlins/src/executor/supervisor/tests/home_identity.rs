@@ -188,6 +188,7 @@ async fn home_frame(reader: &mut tokio::io::BufReader<tokio::net::UnixStream>) -
 #[tokio::test]
 async fn announced_home_execution_resolves_input_and_shares_legacy_controller_claim() {
     use crate::executor::supervisor::test_provider::pending_request;
+    use gremlins_magic_bus::{connection::BusSubGuard, subscribe_run, EventKind, Recv};
     use serde_json::json;
     use tokio::{io::BufReader, net::UnixStream};
 
@@ -206,6 +207,9 @@ async fn announced_home_execution_resolves_input_and_shares_legacy_controller_cl
     let (registry, _) = spawn_test_actor().await;
     let sessions = Default::default();
     let (created, session) = reserved_session(&registry, &sessions).await;
+    let run_id = created["home_run_id"].as_str().unwrap();
+    let (sub, mut events) = subscribe_run(run_id);
+    let _guard = BusSubGuard::new(sub);
     let path = crate::config::state_root().join(created["socket"].as_str().unwrap());
     let mut main = BufReader::new(UnixStream::connect(&path).await.unwrap());
     socket::write_json_line(
@@ -215,32 +219,66 @@ async fn announced_home_execution_resolves_input_and_shares_legacy_controller_cl
     )
     .await
     .unwrap();
-    let started = loop {
-        let event = home_frame(&mut main).await;
-        assert_ne!(event["type"], "error", "{event}");
-        if event["type"] == "turn_started" {
-            break event;
+    let ack = home_frame(&mut main).await;
+    assert_eq!(ack["type"], "ok", "{ack}");
+    assert_eq!(ack["id"], run_id);
+    let started = tokio::time::timeout(Duration::from_secs(10), async {
+        loop {
+            let Recv::Event(event) = events.recv().await else {
+                panic!("home bus closed or lagged")
+            };
+            if matches!(event.kind(), EventKind::TurnStarted { .. }) {
+                break event;
+            }
         }
+    })
+    .await
+    .expect("home turn start timed out");
+    let EventKind::TurnStarted {
+        stage_run_id: execution_id,
+    } = started.kind()
+    else {
+        unreachable!()
     };
-    assert_eq!(started["id"], created["home_run_id"]);
+    assert!(!execution_id.is_empty());
+    assert_eq!(started.corr_id().run(), Some(run_id));
+    assert_eq!(
+        started.corr_id().stage_run_id(),
+        Some(execution_id.as_str())
+    );
+    assert!(started.corr_id().to_string().contains("home-input"));
     // The provider request is a barrier after run_agent has bound its inbox.
     let (_, held) = pending_request(&provider).await;
-    let run_id = started["id"].as_str().unwrap();
-    let execution_id = started["stage_run_id"].as_str().unwrap();
     let (interactive, _, _) = registry.get_run_interactive(run_id).await.unwrap();
     let (identity, sender) = interactive
         .resolve_input(run_id, execution_id, None)
         .expect("TurnStarted identity must resolve to the running home inbox");
     assert_eq!(identity.run_id, run_id);
-    // The announced descriptor aliases the invocation's canonical identity.
+    assert_eq!(identity.stage_run_id, *execution_id);
+    assert_eq!(
+        started.corr_id().stage(),
+        Some(identity.stage_name.as_str())
+    );
+    // The bus output identity is the invocation's exact input identity.
     let (canonical, canonical_sender) = interactive
         .resolve_input(run_id, &identity.stage_run_id, Some(&identity.stage_name))
         .expect("the invocation's exact identity must resolve too");
     assert_eq!(canonical, identity);
     assert!(!canonical_sender.is_closed());
     assert!(!sender.is_closed());
-    assert_eq!(interactive.target().stage_run_id(), Some(execution_id));
-    assert_eq!(started["nonce"], interactive.target().nonce());
+    // Legacy attachment uses the debugger descriptor, which may alias the
+    // actual stage identity. Both must contend for the same controller claim.
+    let target = interactive.target();
+    let legacy_stage_run_id = target.stage_run_id().expect("live debugger target");
+    let (legacy_identity, _) = interactive
+        .resolve_input(run_id, legacy_stage_run_id, None)
+        .expect("legacy descriptor must resolve to the same home inbox");
+    assert_eq!(legacy_identity, identity);
+    // TurnStarted carries no nonce; obtain it from the live input registration.
+    let nonce = sender
+        .nonce()
+        .expect("running home inbox must have a nonce");
+    assert_eq!(nonce, target.nonce());
 
     let mut exact = BufReader::new(UnixStream::connect(&path).await.unwrap());
     socket::write_json_line(
@@ -252,6 +290,8 @@ async fn announced_home_execution_resolves_input_and_shares_legacy_controller_cl
     .unwrap();
     let bound = home_frame(&mut exact).await;
     assert_eq!(bound["type"], "input_bound", "{bound}");
+    assert_eq!(bound["req_id"], "exact");
+    assert_eq!(bound["id"], identity.run_id);
     assert_eq!(bound["stage_run_id"], identity.stage_run_id);
     assert_eq!(bound["stage"], identity.stage_name);
 
@@ -260,7 +300,7 @@ async fn announced_home_execution_resolves_input_and_shares_legacy_controller_cl
         legacy.get_mut(),
         &json!({"op":"attach", "session_id":created["session_id"],
             "scope":"conversation", "mode":"control", "id":run_id,
-            "stage_run_id":execution_id, "nonce":started["nonce"], "req_id":"legacy"}),
+            "stage_run_id":legacy_stage_run_id, "nonce":nonce, "req_id":"legacy"}),
     )
     .await
     .unwrap();

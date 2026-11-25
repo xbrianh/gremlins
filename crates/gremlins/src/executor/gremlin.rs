@@ -399,6 +399,7 @@ impl Gremlin {
     }
 
     /// Capture the execution prepared on this gremlin, even if its run ID is reused.
+    #[cfg(test)]
     pub(crate) fn prepare_interactive_target_with_commands(
         &mut self,
         accepts_commands: bool,

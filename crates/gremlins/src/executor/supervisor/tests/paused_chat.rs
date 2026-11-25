@@ -1,7 +1,7 @@
 use std::time::Duration;
 
 use gremlins_magic_bus::connection::{BusSubGuard, SharedWriter};
-use gremlins_magic_bus::{subscribe_run, EventKind};
+use gremlins_magic_bus::{subscribe_run, EventKind, ReceiverHalf, Recv};
 use serde_json::json;
 use tokio::io::BufReader;
 use tokio::net::unix::OwnedReadHalf;
@@ -19,21 +19,23 @@ const FOLLOWUP: &str = "Review my revision.";
 const NOTICE: &str = "Your previous response was interrupted.";
 const WAIT: Duration = Duration::from_secs(10);
 
-async fn expect_cancellation(chat: &mut BufReader<OwnedReadHalf>, reason: &str) {
-    // The cancel ack and the turn's terminal event may arrive in either order.
+async fn expect_cancellation(events: &mut ReceiverHalf<EventKind>, id: &str, reason: &str) {
     timeout(WAIT, async {
-        let (mut ack, mut ended) = (false, false);
-        while !ack || !ended {
-            let frame = read_json_line(chat).await.unwrap().expect("chat closed");
-            match frame["type"].as_str() {
-                Some("ok") => ack = true,
-                Some("ended") => {
-                    assert_eq!(frame["chat_turn"], "initial");
-                    assert_eq!(frame["reason"], reason);
-                    ended = true;
+        loop {
+            let Recv::Event(event) = events.recv().await else {
+                panic!("bus closed or lagged");
+            };
+            match event.kind() {
+                EventKind::Ended { reason: actual } => {
+                    assert_eq!(event.corr_id().run(), Some(id));
+                    assert!(event.corr_id().to_string().contains("initial"));
+                    assert_eq!(actual, reason);
+                    break;
                 }
-                Some("done" | "turn_complete" | "error") => {
-                    panic!("unexpected chat event: {frame}")
+                EventKind::Done { .. }
+                | EventKind::Error { .. }
+                | EventKind::PromptRequest { .. } => {
+                    panic!("unexpected cancellation event: {:?}", event.kind());
                 }
                 _ => (),
             }
@@ -41,6 +43,25 @@ async fn expect_cancellation(chat: &mut BufReader<OwnedReadHalf>, reason: &str) 
     })
     .await
     .expect("a paused turn must end without debugger input");
+}
+
+async fn expect_ack(chat: &mut BufReader<OwnedReadHalf>) -> serde_json::Value {
+    let ack = timeout(WAIT, read_json_line(chat))
+        .await
+        .expect("request acknowledgement timed out")
+        .unwrap()
+        .expect("chat closed");
+    assert_eq!(ack["type"], "ok", "{ack}");
+    ack
+}
+
+async fn expect_quiet(chat: &mut BufReader<OwnedReadHalf>) {
+    assert!(
+        timeout(Duration::from_millis(50), read_json_line(chat))
+            .await
+            .is_err(),
+        "prompt socket received unsolicited output or closed"
+    );
 }
 
 async fn cancel_paused_chat(mode: &str, lose_chat_writer: bool) {
@@ -83,7 +104,9 @@ async fn cancel_paused_chat(mode: &str, lose_chat_writer: bool) {
     write_json_line(&mut write, &prompt("initial", FIRST))
         .await
         .unwrap();
-    let ack = read_until_type(&mut chat, "ok").await;
+    let ack = expect_ack(&mut chat).await;
+    assert!(ack.get("stage_run_id").is_none(), "{ack}");
+    assert!(ack.get("nonce").is_none(), "{ack}");
     let id = ack["id"].as_str().unwrap();
     let (first, _held) = pending_request(&provider).await;
     assert!(first["messages"].to_string().contains(FIRST), "{first}");
@@ -118,17 +141,20 @@ async fn cancel_paused_chat(mode: &str, lose_chat_writer: bool) {
 
     if lose_chat_writer {
         drop(chat);
-        // The first reset fails the write. More events than the bounded
-        // mailbox can hold prove the runner stopped backpressuring the stage
-        // before joining it. Keep the model request pending until then.
+        // Losing the ack-only prompt reader must not backpressure the stage.
+        // More events than the bounded mailbox can hold prove the runner
+        // keeps draining bus output. Keep the model request pending until then.
         timeout(WAIT, async {
             for _ in 0..258 {
                 gremlins_magic_bus::emit_run_event_async(id, EventKind::StreamReset).await;
             }
         })
         .await
-        .expect("failed chat writer kept backpressuring the stage");
+        .expect("lost prompt reader kept backpressuring the stage");
+        let (sub, mut events) = subscribe_run(id);
+        let _guard = BusSubGuard::new(sub);
         session.cancel_turn(Some(id)).await.expect("active turn");
+        expect_cancellation(&mut events, id, "interrupted").await;
         let ended = read_until_type(&mut debug, "ended").await;
         assert_eq!(ended["reason"], "interrupted");
         drop(debug_write);
@@ -156,9 +182,11 @@ async fn cancel_paused_chat(mode: &str, lose_chat_writer: bool) {
     } else {
         "interrupted"
     };
-    expect_cancellation(&mut chat, reason).await;
+    expect_ack(&mut chat).await;
+    expect_cancellation(&mut events, id, reason).await;
+    expect_quiet(&mut chat).await;
     // Dropping the command receiver isn't a terminal event. The debugger
-    // must see the same classified outcome as the chat, not just socket EOF.
+    // must see the same classified outcome as the bus, not just socket EOF.
     let ended = read_until_type(&mut debug, "ended").await;
     assert_eq!(ended["type"], "ended");
     assert_eq!(ended["scope"], "conversation");
@@ -186,8 +214,9 @@ async fn cancel_paused_chat(mode: &str, lose_chat_writer: bool) {
         write_json_line(&mut write, &prompt("next", FOLLOWUP))
             .await
             .unwrap();
-        assert_eq!(read_until_type(&mut chat, "ok").await["id"], id);
+        assert_eq!(expect_ack(&mut chat).await["id"], id);
         let (request, held) = pending_request(&provider).await;
+        expect_quiet(&mut chat).await;
         let messages = request["messages"].to_string();
         assert!(messages.contains(FOLLOWUP), "{messages}");
         assert_eq!(messages.contains(FIRST), mode == "soft", "{messages}");
@@ -215,6 +244,6 @@ async fn permanent_stop_exits_paused_chat_task() {
 }
 
 #[tokio::test]
-async fn failed_chat_write_releases_backpressure_and_classifies_debugger_cancellation() {
+async fn lost_prompt_reader_does_not_backpressure_and_classifies_debugger_cancellation() {
     cancel_paused_chat("soft", true).await;
 }

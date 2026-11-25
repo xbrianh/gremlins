@@ -635,6 +635,7 @@ mod tests {
                 crate::clients::agent::task_models::sync_factory(move |_| {
                     Ok(TaskModel {
                         model: selected.clone().erase(),
+                        backend: None,
                         temperature: None,
                         max_tokens: None,
                         extra: None,

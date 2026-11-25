@@ -876,7 +876,7 @@ impl Backend for ChatBackend {
 }
 
 #[tokio::test]
-async fn chat_input_and_output_use_invocation_identity_without_replacing_prepared_target() {
+async fn chat_input_and_output_use_invocation_identity() {
     // Repeat the same turn name, including on failure, to catch identity reuse.
     for mode in ["success", "failure", "cancel", "abort"] {
         let spec = format!("cmd/chat-invocation-{}", state::token_hex(8));
@@ -908,16 +908,9 @@ async fn chat_input_and_output_use_invocation_identity_without_replacing_prepare
         let mut bus = Subscription::new(CorrId::new().with_run(&id));
         let node = Arc::new(node);
         let mut invocation_ids = HashSet::new();
-        let mut session_ids = HashSet::new();
         for _ in 0..if mode == "abort" { 1 } else { 2 } {
             let token = CancelToken::new();
             gremlin.cancel_token = Some(token.clone());
-            let target = gremlin
-                .prepare_interactive_target_with_commands(true)
-                .unwrap();
-            let session_id = target.stage_run_id().unwrap().to_owned();
-            assert!(session_ids.insert(session_id.clone()));
-            let execution_end = target.end_signal();
             let stage = node.clone();
             let mut task = tokio::spawn(async move {
                 let result = run_stage(&stage, &mut gremlin).await;
@@ -940,12 +933,12 @@ async fn chat_input_and_output_use_invocation_identity_without_replacing_prepare
             .await
             .expect("chat backend was not dispatched");
             let marker = events.last().unwrap().clone();
-            assert!(matches!(marker.kind(), EventKind::LogLine { line, .. }
-                if line == &format!("chat backend session: {session_id}")));
-            assert_eq!(handle.target().stage_run_id(), Some(session_id.as_str()));
-            assert_eq!(handle.target().nonce(), target.nonce());
-            assert_ne!(marker.corr_id().stage_run_id(), Some(session_id.as_str()));
             let stage_run_id = marker.corr_id().stage_run_id().unwrap();
+            let target = handle.target();
+            let execution_end = target.end_signal();
+            assert_eq!(target.stage_run_id(), Some(stage_run_id));
+            assert!(matches!(marker.kind(), EventKind::LogLine { line, .. }
+                if line == &format!("chat backend session: {stage_run_id}")));
             let (identity, sender) = handle
                 .resolve_input(&id, stage_run_id, Some("chat-0001"))
                 .expect("exact invocation must resolve to its input sender");
@@ -954,43 +947,29 @@ async fn chat_input_and_output_use_invocation_identity_without_replacing_prepare
             assert_eq!(identity.stage_run_id, stage_run_id);
             assert_eq!(sender.nonce(), Some(target.nonce()));
             assert!(!sender.is_closed());
-            let (prepared_identity, prepared_sender) = handle
-                .resolve_input(&id, &session_id, Some("chat-0001"))
-                .expect("prepared owner descriptor must resolve to the same invocation inbox");
-            assert_eq!(prepared_identity, identity);
-            assert_eq!(prepared_sender.nonce(), sender.nonce());
             let mut receipts = Vec::new();
             for index in 0..crate::clients::execution_input::INPUT_CAPACITY {
-                let input = if index % 2 == 0 {
-                    &sender
-                } else {
-                    &prepared_sender
-                };
                 receipts.push(
-                    input
+                    sender
                         .try_send(format!("input-{index}"), "hi".into())
                         .unwrap(),
                 );
             }
-            for input in [&sender, &prepared_sender] {
-                assert_eq!(
-                    input.try_send("overflow".into(), "hi".into()).unwrap_err(),
-                    crate::clients::execution_input::InputRejected::Full,
-                );
-            }
+            assert_eq!(
+                sender.try_send("overflow".into(), "hi".into()).unwrap_err(),
+                crate::clients::execution_input::InputRejected::Full,
+            );
             let (shutdown, _) = tokio::sync::watch::channel(false);
             let registry = crate::executor::supervisor::run_registry::RunRegistry::new(shutdown);
             let claim = registry
                 .claim_controller(&id, &identity.stage_run_id)
                 .unwrap();
             assert!(matches!(
-                registry.claim_controller(&id, &prepared_identity.stage_run_id),
+                registry.claim_controller(&id, stage_run_id),
                 Err("controller_busy")
             ));
             drop(claim);
-            let claim = registry
-                .claim_controller(&id, &prepared_identity.stage_run_id)
-                .unwrap();
+            let claim = registry.claim_controller(&id, stage_run_id).unwrap();
             assert!(matches!(
                 registry.claim_controller(&id, &identity.stage_run_id),
                 Err("controller_busy")
@@ -1033,7 +1012,6 @@ async fn chat_input_and_output_use_invocation_identity_without_replacing_prepare
             assert!(marker.sequence() < pair[1].sequence());
             assert!(execution_end.is_ended());
             assert!(sender.is_closed());
-            assert!(prepared_sender.is_closed());
             for receipt in receipts {
                 assert_eq!(
                     receipt.await.unwrap(),
@@ -1041,8 +1019,7 @@ async fn chat_input_and_output_use_invocation_identity_without_replacing_prepare
                 );
             }
             assert!(handle.resolve_input(&id, stage_run_id, None).is_none());
-            assert!(handle.resolve_input(&id, &session_id, None).is_none());
-            assert_eq!(target.stage_run_id(), Some(session_id.as_str()));
+            assert_eq!(target.stage_run_id(), Some(stage_run_id));
             if let Some(g) = recovered {
                 gremlin = g;
             } else {
@@ -1050,6 +1027,64 @@ async fn chat_input_and_output_use_invocation_identity_without_replacing_prepare
             }
         }
     }
+}
+
+#[tokio::test]
+async fn incompatible_prepared_identity_is_rejected_and_cleared_by_run_agent() {
+    let spec = format!("cmd/chat-incompatible-{}", state::token_hex(8));
+    install_test_backend(
+        &spec,
+        Arc::new(ChatBackend {
+            release: Arc::new(tokio::sync::Notify::new()),
+            wait_for_cancel: false,
+            fail: false,
+        }),
+    );
+    let stage = AgentBuilder::new("chat-0001")
+        .model(ModelURI::parse(&spec).unwrap())
+        .prompt("hi")
+        .build()
+        .unwrap();
+    let (_sandbox, mut gremlin, node) = fixture(stage);
+    gremlin.state.patch(
+        &[],
+        &[("kind".into(), serde_json::json!("chat"))]
+            .into_iter()
+            .collect(),
+    );
+    let (sessions, handle) = crate::clients::interactive::InteractiveSessionFactory::for_chat();
+    handle.set_input_registry(gremlin.execution_inputs.clone());
+    gremlin.interactive_sessions = Some(sessions);
+    let target = gremlin
+        .prepare_interactive_target_with_commands(true)
+        .unwrap();
+    let prepared_id = target.stage_run_id().unwrap().to_owned();
+    let execution_end = target.end_signal();
+    assert!(!execution_end.is_ended());
+    let id = gremlin.id.to_string();
+    let mut bus = Subscription::new(CorrId::new().with_run(&id));
+
+    let error = tokio::time::timeout(Duration::from_secs(10), run_stage(&node, &mut gremlin))
+        .await
+        .expect("incompatible identity must fail before dispatching the backend")
+        .unwrap_err();
+    assert!(error
+        .to_string()
+        .contains("interactive session identity disagrees with stage invocation"));
+    let events = bus.drain();
+    let pair: Vec<_> = events.iter().filter(|e| is_boundary(e)).cloned().collect();
+    assert_pair(&pair, &id, "chat-0001", "agent");
+    let invocation_id = pair[0].corr_id().stage_run_id().unwrap();
+    assert_ne!(invocation_id, prepared_id);
+    assert!(!events.iter().any(|event| matches!(event.kind(),
+        EventKind::LogLine { line, .. } if line.starts_with("chat backend session: "))));
+    assert!(!events.iter().any(|event| matches!(event.kind(),
+        EventKind::StreamChunk { text } if text == "CHAT_MARKER")));
+    assert!(execution_end.is_ended());
+    assert!(target.attach().is_err());
+    assert!(handle.resolve_input(&id, &prepared_id, None).is_none());
+    assert!(handle.resolve_input(&id, invocation_id, None).is_none());
+    assert!(handle.target().end_signal().is_ended());
 }
 
 #[tokio::test]

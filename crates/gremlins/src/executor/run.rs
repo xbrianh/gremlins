@@ -55,7 +55,15 @@ pub(crate) async fn run_stage(
     stage: &ExecutorStage,
     gremlin: &mut Gremlin,
 ) -> Result<(), RunError> {
-    run_stage_scoped(stage, gremlin, "", &[], None, None).await
+    run_stage_scoped(stage, gremlin, "", &[], None, None, None).await
+}
+
+pub(crate) async fn run_chat_stage(
+    stage: &ExecutorStage,
+    gremlin: &mut Gremlin,
+    invocation: StageInvocation,
+) -> Result<(), RunError> {
+    run_stage_scoped(stage, gremlin, "", &[], None, None, Some(invocation)).await
 }
 
 /// Run one stage under `scope`.
@@ -70,9 +78,12 @@ async fn run_stage_scoped(
     sequences: &[&str],
     enclosing_model: Option<&ModelURI>,
     enclosing_task_models: Option<&IndexMap<String, String>>,
+    invocation: Option<StageInvocation>,
 ) -> Result<(), RunError> {
     // Every dispatched stage gets boundaries, including stages omitted from display state.
-    let invocation = StageInvocation::enter(gremlin.id.as_str(), stage.name(), stage.stage_type());
+    let invocation = invocation.unwrap_or_else(|| {
+        StageInvocation::enter(gremlin.id.as_str(), stage.name(), stage.stage_type())
+    });
     let _ = gremlin.state.read_str("attempt");
     let tm = gremlin.enclosing_task_models.clone();
     let enc_tm = enclosing_task_models.or(tm.as_ref());
@@ -429,6 +440,7 @@ async fn run_sequence(
                 &child_sequences,
                 enclosing_model,
                 enclosing_task_models,
+                None,
             ))
             .await?;
         }
@@ -502,6 +514,7 @@ async fn run_sequence(
                 &child_sequences,
                 enclosing_model,
                 enclosing_task_models,
+                None,
             ))
             .await
             {

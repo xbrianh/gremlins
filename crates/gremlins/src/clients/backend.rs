@@ -14,6 +14,10 @@ use rig_core::driver::DynModel;
 use rig_core::operation::Completion;
 
 pub struct RunParams {
+    /// The executor publishes home-chat Done only after committing outputs.
+    pub(crate) defer_done: bool,
+    /// Persisted chat usage added only to terminal/progress event totals.
+    pub(crate) usage_baseline: Option<super::protocol::UsageStats>,
     pub prompt: String,
     pub label: String,
     pub model: Option<String>,
@@ -78,6 +82,8 @@ impl RunParams {
     /// default.
     pub(crate) fn empty() -> Self {
         Self {
+            defer_done: false,
+            usage_baseline: None,
             prompt: String::new(),
             label: String::new(),
             model: None,
@@ -109,6 +115,8 @@ impl RunParams {
 impl Clone for RunParams {
     fn clone(&self) -> Self {
         Self {
+            defer_done: self.defer_done,
+            usage_baseline: self.usage_baseline.clone(),
             prompt: self.prompt.clone(),
             label: self.label.clone(),
             model: self.model.clone(),

@@ -71,9 +71,11 @@ pub(crate) use self::run_registry::LaunchResult;
 pub(crate) use self::session::handle_session_main;
 
 // Items needed by tests (referenced as `super::TypeName` in tests.rs).
+#[cfg(test)]
+pub(crate) use self::chat::chat_payload;
 #[allow(unused_imports)]
 pub(crate) use self::chat::{
-    chat_payload, create_chat_gremlin, handle_chat, resolve_chat_env, reusable_chat_gremlin_id,
+    create_chat_gremlin, handle_chat, resolve_chat_env, reusable_chat_gremlin_id,
 };
 #[allow(unused_imports)]
 pub(crate) use self::ops::resolve_filepath_source_values;

@@ -20,7 +20,7 @@ mod turn_runner;
 // helpers as `super::chat::{add_usage_stats, usage_stats_from_state}`.
 pub(crate) use self::payload::PromptMsg;
 pub(crate) use super::chat_handle::ChatGremlinHandle;
-#[allow(unused_imports)]
+#[cfg(test)]
 pub(crate) use payload::{add_usage_stats, chat_payload, usage_stats_from_state};
 pub(crate) use turn::{handle_cancel_chat, spawn_chat_gremlin};
 
@@ -407,7 +407,6 @@ pub(crate) async fn handle_chat(
         env,
         requested_skills,
         all_skills,
-        writer: writer.clone(),
     };
     if !handle.send(prompt).await {
         session_task.set_chat_handle(None).await;
@@ -416,18 +415,9 @@ pub(crate) async fn handle_chat(
         return;
     }
 
-    // 6. Acknowledge the request so the TUI's `send_request` completes. Chat
-    //    events themselves are unsolicited lines written by the task above and
-    //    classified separately by the client read loop.
-    //
-    //    Deliberately no `nonce` / `stage_run_id` here: the turn has not
-    //    started yet (the prompt was only just queued), so any identity
-    //    sampled from the run map now describes the *previous* execution.
-    //    The turn that starts publishes its stage run identity on
-    //    `CurrentTurn.stage_run_id` (see `chat/turn.rs::run_turn`), and
-    //    attachments bind to that descriptor; corrections validate against it
-    //    below.
-    let ack = serde_json::json!({"id": handle.id, "status": "streaming"});
+    // Acknowledge enqueue only. The bus carries output correlated with this
+    // caller's token; an execution identity exists only when its stage starts.
+    let ack = serde_json::json!({"id": handle.id, "status": "streaming", "turn": turn, "req_id": request.get("req_id")});
     let _ = writer.write_json_line(&ok_response(ack)).await;
 }
 
@@ -435,7 +425,7 @@ pub(crate) async fn handle_chat(
 ///
 /// The decision is a flat early-return chain:
 /// 1. If the session holds a live handle whose task is running and whose id
-///    matches a parked gremlin, return it.
+///    matches a parked gremlin or the setup handoff, return it.
 /// 2. If a parked gremlin id exists but the handle is stale (task exited),
 ///    re-drive the parked gremlin under the same id.
 /// 3. Otherwise reserve a fresh id and spawn a brand-new chat gremlin task.
@@ -542,8 +532,8 @@ async fn spawn_fresh_chat_gremlin(
     Ok(handle)
 }
 
-/// Return the session's parked chat gremlin id, waiting for an in-flight
-/// turn to re-insert.
+/// Return the session's reusable home, waiting for an installed turn to
+/// re-park or retaining the live task's identity during setup.
 pub(crate) async fn reusable_chat_gremlin_id(session_task: &SessionTaskHandle) -> Option<String> {
     loop {
         // Parked gremlin wins; otherwise look at the in-flight turn.
@@ -568,10 +558,19 @@ pub(crate) async fn reusable_chat_gremlin_id(session_task: &SessionTaskHandle) -
                 return ids.into_iter().next();
             }
             None => {
-                // A gremlin may have been parked between the two lookups.
-                // Recheck before giving up.
-                let ids = session_task.get_chat_gremlin_keys().await;
-                return ids.into_iter().next();
+                // The persistent task may own the gremlin during setup,
+                // before CurrentTurn is installed. Its live handle still owns
+                // the home; queue on it rather than creating a replacement.
+                if let Some(handle) = session_task.get_chat_handle().await {
+                    if !handle.is_finished() {
+                        return Some(handle.id);
+                    }
+                }
+                return session_task
+                    .get_chat_gremlin_keys()
+                    .await
+                    .into_iter()
+                    .next();
             }
         };
 

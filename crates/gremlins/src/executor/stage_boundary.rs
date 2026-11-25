@@ -17,12 +17,25 @@ pub(crate) struct StageInvocation {
 
 impl StageInvocation {
     pub(crate) fn enter(run_id: &str, name: &str, stage_type: &str) -> Self {
+        Self::enter_turn(run_id, name, stage_type, None)
+    }
+
+    pub(crate) fn enter_turn(
+        run_id: &str,
+        name: &str,
+        stage_type: &str,
+        turn: Option<&str>,
+    ) -> Self {
         let stage_run_id = super::state::token_hex(16);
+        let mut corr_id = CorrId::new()
+            .with_run(run_id)
+            .with_stage(name)
+            .with_stage_run_id(&stage_run_id);
+        if let Some(turn) = turn.filter(|t| !t.is_empty()) {
+            corr_id = corr_id.with_turn_token(turn);
+        }
         let invocation = Self {
-            corr_id: CorrId::new()
-                .with_run(run_id)
-                .with_stage(name)
-                .with_stage_run_id(&stage_run_id),
+            corr_id,
             stage_run_id,
             run_id: run_id.to_owned(),
             name: name.to_owned(),

@@ -13,7 +13,7 @@
 //!
 //! # String form
 //!
-//! The tagged form is `r:<run>:s:<stage>:t:<turn>:c:<tool>:a:<attempt>:x:<stage_run_id>`, with
+//! The tagged form is `r:<run>:s:<stage>:t:<turn>:c:<tool>:a:<attempt>:x:<stage_run_id>:q:<turn_token>`, with
 //! missing segments omitted entirely. String segment values may contain `:`
 //! and `\`; both are escaped on render (`\:` and `\\`) and unescaped on parse,
 //! so `to_string().parse::<CorrId>()` always round-trips for a valid
@@ -23,7 +23,7 @@ use std::fmt;
 use std::str::FromStr;
 
 /// Fixed segment order for both rendering and parsing.
-const FIELD_TAGS: &[u8] = b"rstcax";
+const FIELD_TAGS: &[u8] = b"rstcaxq";
 
 /// A segment-aware correlation identifier.
 ///
@@ -37,6 +37,7 @@ pub struct CorrId {
     tool: Option<String>,
     attempt: Option<u32>,
     stage_run_id: Option<String>,
+    turn_token: Option<String>,
 }
 
 impl CorrId {
@@ -76,6 +77,18 @@ impl CorrId {
     pub fn with_stage_run_id(mut self, value: impl Into<String>) -> Self {
         self.stage_run_id = Some(into_segment(value));
         self
+    }
+
+    /// Set an opaque caller turn token, independent of the numeric model turn.
+    ///
+    /// Panics if the value is empty, like the other string segment builders.
+    pub fn with_turn_token(mut self, value: impl Into<String>) -> Self {
+        self.turn_token = Some(into_segment(value));
+        self
+    }
+
+    pub fn turn_token(&self) -> Option<&str> {
+        self.turn_token.as_deref()
     }
 
     pub fn stage_run_id(&self) -> Option<&str> {
@@ -118,12 +131,13 @@ impl CorrId {
             && segment_matches(&self.tool, &prefix.tool)
             && segment_matches(&self.attempt, &prefix.attempt)
             && segment_matches(&self.stage_run_id, &prefix.stage_run_id)
+            && segment_matches(&self.turn_token, &prefix.turn_token)
     }
 
-    /// Parse the tagged string form, with optional `x:<stage_run_id>` last.
+    /// Parse the tagged string form, with optional `x:<stage_run_id>` and `q:<turn_token>`.
     ///
     /// Segments must appear in the fixed run -> stage -> turn -> tool ->
-    /// attempt -> stage-run id order and each tag may appear at most once. String values may
+    /// attempt -> stage-run id -> turn token order; each tag may appear at most once. String values may
     /// use `\:` and `\\` escapes for literal `:` and `\` characters.
     pub fn try_parse(s: &str) -> Result<Self, ParseCorrIdError> {
         let parsed = split_segments(s.as_bytes())?;
@@ -259,6 +273,7 @@ fn interpret_segments(
                 )
             }
             b'x' => corr_id.stage_run_id = Some(value),
+            b'q' => corr_id.turn_token = Some(value),
             _ => unreachable!("segment tags are validated by split_segments"),
         }
 
@@ -368,6 +383,10 @@ impl fmt::Display for CorrId {
             segments.push(format!("x:{}", escape_segment(stage_run_id)));
         }
 
+        if let Some(turn_token) = &self.turn_token {
+            segments.push(format!("q:{}", escape_segment(turn_token)));
+        }
+
         f.write_str(&segments.join(":"))
     }
 }
@@ -383,7 +402,7 @@ impl FromStr for CorrId {
 /// Error returned when a string is not a well-formed correlation identifier.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ParseCorrIdError {
-    /// A segment starts with a tag other than `r`, `s`, `t`, `c`, `a`, or `x`.
+    /// A segment starts with a tag other than `r`, `s`, `t`, `c`, `a`, `x`, or `q`.
     UnknownTag,
     /// A tag is not followed by `:`.
     MissingColon,
@@ -391,7 +410,7 @@ pub enum ParseCorrIdError {
     EmptyValue,
     /// The same segment tag appears more than once.
     DuplicateTag,
-    /// Segments violate run -> stage -> turn -> tool -> attempt -> stage-run id order.
+    /// Segments violate run -> stage -> turn -> tool -> attempt -> stage-run id -> turn token order.
     OutOfOrder,
     /// A `\` escape is not followed by `\` or `:`.
     InvalidEscape,
@@ -445,6 +464,61 @@ mod tests {
         let rendered = "r:abc123:s:reviews/checks:t:3:c:call_0:a:1";
         assert_eq!(corr_id.to_string(), rendered);
         assert_eq!(rendered.parse::<CorrId>().unwrap(), corr_id);
+    }
+
+    #[test]
+    fn turn_token_round_trips_as_an_opaque_string() {
+        assert_eq!(full().turn_token(), None);
+        for value in ["caller-turn", r"opaque:雪\:q:value", "00042"] {
+            for base in [CorrId::new(), full().with_stage_run_id("stage-run")] {
+                let corr_id = base.with_turn_token(value);
+                assert_eq!(corr_id.turn_token(), Some(value));
+                assert_eq!(corr_id.to_string().parse::<CorrId>().unwrap(), corr_id);
+            }
+        }
+        let corr_id = full()
+            .with_stage_run_id("stage-run")
+            .with_turn_token(r"e:q\y");
+        assert_eq!(corr_id.turn(), Some(3));
+        assert_eq!(
+            corr_id.to_string(),
+            r"r:abc123:s:reviews/checks:t:3:c:call_0:a:1:x:stage-run:q:e\:q\\y"
+        );
+    }
+
+    #[test]
+    fn turn_token_matching_is_exact_and_optional() {
+        let prefix = CorrId::new().with_turn_token("A");
+        let event = full().with_turn_token("A");
+        assert!(event.matches_prefix(&prefix));
+        assert!(event.matches_prefix(&full()));
+        assert!(event.matches_prefix(&CorrId::new()));
+        assert!(!full().matches_prefix(&prefix));
+        for value in ["AB", "A:child", "other"] {
+            assert!(!full().with_turn_token(value).matches_prefix(&prefix));
+        }
+        assert!(event.clone().with_turn(99).matches_prefix(&prefix));
+        assert!(!event.matches_prefix(&prefix.with_turn(99)));
+        assert_ne!(full(), event);
+    }
+
+    #[test]
+    fn turn_token_parser_validation() {
+        for (input, expected) in [
+            ("q:", ParseCorrIdError::EmptyValue),
+            ("q:a:q:b", ParseCorrIdError::DuplicateTag),
+            ("q:a:x:b", ParseCorrIdError::OutOfOrder),
+            (r"q:a\z", ParseCorrIdError::InvalidEscape),
+            ("q:a:", ParseCorrIdError::TrailingDelimiter),
+        ] {
+            assert_eq!(CorrId::try_parse(input).unwrap_err(), expected);
+        }
+    }
+
+    #[test]
+    #[should_panic(expected = "non-empty")]
+    fn empty_turn_token_is_rejected() {
+        CorrId::new().with_turn_token("");
     }
 
     #[test]

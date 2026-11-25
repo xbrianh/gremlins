@@ -38,9 +38,9 @@ pub(crate) struct ChatGremlinHandle {
 }
 
 impl ChatGremlinHandle {
-    /// Whether the underlying task has exited.
+    /// Whether the task has exited or permanently relinquished its home.
     pub(crate) fn is_finished(&self) -> bool {
-        self.finished.load(Ordering::Relaxed)
+        self.finished.load(Ordering::Relaxed) || self.cancel.is_cancelled()
     }
 
     /// Queue a turn, returning `false` when the task is gone (closed channel).

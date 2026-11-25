@@ -2500,6 +2500,8 @@ async fn slow_viewer_receiver_can_lag_without_blocking_owner() {
         })).await.unwrap();
         let ack = wait_for(&mut owner, |f| f["type"] == "ok").await;
         let id = ack["id"].as_str().unwrap();
+        let (sub, mut events) = subscribe_run(id);
+        let _guard = BusSubGuard::new(sub);
         let (_, mut stream) = pending_request(&provider).await;
         let (entered, release) = crate::executor::supervisor::attachment::receiver_gate::install(id);
         let (mut client, handler) = connection_mode(&registry, id, Some("passive"));
@@ -2510,21 +2512,42 @@ async fn slow_viewer_receiver_can_lag_without_blocking_owner() {
         stream.set_nodelay(true).unwrap();
         stream.write_all(b"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nConnection: close\r\n\r\n").await.unwrap();
         let mut expected = String::new();
+        let mut turn_corr = None;
         for index in 0..600 {
             let text = format!("chunk-{index} ");
             expected.push_str(&text);
             let chunk = format!("data: {}\n\n", json!({"choices":[{"index":0,"delta":{"content":text},"finish_reason":null}]}));
             stream.write_all(chunk.as_bytes()).await.unwrap();
-            let frame = wait_for(&mut owner, |frame| frame["type"] == "stream_chunk").await;
-            assert_eq!(frame["text"], text);
+            loop {
+                let Recv::Event(event) = events.recv().await else {
+                    panic!("owner bus closed or lagged before chunk {index}");
+                };
+                if let EventKind::StreamChunk { text: actual } = event.kind() {
+                    assert_eq!(actual, &text, "chunk {index}");
+                    assert_eq!(event.corr_id().run(), Some(id));
+                    assert!(event.corr_id().to_string().contains("slow-owner"));
+                    assert!(event.corr_id().stage_run_id().is_some());
+                    let corr = turn_corr.get_or_insert_with(|| event.corr_id().clone());
+                    assert_eq!(event.corr_id(), corr);
+                    break;
+                }
+            }
         }
         let done = json!({"choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"id":"done-slow","type":"function","function":{"name":"Done","arguments":json!({"summary":"all output intact"}).to_string()}}]},"finish_reason":"tool_calls"}]});
         stream.write_all(format!("data: {done}\n\ndata: [DONE]\n\n").as_bytes()).await.unwrap();
         stream.shutdown().await.unwrap();
-        let done_frame = wait_for(&mut owner, |frame| frame["type"] == "done").await;
-        assert_eq!(done_frame["chat_turn"], "slow-owner");
-        assert_eq!(done_frame["text"], expected);
-        // Owner terminal output proves the TurnRunner and model finished while
+        loop {
+            let Recv::Event(event) = events.recv().await else {
+                panic!("owner bus closed or lagged before completion");
+            };
+            assert!(!matches!(event.kind(), EventKind::StreamChunk { .. }), "unexpected extra chunk");
+            if let EventKind::Done { text, .. } = event.kind() {
+                assert_eq!(event.corr_id(), turn_corr.as_ref().unwrap());
+                assert_eq!(text, &expected);
+                break;
+            }
+        }
+        // Native owner bus output proves the TurnRunner and model finished while
         // the observer's receiver remains gated beyond its bounded capacity.
         release.send(()).unwrap();
         // Completion ends the snapshot while gated; it may close without

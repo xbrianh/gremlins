@@ -12,8 +12,8 @@
 //!
 //! 1. takes the gremlin out of its session,
 //! 2. installs a *fresh* per-turn [`CancelToken`] on it,
-//! 3. runs exactly one agent loop turn (`next_stage` → `run_stage`), streaming
-//!    bus events to the connection, and
+//! 3. runs exactly one agent loop turn (`next_stage` → `run_chat_stage`),
+//!    publishing events to the bus, and
 //! 4. restores the run-map cancel token and re-parks the gremlin.
 //!
 //! Two cancel tokens govern the task. A *persistent* token (the handle's
@@ -38,8 +38,9 @@ use crate::clients::client::Client as ModelClient;
 use crate::definition::ChatDefinition;
 use crate::executor::gremlin::Gremlin;
 use crate::executor::run_agent;
+use crate::executor::stage_boundary::StageInvocation;
 use gremlins_magic_bus::connection::SharedWriter;
-use gremlins_magic_bus::EventKind;
+use gremlins_magic_bus::{emit_corr_event, CorrId, EventKind};
 
 use super::super::chat_handle::ChatGremlinHandle;
 use super::super::run_registry::RunRegistry;
@@ -140,7 +141,10 @@ async fn chat_gremlin_task(
 
         #[cfg(test)]
         tokio::select! {
-            _ = cancel.cancelled() => break,
+            _ = cancel.cancelled() => {
+                publish_unstarted_end(&id, prompt.turn.as_deref());
+                break;
+            },
             _ = session_task.wait_turn_gate(prompt.turn.as_deref(), "start") => {}
         }
         run_turn(&id, &cancel, &registry, &session_task, prompt).await;
@@ -151,11 +155,32 @@ async fn chat_gremlin_task(
             break;
         }
     }
+    prompt_rx.close();
+    while let Some(prompt) = prompt_rx.recv().await {
+        publish_unstarted_end(&id, prompt.turn.as_deref());
+    }
     finished.store(true, Ordering::Relaxed);
     log::debug!("chat gremlin task {id} exiting");
 }
 
-/// Run exactly one turn for `prompt`, streaming its events to the connection.
+fn turn_corr(id: &str, turn: Option<&str>) -> CorrId {
+    let corr = CorrId::new().with_run(id);
+    match turn.filter(|turn| !turn.is_empty()) {
+        Some(turn) => corr.with_turn_token(turn),
+        None => corr,
+    }
+}
+
+fn publish_unstarted_end(id: &str, turn: Option<&str>) {
+    emit_corr_event(
+        &turn_corr(id, turn),
+        EventKind::Ended {
+            reason: "gremlin stopped before turn started".into(),
+        },
+    );
+}
+
+/// Run exactly one turn for `prompt`, publishing events to the bus.
 ///
 /// Takes the gremlin out of its session, installs a fresh per-turn cancel token
 /// on it, runs the stage, then re-parks it on every exit path.
@@ -176,7 +201,7 @@ async fn run_turn(
         env,
         requested_skills,
         all_skills,
-        writer,
+        ..
     } = prompt;
 
     // Take the gremlin out of the session. If it was removed underneath us
@@ -184,16 +209,12 @@ async fn run_turn(
     // acknowledged as streaming, so emit a terminal event for the TUI.
     let Some(mut gremlin) = session_task.take_gremlin(id).await else {
         log::debug!("chat turn {id}: gremlin gone, skipping turn");
-        let payload = super::payload::chat_payload(
-            &turn,
-            serde_json::to_value(EventKind::Ended {
-                reason: "gremlin stopped before turn started".to_string(),
-            })
-            .unwrap_or_default(),
-        );
-        let _ = writer.write_json_line(&payload).await;
+        publish_unstarted_end(id, turn.as_deref());
         return;
     };
+
+    #[cfg(test)]
+    session_task.wait_turn_gate(turn.as_deref(), "setup").await;
 
     // ── Prepare the gremlin for this turn ──────────────────────────────
 
@@ -218,9 +239,7 @@ async fn run_turn(
     let done_tx = Arc::new(done_tx);
     let hard = Arc::new(AtomicBool::new(false));
 
-    // Resolve the current turn's client and backend capability before
-    // publishing an interactive session. Keep the parse result for the usual
-    // post-announcement error path so TurnStarted ordering is unchanged.
+    // Validate setup without creating an interactive execution target.
     let llm_client = ModelClient::from_uri(chat_model.clone());
     let backend = match &llm_client {
         Ok(client) => client.get_or_build_backend().map_err(|error| {
@@ -229,15 +248,7 @@ async fn run_turn(
         }),
         Err(error) => Err(error.clone()),
     };
-    let accepts_commands = backend
-        .as_ref()
-        .map(|backend| backend.accepts_interactive_commands())
-        .unwrap_or(false);
     gremlin.cancel_token = Some(turn_cancel.clone());
-    let starting_target = gremlin.prepare_interactive_target_with_commands(accepts_commands);
-    let stage_run_id = starting_target
-        .as_ref()
-        .and_then(|target| target.stage_run_id().map(str::to_owned));
 
     // Announce the in-flight turn so cancel / stop / compact can find it.
     session_task
@@ -245,47 +256,25 @@ async fn run_turn(
             id: id.to_string(),
             turn: turn.clone(),
             cancel: turn_cancel.clone(),
-            done: done_rx,
+            done: done_rx.clone(),
             hard: hard.clone(),
             #[cfg(test)]
-            stage_run_id: stage_run_id.clone(),
+            stage_run_id: None,
         })
         .await;
 
-    let mut corr_id = gremlins_magic_bus::CorrId::new().with_run(id);
-    if let Some(stage_run_id) = stage_run_id.as_deref() {
-        corr_id = corr_id.with_stage_run_id(stage_run_id);
-    }
-    let runner = TurnRunner::new(TurnRunnerCfg {
+    let corr_id = turn_corr(id, turn.as_deref());
+    let mut runner = TurnRunner::new(TurnRunnerCfg {
         id: id.to_string(),
         turn,
         turn_cancel,
         persistent: persistent.clone(),
         registry: Arc::clone(registry),
         session_task: session_task.clone(),
-        writer: writer.clone(),
         corr_id,
         done: done_tx,
-        hard,
+        hard: hard.clone(),
     });
-
-    // Announce the prepared input identity; run_agent registers its sender under
-    // this ID. Output boundaries retain their separate invocation identity.
-    // Chat gremlins always carry an interactive factory; `None` is a naked-run
-    // case where there is nothing to target.
-    if let Some(stage_run_id) = stage_run_id {
-        let mut event = serde_json::to_value(EventKind::TurnStarted {
-            stage_run_id: stage_run_id.clone(),
-        })
-        .expect("TurnStarted must serialize");
-        event["id"] = serde_json::json!(id);
-        event["turn"] = serde_json::json!(runner.turn);
-        event["nonce"] = serde_json::json!(starting_target
-            .as_ref()
-            .expect("starting target must exist when stage_run_id is known")
-            .nonce());
-        runner.write(event).await;
-    }
 
     // Rebuild the parsed model handle for the reused gremlin so a `/model`
     // change takes effect on the next turn rather than only after the chat
@@ -309,6 +298,10 @@ async fn run_turn(
     gremlin.project_root = project_root;
     gremlin.env = env;
     gremlin.discovered_skills = Some(Arc::clone(&all_skills));
+    // Checkpoint before set_pending consumes a prior interruption notice.
+    // Restore it if cancellation wins before stage execution, including after
+    // next_stage has advanced the conversation artifact slot.
+    let definition_checkpoint = gremlin.definition.clone_box();
     // Queue this turn's prompt onto the ChatDefinition so `next_stage()` builds
     // the agent stage on demand.
     gremlin
@@ -331,6 +324,12 @@ async fn run_turn(
 
     // ── Drive the event loop ───────────────────────────────────────────
 
+    if persistent.is_cancelled() || runner.turn_cancel.is_cancelled() {
+        runner
+            .stop_before_stage(gremlin, definition_checkpoint)
+            .await;
+        return;
+    }
     // Build the stage (consumes the pending prompt).
     let stage = match gremlin.definition.next_stage().await {
         Ok(stage) => stage,
@@ -340,6 +339,32 @@ async fn run_turn(
             return;
         }
     };
+
+    if persistent.is_cancelled() || runner.turn_cancel.is_cancelled() {
+        runner
+            .stop_before_stage(gremlin, definition_checkpoint)
+            .await;
+        return;
+    }
+    let invocation =
+        StageInvocation::enter_turn(id, stage.name(), stage.stage_type(), runner.turn.as_deref());
+    runner.bind_corr(invocation.corr_id());
+    #[cfg(test)]
+    session_task
+        .set_current_turn(CurrentTurn {
+            id: id.to_owned(),
+            turn: runner.turn.clone(),
+            cancel: runner.turn_cancel.clone(),
+            done: done_rx,
+            hard,
+            stage_run_id: Some(invocation.stage_run_id.clone()),
+        })
+        .await;
+    runner
+        .write_event(EventKind::TurnStarted {
+            stage_run_id: invocation.stage_run_id.clone(),
+        })
+        .await;
 
     // Invalidate the per-turn artifact so a stale `conversation/NNNN.json`
     // from an abandoned branch is not loaded by `run_agent`.
@@ -364,7 +389,7 @@ async fn run_turn(
         _ = runner.turn_cancel.cancelled() => {},
         _ = session_task.wait_turn_gate(runner.turn.as_deref(), "incorporation") => {}
     }
-    runner.run(stage, gremlin).await;
+    runner.run(stage, gremlin, invocation).await;
 }
 
 /// Cancel the in-flight chat turn, or (for a permanent stop) the chat task.

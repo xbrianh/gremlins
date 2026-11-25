@@ -816,6 +816,10 @@ impl InteractiveSessionFactory {
             // The prepared session's identity has already been published.
             // Never replace it if backend selection disagrees; fail the caller's
             // turn while dropping this execution revokes the announced identity.
+            if stage_run_id.is_some_and(|id| session.slot.stage_run_id().as_deref() != Some(id)) {
+                drop(session);
+                return Err("interactive session identity disagrees with stage invocation");
+            }
             if session.accepts_commands != accepts_commands {
                 drop(session);
                 return Err("prepared interactive session capability disagrees with backend");
@@ -865,6 +869,7 @@ impl InteractiveSessionFactory {
     }
 
     /// Prepare and capture an execution from this factory, never a registry lookup.
+    #[cfg(test)]
     pub(crate) fn prepare_target_with_commands(
         &mut self,
         accepts_commands: bool,
@@ -1795,16 +1800,17 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn supplied_stage_does_not_replace_prepared_chat_identity() {
+    async fn supplied_stage_rejects_incompatible_prepared_chat_identity() {
         let (mut sessions, handle) = InteractiveSessionFactory::for_chat();
         let announced = sessions.prepare_next_with_commands(true, None);
         let target = handle.target();
-        let _session = sessions
-            .next_session_for_stage("ignored", true, None)
-            .unwrap();
+        assert!(matches!(
+            sessions.next_session_for_stage("different", true, None),
+            Err("interactive session identity disagrees with stage invocation")
+        ));
         assert_eq!(handle.target().stage_run_id(), Some(announced.as_str()));
         assert_eq!(handle.target().nonce(), target.nonce());
-        assert!(!target.end_signal().is_ended());
+        assert!(target.end_signal().is_ended());
     }
 
     #[tokio::test]

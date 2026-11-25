@@ -46,6 +46,23 @@ fn usage_stats(
     }
 }
 
+fn event_usage(baseline: Option<&UsageStats>, usage: &UsageStats) -> UsageStats {
+    let Some(baseline) = baseline else {
+        return usage.clone();
+    };
+    UsageStats {
+        turns: baseline.turns + usage.turns,
+        prompt_tokens: add_opt(baseline.prompt_tokens, usage.prompt_tokens),
+        completion_tokens: add_opt(baseline.completion_tokens, usage.completion_tokens),
+        cached_input_tokens: add_opt(baseline.cached_input_tokens, usage.cached_input_tokens),
+        cache_creation_input_tokens: add_opt(
+            baseline.cache_creation_input_tokens,
+            usage.cache_creation_input_tokens,
+        ),
+        reasoning_tokens: add_opt(baseline.reasoning_tokens, usage.reasoning_tokens),
+    }
+}
+
 fn completed_run(
     text: Option<String>,
     summary: Option<String>,
@@ -176,7 +193,7 @@ pub(super) async fn handle_done_decision(
                     state.total_reasoning_tokens,
                 );
             }
-            if !nested {
+            if !nested && !state.defer_done {
                 log::debug!("agent_loop: broadcasting Done (turn={})", state.turn_num);
                 tokio::select! {
                     biased;
@@ -186,7 +203,7 @@ pub(super) async fn handle_done_decision(
                     _ = emit_corr_event_async(&state.corr_id, EventKind::Done {
                         text: result_text.clone(),
                         summary: done_summary.clone(),
-                        usage: Some(usage.clone()),
+                        usage: Some(event_usage(state.usage_baseline.as_ref(), &usage)),
                     }) => {}
                 }
                 if state.interactive.is_attached() {
@@ -448,7 +465,7 @@ pub(super) async fn emit_turn_artifacts(
                     text: text.to_string(),
                     tool_calls: tool_calls.iter().map(format_tool_call).collect(),
                     stats: turn_stats.clone(),
-                    totals: Some(totals.clone()),
+                    totals: Some(event_usage(state.usage_baseline.as_ref(), totals)),
                 }) => {}
             }
         }
@@ -501,5 +518,29 @@ fn write_raw(raw: &mut Option<std::fs::File>, evt: &serde_json::Value) {
             let _ = writeln!(f, "{line}");
             let _ = f.flush();
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{event_usage, usage_stats};
+
+    #[test]
+    fn event_baseline_preserves_missing_counters_and_reported_zero() {
+        let local = usage_stats(1, None, Some(0), Some(3), None, None);
+        let baseline = usage_stats(2, Some(9), None, Some(4), None, None);
+        let combined = event_usage(Some(&baseline), &local);
+        assert_eq!(combined.turns, 3);
+        assert_eq!(combined.prompt_tokens, Some(9));
+        assert_eq!(combined.completion_tokens, Some(0));
+        assert_eq!(combined.cached_input_tokens, Some(7));
+        assert_eq!(combined.cache_creation_input_tokens, None);
+        assert_eq!(combined.reasoning_tokens, None);
+        assert_eq!(
+            serde_json::to_value(event_usage(None, &local)).unwrap(),
+            serde_json::to_value(&local).unwrap(),
+        );
+        assert_eq!(local.turns, 1);
+        assert_eq!(local.prompt_tokens, None);
     }
 }

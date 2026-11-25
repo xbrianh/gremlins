@@ -1,90 +1,52 @@
-//! Turn runner: owns the event loop and terminal-path handling for one
-//! chat turn.
-//!
-//! Extracted from [`super::turn`] so the turn orchestration stays readable —
-//! the persistent task and per-turn preparation live in `turn`, while the
-//! event loop, bus subscription, and "re-park the gremlin" unwinding live here.
+//! Bus observation and terminal cleanup for one chat turn.
 
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
-use serde_json::Value;
 use tokio::sync::watch;
-use tokio::task::{JoinError, JoinHandle};
+use tokio::task::JoinError;
 
 use crate::clients::cancel::CancelToken;
-use crate::clients::interactive::MESSAGE_DELIVERED_REASON;
-use crate::definition::ExecutorStage;
+use crate::definition::{ExecutorStage, GremlinDefinition};
 use crate::executor::gremlin::Gremlin;
-use crate::executor::run::run_stage;
+use crate::executor::run::run_chat_stage;
 use crate::executor::run_agent;
+use crate::executor::stage_boundary::StageInvocation;
 use crate::executor::RunError;
-use gremlins_magic_bus::connection::{BusSubGuard, SharedWriter};
-use gremlins_magic_bus::{emit_corr_event, subscribe_run_backpressured, CorrId, EventKind, Recv};
+use gremlins_magic_bus::connection::BusSubGuard;
+use gremlins_magic_bus::{emit_corr_event, subscribe_run, CorrId, EventKind, Recv};
 
 use super::super::run_registry::RunRegistry;
 use super::super::session_task::SessionTaskHandle;
-use super::payload::{add_usage_stats, chat_payload, usage_stats_from_state};
 
-// ── Internal outcome type ───────────────────────────────────────────────
-
-/// How a chat turn ended, used to classify the terminal unwinding path.
 enum TurnEnd {
-    /// A stream terminal event arrived (Done, Ended, Error from stream).
-    /// The payload is written after the gremlin is re-parked.
-    Terminal(Value),
-    /// The turn was cancelled. `reason` is the `Ended.reason` string.
-    /// `discard_artifact` controls whether the per-turn conversation
-    /// artifact is cleared.
+    Complete,
     Cancelled {
-        reason: String,
+        reason: &'static str,
         discard_artifact: bool,
     },
+    Failed(String),
 }
 
-/// A stage returns the gremlin to the event loop even on error.
+#[cfg(test)]
+#[path = "turn_runner_tests.rs"]
+mod tests;
+
 type RunTaskOutput = (Result<(), RunError>, Gremlin);
-type RunTaskHandle = JoinHandle<RunTaskOutput>;
 
-// ── TurnRunner ──────────────────────────────────────────────────────────
-
-/// Terminal-path resources for one chat turn.
-///
-/// Holds everything a turn needs to unwind: the run registry, the per-turn and
-/// persistent cancel tokens, the `done` broadcaster, the connection writer,
-/// and the bus subscription guard. Every exit path goes through one of its
-/// methods so the "re-park the gremlin, restore the run-map token, clear
-/// `current_turn`, signal `done`, emit the terminal event" dance happens
-/// exactly once.
-///
-/// Constructed by [`new`](TurnRunner::new); most fields are private so
-/// external code cannot bypass the terminal-path invariants.  The fields that
-/// `turn.rs` needs during turn setup (`id`, `turn`, `turn_cancel`, `registry`)
-/// are `pub(super)`.
+/// Owns re-parking, cancel-token restoration, and completion notification.
 pub(super) struct TurnRunner {
-    /// The gremlin id this turn drives.
     pub(super) id: String,
-    /// The client-generated turn id, echoed on chat events.
     pub(super) turn: Option<String>,
-    /// The per-turn cancel token, installed on the gremlin and run map
-    /// before [`run`](TurnRunner::run) is called.
     pub(super) turn_cancel: Arc<CancelToken>,
-    /// The run registry for the turn. Public so `turn.rs` can call
-    /// `set_run_cancel` during turn setup.
     pub(super) registry: Arc<RunRegistry>,
-    /// Handle to the owning session task; all session-scoped state (current
-    /// turn, parked gremlins, skills) is reached through it.
     session_task: SessionTaskHandle,
-    /// The task's persistent token, restored on the run map after each turn.
     persistent: Arc<CancelToken>,
     corr_id: CorrId,
-    writer: SharedWriter,
     done: Arc<watch::Sender<bool>>,
     hard: Arc<AtomicBool>,
 }
 
-/// Config bag for [`TurnRunner::new`] — keeps the arg count under clippy's
-/// limit without sacrificing clarity.
 pub(super) struct TurnRunnerCfg {
     pub id: String,
     pub turn: Option<String>,
@@ -93,206 +55,151 @@ pub(super) struct TurnRunnerCfg {
     pub registry: Arc<RunRegistry>,
     pub session_task: SessionTaskHandle,
     pub corr_id: CorrId,
-    pub writer: SharedWriter,
     pub done: Arc<watch::Sender<bool>>,
     pub hard: Arc<AtomicBool>,
 }
 
 impl TurnRunner {
-    /// Build a new runner from the pieces assembled in [`super::turn::run_turn`].
     pub(super) fn new(cfg: TurnRunnerCfg) -> Self {
-        let TurnRunnerCfg {
-            id,
-            turn,
-            turn_cancel,
-            persistent,
-            registry,
-            session_task,
-            corr_id,
-            writer,
-            done,
-            hard,
-        } = cfg;
         Self {
-            id,
-            turn,
-            turn_cancel,
-            persistent,
-            registry,
-            session_task,
-            corr_id,
-            writer,
-            done,
-            hard,
+            id: cfg.id,
+            turn: cfg.turn,
+            turn_cancel: cfg.turn_cancel,
+            persistent: cfg.persistent,
+            registry: cfg.registry,
+            session_task: cfg.session_task,
+            corr_id: cfg.corr_id,
+            done: cfg.done,
+            hard: cfg.hard,
         }
     }
 
-    /// Run the stage and forward its stream events until a terminal event,
-    /// a cancellation, or a write error.
-    pub(super) async fn run(&self, stage: ExecutorStage, mut gremlin: Gremlin) {
-        // Subscribe *before* spawning the stage runner so no early event (the
-        // first chunks) is missed. The bounded buffer applies backpressure to
-        // the agent loop instead of dropping live stream events.
-        let (stream_sub, mut stream_rx) = subscribe_run_backpressured(&self.id, 256);
-        let mut stream_guard = Some(BusSubGuard::new(stream_sub));
+    pub(super) fn bind_corr(&mut self, corr_id: CorrId) {
+        self.corr_id = corr_id;
+    }
 
-        // Capture the turn number from the stage name so cancel cleanup can
-        // always clear the per-turn artifact.
-        let chat_turn_num = run_agent::chat_turn_from_stage_name(stage.name());
+    pub(super) async fn stop_before_stage(
+        &self,
+        mut gremlin: Gremlin,
+        checkpoint: Box<dyn GremlinDefinition>,
+    ) {
+        // Restore both the consumed slot and any prior interruption notice.
+        gremlin.definition = checkpoint;
+        if self.hard.load(Ordering::Relaxed) {
+            if let Some(chat) = gremlin
+                .definition
+                .as_any_mut()
+                .and_then(|a| a.downcast_mut::<crate::definition::ChatDefinition>())
+            {
+                chat.clear_interrupted();
+            }
+        }
+        self.reinsert(gremlin).await;
+        self.write_event(EventKind::Ended {
+            reason: "cancelled before stage started".into(),
+        })
+        .await;
+        self.clear_turn_and_signal().await;
+    }
 
-        // Capture the conversation baseline *before* moving the gremlin into
-        // the stage runner (`run_stage` accumulates this prompt's usage into
-        // the same state after completion).
-        let baseline_usage =
-            usage_stats_from_state(gremlin.state.read_field("token_usage").as_ref());
-
+    pub(super) async fn run(
+        &self,
+        stage: ExecutorStage,
+        mut gremlin: Gremlin,
+        invocation: StageInvocation,
+    ) {
+        // Lossless/unbounded bookkeeping, independent of lossy display readers.
+        // Subscribe before spawning so neither skills nor Done can be lost.
+        let (sub, mut rx) = subscribe_run(&self.id);
+        let guard = BusSubGuard::new(sub);
+        let turn_num = run_agent::chat_turn_from_stage_name(stage.name());
         let debug_terminal = gremlin
             .interactive_sessions
             .as_mut()
             .map(|sessions| sessions.supervise_next_turn());
-        let mut run_task: RunTaskHandle = tokio::spawn(async move {
-            let result = run_stage(&stage, &mut gremlin).await;
+        let mut task = tokio::spawn(async move {
+            let result = run_chat_stage(&stage, &mut gremlin, invocation).await;
             (result, gremlin)
         });
-
-        let (result, writer_live) = loop {
-            macro_rules! send {
-                ($fields:expr) => {
-                    let payload = chat_payload(&self.turn, $fields);
-                    if self.writer.write_json_line(&payload).await.is_err() {
-                        // No consumer remains for the bounded chat stream.
-                        Self::drop_guard(&mut stream_guard);
-                        drop(stream_rx);
-                        break (run_task.await, false);
-                    }
-                };
+        let mut saw_done = false;
+        let result = loop {
+            tokio::select! {
+                result = &mut task => break result,
+                event = rx.recv() => match event {
+                    Recv::Event(event) => self.record_producer_event(event.into_kind(), &mut saw_done).await,
+                    Recv::Lagged(_) => continue,
+                    Recv::Closed => break task.await,
+                },
             }
-            let result = tokio::select! {
-                biased;
-
-                result = stream_rx.recv() => {
-                    let event = match result {
-                        Recv::Event(dispatch) => dispatch.into_kind(),
-                        // Backpressured receivers never lag; ignore defensively.
-                        Recv::Lagged(_) => continue,
-                        Recv::Closed => {
-                            let ev = EventKind::Error {
-                                message: "agent exited before completing".to_string(),
-                                turn: self.turn.clone(),
-                            };
-                            emit_corr_event(&self.corr_id, ev.clone());
-                            let payload = self.dispatch_terminal(
-                                TurnEnd::Terminal(
-                                    serde_json::to_value(&ev).unwrap_or_default(),
-                                ),
-                                None,
-                                &mut stream_guard,
-                                Some(&mut run_task),
-                                chat_turn_num,
-                            )
-                            .await;
-                            self.write_payload(payload).await;
-                            return;
-                        }
-                    };
-                    match event {
-                        EventKind::StreamChunk { .. }
-                        | EventKind::ReasoningChunk { .. }
-                        | EventKind::ToolOutputChunk { .. }
-                        | EventKind::StreamReset
-                        | EventKind::ToolResult { .. }
-                        | EventKind::TaskProgress { .. } => {
-                            send!(serde_json::to_value(&event).unwrap_or_default());
-                        }
-                        EventKind::TurnComplete { turn, text, tool_calls, stats, totals } => {
-                            let total = totals.as_ref().map(|t| add_usage_stats(&baseline_usage, t));
-                            let ev = EventKind::TurnComplete { turn, text, tool_calls, stats, totals: total };
-                            send!(serde_json::to_value(&ev).unwrap_or_default());
-                        }
-                        EventKind::Done { text, summary, usage } => {
-                            let usage = usage.as_ref().map(|u| add_usage_stats(&baseline_usage, u));
-                            let ev = EventKind::Done { text, summary, usage };
-                            let payload = self.dispatch_terminal(
-                                TurnEnd::Terminal(
-                                    serde_json::to_value(&ev).unwrap_or_default(),
-                                ),
-                                None,
-                                &mut stream_guard,
-                                Some(&mut run_task),
-                                chat_turn_num,
-                            )
-                            .await;
-                            self.write_payload(payload).await;
-                            return;
-                        }
-                        // Detaching the debugger resumes the model. Keep draining
-                        // the chat stream until the turn itself has ended.
-                        EventKind::Ended { ref reason }
-                            if matches!(reason.as_str(), "resumed" | "disconnect" | MESSAGE_DELIVERED_REASON) => {}
-                        EventKind::Ended { .. } => {
-                            let payload = self.dispatch_terminal(
-                                TurnEnd::Terminal(
-                                    serde_json::to_value(&event).unwrap_or_default(),
-                                ),
-                                None,
-                                &mut stream_guard,
-                                Some(&mut run_task),
-                                chat_turn_num,
-                            )
-                            .await;
-                            self.write_payload(payload).await;
-                            return;
-                        }
-                        // Ignore Ready in chat mode.
-                        EventKind::Ready { .. } => {}
-                        EventKind::Error { .. } | EventKind::SystemWarning { .. } => {
-                            send!(serde_json::to_value(&event).unwrap_or_default());
-                        }
-                        EventKind::SkillLoaded { name, .. } => {
-                            // Append the model-loaded skill to the session so
-                            // the next turn's system prompt picks it up.
-                            self.session_task
-                                .append_model_skills(vec![name])
-                                .await;
-                        }
-                        // Other run-scoped events are not part of the chat
-                        // stream protocol.
-                        _ => {}
-                    }
-                    continue;
-                }
-
-                _ = self.turn_cancel.cancelled() => {
-                    // Stop backpressuring the stage while we wait for it to unwind.
-                    Self::drop_guard(&mut stream_guard);
-                    drop(stream_rx);
-                    run_task.await
-                }
-                result = &mut run_task => result,
-            };
-            break (result, true);
         };
-        let (gremlin, end) = self.classify_task_result(result);
+        // Detach first: late run publishers must not extend terminal cleanup.
+        // Lossless sends are synchronous, so the joined producer's events are
+        // already queued. Snapshot a finite drain even if a sender is in flight.
+        drop(guard);
+        let pending = match &rx {
+            gremlins_magic_bus::ReceiverHalf::Lossless(rx) => rx.len(),
+            _ => unreachable!("turn bookkeeping requires lossless delivery"),
+        };
+        for _ in 0..pending {
+            let Ok(event) = rx.try_recv() else { break };
+            self.record_producer_event(event.into_kind(), &mut saw_done)
+                .await;
+        }
+
+        let (gremlin, end) = self.classify_task_result(result, saw_done);
         if let (Some(terminal), TurnEnd::Cancelled { reason, .. }) = (&debug_terminal, &end) {
             terminal.end(reason);
         }
-        let payload = self
-            .dispatch_terminal(end, gremlin, &mut stream_guard, None, chat_turn_num)
-            .await;
-        if writer_live {
-            self.write_payload(payload).await;
+        let discard = match &end {
+            TurnEnd::Complete => false,
+            TurnEnd::Cancelled {
+                discard_artifact, ..
+            } => *discard_artifact,
+            TurnEnd::Failed(_) => true,
+        };
+        if let Some(gremlin) = gremlin {
+            if discard {
+                if let Some(turn_num) = turn_num {
+                    run_agent::clear_chat_turn_artifact(&gremlin, turn_num).await;
+                }
+            }
+            self.reinsert(gremlin).await;
+        } else {
+            // The stage task lost its gremlin. Retire the prompt task rather
+            // than accepting further turns that can never execute.
+            self.persistent.cancel();
+            let _ = self.registry.stop_run(&self.id).await;
+        }
+        match end {
+            TurnEnd::Complete => {}
+            TurnEnd::Cancelled { reason, .. } => {
+                self.write_event(EventKind::Ended {
+                    reason: reason.into(),
+                })
+                .await;
+            }
+            TurnEnd::Failed(message) => self.publish_failure(&self.corr_id, message),
+        }
+        self.clear_turn_and_signal().await;
+    }
+
+    async fn record_producer_event(&self, event: EventKind, saw_done: &mut bool) {
+        match event {
+            EventKind::SkillLoaded { name, .. } => {
+                self.session_task.append_model_skills(vec![name]).await;
+            }
+            EventKind::Done { .. } => *saw_done = true,
+            _ => {}
         }
     }
 
-    /// A cancelled stage can finish between polling the cancel token and the
-    /// join handle. Its history policy must not depend on which arm won.
     fn classify_task_result(
         &self,
         result: Result<RunTaskOutput, JoinError>,
+        saw_done: bool,
     ) -> (Option<Gremlin>, TurnEnd) {
-        let cancelled = self.turn_cancel.is_cancelled();
-        let (gremlin, reason, discard_artifact) = match result {
-            Ok((Err(RunError::Cancelled), mut gremlin)) if cancelled => {
+        match result {
+            Ok((Err(RunError::Cancelled), mut gremlin)) if self.turn_cancel.is_cancelled() => {
                 let hard = self.hard.load(Ordering::Relaxed);
                 if let Some(chat) = gremlin
                     .definition
@@ -305,121 +212,67 @@ impl TurnRunner {
                         chat.mark_interrupted();
                     }
                 }
-                let reason = if hard { "cancelled" } else { "interrupted" };
-                (Some(gremlin), reason.into(), hard)
+                (
+                    Some(gremlin),
+                    TurnEnd::Cancelled {
+                        reason: if hard { "cancelled" } else { "interrupted" },
+                        discard_artifact: hard,
+                    },
+                )
             }
-            Ok((_, gremlin)) if cancelled => (Some(gremlin), "cancelled".into(), true),
+            Ok((Err(error), gremlin)) => (
+                Some(gremlin),
+                TurnEnd::Failed(format!("agent error: {error}")),
+            ),
+            // Once the producer completed, a late stop cannot create a second terminal.
+            Ok((Ok(()), gremlin)) if saw_done => (Some(gremlin), TurnEnd::Complete),
+            Ok((Ok(()), gremlin)) if self.turn_cancel.is_cancelled() => (
+                Some(gremlin),
+                TurnEnd::Cancelled {
+                    reason: "cancelled",
+                    discard_artifact: true,
+                },
+            ),
             Ok((Ok(()), gremlin)) => (
                 Some(gremlin),
-                "agent completed without terminal event".into(),
-                true,
+                TurnEnd::Failed("agent completed without terminal event".into()),
             ),
-            Ok((Err(e), gremlin)) => (Some(gremlin), format!("agent error: {e}"), true),
-            Err(e) if e.is_panic() => (None, "agent panicked".into(), true),
-            Err(e) => (None, format!("agent task cancelled: {e}"), true),
-        };
-        (
-            gremlin,
-            TurnEnd::Cancelled {
-                reason,
-                discard_artifact,
-            },
-        )
-    }
-
-    /// Abort turn setup before the stage runner consumes its prepared session
-    /// (invalid model, definition error): re-park the gremlin, clear the
-    /// in-flight turn, and report the error.
-    pub(super) async fn abort(&self, mut gremlin: Gremlin, message: &str) {
-        // The chat turn eagerly published an interactive session before
-        // validating the model/building its stage. If this aborts before the
-        // stage runner consumes that session, drop it before parking the
-        // gremlin so the execution is revoked rather than left live.
-        gremlin.discard_prepared_interactive_session();
-        gremlin.cancel_token = None;
-        self.restore_run_cancel().await;
-        self.session_task.reinsert_gremlin(&self.id, gremlin).await;
-        self.clear_turn_and_signal().await;
-        self.write_event(EventKind::Error {
-            message: message.to_string(),
-            turn: self.turn.clone(),
-        })
-        .await;
-    }
-
-    /// Write a chat payload to the connection, tagged with this turn's id.
-    /// Public so `turn.rs` can emit events during the preparation phase
-    /// (e.g. unresolved-skill warnings) before entering `run`.
-    pub(super) async fn write(&self, payload: Value) {
-        self.write_payload(payload).await;
-    }
-
-    pub(super) async fn write_event(&self, event: EventKind) {
-        emit_corr_event(&self.corr_id, event.clone());
-        self.write_payload(serde_json::to_value(event).unwrap_or_default())
-            .await;
-    }
-
-    // ── Internal helpers ────────────────────────────────────────────────
-
-    /// Single terminal dispatch: matches [`TurnEnd`] and executes the right
-    /// unwinding path. There is no silent fall-through — both variants are
-    /// handled exhaustively via a `match`, so the compiler guarantees every
-    /// outcome is handled.
-    ///
-    /// Callers that already awaited the run task (cancel and task-completion
-    /// arms) pass the recovered gremlin as `gremlin_opt` and `None` for
-    /// `run_task`; stream-terminal callers pass `Some(run_task)` and `None`
-    /// for `gremlin_opt`.
-    async fn dispatch_terminal(
-        &self,
-        end: TurnEnd,
-        gremlin_opt: Option<Gremlin>,
-        guard: &mut Option<BusSubGuard>,
-        run_task: Option<&mut RunTaskHandle>,
-        chat_turn_num: Option<usize>,
-    ) -> Value {
-        match end {
-            TurnEnd::Terminal(payload) => {
-                // Stream-terminal: gremlin not yet recovered; finish() does it.
-                let rt = run_task.expect("Terminal path requires run_task");
-                self.finish(guard, rt).await;
-                payload
-            }
-            TurnEnd::Cancelled {
-                reason,
-                discard_artifact,
-            } => {
-                // The gremlin was already recovered by the caller (cancel or
-                // task-completion arm).  If one is present, optionally clear
-                // the per-turn artifact before re-parking it.
-                if let Some(gremlin) = gremlin_opt {
-                    if discard_artifact {
-                        if let Some(turn_num) = chat_turn_num {
-                            run_agent::clear_chat_turn_artifact(&gremlin, turn_num).await;
-                        }
-                    }
-                    self.reinsert(guard, gremlin).await;
-                } else {
-                    Self::drop_guard(guard);
-                    self.restore_run_cancel().await;
-                }
-                self.clear_turn_and_signal().await;
-                let event = EventKind::Ended { reason };
-                emit_corr_event(&self.corr_id, event.clone());
-                serde_json::to_value(event).unwrap_or_default()
-            }
+            Err(error) if error.is_panic() => (None, TurnEnd::Failed("agent panicked".into())),
+            Err(error) => (
+                None,
+                TurnEnd::Failed(format!("agent task cancelled: {error}")),
+            ),
         }
     }
 
-    /// Write a chat payload to the connection, tagged with this turn's id.
-    async fn write_payload(&self, payload: Value) {
-        let payload = chat_payload(&self.turn, payload);
-        let _ = self.writer.write_json_line(&payload).await;
+    pub(super) async fn abort(&self, mut gremlin: Gremlin, message: &str) {
+        gremlin.discard_prepared_interactive_session();
+        self.reinsert(gremlin).await;
+        let mut corr = CorrId::new().with_run(&self.id);
+        if let Some(turn) = self.turn.as_deref().filter(|turn| !turn.is_empty()) {
+            corr = corr.with_turn_token(turn);
+        }
+        self.publish_failure(&corr, message.into());
+        self.clear_turn_and_signal().await;
     }
 
-    /// Clear `current_turn` on the session (only when it still points at this
-    /// turn's cancel token), then publish `true` on `done`.
+    pub(super) async fn write_event(&self, event: EventKind) {
+        emit_corr_event(&self.corr_id, event);
+    }
+
+    /// Error is diagnostic, not completion. Ended is the failed-turn terminal;
+    /// consumers must wait for Ended rather than completing twice on this pair.
+    fn publish_failure(&self, corr: &CorrId, message: String) {
+        emit_corr_event(
+            corr,
+            EventKind::Error {
+                message: message.clone(),
+                turn: self.turn.clone(),
+            },
+        );
+        emit_corr_event(corr, EventKind::Ended { reason: message });
+    }
+
     async fn clear_turn_and_signal(&self) {
         self.session_task
             .clear_current_turn(self.turn_cancel.clone())
@@ -427,40 +280,15 @@ impl TurnRunner {
         let _ = self.done.send(true);
     }
 
-    /// Drop the bus subscription guard so the next turn (which reuses the
-    /// same run id) gets its own fresh subscription instead of filling this
-    /// turn's undrained mailbox.
-    fn drop_guard(guard: &mut Option<BusSubGuard>) {
-        drop(guard.take());
-    }
-
-    /// Restore the run map's cancel token to the task's persistent one.
     async fn restore_run_cancel(&self) {
         self.registry
             .set_run_cancel(&self.id, self.persistent.clone())
             .await;
     }
 
-    /// Re-park the gremlin in its session, restoring the run-map cancel token
-    /// to the persistent one first.
-    async fn reinsert(&self, guard: &mut Option<BusSubGuard>, mut gremlin: Gremlin) {
-        Self::drop_guard(guard);
+    async fn reinsert(&self, mut gremlin: Gremlin) {
         gremlin.cancel_token = None;
         self.restore_run_cancel().await;
         self.session_task.reinsert_gremlin(&self.id, gremlin).await;
-    }
-
-    /// Await the run task, re-park the gremlin if the task returned one, then
-    /// clear the in-flight turn and signal completion.
-    async fn finish(&self, guard: &mut Option<BusSubGuard>, run_task: &mut RunTaskHandle) {
-        match run_task.await {
-            Ok((_, gremlin)) => self.reinsert(guard, gremlin).await,
-            Err(e) => {
-                log::warn!("chat turn {}: run task panicked: {e}", self.id);
-                Self::drop_guard(guard);
-                self.restore_run_cancel().await;
-            }
-        }
-        self.clear_turn_and_signal().await;
     }
 }

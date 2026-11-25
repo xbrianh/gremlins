@@ -53,6 +53,41 @@ pub(crate) fn agent_raw_stream_path(gremlin: &Gremlin, name: &str) -> Result<Pat
 // Agent
 // ---------------------------------------------------------------------------
 
+fn usage_baseline_from_state(
+    value: Option<&serde_json::Value>,
+) -> crate::clients::protocol::UsageStats {
+    let counter = |key: &str| value.and_then(|v| v.get(key)).and_then(|v| v.as_u64());
+    crate::clients::protocol::UsageStats {
+        prompt_tokens: counter("prompt_tokens"),
+        completion_tokens: counter("completion_tokens"),
+        cached_input_tokens: counter("cached_input_tokens"),
+        cache_creation_input_tokens: counter("cache_creation_input_tokens"),
+        reasoning_tokens: counter("reasoning_tokens"),
+        turns: counter("turns").unwrap_or(0) as usize,
+    }
+}
+
+fn chat_done_usage(
+    baseline: Option<&crate::clients::protocol::UsageStats>,
+    local: Option<&crate::clients::protocol::UsageStats>,
+) -> Option<crate::clients::protocol::UsageStats> {
+    use crate::clients::protocol::{add_opt, UsageStats};
+    match (baseline, local) {
+        (None, usage) | (usage, None) => usage.cloned(),
+        (Some(base), Some(local)) => Some(UsageStats {
+            turns: base.turns + local.turns,
+            prompt_tokens: add_opt(base.prompt_tokens, local.prompt_tokens),
+            completion_tokens: add_opt(base.completion_tokens, local.completion_tokens),
+            cached_input_tokens: add_opt(base.cached_input_tokens, local.cached_input_tokens),
+            cache_creation_input_tokens: add_opt(
+                base.cache_creation_input_tokens,
+                local.cache_creation_input_tokens,
+            ),
+            reasoning_tokens: add_opt(base.reasoning_tokens, local.reasoning_tokens),
+        }),
+    }
+}
+
 /// Merge task-model layers into a kind-keyed map.
 pub(crate) fn resolve_task_models(
     global: Option<&IndexMap<String, String>>,
@@ -135,12 +170,9 @@ pub(crate) async fn run_agent(
         }
     };
     let accepts_commands = backend.accepts_interactive_commands();
-    // Chat input keeps its prepared session identity, independently of output correlation.
-    let session = if is_chat {
-        gremlin.next_interactive_session_with_commands(accepts_commands)
-    } else {
-        gremlin.next_pipeline_interactive_session(&invocation.stage_run_id, accepts_commands)
-    };
+    // Input and output share the actual invocation identity.
+    let session =
+        gremlin.next_pipeline_interactive_session(&invocation.stage_run_id, accepts_commands);
     let mut interactive = match session {
         Ok(session) => session,
         Err(error) => return Err(stage_failed(&agent.name, error)),
@@ -385,8 +417,12 @@ pub(crate) async fn run_agent(
             artifact: artifact_check,
         });
 
+    let usage_baseline = is_chat
+        .then(|| usage_baseline_from_state(gremlin.state.read_field("token_usage").as_ref()));
     let params = RunParams {
+        defer_done: is_chat,
         output_corr_id: Some(corr_id.clone()),
+        usage_baseline: usage_baseline.clone(),
         prompt: prepared.user_prompt(),
         label: prepared.name.clone(),
         model: if gremlin.runtime_config.resolved_model_selection.is_some() {
@@ -596,6 +632,18 @@ pub(crate) async fn run_agent(
         .join(local_registry.as_ref(), Collision::Ignore, None)
         .await
         .map_err(|error| stage_failed(&prepared.name, error))?;
+
+    // Home-chat completion is authoritative only after commit and registry merge.
+    if is_chat && completed.exit_code == 0 {
+        emit_corr_event(
+            &corr_id,
+            EventKind::Done {
+                text: completed.text_result.unwrap_or_default(),
+                summary: completed.summary.unwrap_or_default(),
+                usage: chat_done_usage(usage_baseline.as_ref(), completed.token_usage.as_ref()),
+            },
+        );
+    }
 
     Ok(())
 }
@@ -809,6 +857,41 @@ mod tests {
     use crate::schemas::bootstrap::Bootstrap;
     use crate::test_support::Sandbox;
     use std::sync::{Arc, Mutex};
+
+    #[test]
+    fn chat_done_usage_adds_delta_without_mutating_it() {
+        let baseline = usage_baseline_from_state(Some(&serde_json::json!({
+            "turns": 3, "prompt_tokens": 17, "completion_tokens": 0
+        })));
+        let local = usage_baseline_from_state(Some(&serde_json::json!({
+            "turns": 1, "prompt_tokens": 5, "cached_input_tokens": 2
+        })));
+        let usage = chat_done_usage(Some(&baseline), Some(&local)).unwrap();
+        assert_eq!(usage.turns, 4);
+        assert_eq!(usage.prompt_tokens, Some(22));
+        assert_eq!(usage.completion_tokens, Some(0));
+        assert_eq!(usage.cached_input_tokens, Some(2));
+        assert_eq!(usage.reasoning_tokens, None);
+        assert_eq!(local.turns, 1);
+        assert_eq!(local.prompt_tokens, Some(5));
+        assert!(chat_done_usage(None, None).is_none());
+    }
+
+    #[test]
+    fn chat_usage_baseline_preserves_optional_counters() {
+        let empty = usage_baseline_from_state(None);
+        assert_eq!(empty.turns, 0);
+        assert_eq!(empty.prompt_tokens, None);
+        let value = serde_json::json!({
+            "turns": 4, "prompt_tokens": 123, "completion_tokens": 0,
+            "cached_input_tokens": 12, "cache_creation_input_tokens": 8,
+            "reasoning_tokens": 7
+        });
+        assert_eq!(
+            serde_json::to_value(usage_baseline_from_state(Some(&value))).unwrap(),
+            value
+        );
+    }
 
     #[test]
     fn conversation_decoder_accepts_legacy_arrays_and_envelopes() {
@@ -1050,6 +1133,10 @@ mod tests {
             mut params: RunParams,
             _interactive: InteractiveSession,
         ) -> Result<CompletedRun, ClientError> {
+            assert!(
+                params.defer_done,
+                "home-chat completion belongs to executor"
+            );
             let conversation = &mut params.prepopulated_conversation;
             conversation.set_next_prompt(&params.prompt);
             let script = conversation
@@ -1116,6 +1203,130 @@ mod tests {
             .unwrap()
     }
 
+    #[tokio::test]
+    async fn native_chat_commit_failure_emits_no_done() {
+        use crate::executor::stage_boundary::StageInvocation;
+        let stage = AgentBuilder::new("chat-0001")
+            .prompt(CHAT_A)
+            .build()
+            .unwrap();
+        let (_sandbox, mut gremlin) = test_gremlin(stage);
+        gremlin.state.patch(
+            &[],
+            serde_json::json!({"kind": "chat"}).as_object().unwrap(),
+        );
+        let spec = "cmd/native-chat-commit-failure";
+        let backend = Arc::new(ChatCancellationBackend::default());
+        install_test_backend(spec, backend);
+        gremlin.model_override = Some(spec.into());
+        let mut node = chat_node(1, CHAT_A).await;
+        let ExecutorStage::Agent { stage, .. } = &mut node else {
+            unreachable!()
+        };
+        stage
+            .outputs_map
+            .insert("missing".into(), "artifact://missing-output".into());
+        let invocation = StageInvocation::enter(gremlin.id.as_str(), node.name(), "agent");
+        let (_guard, mut rx) = gremlins_magic_bus::subscribe_run(gremlin.id.as_str());
+        let result = run_agent(&node, &mut gremlin, &invocation, "", "", None, None).await;
+        assert!(result.is_err(), "missing output must fail commit");
+        while let Ok(event) = rx.try_recv() {
+            assert!(!matches!(event.kind(), EventKind::Done { .. }));
+        }
+    }
+
+    async fn assert_cmd_done_events(spec: &str, is_chat: bool, succeeds: bool) {
+        use crate::executor::stage_boundary::StageInvocation;
+        use gremlins_magic_bus::subscribe_run;
+
+        let stage = AgentBuilder::new("chat-0001")
+            .prompt("This prompt is not the command output")
+            .build()
+            .unwrap();
+        let (_sandbox, mut gremlin) = test_gremlin(stage);
+        gremlin.runtime_config.default_task_models = None;
+        gremlin.runtime_config.resolved_model_selection = None;
+        gremlin.client = Client::parse(spec).unwrap();
+        gremlin.model_override = Some(spec.into());
+        assert_eq!(gremlin.client.get_or_build_backend().unwrap().name(), "cmd");
+        if is_chat {
+            gremlin.state.patch(
+                &[],
+                serde_json::json!({"kind": "chat", "token_usage": {
+                    "turns": 3, "prompt_tokens": 17, "completion_tokens": 0
+                }})
+                .as_object()
+                .unwrap(),
+            );
+        }
+        let node = chat_node(1, "This prompt is not the command output").await;
+        let invocation = StageInvocation::enter(gremlin.id.as_str(), node.name(), "agent");
+        let corr_id = invocation.corr_id();
+        let (sub, mut rx) = subscribe_run(gremlin.id.as_str());
+        let _guard = gremlins_magic_bus::connection::BusSubGuard::new(sub);
+        let result = tokio::time::timeout(
+            std::time::Duration::from_secs(15),
+            run_agent(&node, &mut gremlin, &invocation, "", "", None, None),
+        )
+        .await
+        .expect("command stage timed out");
+        if succeeds {
+            result.unwrap();
+        } else {
+            let error = result.unwrap_err().to_string();
+            assert!(error.contains("exited 7"), "{error}");
+        }
+
+        let mut done = Vec::new();
+        loop {
+            match rx.try_recv() {
+                Ok(event) => {
+                    if let EventKind::Done {
+                        text,
+                        summary,
+                        usage,
+                    } = event.kind()
+                    {
+                        let usage = usage.as_ref().expect("prior chat usage is retained");
+                        assert_eq!(usage.turns, 3);
+                        assert_eq!(usage.prompt_tokens, Some(17));
+                        assert_eq!(usage.completion_tokens, Some(0));
+                        assert_eq!(event.corr_id(), &corr_id);
+                        assert!(summary.is_empty(), "command output must not be duplicated");
+                        done.push(text.clone());
+                    }
+                }
+                Err(gremlins_magic_bus::TryRecvError::Empty) => break,
+                Err(error) => panic!("event subscription failed: {error}"),
+            }
+        }
+        if is_chat && succeeds {
+            assert_eq!(done, ["actual command reply"]);
+        } else {
+            assert!(done.is_empty(), "unexpected Done events: {done:?}");
+        }
+    }
+
+    #[tokio::test]
+    async fn cmd_chat_success_emits_one_done_with_output_and_invocation() {
+        assert_cmd_done_events("cmd/sh -c 'printf actual\\ command\\ reply'", true, true).await;
+    }
+
+    #[tokio::test]
+    async fn cmd_chat_failure_emits_no_done() {
+        assert_cmd_done_events(
+            "cmd/sh -c 'printf failed-command-output; exit 7'",
+            true,
+            false,
+        )
+        .await;
+    }
+
+    #[tokio::test]
+    async fn cmd_pipeline_success_emits_no_done() {
+        assert_cmd_done_events("cmd/sh -c 'printf actual\\ command\\ reply'", false, true).await;
+    }
+
     async fn assert_cancelled_chat_recovery(retry: bool) {
         let stage = AgentBuilder::new("chat-0001")
             .prompt(CHAT_A)
@@ -1138,7 +1349,12 @@ mod tests {
         let backend = Arc::new(ChatCancellationBackend::default());
         install_test_backend(spec, backend.clone());
         let a = chat_node(1, CHAT_A).await;
-        run_agent(&a, &mut gremlin, "", "", None, None)
+        let invocation = crate::executor::stage_boundary::StageInvocation::enter(
+            gremlin.id.as_str(),
+            a.name(),
+            "agent",
+        );
+        run_agent(&a, &mut gremlin, &invocation, "", "", None, None)
             .await
             .unwrap();
         let a_json = gremlin
@@ -1164,9 +1380,14 @@ mod tests {
             backend.started.notified().await;
             token.cancel();
         };
+        let invocation = crate::executor::stage_boundary::StageInvocation::enter(
+            gremlin.id.as_str(),
+            b.name(),
+            "agent",
+        );
         let (result, ()) = tokio::time::timeout(std::time::Duration::from_secs(10), async {
             tokio::join!(
-                run_agent(&b, &mut gremlin, "", "", None, None),
+                run_agent(&b, &mut gremlin, &invocation, "", "", None, None),
                 cancel_after_request
             )
         })
@@ -1199,7 +1420,12 @@ mod tests {
         } else {
             chat_node(3, CHAT_C).await
         };
-        let error = run_agent(&next, &mut gremlin, "", "", None, None)
+        let invocation = crate::executor::stage_boundary::StageInvocation::enter(
+            gremlin.id.as_str(),
+            next.name(),
+            "agent",
+        );
+        let error = run_agent(&next, &mut gremlin, &invocation, "", "", None, None)
             .await
             .unwrap_err();
         assert!(error.to_string().contains(CAPTURED), "{error}");

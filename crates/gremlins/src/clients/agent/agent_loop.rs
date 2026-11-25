@@ -92,6 +92,8 @@ pub(super) struct LoopState {
     pub(super) exhausted_turn_retries: bool,
     pub(super) exhausted_timeout_retries: bool,
     pub(super) stream_error: Option<ProviderError>,
+    pub(super) defer_done: bool,
+    pub(super) usage_baseline: Option<UsageStats>,
     pub(super) total_prompt_tokens: Option<u64>,
     pub(super) total_completion_tokens: Option<u64>,
     pub(super) total_cached_tokens: Option<u64>,
@@ -202,6 +204,8 @@ impl LoopState {
             exhausted_turn_retries: false,
             exhausted_timeout_retries: false,
             stream_error: None,
+            defer_done: false,
+            usage_baseline: None,
             total_prompt_tokens: None,
             total_completion_tokens: None,
             total_cached_tokens: None,
@@ -1171,6 +1175,8 @@ pub(crate) async fn run_agent_loop(
         .or_else(|| DoneAssessment::from_paths(&ctx.expected_artifact_paths));
     let terminal = interactive.supervise_if_needed();
     let result = run_agent_loop_core(
+        ctx.params.defer_done,
+        ctx.params.usage_baseline.clone(),
         &model,
         prompt,
         ctx.params.system_prompt.clone(),
@@ -1341,6 +1347,8 @@ pub(crate) async fn run_agent_loop_nested(
         );
     }
     let result = run_agent_loop_core(
+        false,
+        None,
         &model,
         prompt,
         system_prompt,
@@ -1410,6 +1418,8 @@ fn turn_stats(turn: usize, usage: Option<&Usage>) -> Option<TurnStats> {
 
 #[allow(clippy::too_many_arguments, clippy::type_complexity)]
 pub(crate) async fn run_agent_loop_core(
+    defer_done: bool,
+    usage_baseline: Option<UsageStats>,
     model: &DynModel<Completion>,
     prompt: &str,
     system_prompt: Option<String>,
@@ -1447,6 +1457,8 @@ pub(crate) async fn run_agent_loop_core(
         &tool_ctx.message_prefix,
         tool_ctx.corr_id.clone(),
     );
+    state.defer_done = defer_done;
+    state.usage_baseline = usage_baseline;
     let loop_start = Instant::now();
     let turn_retry_backoff = crate::config::turn_retry_backoff();
     let timeout_retry_backoff = crate::config::timeout_retry_backoff();
@@ -1815,6 +1827,8 @@ pub(crate) fn test_ctx(
         Box::new(crate::clients::conversation::ConversationStub::new("hi"));
     RunContext {
         params: crate::clients::backend::RunParams {
+            defer_done: false,
+            usage_baseline: None,
             prompt: "hi".into(),
             label: "t".into(),
             model: Some("mock".into()),
@@ -1940,6 +1954,7 @@ mod tests {
             1,
             false,
             "context-test",
+            CorrId::new(),
         );
         let mut opts = loop_opts(None);
         opts.extra = Some(serde_json::json!({"thinking": {"type": "adaptive"}}));
@@ -3216,6 +3231,100 @@ mod tests {
         }
         assert!(saw_text, "retried text must retain the invocation route");
         assert!(saw_usage, "late usage must retain the invocation route");
+    }
+
+    #[tokio::test]
+    async fn native_chat_events_add_baseline_without_changing_local_accounting() {
+        use rig_core::test_utils::{MockCompletionModel, MockStreamEvent as E};
+
+        let run = format!("native-baseline-{}", uuid::Uuid::new_v4());
+        let (_guard, mut rx) = subscribe_log(&run);
+        let model = MockCompletionModel::from_stream_turns([vec![
+            E::text("final prose"),
+            E::tool_call(
+                "done",
+                "Done",
+                serde_json::json!({"summary": "separate summary"}),
+            ),
+            E::final_response_with_default_usage(),
+        ]]);
+        let mut ctx = test_ctx(None, None);
+        ctx.params.gremlin_id = Some(run);
+        ctx.params.usage_baseline = Some(UsageStats {
+            prompt_tokens: Some(1000),
+            completion_tokens: Some(2000),
+            cached_input_tokens: Some(3000),
+            cache_creation_input_tokens: Some(4000),
+            reasoning_tokens: Some(5000),
+            turns: 7,
+        });
+        assert_eq!(ctx.params.clone().usage_baseline.unwrap().turns, 7);
+        let completed = run_agent_loop(
+            model.erase(),
+            "finish",
+            ctx,
+            CancelToken::new(),
+            loop_opts(None),
+            InteractiveSession::unattached(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(completed.text_result.as_deref(), Some("final prose"));
+        assert_eq!(completed.summary.as_deref(), Some("separate summary"));
+        let local = completed.token_usage.unwrap();
+        assert_eq!(local.turns, 1);
+        let mut saw_done = false;
+        let mut saw_turn = false;
+        let mut saw_local = false;
+        while let Ok(event) = rx.try_recv() {
+            let usage = match event.kind() {
+                EventKind::Done {
+                    text,
+                    summary,
+                    usage,
+                } => {
+                    assert_eq!(text, "final prose");
+                    assert_eq!(summary, "separate summary");
+                    saw_done = true;
+                    usage.as_ref().unwrap()
+                }
+                EventKind::TurnComplete { totals, .. } => {
+                    saw_turn = true;
+                    totals.as_ref().unwrap()
+                }
+                EventKind::TokenUsage { usage, .. } => {
+                    assert_eq!(
+                        serde_json::to_value(usage).unwrap(),
+                        serde_json::to_value(&local).unwrap()
+                    );
+                    saw_local = true;
+                    continue;
+                }
+                _ => continue,
+            };
+            assert_eq!(usage.turns, 8);
+            assert_eq!(
+                usage.prompt_tokens,
+                Some(1000 + local.prompt_tokens.unwrap_or(0))
+            );
+            assert_eq!(
+                usage.completion_tokens,
+                Some(2000 + local.completion_tokens.unwrap_or(0))
+            );
+            assert_eq!(
+                usage.cached_input_tokens,
+                Some(3000 + local.cached_input_tokens.unwrap_or(0))
+            );
+            assert_eq!(
+                usage.cache_creation_input_tokens,
+                Some(4000 + local.cache_creation_input_tokens.unwrap_or(0))
+            );
+            assert_eq!(
+                usage.reasoning_tokens,
+                Some(5000 + local.reasoning_tokens.unwrap_or(0))
+            );
+        }
+        assert!(saw_done && saw_turn && saw_local);
     }
 
     /// A cancel token set during the turn-level backoff must abandon the
@@ -5487,6 +5596,8 @@ mod tests {
         let (_sub, mut evt_rx) = subscribe_log(run_id);
         let agent = tokio::spawn(async move {
             run_agent_loop_core(
+                false,
+                None,
                 &dyn_model,
                 "hi",
                 None,
@@ -5600,6 +5711,8 @@ mod tests {
         let (_sub, mut evt_rx) = subscribe_log(run_id);
         let agent = tokio::spawn(async move {
             run_agent_loop_core(
+                false,
+                None,
                 &dyn_model,
                 "hi",
                 None,
@@ -5702,6 +5815,8 @@ mod tests {
         let (_sub, mut evt_rx) = subscribe_log(run_id);
         let agent = tokio::spawn(async move {
             run_agent_loop_core(
+                false,
+                None,
                 &dyn_model,
                 "hi",
                 None,
@@ -5788,6 +5903,8 @@ mod tests {
         let (_sub, mut evt_rx) = subscribe_log(run_id);
         let agent = tokio::spawn(async move {
             run_agent_loop_core(
+                false,
+                None,
                 &dyn_model,
                 "hi",
                 None,
@@ -5934,6 +6051,41 @@ mod tests {
         assert_eq!(result.text_result.as_deref(), Some("ok"));
     }
 
+    #[tokio::test]
+    async fn home_chat_defers_done_but_returns_finalized_run() {
+        let run_id = "deferred-home-chat-done";
+        let (_guard, mut rx) = gremlins_magic_bus::subscribe_run(run_id);
+        let model = rig_core::test_utils::MockCompletionModel::from_stream_turns([[
+            rig_core::test_utils::MockStreamEvent::text("finished"),
+            rig_core::test_utils::MockStreamEvent::tool_call(
+                "done1",
+                "Done",
+                serde_json::json!({"summary": "saved"}),
+            ),
+            rig_core::test_utils::MockStreamEvent::final_response_with_default_usage(),
+        ]]);
+        let mut ctx = test_ctx(None, None);
+        ctx.params.gremlin_id = Some(run_id.into());
+        ctx.params.defer_done = true;
+        let result = run_agent_loop(
+            model.erase(),
+            "hello",
+            ctx,
+            CancelToken::new(),
+            loop_opts(None),
+            InteractiveSession::unattached(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(result.text_result.as_deref(), Some("finished"));
+        assert_eq!(result.summary.as_deref(), Some("saved"));
+        assert!(result.conversation.is_some());
+        assert_eq!(result.token_usage.unwrap().turns, 1);
+        while let Ok(event) = rx.try_recv() {
+            assert!(!matches!(event.kind(), EventKind::Done { .. }));
+        }
+    }
+
     /// Fix 1 regression: a solo `Done` never flows through the normal
     /// tool-execution path, so the completion handler must itself emit the
     /// `tool: Done <summary>` log line and record the Done action-ledger entry
@@ -5959,6 +6111,8 @@ mod tests {
         let (_log_guard, mut log_rx) = subscribe_log(prefix);
 
         let result = run_agent_loop_core(
+            false,
+            None,
             &model,
             "do the thing",
             None,
@@ -6043,6 +6197,8 @@ mod tests {
         let opts = loop_opts(None);
 
         let result = run_agent_loop_core(
+            false,
+            None,
             &model,
             "do the thing",
             None,

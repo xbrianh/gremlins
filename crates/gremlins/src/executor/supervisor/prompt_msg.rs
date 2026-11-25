@@ -12,7 +12,6 @@ use std::sync::Arc;
 
 use crate::clients::client::ModelURI;
 use crate::skills::LoadedSkill;
-use gremlins_magic_bus::connection::SharedWriter;
 
 /// One operator turn queued to a
 /// [`super::chat_handle::ChatGremlinHandle`]'s task.
@@ -20,8 +19,7 @@ use gremlins_magic_bus::connection::SharedWriter;
 /// Carries everything the task needs to run a single turn without reaching
 /// back into the request handler: the raw prompt text (the dynamic preamble is
 /// assembled inside the task), the repository-context snapshot, the model and
-/// system prompt for the turn, the operator environment, the skill set, and
-/// the connection writer this turn's stream events are written to. The gremlin
+/// system prompt for the turn, the operator environment, and the skill set. The gremlin
 /// itself is taken out of the session by the task at turn start.
 pub(crate) struct PromptMsg {
     /// The operator's raw prompt text (before the dynamic preamble is added).
@@ -42,8 +40,4 @@ pub(crate) struct PromptMsg {
     pub(crate) requested_skills: Vec<String>,
     /// Every skill discovered under the project root this turn.
     pub(crate) all_skills: Arc<Vec<LoadedSkill>>,
-    /// The connection this turn's stream events are written to. Carried per
-    /// request so a turn always streams to the connection that issued it, even
-    /// if a session's main connection is replaced while the task is alive.
-    pub(crate) writer: SharedWriter,
 }

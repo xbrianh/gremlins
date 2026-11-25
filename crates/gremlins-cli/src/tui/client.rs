@@ -8,11 +8,12 @@
 //! * one **session socket** (`sess-<id>.sock`) for chat and other
 //!   session-scoped ops
 //!
-//! The daemon routes daemon broadcasts over the control socket and chat
-//! stream events over the session socket, so each connection owns its own
-//! response FIFO and its own background read task.
+//! Daemon broadcasts use the control socket. Home chat requests are ack-only;
+//! a dedicated passive bus watch supplies display events. Each request socket
+//! owns its own response FIFO and background reader.
 
 pub(crate) mod attachment;
+mod home;
 
 use std::collections::VecDeque;
 use std::sync::Arc;
@@ -261,6 +262,7 @@ pub struct DaemonClient {
     /// Serializes session recreation so a `/clear` can never race another
     /// session operation's restart and drop un-acked waiters.
     session_recreate: Mutex<()>,
+    home_display: Mutex<Option<home::Display>>,
     #[cfg(test)]
     aux_streams: Mutex<Option<VecDeque<tokio::net::UnixStream>>>,
 }
@@ -303,6 +305,7 @@ impl DaemonClient {
                 ),
                 out,
                 session_recreate: Mutex::new(()),
+                home_display: Mutex::new(None),
                 aux_streams: Mutex::new(Some(streams.into())),
             },
             [control_peer, session_peer],
@@ -345,7 +348,8 @@ impl DaemonClient {
     /// session write half, so a `/clear` restart can never write a request
     /// bearing the old id to the new socket.
     pub async fn send_session_request(&self, request: Value) -> Result<Value, String> {
-        self.session.send_on_session(request).await
+        let _guard = self.session_recreate.lock().await;
+        self.send_home_or_session(request, None).await
     }
 
     /// Send a session request only if the connection still belongs to
@@ -365,8 +369,7 @@ impl DaemonClient {
         // that was submitted against a retired session instead of writing it
         // to the old (already-closed) socket or stamping it with the new id.
         let _recreate_guard = self.session_recreate.lock().await;
-        self.session
-            .send_on_session_for_generation(request, expected_generation)
+        self.send_home_or_session(request, Some(expected_generation))
             .await
     }
 
@@ -516,6 +519,7 @@ impl DaemonClient {
     pub async fn recreate_session(&self) -> Result<(), String> {
         let _recreate_guard = self.session_recreate.lock().await;
 
+        self.home_display.lock().await.take();
         let close_request = serde_json::json!({"op": "close_session"});
         let _ = self.session.send_on_session(close_request).await?;
 
@@ -535,6 +539,7 @@ impl DaemonClient {
 
     /// Abort both background read loops, closing the sockets.
     pub async fn shutdown(&self) {
+        self.home_display.lock().await.take();
         self.control.shutdown().await;
         self.session.shutdown().await;
     }
@@ -604,7 +609,6 @@ async fn send_correction(
     ))
 }
 
-#[cfg(test)]
 async fn follow_run(
     stream: tokio::net::UnixStream,
     session_id: &str,
@@ -735,6 +739,7 @@ pub async fn connect() -> Result<
             session,
             out,
             session_recreate: Mutex::new(()),
+            home_display: Mutex::new(None),
             #[cfg(test)]
             aux_streams: Mutex::new(None),
         },

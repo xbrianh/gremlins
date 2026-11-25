@@ -24,8 +24,7 @@ A session's chat gremlin is owned by a single long-lived task
 `session_task.rs::SessionState`, accessed through `SessionTaskHandle`:
 
 - `handle_chat` builds a `PromptMsg` (raw text, repo context, model, system
-  prompt, project root, env, requested + discovered skills, and the connection
-  writer for this turn) and sends it onto the handle's bounded(1) `prompt_tx`.
+  prompt, project root, env, requested + discovered skills, and caller turn token) and sends it onto the handle's bounded(1) `prompt_tx`.
   A second prompt naturally blocks behind the in-flight turn, so turns
   serialize with no extra locking.
 - `chat_gremlin_task` loops one `PromptMsg` at a time (racing the persistent
@@ -40,11 +39,13 @@ A session's chat gremlin is owned by a single long-lived task
    task.
 2. `handle_chat` queues a `PromptMsg`; the task takes the gremlin out of the
    session, installs a **fresh per-turn child `CancelToken`**, and runs exactly
-   one `next_stage` → `run_stage` loop, streaming bus events to the connection.
+   one `next_stage` → `run_chat_stage` loop. The actual stage invocation binds
+   the caller token, stage name and fresh execution ID for input and native bus output.
 3. When the turn completes, cancels, or errors, `TurnRunner` runs the terminal
    path exactly once: re-park the gremlin, restore the run-map token to the
-   persistent one, clear `current_turn`, signal `done`, and write the terminal
-   event (`done` / `ended` / `error`).
+   persistent one, clear `current_turn`, signal `done`, and publish the terminal
+   event on the bus (`done` / `ended` / `error`). Request sockets carry only
+   acknowledgments; display readers never participate in terminal cleanup.
 
 ### Chat gremlin reuse
 

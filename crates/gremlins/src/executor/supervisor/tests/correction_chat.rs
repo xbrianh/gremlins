@@ -4,6 +4,9 @@ use super::{
     teardown_session,
 };
 use crate::executor::socket;
+use gremlins_magic_bus::{
+    connection::BusSubGuard, subscribe_run, DispatchEvent, EventKind, ReceiverHalf, Recv,
+};
 use serde_json::{json, Value};
 use std::future::Future;
 use std::task::Poll;
@@ -59,32 +62,52 @@ fn assert_new_identity_only(frame: &Value) {
     assert!(frame.get("stage_id").is_none(), "{frame}");
 }
 
-fn correction_target(started: &Value) -> Value {
-    json!({"id": started["id"], "nonce": started["nonce"],
-        "stage_run_id": started["stage_run_id"]})
+async fn next_start(events: &mut ReceiverHalf<EventKind>) -> DispatchEvent<EventKind> {
+    tokio::time::timeout(Duration::from_secs(10), async {
+        loop {
+            let Recv::Event(event) = events.recv().await else {
+                panic!("home bus closed or lagged")
+            };
+            if matches!(event.kind(), EventKind::TurnStarted { .. }) {
+                return event;
+            }
+        }
+    })
+    .await
+    .expect("home turn start timed out")
+}
+
+async fn assert_no_start(events: &mut ReceiverHalf<EventKind>) {
+    assert!(
+        tokio::time::timeout(Duration::from_millis(50), next_start(events))
+            .await
+            .is_err(),
+        "turn start escaped the gate"
+    );
 }
 
 async fn assert_start_snapshot(
     registry: &TestRegistry,
     session: &crate::executor::supervisor::session_task::SessionTaskHandle,
-    started: &Value,
+    started: &DispatchEvent<EventKind>,
     turn: &str,
-) {
-    assert_eq!(started["type"], "turn_started");
-    assert_eq!(started["turn"], turn);
+) -> Value {
+    let EventKind::TurnStarted { stage_run_id } = started.kind() else {
+        panic!("expected turn start")
+    };
+    assert!(!stage_run_id.is_empty());
     let current = session.get_current_turn().await.expect("active turn");
-    assert_eq!(current.id, started["id"].as_str().unwrap());
+    assert_eq!(started.corr_id().run(), Some(current.id.as_str()));
+    assert!(started.corr_id().to_string().contains(turn));
     assert_eq!(current.turn.as_deref(), Some(turn));
+    assert_eq!(current.stage_run_id.as_deref(), Some(stage_run_id.as_str()));
     assert_eq!(
-        current.stage_run_id.as_deref(),
-        started["stage_run_id"].as_str()
+        started.corr_id().stage_run_id(),
+        Some(stage_run_id.as_str())
     );
     let (interactive, _, _) = registry.get_run_interactive(&current.id).await.unwrap();
     let target = interactive.target();
-    assert_eq!(started["nonce"], target.nonce());
-    assert_eq!(started["stage_run_id"].as_str(), target.stage_run_id());
-    assert!(target.stage_run_id().is_some_and(|id| !id.is_empty()));
-    assert_new_identity_only(started);
+    json!({"id": current.id, "nonce": target.nonce(), "stage_run_id": stage_run_id})
 }
 
 async fn assert_no_frame(reader: &mut BufReader<OwnedReadHalf>) {
@@ -132,6 +155,10 @@ async fn second_prompt_is_gated_and_each_start_matches_live_snapshot_then_become
     .unwrap();
     let (registry, _) = spawn_test_actor().await;
     let (id, session) = create_session(&registry).await;
+    let home_id = registry.reserve_chat_id().await;
+    assert!(session.reserve_home_run_id(&home_id).await);
+    let (sub, mut events) = subscribe_run(&home_id);
+    let _guard = BusSubGuard::new(sub);
     let socket_dir = tempfile::tempdir().unwrap();
     let socket_path = socket_dir.path().join("session.sock");
     let listener = tokio::net::UnixListener::bind(&socket_path).unwrap();
@@ -156,13 +183,27 @@ async fn second_prompt_is_gated_and_each_start_matches_live_snapshot_then_become
     assert_eq!(ack["type"], "ok");
     assert!(ack.get("nonce").is_none());
     assert!(ack.get("stage_run_id").is_none());
-    let first = read_until_type(&mut reader, "turn_started").await;
-    assert_start_snapshot(&registry, &session, &first, "first").await;
+    assert_eq!(ack["id"], home_id);
+    let first_started = next_start(&mut events).await;
     let (_, held) = pending_request(&provider).await;
+    let first = assert_start_snapshot(&registry, &session, &first_started, "first").await;
+    let (interactive, _, _) = registry.get_run_interactive(&home_id).await.unwrap();
+    let (actual, _) = interactive
+        .resolve_input(&home_id, first["stage_run_id"].as_str().unwrap(), None)
+        .expect("first announced execution must bind the live input");
+    assert_eq!(actual.stage_run_id, first["stage_run_id"].as_str().unwrap());
+    assert_eq!(
+        first_started.corr_id().stage(),
+        Some(actual.stage_name.as_str())
+    );
+    assert_no_frame(&mut reader).await;
     send_chat(&mut write, prompt("second")).await;
     let busy = read_until_type(&mut reader, "error").await;
     assert!(busy.to_string().contains("session busy"), "{busy}");
-    assert_start_snapshot(&registry, &session, &first, "first").await;
+    assert_eq!(
+        assert_start_snapshot(&registry, &session, &first_started, "first").await,
+        first
+    );
     session.cancel_turn(None).await.unwrap();
     drop(held);
     wait_for_return(&session).await;
@@ -172,16 +213,12 @@ async fn second_prompt_is_gated_and_each_start_matches_live_snapshot_then_become
     tokio::time::timeout(Duration::from_secs(10), start_gate.entered.notified())
         .await
         .expect("accepted second prompt must reach the start gate");
-    loop {
-        let response = frame(&mut reader).await;
-        if response["type"] == "ok" {
-            assert_eq!(response["id"], first["id"]);
-            assert!(response.get("nonce").is_none());
-            assert!(response.get("stage_run_id").is_none());
-            break;
-        }
-        assert_ne!(response["type"], "turn_started", "start escaped the gate");
-    }
+    let response = frame(&mut reader).await;
+    assert_eq!(response["type"], "ok", "{response}");
+    assert_eq!(response["id"], first["id"]);
+    assert!(response.get("nonce").is_none());
+    assert!(response.get("stage_run_id").is_none());
+    assert_no_start(&mut events).await;
     assert!(session.get_current_turn().await.is_none());
     assert_eq!(
         session.get_chat_gremlin_keys().await,
@@ -197,33 +234,54 @@ async fn second_prompt_is_gated_and_each_start_matches_live_snapshot_then_become
     );
     assert_no_frame(&mut reader).await;
     start_gate.release.notify_one();
-    let second = read_until_type(&mut reader, "turn_started").await;
+    let second_started = next_start(&mut events).await;
     tokio::time::timeout(
         Duration::from_secs(10),
         incorporation_gate.entered.notified(),
     )
     .await
     .expect("announced execution must reach the incorporation gate");
-    assert_start_snapshot(&registry, &session, &second, "second").await;
+    let second = assert_start_snapshot(&registry, &session, &second_started, "second").await;
     assert_eq!(first["id"], second["id"]);
-    assert_ne!(first["nonce"], second["nonce"]);
     assert_ne!(first["stage_run_id"], second["stage_run_id"]);
     let correction = "Use the revised plan in this live turn.";
     send_chat(
         &mut write,
         json!({"op": "chat", "text": correction, "req_id": "live-second-correction",
-            "target": correction_target(&second)}),
+            "target": second}),
     )
     .await;
     // A published debugger target is not an execution inbox. Before the
     // runner registers input, rejection must not promise queued delivery.
     let rejected = frame(&mut reader).await;
     assert_eq!(rejected["type"], "error", "{rejected}");
-    assert_start_snapshot(&registry, &session, &second, "second").await;
+    assert_eq!(
+        assert_start_snapshot(&registry, &session, &second_started, "second").await,
+        second
+    );
     assert_no_frame(&mut reader).await;
     incorporation_gate.release.notify_one();
     let (_, held) = pending_request(&provider).await;
-    // Follow the owner's identity change while the second execution is held live.
+    let second = assert_start_snapshot(&registry, &session, &second_started, "second").await;
+    assert_ne!(first["nonce"], second["nonce"]);
+    let (interactive, _, _) = registry.get_run_interactive(&home_id).await.unwrap();
+
+    let (actual, _) = interactive
+        .resolve_input(&home_id, second["stage_run_id"].as_str().unwrap(), None)
+        .expect("announced execution must bind the live input");
+    assert_eq!(
+        actual.stage_run_id,
+        second["stage_run_id"].as_str().unwrap()
+    );
+    assert_eq!(
+        second_started.corr_id().stage(),
+        Some(actual.stage_name.as_str())
+    );
+    let debugger_target = interactive.target();
+    let debugger_stage = debugger_target
+        .stage_run_id()
+        .expect("live debugger execution");
+    // Debugger attachment uses its own target; bus starts name the actual stage input.
     for (nonce, stage_run_id, expected) in [
         (
             second["nonce"].as_u64().unwrap() + 1,
@@ -237,7 +295,7 @@ async fn second_prompt_is_gated_and_each_start_matches_live_snapshot_then_become
         ),
         (
             second["nonce"].as_u64().unwrap(),
-            second["stage_run_id"].as_str().unwrap(),
+            debugger_stage,
             "attached",
         ),
     ] {
@@ -263,21 +321,27 @@ async fn second_prompt_is_gated_and_each_start_matches_live_snapshot_then_become
         assert_eq!(response["type"], expected, "{response}");
         if expected == "attached" {
             assert_eq!(response["nonce"], second["nonce"]);
-            assert_eq!(response["stage_run_id"], second["stage_run_id"]);
+            assert_eq!(response["stage_run_id"], debugger_stage);
             assert_new_identity_only(&response);
         }
         drop(client);
     }
-    assert_start_snapshot(&registry, &session, &second, "second").await;
+    assert_eq!(
+        assert_start_snapshot(&registry, &session, &second_started, "second").await,
+        second
+    );
     send_chat(
         &mut write,
         json!({"op": "chat", "text": "stale correction",
-        "target": correction_target(&first)}),
+        "target": first}),
     )
     .await;
     let error = read_until_type(&mut reader, "error").await;
     assert!(error.to_string().contains("stale"), "{error}");
-    assert_start_snapshot(&registry, &session, &second, "second").await;
+    assert_eq!(
+        assert_start_snapshot(&registry, &session, &second_started, "second").await,
+        second
+    );
     session.cancel_turn(None).await.unwrap();
     drop(held);
     wait_for_return(&session).await;
@@ -285,7 +349,7 @@ async fn second_prompt_is_gated_and_each_start_matches_live_snapshot_then_become
     send_chat(
         &mut write,
         json!({"op": "chat", "text": "returned correction",
-        "target": correction_target(&second)}),
+        "target": second}),
     )
     .await;
     let error = read_until_type(&mut reader, "error").await;

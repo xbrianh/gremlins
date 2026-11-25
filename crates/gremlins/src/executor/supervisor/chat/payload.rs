@@ -8,13 +8,16 @@
 //! chat module and [`super::super::chat_handle`] share a neutral prompt type
 //! without creating a dependency cycle.
 
+#[cfg(test)]
 use serde_json::{Map, Value};
 
+#[cfg(test)]
 use crate::clients::protocol::{add_opt, UsageStats};
 
 pub(crate) use super::super::prompt_msg::PromptMsg;
 
 /// Read persisted `state.json.token_usage` as [`UsageStats`].
+#[cfg(test)]
 pub(crate) fn usage_stats_from_state(value: Option<&Value>) -> UsageStats {
     let obj = value
         .and_then(|v| v.as_object())
@@ -33,6 +36,7 @@ pub(crate) fn usage_stats_from_state(value: Option<&Value>) -> UsageStats {
 }
 
 /// Add a per-prompt usage delta to a conversation baseline.
+#[cfg(test)]
 pub(crate) fn add_usage_stats(baseline: &UsageStats, delta: &UsageStats) -> UsageStats {
     UsageStats {
         prompt_tokens: add_opt(baseline.prompt_tokens, delta.prompt_tokens),
@@ -48,6 +52,7 @@ pub(crate) fn add_usage_stats(baseline: &UsageStats, delta: &UsageStats) -> Usag
 }
 
 /// Build a chat JSON line, tagged with the client's turn id for stale-event filtering.
+#[cfg(test)]
 pub(crate) fn chat_payload(turn: &Option<String>, fields: Value) -> Value {
     let mut obj = match fields {
         Value::Object(obj) => obj,
