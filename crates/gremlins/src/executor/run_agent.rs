@@ -14,6 +14,7 @@ use crate::artifacts::uri::Uri;
 use crate::clients::agent::done_assess::DoneAssessment;
 use crate::clients::backend::{ClientError, RunParams};
 use crate::clients::client::ModelURI;
+use crate::clients::compaction::ResolvedRequestContext;
 use crate::config;
 use crate::definition::ExecutorStage;
 use crate::executor::agent_runner::{commit_agent, prepare_agent};
@@ -493,7 +494,13 @@ pub(crate) async fn run_agent(
                 // artifacts so the next submission does not reload
                 // compacted-away messages or duplicate retained ones.
                 let messages = conversation.messages();
-                if let Err(e) = persist_compacted_conversation(gremlin, &messages).await {
+                if let Err(e) = persist_compacted_conversation_with_context(
+                    gremlin,
+                    &messages,
+                    conversation.request_context(),
+                )
+                .await
+                {
                     log::warn!("chat: failed to persist compacted conversation: {e}");
                 }
             } else {
@@ -511,7 +518,14 @@ pub(crate) async fn run_agent(
                             messages.clone()
                         }
                     };
-                if let Err(e) = persist_chat_conversation_turn(gremlin, turn_num, &diff).await {
+                if let Err(e) = persist_chat_conversation_turn_with_context(
+                    gremlin,
+                    turn_num,
+                    &diff,
+                    conversation.request_context(),
+                )
+                .await
+                {
                     log::warn!("chat: failed to persist conversation turn {turn_num}: {e}");
                 }
             }
@@ -536,12 +550,36 @@ pub(crate) async fn run_agent(
 // Chat conversation artifacts
 // ---------------------------------------------------------------------------
 
-/// Deserialize a conversation artifact (JSON array of rig `Message` values).
+/// Deserialize a legacy message array or a context-bearing conversation envelope.
 pub(crate) fn messages_from_conversation(
     json: &str,
 ) -> Result<Vec<rig_core::completion::Message>, String> {
-    serde_json::from_str::<Vec<rig_core::completion::Message>>(json)
-        .map_err(|e| format!("chat: failed to parse conversation artifact: {e}"))
+    conversation_from_json(json).map(|(messages, _)| messages)
+}
+
+fn conversation_from_json(
+    json: &str,
+) -> Result<(Vec<Message>, Option<ResolvedRequestContext>), String> {
+    #[derive(serde::Deserialize)]
+    #[serde(untagged)]
+    enum ConversationArtifact {
+        Legacy(Vec<Message>),
+        Envelope {
+            messages: Vec<Message>,
+            #[serde(default)]
+            request_context: Option<ResolvedRequestContext>,
+        },
+    }
+
+    match serde_json::from_str(json)
+        .map_err(|e| format!("chat: failed to parse conversation artifact: {e}"))?
+    {
+        ConversationArtifact::Legacy(messages) => Ok((messages, None)),
+        ConversationArtifact::Envelope {
+            messages,
+            request_context,
+        } => Ok((messages, request_context)),
+    }
 }
 
 /// Persist messages to `artifact://conversation/{turn:04}.json`.
@@ -553,7 +591,21 @@ pub(crate) async fn persist_chat_conversation_turn(
     turn: usize,
     messages: &[rig_core::completion::Message],
 ) -> Result<String, Box<dyn std::error::Error>> {
-    let json = serde_json::to_string(messages).map_err(|e| {
+    persist_chat_conversation_turn_with_context(gremlin, turn, messages, None).await
+}
+
+/// Bind the credential-free request context atomically with its committed messages.
+async fn persist_chat_conversation_turn_with_context(
+    gremlin: &Gremlin,
+    turn: usize,
+    messages: &[Message],
+    context: Option<ResolvedRequestContext>,
+) -> Result<String, Box<dyn std::error::Error>> {
+    let value = match context {
+        Some(context) => serde_json::json!({"messages": messages, "request_context": context}),
+        None => serde_json::to_value(messages)?,
+    };
+    let json = serde_json::to_string(&value).map_err(|e| {
         format!("chat: failed to serialize conversation artifact for turn {turn}: {e}")
     })?;
     let uri = Uri::parse(&conversation_uri(turn))?;
@@ -579,19 +631,37 @@ pub(crate) async fn clear_chat_turn_artifact(gremlin: &Gremlin, turn: usize) {
 }
 
 /// Walk per-turn conversation artifacts concatenating message arrays.
+#[cfg(test)]
 pub(crate) async fn read_chat_conversation(
     gremlin: &Gremlin,
     max_turn: Option<usize>,
 ) -> Vec<Message> {
+    read_chat_conversation_with_context(gremlin, max_turn)
+        .await
+        .0
+}
+
+/// The last nonempty committed turn owns the context; never inherit context
+/// across a newer legacy/context-free turn. Empty cleared turns do not own it.
+pub(crate) async fn read_chat_conversation_with_context(
+    gremlin: &Gremlin,
+    max_turn: Option<usize>,
+) -> (Vec<Message>, Option<ResolvedRequestContext>) {
     let mut all_msgs = Vec::new();
+    let mut context = None;
     for t in 1.. {
         if max_turn.is_some_and(|max| t > max) {
             break;
         }
         let uri = conversation_uri(t);
         match gremlin.state.content(&uri, None).await {
-            Ok(json) => match messages_from_conversation(&json) {
-                Ok(msgs) => all_msgs.extend(msgs),
+            Ok(json) => match conversation_from_json(&json) {
+                Ok((msgs, turn_context)) => {
+                    if !msgs.is_empty() {
+                        context = turn_context;
+                    }
+                    all_msgs.extend(msgs);
+                }
                 Err(_) => {
                     log::warn!("chat: conversation artifact {uri} unparseable; stopping walk");
                     break;
@@ -606,7 +676,7 @@ pub(crate) async fn read_chat_conversation(
             Err(_) => continue,
         }
     }
-    all_msgs
+    (all_msgs, context)
 }
 
 /// Overwrite per-turn conversation artifacts from a compacted conversation.
@@ -616,13 +686,21 @@ pub(crate) async fn read_chat_conversation(
 /// succeed before any later artifact is cleared — otherwise a failure would
 /// destroy the only stored copies of those messages while still reporting
 /// success.
+#[cfg(test)]
 pub(crate) async fn persist_compacted_conversation(
     gremlin: &Gremlin,
     messages: &[Message],
 ) -> Result<(), Box<dyn std::error::Error>> {
-    // Save the compacted replacement first. Only after it is durably bound do
-    // we consider clearing the artifacts it subsumed.
-    persist_chat_conversation_turn(gremlin, 1, messages).await?;
+    persist_compacted_conversation_with_context(gremlin, messages, None).await
+}
+
+pub(crate) async fn persist_compacted_conversation_with_context(
+    gremlin: &Gremlin,
+    messages: &[Message],
+    context: Option<ResolvedRequestContext>,
+) -> Result<(), Box<dyn std::error::Error>> {
+    // Save replacement and context together before clearing the old prefix.
+    persist_chat_conversation_turn_with_context(gremlin, 1, messages, context).await?;
 
     // Enumerate the registered conversation artifacts rather than assuming a
     // numeric range. Turn counts are unbounded, and scanning only 2..1000
@@ -677,6 +755,105 @@ mod tests {
     use crate::schemas::bootstrap::Bootstrap;
     use crate::test_support::Sandbox;
     use std::sync::{Arc, Mutex};
+
+    #[test]
+    fn conversation_decoder_accepts_legacy_arrays_and_envelopes() {
+        let messages = vec![Message::user("saved history")];
+        let value = serde_json::to_value(&messages).unwrap();
+        for artifact in [value.clone(), serde_json::json!({"messages": value})] {
+            let (restored, context) = conversation_from_json(&artifact.to_string()).unwrap();
+            assert_eq!(serde_json::to_value(restored).unwrap(), value);
+            assert!(context.is_none());
+        }
+
+        // Older envelopes have no provider and must remain readable.
+        let artifact = serde_json::json!({
+            "messages": value,
+            "request_context": {
+                "model": "old-model", "system": null, "tools": [],
+                "extra": null, "temperature": null, "max_tokens": null
+            }
+        });
+        let (restored, context) = conversation_from_json(&artifact.to_string()).unwrap();
+        assert_eq!(serde_json::to_value(restored).unwrap(), value);
+        let context = context.unwrap();
+        assert!(context.provider.is_empty());
+        assert!(context.system.is_none());
+        assert_eq!(context.model, "old-model");
+    }
+
+    #[test]
+    fn conversation_decoder_rejects_invalid_artifacts() {
+        for artifact in ["not json", "{}", "{\"messages\": false}", "null"] {
+            assert!(conversation_from_json(artifact).is_err());
+        }
+    }
+
+    #[tokio::test]
+    async fn chat_request_context_tracks_committed_history() {
+        let stage = AgentBuilder::new("chat-0001")
+            .prompt("hello")
+            .build()
+            .unwrap();
+        let (_sandbox, gremlin) = test_gremlin(stage);
+        let context = ResolvedRequestContext {
+            provider: "anthropic".into(),
+            model: "retained-model".into(),
+            system: Some("resolved workspace and skills".into()),
+            tools: vec![],
+            extra: Some(
+                serde_json::json!({"thinking": {"type": "enabled", "budget_tokens": 2048}}),
+            ),
+            temperature: Some(0.25),
+            max_tokens: Some(4096),
+        };
+        let messages = vec![Message::user("committed"), Message::assistant("answer")];
+        persist_chat_conversation_turn_with_context(&gremlin, 1, &messages, Some(context.clone()))
+            .await
+            .unwrap();
+        let (restored, retained) = read_chat_conversation_with_context(&gremlin, None).await;
+        assert_eq!(
+            serde_json::to_value(restored).unwrap(),
+            serde_json::to_value(&messages).unwrap()
+        );
+        assert_eq!(
+            serde_json::to_value(retained).unwrap(),
+            serde_json::to_value(&context).unwrap()
+        );
+
+        // Cleared artifacts must not discard the replacement prefix's context.
+        persist_chat_conversation_turn(&gremlin, 2, &[])
+            .await
+            .unwrap();
+        assert!(read_chat_conversation_with_context(&gremlin, None)
+            .await
+            .1
+            .is_some());
+        // A newer context-free turn cannot reuse the older turn's request.
+        persist_chat_conversation_turn(&gremlin, 2, &[Message::user("legacy")])
+            .await
+            .unwrap();
+        assert!(read_chat_conversation_with_context(&gremlin, None)
+            .await
+            .1
+            .is_none());
+        persist_compacted_conversation_with_context(&gremlin, &messages, Some(context.clone()))
+            .await
+            .unwrap();
+        assert_eq!(
+            serde_json::to_value(read_chat_conversation_with_context(&gremlin, None).await.1)
+                .unwrap(),
+            serde_json::to_value(context).unwrap()
+        );
+        // Replacing a context-bearing artifact without context removes it atomically.
+        persist_chat_conversation_turn(&gremlin, 1, &messages)
+            .await
+            .unwrap();
+        assert!(read_chat_conversation_with_context(&gremlin, None)
+            .await
+            .1
+            .is_none());
+    }
 
     const CAPTURED: &str = "deliberate run_agent dispatch capture";
 
@@ -1018,6 +1195,7 @@ mod tests {
             .expect("replacement installs a selector even without task overrides");
         let parent = TaskModel {
             model: rig_core::test_utils::MockCompletionModel::from_turns([]).erase(),
+            backend: None,
             temperature: None,
             max_tokens: None,
             extra: None,

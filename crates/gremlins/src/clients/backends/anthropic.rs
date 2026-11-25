@@ -5,8 +5,8 @@ use async_trait::async_trait;
 use rig_core::http_client::DynHttpClient;
 use rig_core::providers::anthropic::{Anthropic, AnthropicConfig};
 
-use crate::clients::cancel::CancelToken;
 use crate::clients::backend::{Backend, ClientError, RunParams};
+use crate::clients::cancel::CancelToken;
 use crate::clients::config::ProviderAuth;
 use crate::clients::interactive::InteractiveSession;
 use crate::clients::lazy_auth_http::{BearerStrategy, LazyAuthHttpClient};
@@ -22,6 +22,10 @@ use rig_reqwest::ReqwestClient;
 /// Default `max_tokens` for Anthropic requests.
 /// Current-generation models (Opus 5.5, Sonnet 5.5, Fable 5.1) support up to 128_000 output tokens.
 const DEFAULT_MAX_TOKENS: u64 = 128_000;
+
+/// Required by AnthropicConfig, but never sent: BearerStrategy removes the
+/// x-api-key header and supplies the identity provider's bearer token instead.
+const DYNAMIC_AUTH_PLACEHOLDER_KEY: &str = "unused";
 
 // ── AnthropicClientState ─────────────────────────────────────────────────
 
@@ -41,15 +45,6 @@ enum AnthropicClientState {
 
 pub struct AnthropicBackend {
     state: NativeRunState<AnthropicClientState>,
-    /// API key for static auth, used by `compact()` to authenticate.
-    api_key: Option<String>,
-    /// Token provider + scope for dynamic auth, used by `compact()`.
-    token_provider: Option<Arc<dyn TokenProvider>>,
-    auth_scope: String,
-    /// HTTP client for compaction API calls that bypass rig.
-    raw_http: DynHttpClient,
-    /// Base URL for the Anthropic API (e.g. https://api.anthropic.com).
-    base_url: String,
 }
 
 impl AnthropicBackend {
@@ -89,7 +84,12 @@ impl AnthropicBackend {
             "https://api.anthropic.com",
         );
 
-        let auth_method = crate::clients::config::azure_auth_method("ANTHROPIC_AUTH", "anthropic", "ANTHROPIC_TOKEN", "ANTHROPIC_API_KEY")?;
+        let auth_method = crate::clients::config::azure_auth_method(
+            "ANTHROPIC_AUTH",
+            "anthropic",
+            "ANTHROPIC_TOKEN",
+            "ANTHROPIC_API_KEY",
+        )?;
 
         let model = if model.is_empty() {
             "claude-sonnet-4-6".to_string()
@@ -151,18 +151,6 @@ impl AnthropicBackend {
             },
         };
 
-        // Extract auth material for compaction.
-        let (api_key, token_provider) = match &client_state {
-            AnthropicClientState::Static(client) => {
-                // api_key may be an API key or a bearer token — both
-                // authenticate as `x-api-key`.
-                (Some(client.config().api_key.expose().to_string()), None)
-            }
-            AnthropicClientState::Dynamic {
-                ref token_provider, ..
-            } => (None, Some(token_provider.clone())),
-        };
-
         Ok(Self {
             state: NativeRunState::new(
                 client_state,
@@ -171,11 +159,6 @@ impl AnthropicBackend {
                 resolved,
                 "AnthropicBackend",
             ),
-            api_key,
-            token_provider,
-            auth_scope,
-            raw_http: http_client,
-            base_url,
         })
     }
 }
@@ -186,9 +169,7 @@ impl Backend for AnthropicBackend {
         let (provider, model) = crate::model_uri::provider_and_model(spec)?;
         if provider == "anthropic" {
             match &self.state.client_state {
-                AnthropicClientState::Static(client) => {
-                    Some(client.completion(&model).erase())
-                }
+                AnthropicClientState::Static(client) => Some(client.completion(&model).erase()),
                 AnthropicClientState::Dynamic {
                     ref base_url,
                     ref http_client,
@@ -203,7 +184,7 @@ impl Backend for AnthropicBackend {
                         token_provider.clone(),
                         auth_scope.clone(),
                     );
-                    let client = AnthropicConfig::new("unused")
+                    let client = AnthropicConfig::new(DYNAMIC_AUTH_PLACEHOLDER_KEY)
                         .with_beta("compact-2026-09-04")
                         .with_base_url(base_url)
                         .connect(wrapped);
@@ -226,9 +207,7 @@ impl Backend for AnthropicBackend {
 
         let make_model = async {
             match &self.state.client_state {
-                AnthropicClientState::Static(client) => {
-                    Ok(client.completion(&model_name).erase())
-                }
+                AnthropicClientState::Static(client) => Ok(client.completion(&model_name).erase()),
                 AnthropicClientState::Dynamic {
                     token_provider,
                     base_url,
@@ -242,7 +221,7 @@ impl Backend for AnthropicBackend {
                         token_provider.clone(),
                         auth_scope.clone(),
                     );
-                    let client = AnthropicConfig::new("unused")
+                    let client = AnthropicConfig::new(DYNAMIC_AUTH_PLACEHOLDER_KEY)
                         .with_beta("compact-2026-09-04")
                         .with_base_url(base_url)
                         .connect(wrapped);
@@ -280,73 +259,73 @@ impl Backend for AnthropicBackend {
     async fn compact(
         &self,
         messages: &[rig_core::completion::Message],
-        system_prompt: Option<&str>,
+        context: &crate::clients::compaction::ResolvedRequestContext,
         instructions: Option<&str>,
     ) -> Result<Option<CompactionResult>, ClientError> {
-        use http::{Request, StatusCode};
+        use http::StatusCode;
         use rig_core::http_client::HttpClientExt;
+        use rig_core::wire::{Body, Mode, Operation, Wire};
 
-        let mut body = serde_json::Map::new();
-        body.insert("model".into(), self.model().into());
-        body.insert("max_tokens".into(), 4096.into());
-        body.insert("messages".into(), serde_json::to_value(messages).map_err(|e| {
-            ClientError::Runtime {
-                message: format!("failed to serialize messages for compaction: {e}"),
+        let driver = match &self.state.client_state {
+            AnthropicClientState::Static(client) => client.completion(&context.model),
+            AnthropicClientState::Dynamic {
+                token_provider,
+                base_url,
+                http_client,
+                auth_scope,
+            } => {
+                let wrapped = LazyAuthHttpClient::<BearerStrategy>::new(
+                    http_client.clone(),
+                    token_provider.clone(),
+                    auth_scope.clone(),
+                );
+                AnthropicConfig::new(DYNAMIC_AUTH_PLACEHOLDER_KEY)
+                    .with_beta("compact-2026-09-04")
+                    .with_base_url(base_url)
+                    .connect(wrapped)
+                    .completion(&context.model)
             }
-        })?);
-
+        };
+        let mut context = context.clone();
         let mut compaction = serde_json::Map::new();
         compaction.insert("type".into(), "summarize".into());
         if let Some(inst) = instructions {
             compaction.insert("instructions".into(), inst.into());
         }
-        body.insert("compaction".into(), compaction.into());
-
-        if let Some(sys) = system_prompt {
-            body.insert("system".into(), sys.into());
-        }
-
-        let body_bytes: bytes::Bytes = serde_json::to_vec(&body)
-            .map_err(|e| ClientError::Runtime {
-                message: format!("failed to serialize compaction request: {e}"),
-            })?
-            .into();
-
-        // Strip trailing slash from base_url to avoid double slashes.
-        let base = self.base_url.trim_end_matches('/');
-        let url = format!("{base}/v1/messages");
-        let mut req_builder = Request::post(&url)
-            .header("content-type", "application/json")
-            .header("anthropic-version", "2023-06-01")
-            .header("anthropic-beta", "compact-2026-09-04");
-
-        // Authenticate: static → x-api-key; dynamic → acquire bearer token.
-        if let Some(ref api_key) = self.api_key {
-            req_builder = req_builder.header("x-api-key", api_key.as_str());
-        }
-        let req = req_builder
-            .body(body_bytes)
-            .map_err(|e| ClientError::Runtime {
-                message: format!("failed to build compaction request: {e}"),
-            })?;
-
-        // For dynamic auth, use LazyAuthHttpClient to acquire a fresh
-        // token per request. Token acquisition errors surface nested
-        // inside the client error ("token acquisition failed: …").
-        let resp: http::Response<rig_core::http_client::LazyBody<Vec<u8>>> = if let Some(ref tp) = self.token_provider {
-            let bearer = LazyAuthHttpClient::<BearerStrategy>::new(
-                self.raw_http.clone(),
-                tp.clone(),
-                self.auth_scope.clone(),
-            );
-            bearer.send(req).await.map_err(|e| ClientError::Runtime {
-                message: format!("compaction HTTP request failed: {e}"),
-            })?
-        } else {
-            self.raw_http.send(req).await.map_err(|e| ClientError::Runtime {
-                message: format!("compaction HTTP request failed: {e}"),
-            })?
+        let extra = context.extra.get_or_insert_with(|| serde_json::json!({}));
+        let extra = extra.as_object_mut().ok_or_else(|| ClientError::Runtime {
+            message: "Anthropic compaction provider parameters must be an object".into(),
+        })?;
+        extra.insert("compaction".into(), compaction.into());
+        let request = <Completion as Operation>::prepare(
+            context.request(messages.to_vec()),
+            &driver.wire.describe(),
+        )
+        .map_err(|e| ClientError::Runtime {
+            message: format!("failed to prepare compaction request: {e}"),
+        })?;
+        let encoded =
+            driver
+                .wire
+                .encode(request, Mode::Unary)
+                .map_err(|e| ClientError::Runtime {
+                    message: format!("failed to encode compaction request: {e}"),
+                })?;
+        let (parts, body) = encoded.request.into_parts();
+        let Body::Bytes(body) = body else {
+            return Err(ClientError::Runtime {
+                message: "Anthropic compaction request must be JSON".into(),
+            });
         };
+        // Keep the concrete wire's endpoint, headers and HTTP version intact.
+        let req = http::Request::from_parts(parts, body);
+        let resp: http::Response<rig_core::http_client::LazyBody<Vec<u8>>> = driver
+            .transport
+            .send(req)
+            .await
+            .map_err(|e| ClientError::Runtime {
+                message: format!("compaction HTTP request failed: {e}"),
+            })?;
 
         if resp.status() != StatusCode::OK {
             let status = resp.status().as_u16();
@@ -368,12 +347,9 @@ impl Backend for AnthropicBackend {
             });
         }
 
-        let body_bytes = resp
-            .into_body()
-            .await
-            .map_err(|e| ClientError::Runtime {
-                message: format!("failed to read compaction response body: {e}"),
-            })?;
+        let body_bytes = resp.into_body().await.map_err(|e| ClientError::Runtime {
+            message: format!("failed to read compaction response body: {e}"),
+        })?;
 
         #[derive(serde::Deserialize)]
         struct CompactionContent {
@@ -537,12 +513,248 @@ impl AnthropicBackend {
 
 #[cfg(test)]
 mod tests {
-    use crate::clients::cancel::CancelToken;
     use super::*;
+    use crate::clients::cancel::CancelToken;
     use crate::test_support::EnvGuard;
+
+    struct CompactToken(std::sync::Mutex<Vec<String>>);
+
+    #[async_trait]
+    impl TokenProvider for CompactToken {
+        async fn get_token(
+            &self,
+            scope: &str,
+        ) -> Result<String, token_provider::TokenProviderError> {
+            self.0.lock().unwrap().push(scope.into());
+            Ok("fresh-compact-token".into())
+        }
+    }
+
+    async fn compact_matches_streaming_wire(auth: &str) {
+        use rig_core::completion::message::{
+            AssistantContent, AssistantMessage, Reasoning, ToolCall, ToolFunction,
+        };
+        use rig_core::completion::{CompletionRequest, Message, ToolDefinition};
+        use rig_core::message::{Origin, ToolName};
+        use rig_core::wire::{Body, Mode, Operation, Wire};
+        use serde_json::json;
+        use std::io::{BufRead, Read, Write};
+
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let base = format!("http://{}/gateway", listener.local_addr().unwrap());
+        let server = std::thread::spawn(move || {
+            let (stream, _) = listener.accept().unwrap();
+            stream
+                .set_read_timeout(Some(std::time::Duration::from_secs(10)))
+                .unwrap();
+            let mut reader = std::io::BufReader::new(stream);
+            let mut headers = String::new();
+            let mut length = 0;
+            loop {
+                let mut line = String::new();
+                reader.read_line(&mut line).unwrap();
+                if line == "\r\n" {
+                    break;
+                }
+                if let Some(value) = line.to_lowercase().strip_prefix("content-length:") {
+                    length = value.trim().parse::<usize>().unwrap();
+                }
+                headers.push_str(&line);
+            }
+            let mut body = vec![0; length];
+            reader.read_exact(&mut body).unwrap();
+            let fixture = json!({
+                "stop_reason": "compaction",
+                "content": [{"type": "compaction", "content": "server summary", "signature": "server signature", "encrypted_content": "sealed", "tool_changes": [{"name": "Do"}]}],
+                "usage": {"input_tokens": 0, "output_tokens": 0, "iterations": [{"type": "compaction", "input_tokens": 123, "output_tokens": 17}]}
+            }).to_string();
+            write!(reader.get_mut(), "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}", fixture.len(), fixture).unwrap();
+            (
+                headers,
+                serde_json::from_slice::<serde_json::Value>(&body).unwrap(),
+            )
+        });
+        let client = AnthropicConfig::new("configured-key")
+            .with_base_url(&base)
+            .with_beta("compact-2026-09-04")
+            .connect(DynHttpClient::new(ReqwestClient::default()));
+        let context = crate::clients::compaction::ResolvedRequestContext {
+            provider: "anthropic".into(),
+            model: "claude-sonnet-4-6".into(),
+            system: Some("nondefault system framing".into()),
+            tools: vec![ToolDefinition {
+                name: ToolName::new("Do").unwrap(),
+                description: "actual selected tool".into(),
+                parameters: json!({"type": "object", "properties": {"path": {"type": "string"}}}),
+                annotations: Default::default(),
+            }],
+            extra: Some(
+                json!({"cache_control": {"type": "ephemeral"}, "thinking": {"type": "enabled", "budget_tokens": 1024}, "compaction": {"type": "caller-value", "instructions": "caller instructions", "unexpected": true}}),
+            ),
+            temperature: Some(0.8),
+            max_tokens: Some(8192),
+        };
+        let call = ToolCall::from_wire(
+            "call-1",
+            ToolFunction::new(ToolName::new("Do").unwrap(), json!({"path": "file"})),
+        );
+        let messages = vec![
+            Message::user("prefix user"),
+            Message::Assistant(AssistantMessage::new(vec![
+                AssistantContent::Reasoning(Reasoning::new("signed thought")).with_native(json!({"type": "thinking", "thinking": "signed thought", "signature": "native signature", "estimated_tokens": 42})),
+                AssistantContent::ToolCall(call.clone()),
+            ]).with_origin(Origin::new(rig_core::message::Api::from_static("anthropic.messages"), "anthropic", &context.model))),
+            Message::tool_result(call.id, call.function.name, "tool output"),
+        ];
+        let driver = client.completion(&context.model);
+        // Build the ordinary completion independently of context.request so a
+        // regression in the compaction request builder cannot affect both sides.
+        let request = CompletionRequest::from(messages.clone())
+            .preamble(context.system.clone().unwrap())
+            .tools(context.tools.clone())
+            .additional_params(context.extra.clone().unwrap())
+            .temperature(context.temperature.unwrap())
+            .max_tokens(context.max_tokens.unwrap());
+        let prepared =
+            <Completion as Operation>::prepare(request, &driver.wire.describe()).unwrap();
+        let encoded = driver.wire.encode(prepared, Mode::Streaming).unwrap();
+        let Body::Bytes(bytes) = encoded.request.body() else {
+            panic!("JSON body")
+        };
+        let streaming: serde_json::Value = serde_json::from_slice(bytes).unwrap();
+        assert_eq!(streaming["stream"], true);
+        let token = Arc::new(CompactToken(Default::default()));
+        let dynamic = auth == "dynamic";
+        let backend: Arc<dyn Backend> = if dynamic {
+            let state = AnthropicClientState::Dynamic {
+                token_provider: token.clone(),
+                base_url: base,
+                http_client: DynHttpClient::new(ReqwestClient::default()),
+                auth_scope: "compact-scope".into(),
+            };
+            Arc::new(AnthropicBackend {
+                state: NativeRunState::new(
+                    state,
+                    "different-default-model".into(),
+                    None,
+                    AnthropicBackend::resolve_params(&Default::default()).unwrap(),
+                    "AnthropicBackend",
+                ),
+            })
+        } else {
+            // Exercise production construction, including its beta configuration,
+            // rather than injecting the reference client into the backend.
+            let mut guard = isolated_env();
+            guard.set(
+                if auth == "token" {
+                    "ANTHROPIC_TOKEN"
+                } else {
+                    "ANTHROPIC_API_KEY"
+                },
+                "configured-key",
+            );
+            guard.set("ANTHROPIC_BASE_URL", &base);
+            AnthropicBackend::build(
+                "different-default-model",
+                &HashMap::new(),
+                &Default::default(),
+            )
+            .unwrap()
+        };
+        let result = backend
+            .compact(&messages, &context, Some("keep decisions"))
+            .await
+            .unwrap()
+            .unwrap();
+        let (headers, body) = server.join().unwrap();
+        assert_eq!(
+            context.extra.as_ref().unwrap()["compaction"]["type"],
+            "caller-value"
+        );
+        // Streaming and compaction must carry the same resolved inputs and
+        // exact history; only transport mode and compaction instructions differ.
+        for field in [
+            "model",
+            "system",
+            "messages",
+            "tools",
+            "temperature",
+            "max_tokens",
+            "thinking",
+        ] {
+            assert!(streaming.get(field).is_some(), "missing reference {field}");
+            assert_eq!(body[field], streaming[field], "payload field {field}");
+        }
+        // Some wire versions apply cache control to system/tool/message blocks
+        // (compared above) rather than retaining a top-level field.
+        assert_eq!(body.get("cache_control"), streaming.get("cache_control"));
+        // Compaction remains unary even though the reference uses streaming.
+        assert!(body.get("stream").is_none() || body["stream"] == false);
+        assert_eq!(
+            body["compaction"],
+            json!({"type": "summarize", "instructions": "keep decisions"})
+        );
+        assert!(headers.starts_with("POST /gateway/v1/messages HTTP/1.1\r\n"));
+        let headers = headers.to_lowercase();
+        assert!(headers.contains("anthropic-version: 2023-06-01"));
+        assert!(headers.contains("anthropic-beta: compact-2026-09-04"));
+        assert!(headers.contains("content-type: application/json"));
+        if dynamic {
+            assert!(headers.contains("authorization: bearer fresh-compact-token"));
+            assert!(!headers.contains("x-api-key:"));
+            assert_eq!(*token.0.lock().unwrap(), vec!["compact-scope"]);
+        } else {
+            assert!(headers.contains("x-api-key: configured-key"));
+        }
+        let captured_messages = body["messages"].as_array().unwrap();
+        assert_eq!(captured_messages.len(), 3);
+        assert_eq!(captured_messages[0]["role"], "user");
+        assert_eq!(captured_messages[1]["role"], "assistant");
+        let assistant_blocks = captured_messages[1]["content"].as_array().unwrap();
+        assert_eq!(assistant_blocks.len(), 2);
+        assert_eq!(assistant_blocks[0]["type"], "thinking");
+        assert_eq!(assistant_blocks[0]["thinking"], "signed thought");
+        assert_eq!(assistant_blocks[0]["signature"], "native signature");
+        assert_eq!(assistant_blocks[1]["type"], "tool_use");
+        assert_eq!(assistant_blocks[1]["id"], "call-1");
+        assert_eq!(captured_messages[2]["role"], "user");
+        let final_blocks = captured_messages[2]["content"].as_array().unwrap();
+        assert_eq!(final_blocks.len(), 1);
+        assert_eq!(final_blocks[0]["type"], "tool_result");
+        assert_eq!(final_blocks[0]["tool_use_id"], "call-1");
+        for message in captured_messages {
+            for block in message["content"].as_array().unwrap() {
+                assert_ne!(block["type"], "reasoning");
+            }
+        }
+        assert!(!body.to_string().contains("estimated_tokens"));
+        assert_eq!(result.input_tokens, Some(123));
+        assert_eq!(result.output_tokens, Some(17));
+        let block = result.block.unwrap();
+        assert_eq!(block.content, "server summary");
+        assert_eq!(block.signature, "server signature");
+        assert_eq!(block.encrypted_content.as_deref(), Some("sealed"));
+        assert_eq!(block.tool_changes, Some(vec![json!({"name": "Do"})]));
+    }
+
+    #[tokio::test]
+    async fn production_compact_matches_streaming_wire_static_api_key() {
+        compact_matches_streaming_wire("api-key").await;
+    }
+
+    #[tokio::test]
+    async fn production_compact_matches_streaming_wire_static_token() {
+        compact_matches_streaming_wire("token").await;
+    }
+
+    #[tokio::test]
+    async fn production_compact_matches_streaming_wire_dynamic() {
+        compact_matches_streaming_wire("dynamic").await;
+    }
 
     fn scrub_anthropic_env(guard: &mut EnvGuard) {
         guard.remove("ANTHROPIC_API_KEY");
+        guard.remove("ANTHROPIC_TOKEN");
         guard.remove("ANTHROPIC_BASE_URL");
         guard.remove("ANTHROPIC_AUTH");
         guard.remove("ANTHROPIC_AUTH_SCOPE");
@@ -570,10 +782,7 @@ mod tests {
             &indexmap::IndexMap::new(),
         );
         let err = result.expect_err("should be an error");
-        assert!(
-            err.contains("no credentials for provider"),
-            "got: {err}"
-        );
+        assert!(err.contains("no credentials for provider"), "got: {err}");
     }
 
     #[test]
@@ -608,12 +817,8 @@ mod tests {
         let mut guard = isolated_env();
         guard.set("ANTHROPIC_API_KEY", "sk-ant-test");
 
-        let backend = AnthropicBackend::build(
-            "",
-            &HashMap::new(),
-            &indexmap::IndexMap::new(),
-        )
-        .unwrap();
+        let backend =
+            AnthropicBackend::build("", &HashMap::new(), &indexmap::IndexMap::new()).unwrap();
         // We can't inspect the model directly through the trait, but we can
         // verify the build succeeded with an empty model string.
         drop(backend);
@@ -701,10 +906,7 @@ mod tests {
             &indexmap::IndexMap::new(),
         );
         let err = result.expect_err("should be an error");
-        assert!(
-            err.contains("unknown auth value"),
-            "got: {err}"
-        );
+        assert!(err.contains("unknown auth value"), "got: {err}");
     }
 
     #[test]
@@ -715,11 +917,6 @@ mod tests {
         let client = Anthropic::new("sk-ant-test");
 
         let backend = AnthropicBackend {
-            api_key: Some("sk-ant-test".into()),
-            token_provider: None,
-            auth_scope: "https://cognitiveservices.azure.com/.default".into(),
-            raw_http: DynHttpClient::new(ReqwestClient::default()),
-            base_url: "https://api.anthropic.com".into(),
             state: NativeRunState::new(
                 AnthropicClientState::Static(client),
                 "claude-sonnet-4-6".into(),
@@ -795,12 +992,8 @@ mod tests {
         let mut extra = indexmap::IndexMap::new();
         extra.insert("max_tokens".into(), "8192".into());
 
-        let backend = AnthropicBackend::build_concrete(
-            "claude-sonnet-4-6",
-            &HashMap::new(),
-            &extra,
-        )
-        .unwrap();
+        let backend =
+            AnthropicBackend::build_concrete("claude-sonnet-4-6", &HashMap::new(), &extra).unwrap();
         assert_eq!(backend.state.resolved.max_tokens, Some(8192));
     }
 
@@ -813,12 +1006,8 @@ mod tests {
         let mut extra = indexmap::IndexMap::new();
         extra.insert("max_tokens".into(), "not-a-number".into());
 
-        let err = AnthropicBackend::build(
-            "claude-sonnet-4-6",
-            &HashMap::new(),
-            &extra,
-        )
-        .expect_err("malformed max_tokens must error");
+        let err = AnthropicBackend::build("claude-sonnet-4-6", &HashMap::new(), &extra)
+            .expect_err("malformed max_tokens must error");
         assert!(err.contains("max_tokens"), "{err}");
     }
 
@@ -878,12 +1067,8 @@ mod tests {
         let mut extra = indexmap::IndexMap::new();
         extra.insert("cache_control".into(), "null".into());
 
-        let backend = AnthropicBackend::build_concrete(
-            "claude-sonnet-4-6",
-            &HashMap::new(),
-            &extra,
-        )
-        .unwrap();
+        let backend =
+            AnthropicBackend::build_concrete("claude-sonnet-4-6", &HashMap::new(), &extra).unwrap();
 
         let val = backend.state.resolved.additional.get("cache_control");
         assert!(
@@ -960,12 +1145,8 @@ mod tests {
             "{\"type\":\"ephemeral\",\"ttl\":\"1h\"}".into(),
         );
 
-        let backend = AnthropicBackend::build_concrete(
-            "claude-sonnet-4-6",
-            &HashMap::new(),
-            &extra,
-        )
-        .unwrap();
+        let backend =
+            AnthropicBackend::build_concrete("claude-sonnet-4-6", &HashMap::new(), &extra).unwrap();
 
         let val = backend.state.resolved.additional.get("cache_control");
         assert!(

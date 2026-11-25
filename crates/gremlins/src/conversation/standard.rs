@@ -31,7 +31,7 @@ use std::sync::Arc;
 
 use crate::clients::agent::done_helpers::done_user_message;
 use crate::clients::backend::Backend;
-use crate::clients::compaction::compaction_block_as_message;
+use crate::clients::compaction::{compaction_block_as_message, ResolvedRequestContext};
 use crate::clients::conversation::{
     Conversation, PendingPrompt, RunArtifact, TurnScript, TurnScriptError,
 };
@@ -75,6 +75,7 @@ pub(crate) struct StandardConversation {
     /// Backend for model construction and server-side API calls.
     backend: Option<Arc<dyn Backend>>,
     local_summarizer: LocalSummarizer,
+    request_context: Option<ResolvedRequestContext>,
     /// Set to `true` when [`render_turn`] auto-compacts the prefix.
     /// Persistence uses this signal to write a full replacement transcript
     /// instead of an incremental diff that would leave compacted-away
@@ -104,6 +105,7 @@ impl StandardConversation {
             last_prompt_tokens: None,
             finalized_messages: None,
             backend,
+            request_context: None,
             local_summarizer: |spec, messages, instructions, system| {
                 Box::pin(run_local_compaction(spec, messages, instructions, system))
             },
@@ -190,14 +192,15 @@ impl StandardConversation {
         let to_compact = self.history[..cut].to_vec();
 
         // ── Server-side compaction ──
-        if backend.supports_compaction() {
-            match backend
-                .compact(&to_compact, system_prompt, instructions)
-                .await
-            {
+        if let Some(context) = self.request_context.as_ref().filter(|context| {
+            backend.supports_compaction()
+                && !context.provider.is_empty()
+                && context.provider == backend.name()
+        }) {
+            match backend.compact(&to_compact, context, instructions).await {
                 Ok(Some(r)) if r.block.is_some() => {
                     let signed = r.block.unwrap();
-                    let summary = compaction_block_as_message(&signed, backend.model());
+                    let summary = compaction_block_as_message(&signed, &context.model);
                     self.commit_compaction(summary, &kept);
                     return Some(CompactionReport {
                         strategy: CompactionStrategy::Server,
@@ -271,7 +274,25 @@ impl Conversation for StandardConversation {
             compaction_threshold_tokens: self.compaction_threshold_tokens,
             backend: self.backend.clone(),
             local_summarizer: self.local_summarizer,
+            request_context: self.request_context.clone(),
         })
+    }
+
+    fn set_request_backend(&mut self, backend: Option<Arc<dyn Backend>>) {
+        self.backend = backend;
+        self.request_context = None;
+    }
+
+    fn set_request_context(&mut self, context: ResolvedRequestContext) {
+        self.request_context = Some(context);
+    }
+
+    fn request_provider(&self) -> Option<&str> {
+        self.backend.as_ref().map(|backend| backend.name())
+    }
+
+    fn request_context(&self) -> Option<ResolvedRequestContext> {
+        self.request_context.clone()
     }
 
     fn record_prose(&mut self, text: &str) {
@@ -452,6 +473,7 @@ impl Conversation for StandardConversation {
             compaction_threshold_tokens: self.compaction_threshold_tokens,
             backend: self.backend.clone(),
             local_summarizer: self.local_summarizer,
+            request_context: None,
         })
     }
 
@@ -755,6 +777,7 @@ mod tests {
             crate::clients::agent::task_models::sync_factory(move |_spec: &str| {
                 Ok(crate::clients::agent::task::TaskModel {
                     model: child_handle.clone().erase(),
+                    backend: None,
                     temperature: None,
                     max_tokens: None,
                     extra: None,

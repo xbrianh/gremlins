@@ -31,6 +31,8 @@ pub(crate) fn build_task_selector(
 #[derive(Clone, Debug)]
 pub(crate) struct TaskModel {
     pub(crate) model: DynModel<Completion>,
+    /// Backend that built the selected model; absent for standalone mock models.
+    pub(crate) backend: Option<Arc<dyn crate::clients::backend::Backend>>,
     pub(crate) temperature: Option<f64>,
     pub(crate) max_tokens: Option<u64>,
     pub(crate) extra: Option<serde_json::Value>,
