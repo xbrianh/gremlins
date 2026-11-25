@@ -27,7 +27,7 @@ use tokio::io::BufReader;
 use tokio::net::unix::{OwnedReadHalf, OwnedWriteHalf};
 use tokio::sync::{mpsc, oneshot, Mutex};
 
-/// A home event, its client-side turn tag, and (only at turn start) its execution.
+/// A home event, its wire turn tag, and its exact agent execution when advertised.
 pub(super) type ChatEvent = (EventKind, Option<String>, Option<Execution>);
 
 /// Outbound side of a single daemon socket connection.
@@ -45,7 +45,7 @@ struct Connection {
     /// Outbound socket plus, for session connections, the session id that
     /// belongs to that socket. Guarded by one lock so a send can never write
     /// a request stamped with the previous session id to the new socket.
-    write: Mutex<WriteState>,
+    write: Arc<Mutex<WriteState>>,
     /// Pending response waiters in request order. The daemon processes
     /// requests sequentially on a connection and writes each response in
     /// order, so FIFO delivery is correct.
@@ -103,12 +103,12 @@ impl Connection {
         });
 
         Self {
-            write: Mutex::new(WriteState {
+            write: Arc::new(Mutex::new(WriteState {
                 write_half,
                 session_id,
                 home_run_id,
                 generation: 0,
-            }),
+            })),
             responses,
             read_handle: Mutex::new(Some(read_handle)),
             out,
@@ -264,7 +264,7 @@ pub struct DaemonClient {
     session_recreate: Mutex<()>,
     home_display: Mutex<Option<home::Display>>,
     #[cfg(test)]
-    aux_streams: Mutex<Option<VecDeque<tokio::net::UnixStream>>>,
+    aux_streams: Arc<Mutex<Option<VecDeque<tokio::net::UnixStream>>>>,
 }
 
 impl DaemonClient {
@@ -306,7 +306,7 @@ impl DaemonClient {
                 out,
                 session_recreate: Mutex::new(()),
                 home_display: Mutex::new(None),
-                aux_streams: Mutex::new(Some(streams.into())),
+                aux_streams: Arc::new(Mutex::new(Some(streams.into()))),
             },
             [control_peer, session_peer],
         )
@@ -408,6 +408,11 @@ impl DaemonClient {
         id: u64,
         text: &str,
     ) -> Result<(), String> {
+        if execution.nonce == 0 {
+            let session = self.session_id().await;
+            let stream = self.open_aux_stream().await?;
+            return send_native_correction(stream, &session, execution, id, text).await;
+        }
         let (stream, bound) = self.attach_conversation(Selector::Exact(execution)).await?;
         send_correction(stream, &bound, id, text).await
     }
@@ -561,6 +566,57 @@ async fn attach_conversation(
     socket::write_json_line(stream.get_mut(), &selector.request(session)).await?;
     let ack = attachment::read_ack(&mut stream).await?;
     Ok((stream, selector.binding(&ack)?))
+}
+
+async fn send_native_correction(
+    stream: tokio::net::UnixStream,
+    session: &str,
+    execution: &Execution,
+    id: u64,
+    text: &str,
+) -> Result<(), String> {
+    let mut stream = BufReader::new(stream);
+    let req_id = id.to_string();
+    socket::write_json_line(stream.get_mut(), &execution.input_request(session, &req_id)).await?;
+    let ack = attachment::read_ack(&mut stream).await?;
+    if ack["type"] == "error" {
+        return Err(ack["message"].as_str().unwrap_or("input rejected").into());
+    }
+    if ack["type"] != "input_bound"
+        || ack["req_id"] != req_id
+        || ack["id"] != execution.run_id
+        || ack["stage_run_id"] != execution.stage_run_id
+    {
+        return Err("input binding acknowledgment mismatch".into());
+    }
+    let uncertain = |reason: String| format!("delivery uncertain: {reason}");
+    socket::write_json_line(
+        stream.get_mut(),
+        &json!({"cmd":"message", "req_id":req_id, "text":text}),
+    )
+    .await
+    .map_err(uncertain)?;
+    while let Some(frame) = socket::read_json_line(&mut stream)
+        .await
+        .map_err(uncertain)?
+    {
+        if frame["type"] == "ended" {
+            break;
+        }
+        if frame["req_id"] != req_id {
+            return Err(uncertain("mismatched input receipt".into()));
+        }
+        match frame["type"].as_str() {
+            Some("queued") => continue,
+            Some("delivered") => return Ok(()),
+            Some("dropped") => return Err("correction not delivered".into()),
+            Some("error") => {
+                return Err(frame["message"].as_str().unwrap_or("input rejected").into())
+            }
+            _ => return Err(uncertain("unexpected input receipt".into())),
+        }
+    }
+    Err(uncertain("input closed without confirmation".into()))
 }
 
 async fn send_correction(
@@ -741,7 +797,7 @@ pub async fn connect() -> Result<
             session_recreate: Mutex::new(()),
             home_display: Mutex::new(None),
             #[cfg(test)]
-            aux_streams: Mutex::new(None),
+            aux_streams: Arc::new(Mutex::new(None)),
         },
         event_rx,
         chat_rx,
@@ -798,13 +854,8 @@ async fn read_loop(
                     }
                 };
                 if can_route_to_chat(&event) {
-                    let execution =
-                        if matches!(event, EventKind::TurnStarted { .. }) && chat_turn.is_some() {
-                            Execution::from_frame(&value)
-                        } else {
-                            None
-                        };
-                    let _ = out.chat_tx.send((event, chat_turn, execution));
+                    // Home display comes exclusively from its passive bus watch.
+                    // Retire legacy frames without consuming a response waiter.
                 } else {
                     // Bare error/system_warning — treat as a response.
                     let response_tx = {
@@ -841,6 +892,77 @@ async fn read_loop(
     // Drop all pending response senders so waiters see "connection
     // closed" instead of hanging forever.
     responses.lock().await.clear();
+}
+
+#[cfg(test)]
+mod native_input_tests {
+    use super::*;
+
+    async fn exchange(ack: Value, receipts: Vec<Value>) -> Result<(), String> {
+        let (client, server) = tokio::net::UnixStream::pair().unwrap();
+        let peer = tokio::spawn(async move {
+            let mut server = BufReader::new(server);
+            let request = socket::read_json_line(&mut server).await.unwrap().unwrap();
+            assert_eq!(
+                request,
+                json!({"op":"input", "session_id":"owner", "id":"home",
+                "stage_run_id":"exact", "req_id":"7"})
+            );
+            socket::write_json_line(server.get_mut(), &ack)
+                .await
+                .unwrap();
+            if ack["type"] != "input_bound" || ack["stage_run_id"] != "exact" {
+                assert!(socket::read_json_line(&mut server).await.unwrap().is_none());
+                return;
+            }
+            assert_eq!(
+                socket::read_json_line(&mut server).await.unwrap().unwrap(),
+                json!({"cmd":"message", "req_id":"7", "text":"fix"})
+            );
+            for receipt in receipts {
+                socket::write_json_line(server.get_mut(), &receipt)
+                    .await
+                    .unwrap();
+            }
+        });
+        let execution =
+            Execution::from_bus_frame(&json!({"run_id":"home", "stage_run_id":"exact"})).unwrap();
+        let result = send_native_correction(client, "owner", &execution, 7, "fix").await;
+        peer.await.unwrap();
+        result
+    }
+
+    fn ack() -> Value {
+        json!({"type":"input_bound", "id":"home", "stage_run_id":"exact", "req_id":"7"})
+    }
+
+    #[tokio::test]
+    async fn native_input_requires_exact_binding_and_delivered_receipt() {
+        assert!(exchange(
+            ack(),
+            vec![
+                json!({"type":"queued", "req_id":"7"}),
+                json!({"type":"delivered", "req_id":"7"})
+            ]
+        )
+        .await
+        .is_ok());
+        for receipts in [
+            vec![],
+            vec![json!({"type":"queued", "req_id":"7"})],
+            vec![json!({"type":"dropped", "req_id":"7"})],
+            vec![json!({"type":"delivered", "req_id":"other"})],
+            vec![json!({"type":"error", "req_id":"7", "message":"busy"})],
+        ] {
+            assert!(exchange(ack(), receipts).await.is_err());
+        }
+        let mut wrong = ack();
+        wrong["stage_run_id"] = json!("successor");
+        assert!(exchange(wrong, vec![]).await.is_err());
+        assert!(exchange(json!({"type":"error", "message":"busy"}), vec![])
+            .await
+            .is_err());
+    }
 }
 
 #[cfg(test)]
@@ -1612,7 +1734,7 @@ mod correction_tests {
     use tokio::net::UnixStream;
 
     #[tokio::test]
-    async fn turn_start_preserves_the_owner_turn_and_execution_as_one_event() {
+    async fn unsolicited_turn_start_is_retired_without_display() {
         let (client, mut peer) = UnixStream::pair().unwrap();
         let (reader, _writer) = client.into_split();
         let (chat_tx, mut chat_rx) = mpsc::unbounded_channel();
@@ -1625,17 +1747,6 @@ mod correction_tests {
         socket::write_json_line(&mut peer, &json!({"type":"turn_started", "chat_turn":"owner-turn", "id":"home", "stage_run_id":"exec-home", "nonce":23})).await.unwrap();
         drop(peer);
         reader.await.unwrap();
-        let (kind, turn, target) = chat_rx.recv().await.unwrap();
-        assert!(matches!(kind, EventKind::TurnStarted { .. }));
-        assert_eq!(turn.as_deref(), Some("owner-turn"));
-        assert_eq!(
-            target,
-            Some(Execution {
-                run_id: "home".into(),
-                stage_run_id: "exec-home".into(),
-                nonce: 23
-            })
-        );
         assert!(chat_rx.recv().await.is_none());
     }
 

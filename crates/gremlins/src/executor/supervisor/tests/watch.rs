@@ -185,6 +185,14 @@ fn assert_wire(frame: &Value, identity: &CorrId, kind: &EventKind) -> u64 {
         }
     }
     expected["stage_run_id"] = json!(identity.stage_run_id());
+    if let Some(turn) = identity.turn_token() {
+        expected["correlation_turn"] = json!(turn);
+    }
+    if expected.get("stage_type").is_none() {
+        if let Some(stage_type) = frame.get("stage_type") {
+            expected["stage_type"] = stage_type.clone();
+        }
+    }
     let sequence = frame["sequence"].as_u64().expect("wire sequence");
     expected["sequence"] = json!(sequence);
     assert_eq!(frame, &expected);
@@ -407,6 +415,68 @@ async fn control_and_verified_aux_replay_retained_events_once_before_live_barrie
         // A second ordered barrier also rules out duplicate live delivery.
         assert_wire(&peer.frame().await, &identity, &terminal);
         peer.closed().await;
+        registry.stop_run(&id).await.unwrap();
+    }
+}
+
+#[tokio::test]
+async fn replay_and_live_preserve_turn_and_invocation_type() {
+    for aux in [false, true] {
+        let id = format!("watch-metadata-{aux}");
+        let (registry, _gremlin, _dir) = live(&id).await;
+        let agent = corr(&id, "worker", "agent-1").with_turn_token("caller-turn");
+        let exec = corr(&id, "worker", "exec-1").with_turn_token("exec-turn");
+        emit_corr_event(&agent, boundary(&id, "worker", "agent-1", "agent"));
+        emit_corr_event(&exec, boundary(&id, "worker", "exec-1", "exec"));
+        let chunk = EventKind::StreamChunk {
+            text: "hello".into(),
+        };
+        emit_corr_event(&agent, chunk.clone());
+        let mut peer = Peer::watch(
+            &registry,
+            aux,
+            &id,
+            json!({"replay":true, "stage":"worker"}),
+        )
+        .await;
+        let mut first = peer.frame().await;
+        if first["type"] == "history_gap" {
+            first = peer.frame().await;
+        }
+        assert_eq!(first["stage_type"], "agent");
+        assert_eq!(first["correlation_turn"], "caller-turn");
+        assert_eq!(peer.frame().await["stage_type"], "exec");
+        let replayed = peer.frame().await;
+        assert_wire(&replayed, &agent, &chunk);
+        assert_eq!(replayed["stage_type"], "agent");
+        assert_eq!(peer.frame().await["type"], "replay_checkpoint");
+
+        let complete = EventKind::TurnComplete {
+            turn: 7,
+            text: "done".into(),
+            tool_calls: vec![],
+            stats: None,
+            totals: None,
+        };
+        emit_corr_event(&agent, complete.clone());
+        let frame = peer.frame().await;
+        assert_wire(&frame, &agent, &complete);
+        assert_eq!(frame["turn"], 7);
+        assert_eq!(frame["correlation_turn"], "caller-turn");
+        assert_eq!(frame["stage_type"], "agent");
+
+        emit_corr_event(&exec, chunk.clone());
+        assert_eq!(peer.frame().await["stage_type"], "exec");
+        // Same stage name, new invocation: no inherited agent classification.
+        let unknown = corr(&id, "worker", "unknown");
+        emit_corr_event(&unknown, chunk.clone());
+        let frame = peer.frame().await;
+        assert!(frame.get("stage_type").is_none());
+        assert!(frame.get("correlation_turn").is_none());
+        // A descendant reusing the invocation token cannot inherit its type.
+        let child = corr(&format!("{id}:child"), "worker", "agent-1");
+        emit_corr_event(&child, chunk);
+        assert!(peer.frame().await.get("stage_type").is_none());
         registry.stop_run(&id).await.unwrap();
     }
 }

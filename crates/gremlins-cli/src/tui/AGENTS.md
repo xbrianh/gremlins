@@ -86,8 +86,9 @@ returns `RunError::Reported` so the CLI exits nonzero without printing it again.
 ### Home chat flow
 Session creation/recreation returns a registry-reserved `home_run_id`, distinct from
 `sess-*`. The client installs it before processing watch rows, without waiting for
-`TurnStarted`; first chat creation consumes the reservation. A stopped run that is
-replaced within the same session can still change identity until `TurnStarted`.
+`TurnStarted`; first chat creation consumes the reservation. A replacement enqueue acknowledgment installs the authoritative run ID immediately,
+without waiting for `TurnStarted`. Home follows that run through native bus replay/live
+handoff; retained-window gaps remain visible. Unsolicited chat-display frames are ignored.
 These steps apply to a new prompt on `Target::Home`; selected-stage text uses the correction path below.
 
 1. User types plain text → Enter
@@ -115,7 +116,11 @@ These steps apply to a new prompt on `Target::Home`; selected-stage text uses th
 - `/debug <id>` uses pause-on-entry for an interactive agent only; exec stages remain read-only. Composer text becomes a correction only for an authorized attached execution (`Submission::Correction` → `deliver_correction()` → `delivery_rx`), resuming that execution rather than creating a chat or replacement run.
 - `AttachmentFrame` arrives on `attach_rx`; `apply_attachment_frame()` routes response, reasoning, tool output/results, operator messages, and terminal frames into the target's shared transcript via `with_target_transcript()`.
 - Passive frames route by bus identity, reject sibling invocations, and never authorize corrections. Debugger attachments pin stage_run_id and nonce; generation/target checks reject stale frames. Only a validated `attached` acknowledgment advertising `message` grants a correction address. Read-only stages still stream.
-- `done` / `ended` / `detached` clear the correction address and finish the target's turn. Detaching or switching away does not cancel execution. Home `chat_rx` events always update `Target::Home`, even while another target is displayed.
+- `done` / `ended` / `detached` clear the correction address and finish the target's turn. Detaching or switching away does not cancel execution. Home bus events always update `Target::Home`, even while another target is displayed.
+Matching tagged agent events identify the exact input execution without requiring a
+start frame or capability announcement. Queued prompts are busy, not input handles;
+corrections use exact input and never fall back to chat. Command receipts are distinct
+from bus output and cannot clear a successor execution's draft.
 
 ## Rendering
 

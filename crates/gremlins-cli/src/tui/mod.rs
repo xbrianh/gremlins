@@ -6,6 +6,8 @@ pub mod client;
 pub mod commands;
 pub mod completion;
 pub mod editor;
+mod home_events;
+use home_events::{apply_home_event, apply_home_identity};
 pub mod input_buffer;
 pub mod markdown;
 pub mod motif;
@@ -182,6 +184,50 @@ fn send_attachment_correction<B: ratatui::backend::Backend>(
     {
         if let Some(receipt) = app.finish_delivery(id, Err(reason)) {
             live.show_receipt(receipt);
+        }
+    }
+}
+
+fn route_submission<B: ratatui::backend::Backend>(
+    app: &mut App,
+    live: &mut LiveArea<B>,
+    client: &Arc<client::DaemonClient>,
+    attachment: &Attachment,
+    delivery_tx: &mpsc::UnboundedSender<(u64, Result<(), String>)>,
+    home_busy: bool,
+) -> bool {
+    if app.input.is_empty() {
+        return true;
+    }
+    if app.session_recreating {
+        live.push_transcript_line("session reset is in progress — wait before sending".to_string());
+        return true;
+    }
+    match app
+        .conversations
+        .submit(&app.selected_target, &app.input, home_busy)
+    {
+        Submission::HomePrompt => false,
+        Submission::Blocked(message) => {
+            live.push_transcript_line(message.to_string());
+            true
+        }
+        Submission::Correction {
+            id,
+            execution,
+            text,
+        } => {
+            if attachment.routes_correction(&app.selected_target, &execution) {
+                send_attachment_correction(app, live, attachment, id, &text);
+                return true;
+            }
+            let c = Arc::clone(client);
+            let tx = delivery_tx.clone();
+            tokio::spawn(async move {
+                let outcome = c.deliver_correction(&execution, id, &text).await;
+                let _ = tx.send((id, outcome));
+            });
+            true
         }
     }
 }
@@ -1297,8 +1343,8 @@ fn build_chat_request(
 /// log follow first. The caller must have already checked `active_request`
 /// and `session_recreating`.
 #[allow(clippy::too_many_arguments)]
-fn send_chat_input(
-    live_area: &mut LiveArea,
+fn send_chat_input<B: ratatui::backend::Backend>(
+    live_area: &mut LiveArea<B>,
     app: &mut App,
     client: &Arc<client::DaemonClient>,
     input: String,
@@ -2329,34 +2375,8 @@ async fn run_app(live_area: &mut LiveArea) -> io::Result<()> {
                                 continue;
                             }
                             let command = dispatch(app.input.text());
-                            if command.is_none() {
-                                if app.input.is_empty() {
-                                    continue;
-                                }
-                                if app.session_recreating {
-                                    live_area.push_transcript_line("session reset is in progress — wait before sending".to_string());
-                                    continue;
-                                }
-                                match app.conversations.submit(&app.selected_target, &app.input, active_turn.is_some()) {
-                                    Submission::HomePrompt => {}
-                                    Submission::Blocked(message) => {
-                                        live_area.push_transcript_line(message.to_string());
-                                        continue;
-                                    }
-                                    Submission::Correction { id, execution, text } => {
-                                        if attachment.routes_correction(&app.selected_target, &execution) {
-                                            send_attachment_correction(&mut app, live_area, &attachment, id, &text);
-                                            continue;
-                                        }
-                                        let c = Arc::clone(&client);
-                                        let tx = delivery_tx.clone();
-                                        tokio::spawn(async move {
-                                            let outcome = c.deliver_correction(&execution, id, &text).await;
-                                            let _ = tx.send((id, outcome));
-                                        });
-                                        continue;
-                                    }
-                                }
+                            if command.is_none() && route_submission(&mut app, live_area, &client, &attachment, &delivery_tx, active_turn.is_some()) {
+                                continue;
                             }
 
                             let input_buf: InputBuffer = app.take_input();
@@ -2887,6 +2907,7 @@ async fn run_app(live_area: &mut LiveArea) -> io::Result<()> {
 
             // ── Raw lines (non-event JSON from the main socket) ─
             Some(raw) = raw_rx.recv() => {
+                apply_home_identity(&mut app, &raw, client.session_generation().await, &active_turn);
                 app.observe_live_pipeline_frame(&raw);
                 if raw.get("type").and_then(|v| v.as_str()) == Some("event_lagged") {
                     // Resync lifecycle status from the daemon so terminal
@@ -3044,210 +3065,7 @@ async fn run_app(live_area: &mut LiveArea) -> io::Result<()> {
 
             // ── Chat events ────────────────────────────────
             Some((event, turn, execution)) = chat_rx.recv() => {
-                // Home keeps streaming regardless of the selected conversation.
-                let home = Target::Home;
-
-                // Drop events that belong to a superseded turn (a turn that
-                // was cancelled by Esc or replaced by a newer submit).
-                // TaskProgress events are keyed by parent tool-call id, not by
-                // turn, and are handled before the turn filter below.
-                if let gremlins_magic_bus::EventKind::TaskProgress { parent_id, chain, kind, call, reasoning, text, stats, totals, .. } = &event {
-                    log::debug!(
-                        "TaskProgress parent_id={parent_id} kind={kind} chain={chain} reasoning_len={} text_len={}",
-                        reasoning.len(), text.len()
-                    );
-                    let stats_json = stats.as_ref().map(|s| serde_json::to_value(s).unwrap_or(serde_json::Value::Null));
-                    let totals_json = totals.as_ref().map(|s| serde_json::to_value(s).unwrap_or(serde_json::Value::Null));
-                    live_area.with_target_transcript(&home, |transcript, _reasoning| {
-                        transcript.push_task_progress(parent_id, kind, call, reasoning, text, stats_json.as_ref(), totals_json.as_ref());
-                    });
-                    continue;
-                }
-                let event_turn = turn.clone();
-                match (&active_turn, &event_turn) {
-                    (Some(active), Some(ev)) if active != ev => {
-                        log::debug!("dropping stale chat event for turn {ev} (active {active})");
-                        continue;
-                    }
-                    // No active turn means `/clear` or Esc has retired the
-                    // conversation; any queued turn-tagged terminal events
-                    // belong to the dead session and must not be applied.
-                    // Exception: events for a recently-interrupted turn
-                    // (from a hard-cancel escalation) are allowed through.
-                    (None, Some(ev))
-                        if interrupt.ended_turn.as_deref() != Some(ev.as_str()) =>
-                    {
-                        log::debug!("dropping retired-session chat event for turn {ev}");
-                        continue;
-                    }
-                    _ => {}
-                }
-
-                match event {
-                    gremlins_magic_bus::EventKind::TurnStarted { stage_run_id } => {
-                        if let Some(turn) = event_turn.as_deref().filter(|turn| active_turn.as_deref() == Some(*turn)) {
-                            log::debug!("chat turn started: stage_run_id={stage_run_id}");
-                            if let Some(execution) = &execution {
-                                app.home_run_id = Some(execution.run_id.clone());
-                            }
-                            app.conversations.home_turn_started(turn, execution);
-                        }
-                    }
-                    gremlins_magic_bus::EventKind::StreamChunk { text, .. } => {
-                        log::debug!("StreamChunk len={}", text.len());
-                        live_area.with_target_transcript(&home, |transcript, _| {
-                            transcript.push_response(&text);
-                        });
-                    }
-                    gremlins_magic_bus::EventKind::ReasoningChunk { text, .. } => {
-                        log::debug!("ReasoningChunk len={}", text.len());
-                        live_area.with_target_transcript(&home, |_, reasoning| {
-                            if reasoning.title_is_empty() {
-                                reasoning.set_title(REASONING_PLACEHOLDER_TITLE);
-                            }
-                            reasoning.push_text(&text);
-                        });
-                    }
-                    gremlins_magic_bus::EventKind::ToolOutputChunk { id, name, call, text, .. } => {
-                        log::debug!(
-                            "ToolOutputChunk id={id} name={name} call={call} len={}",
-                            text.len()
-                        );
-                        live_area.with_target_transcript(&home, |transcript, _| {
-                            transcript.push_tool_output_chunk(&id, &call, &text);
-                        });
-                    }
-                    gremlins_magic_bus::EventKind::ToolResult { id, name: _, call, output, .. } => {
-                        log::debug!(
-                            "ToolResult id={id} output_len={}",
-                            output.len()
-                        );
-                        // All tools participate uniformly in the transcript.
-                        live_area.with_target_transcript(&home, |transcript, _| {
-                            transcript.commit_tool_result(&id, &call);
-                        });
-                    }
-                    gremlins_magic_bus::EventKind::TurnComplete { turn, text, tool_calls, stats, totals } => {
-                        log::debug!("TurnComplete text_len={} tool_calls={:?}", text.len(), tool_calls);
-                        live_area.with_target_transcript(&home, |transcript, reasoning| {
-                            transcript.clear_tool_output();
-                            transcript.reconcile_response(&text);
-                            transcript.reconcile_tool_calls(&tool_calls);
-                            let turn_num = turn;
-                            let stats_json = stats.as_ref().map(|s| serde_json::to_value(s).unwrap_or(serde_json::Value::Null));
-                            let totals_json = totals.as_ref().map(|s| serde_json::to_value(s).unwrap_or(serde_json::Value::Null));
-                            reasoning.set_title(&stats_title(turn_num, stats_json.as_ref(), totals_json.as_ref()));
-                        });
-                    }
-                    gremlins_magic_bus::EventKind::Done { text, summary, .. } => {
-                        log::debug!("Done text_len={} summary_len={} has_current_turn={}",
-                            text.len(), summary.len(), live_area.target_has_current_turn(&home));
-                        if !live_area.target_has_current_turn(&home) {
-                            log::debug!("Done SKIPPED — no current turn");
-                            continue;
-                        }
-                        // Update the home target's transcript.
-                        live_area.with_target_transcript(&home, |transcript, reasoning| {
-                            if transcript.response_is_empty() && !text.is_empty() {
-                                transcript.replace_response(&text);
-                            }
-                            if !summary.is_empty() && summary != text {
-                                transcript.push_response("\n\n");
-                                transcript.push_response(&summary);
-                            }
-                            // Relabel the live stats header.
-                            let new_title = reasoning
-                                .title()
-                                .map(|t| t.replacen(REASONING_PLACEHOLDER_TITLE, REASONING_COMPLETED_TITLE, 1));
-                            if let Some(new_title) = new_title {
-                                reasoning.set_title(&new_title);
-                            }
-                            let stream = std::mem::replace(reasoning, new_reasoning_band());
-                            let had_turn = transcript.has_current_turn();
-                            transcript.finish_turn();
-                            if had_turn {
-                                transcript.commit_reasoning_title(stream);
-                            }
-                            transcript.clear_tool_output();
-                        });
-
-                        finish_home_request(&mut app, live_area);
-                        active_turn = None;
-
-                        // Repaint immediately so the finished response text
-                        // and Done summary are visible without waiting for the
-                        // next input event.
-                        live_area.compose(&app)?;
-                    }
-                    gremlins_magic_bus::EventKind::Ended { reason, .. } => {
-                        if !live_area.target_has_current_turn(&home) {
-                            continue;
-                        }
-                        finish_home_request(&mut app, live_area);
-                        let msg = format!("chat ended: {reason}");
-                        live_area.with_target_transcript(&home, |transcript, reasoning| {
-                            let had_turn = transcript.has_current_turn();
-                            let stream = std::mem::replace(reasoning, new_reasoning_band());
-                            transcript.finish_turn();
-                            transcript.clear_tool_output();
-                            if had_turn {
-                                transcript.commit_reasoning_title(stream);
-                            }
-                            transcript.push_transcript_line(msg);
-                        });
-
-                        // When the turn was soft-interrupted, keep the
-                        // turn id alive so a second ESC within the
-                        // double-press window can escalate to a hard
-                        // cancel that cleans up the partial artifact
-                        // and the interrupt flag.
-                        if reason == "interrupted" && interrupt.in_window(Instant::now()) {
-                            interrupt.ended_turn = active_turn.take();
-                        } else {
-                            active_turn = None;
-                            // Also clear a lingering interrupted turn
-                            // when a hard-cancel escalation completes.
-                            interrupt.ended_turn = None;
-                        }
-
-                        // Repaint immediately so the ended state is visible
-                        // without waiting for the next input event.
-                        live_area.compose(&app)?;
-                    }
-                    gremlins_magic_bus::EventKind::Error { message: msg, .. } => {
-                        if !live_area.target_has_current_turn(&home) {
-                            continue;
-                        }
-                        finish_home_request(&mut app, live_area);
-                        active_turn = None;
-                        let full = format!("chat error: {msg}");
-                        live_area.with_target_transcript(&home, |transcript, reasoning| {
-                            let stream = std::mem::replace(reasoning, new_reasoning_band());
-                            let had_turn = transcript.has_current_turn();
-                            transcript.finish_turn();
-                            if had_turn {
-                                transcript.commit_reasoning_title(stream);
-                            }
-                            transcript.clear_tool_output();
-                            transcript.push_transcript_line(full);
-                        });
-
-                        // Repaint immediately so the error state is visible
-                        // without waiting for the next input event.
-                        live_area.compose(&app)?;
-                    }
-                    gremlins_magic_bus::EventKind::SystemWarning { message: msg, .. } => {
-                        if !live_area.target_has_current_turn(&home) {
-                            continue;
-                        }
-                        let full = format!("⚠ {msg}");
-                        live_area.with_target_transcript(&home, |transcript, _| {
-                            transcript.push_transcript_line(full);
-                        });
-                    }
-                    gremlins_magic_bus::EventKind::TaskProgress { .. } => unreachable!("handled above"),
-                    _ => {}
-                }
+                apply_home_event(&mut app, live_area, &mut active_turn, &mut interrupt, event, turn, execution)?;
             }
 
         }

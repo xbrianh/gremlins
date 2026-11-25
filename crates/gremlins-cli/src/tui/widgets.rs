@@ -273,7 +273,7 @@ impl TranscriptWidget {
     /// into the FIFO so model text that arrived before this tool call
     /// appears before the tool's `◆` line in the final transcript.
     pub fn push_tool_output_chunk(&mut self, id: &str, call: &str, text: &str) {
-        if id.is_empty() && call.is_empty() {
+        if (id.is_empty() && call.is_empty()) || self.committed_tool_ids.contains(id) {
             return;
         }
         // Seal the response accumulator on first chunk so text that
@@ -309,7 +309,7 @@ impl TranscriptWidget {
         stats: Option<&serde_json::Value>,
         total: Option<&serde_json::Value>,
     ) {
-        if parent_id.is_empty() {
+        if parent_id.is_empty() || self.committed_tool_ids.contains(parent_id) {
             return;
         }
         // Seal the response accumulator on first push so response text that
@@ -345,6 +345,32 @@ impl TranscriptWidget {
         }
         self.tool_calls_by_id
             .insert(parent_id.to_string(), call.to_string());
+    }
+
+    /// Reconcile an authoritative result with potentially incomplete live output.
+    /// Nonempty output replaces chunk history; an empty result preserves it.
+    /// Keep the live title (including Task progress stats) when available.
+    pub fn reconcile_tool_result(&mut self, id: &str, call: &str, output: &str) {
+        if (id.is_empty() && call.is_empty()) || self.committed_tool_ids.contains(id) {
+            return;
+        }
+        if !output.is_empty() {
+            if !self.tools.contains_key(id) {
+                self.seal_response();
+            }
+            let title = self
+                .tools
+                .get(id)
+                .and_then(StreamingWidget::title)
+                .filter(|title| !title.is_empty())
+                .unwrap_or(call)
+                .to_string();
+            let mut stream = StreamingWidget::tool(Self::STREAM_MAX_ROWS);
+            stream.set_title(&title);
+            stream.push_text(output);
+            self.tools.insert(id.to_string(), stream);
+        }
+        self.commit_tool_result(id, call);
     }
 
     /// Commit a finished tool call into the transcript's permanent tool
@@ -4067,6 +4093,89 @@ mod tests {
             .map(|l| l.to_string())
             .collect();
         assert_eq!(lines, vec!["red normal".to_string()]);
+    }
+
+    #[test]
+    fn authoritative_tool_result_replaces_missing_partial_or_complete_chunks_once() {
+        let output = "zero\none\ntwo\nthree\nfour\nfive\nsix";
+        for history in [None, Some("zero\ntw"), Some(output), Some("stale output")] {
+            let mut transcript = TranscriptWidget::new();
+            transcript.push_response("before");
+            if let Some(history) = history {
+                transcript.push_tool_output_chunk("c1", "Bash(run)", history);
+                transcript.tools.get_mut("c1").unwrap().trim_to(1, 80);
+            }
+            transcript.reconcile_tool_result("c1", "Bash(run)", output);
+            transcript.reconcile_tool_result("c1", "Bash(run)", "duplicate");
+            transcript.push_tool_output_chunk("c1", "Bash(run)", "late chunk");
+            transcript.push_task_progress("c1", "Scout", "Bash(run)", "", "late", None, None);
+            assert!(transcript.tools.is_empty());
+            assert!(transcript.tool_calls_by_id.is_empty());
+            transcript.reconcile_tool_calls(&["Bash(run)".into()]);
+            transcript.push_response("after");
+            transcript.finish_turn();
+            let lines: Vec<String> = transcript
+                .scrollable
+                .visible_lines()
+                .iter()
+                .map(|line| line.to_string())
+                .collect();
+            assert_eq!(
+                lines,
+                vec![
+                    "before",
+                    "◆ Bash(run)",
+                    "    two",
+                    "    three",
+                    "    four",
+                    "    five",
+                    "    six",
+                    "after"
+                ],
+                "history: {history:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn empty_authoritative_tool_result_preserves_chunk_history() {
+        let mut transcript = TranscriptWidget::new();
+        transcript.push_tool_output_chunk("c1", "Bash(run)", "retained partial");
+        transcript.reconcile_tool_result("c1", "Bash(run)", "");
+        transcript.reconcile_tool_result("c2", "Read(file)", "");
+        let lines: Vec<String> = transcript
+            .scrollable
+            .visible_lines()
+            .iter()
+            .map(|line| line.to_string())
+            .collect();
+        assert_eq!(
+            lines,
+            vec!["◆ Bash(run)", "    retained partial", "◆ Read(file)"]
+        );
+    }
+
+    #[test]
+    fn authoritative_task_result_preserves_progress_title_not_progress_body() {
+        let mut transcript = TranscriptWidget::new();
+        transcript.push_task_progress(
+            "t1",
+            "Scout",
+            "Task(find)",
+            "thinking",
+            "progress",
+            None,
+            None,
+        );
+        let title = transcript.tools["t1"].title().unwrap().to_string();
+        transcript.reconcile_tool_result("t1", "Task(find)", "final answer");
+        let lines: Vec<String> = transcript
+            .scrollable
+            .visible_lines()
+            .iter()
+            .map(|line| line.to_string())
+            .collect();
+        assert_eq!(lines, vec![format!("◆ {title}"), "    final answer".into()]);
     }
 
     #[test]

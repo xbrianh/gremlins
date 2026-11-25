@@ -16,7 +16,8 @@ pub(crate) enum Submission {
 }
 
 /// The caller renders the result only in `target`'s transcript. On failure
-/// `text` remains recoverable even if a newer draft has replaced this one.
+/// `text` includes the originating execution and recoverable display text,
+/// even if a newer draft has replaced this one.
 pub(crate) struct Receipt {
     pub target: Target,
     pub text: String,
@@ -35,6 +36,7 @@ enum Address {
 #[derive(Clone)]
 struct Draft {
     address: Address,
+    text: String,
     revision: u64,
 }
 
@@ -42,12 +44,14 @@ struct Pending {
     target: Target,
     // Keep the exact addressed snapshot even if the composer is replaced.
     revision: u64,
+    execution: Execution,
     buffer: InputBuffer,
 }
 
 #[derive(Default)]
 pub(crate) struct Conversations {
     starting_home: Option<String>,
+    latest_home_turn: Option<String>,
     live: HashMap<Target, Execution>,
     drafts: HashMap<Target, Draft>,
     pending: HashMap<u64, Pending>,
@@ -57,18 +61,28 @@ pub(crate) struct Conversations {
 impl Conversations {
     pub fn begin_home_turn(&mut self, turn: String) {
         self.live.remove(&Target::Home);
+        self.latest_home_turn = Some(turn.clone());
         self.starting_home = Some(turn);
     }
 
+    pub fn latest_home_turn(&self) -> Option<&str> {
+        self.latest_home_turn.as_deref()
+    }
+
     pub fn home_turn_started(&mut self, turn: &str, execution: Option<Execution>) {
-        let starting_draft = self.drafts.get_mut(&Target::Home).filter(|draft| {
-            self.starting_home.as_deref() == Some(turn)
-                && matches!(&draft.address, Address::StartingHome(id) if id == turn)
-        });
-        if let (Some(draft), Some(execution)) = (starting_draft, &execution) {
-            draft.address = Address::Execution(execution.clone());
+        if self.starting_home.as_deref() != Some(turn) {
+            return;
         }
-        self.set_execution(Target::Home, execution);
+        let Some(execution) = execution else {
+            return;
+        };
+        if let Some(draft) = self.drafts.get_mut(&Target::Home) {
+            if matches!(&draft.address, Address::StartingHome(id) if id == turn) {
+                draft.address = Address::Execution(execution.clone());
+            }
+        }
+        // Keep the turn identity for subsequent tagged agent frames.
+        self.live.insert(Target::Home, execution);
     }
 
     pub fn set_execution(&mut self, target: Target, execution: Option<Execution>) {
@@ -125,15 +139,18 @@ impl Conversations {
     pub fn observe_draft(&mut self, target: &Target, input: &InputBuffer, home_busy: bool) {
         if input.is_empty() {
             self.drafts.remove(target);
-        } else if let Some(draft) = self.drafts.get_mut(target) {
+        } else if self.drafts.contains_key(target) {
+            let draft = self.drafts.get_mut(target).unwrap();
             self.sequence += 1;
             draft.revision = self.sequence;
+            draft.text = input.text().to_owned();
         } else {
             self.sequence += 1;
             self.drafts.insert(
                 target.clone(),
                 Draft {
                     address: self.address(target, home_busy),
+                    text: input.text().to_owned(),
                     revision: self.sequence,
                 },
             );
@@ -147,7 +164,12 @@ impl Conversations {
         let Some(draft) = self.drafts.get(target) else {
             return Submission::Blocked("empty draft");
         };
-        if self.pending.values().any(|p| &p.target == target) {
+        // Outstanding receipts belong to an execution, not every future draft
+        // on this target. In particular, Home can be idle again before delivery
+        // of the previous turn's correction is acknowledged.
+        if self.pending.values().any(|p| {
+            &p.target == target && draft.address == Address::Execution(p.execution.clone())
+        }) {
             return Submission::Blocked("delivery is pending for this conversation");
         }
         if draft.address != self.address(target, home_busy) {
@@ -169,6 +191,7 @@ impl Conversations {
                     Pending {
                         target: target.clone(),
                         revision: draft.revision,
+                        execution: execution.clone(),
                         buffer: input.clone(),
                     },
                 );
@@ -184,6 +207,7 @@ impl Conversations {
     /// Retire this generation's receipts before exposing the replacement session.
     /// Submission IDs are monotonic, so a late result can never match a new draft.
     pub fn retire_home_session(&mut self) {
+        self.latest_home_turn = None;
         self.pending.retain(|_, pending| !pending.target.is_home());
         self.drafts.remove(&Target::Home);
         self.set_execution(Target::Home, None);
@@ -209,16 +233,23 @@ impl Conversations {
     pub fn finish(&mut self, id: u64, result: Result<(), String>) -> Option<Receipt> {
         let pending = self.pending.remove(&id)?;
         let clear_draft = result.is_ok()
-            && self
-                .drafts
-                .get(&pending.target)
-                .is_some_and(|draft| draft.revision == pending.revision);
+            && self.drafts.get(&pending.target).is_some_and(|draft| {
+                draft.revision == pending.revision
+                    && draft.address == Address::Execution(pending.execution.clone())
+                    && self.live.get(&pending.target) == Some(&pending.execution)
+            });
         if clear_draft {
             self.drafts.remove(&pending.target);
         }
         Some(Receipt {
             target: pending.target,
-            text: pending.buffer.text().to_owned(),
+            text: format!(
+                "{} [execution {}/{} nonce {}]",
+                pending.buffer.text(),
+                pending.execution.run_id,
+                pending.execution.stage_run_id,
+                pending.execution.nonce
+            ),
             clear_draft,
             result,
         })
@@ -298,7 +329,7 @@ mod tests {
 
         let repeated = state.finish(ids[2], Ok(())).unwrap();
         assert_eq!(repeated.target, targets[2]);
-        assert_eq!(repeated.text, "original");
+        assert!(repeated.text.starts_with("original [execution "));
         assert!(repeated.clear_draft);
         assert!(!state.retain_target(&targets[2]));
         assert!(state.retain_target(&targets[0]));
@@ -306,7 +337,7 @@ mod tests {
 
         let pinned = state.finish(ids[0], Ok(())).unwrap();
         assert_eq!(pinned.target, targets[0]);
-        assert_eq!(pinned.text, "original");
+        assert!(pinned.text.starts_with("original [execution "));
         assert!(!pinned.clear_draft);
         assert!(matches!(
             state.submit(&targets[0], &input("pinned edit"), true),
@@ -321,7 +352,7 @@ mod tests {
 
         let failed = state.finish(ids[1], Err("rejected".into())).unwrap();
         assert_eq!(failed.target, targets[1]);
-        assert_eq!(failed.text, "original");
+        assert!(failed.text.starts_with("original [execution "));
         assert_eq!(failed.result, Err("rejected".into()));
         assert!(!failed.clear_draft);
         correction(
@@ -371,7 +402,7 @@ mod tests {
             ));
             let receipt = state.finish(id, Ok(())).unwrap();
             assert_eq!(receipt.target, target);
-            assert_eq!(receipt.text, "original");
+            assert!(receipt.text.starts_with("original [execution "));
             assert_eq!(receipt.result, Ok(()));
             assert!(!receipt.clear_draft);
             assert!(state.retain_target(&target));
@@ -408,7 +439,10 @@ mod tests {
             &exec,
             "fix /work/src",
         );
-        assert_eq!(state.finish(id, Ok(())).unwrap().text, "fix src");
+        assert_eq!(
+            state.finish(id, Ok(())).unwrap().text,
+            "fix src [execution home/home-1 nonce 1]"
+        );
     }
 
     #[test]
@@ -499,7 +533,9 @@ mod tests {
 
             let receipt = state.finish(retry, Ok(())).unwrap();
             assert_eq!(receipt.target, target);
-            assert_eq!(receipt.text, draft.text());
+            assert!(receipt
+                .text
+                .starts_with(&format!("{} [execution ", draft.text())));
             assert_eq!(receipt.result, Ok(()));
             assert!(receipt.clear_draft);
             assert!(!state.retain_target(&target));
@@ -529,7 +565,7 @@ mod tests {
         assert_eq!(receipts.len(), 1);
         let receipt = &receipts[0];
         assert_eq!(receipt.target, stage());
-        assert_eq!(receipt.text, "original");
+        assert!(receipt.text.starts_with("original [execution "));
         assert_eq!(receipt.result, Err("command failed".into()));
         assert!(!receipt.clear_draft);
         assert!(state.drafts.contains_key(&stage()));
@@ -572,7 +608,7 @@ mod tests {
         ));
         let ok = state.finish(job_id, Ok(())).unwrap();
         assert_eq!(ok.target, stage());
-        assert_eq!(ok.text, "stop building");
+        assert!(ok.text.starts_with("stop building [execution "));
         assert!(ok.clear_draft);
         assert!(state.finish(job_id, Ok(())).is_none());
         let rejected = state.finish(id, Err("read-only".into())).unwrap();
@@ -645,13 +681,11 @@ mod tests {
             // The original draft is still recoverable on its own execution.
             state.set_execution(target.clone(), Some(old.clone()));
             let recovered = correction(state.submit(&target, &draft, true), &old, draft.text());
-            assert_eq!(
-                state
-                    .finish(recovered, Err("not delivered".into()))
-                    .unwrap()
-                    .text,
-                draft.text()
-            );
+            assert!(state
+                .finish(recovered, Err("not delivered".into()))
+                .unwrap()
+                .text
+                .starts_with(&format!("{} [execution ", draft.text())));
             assert!(state.drafts.contains_key(&target));
 
             state.set_execution(target.clone(), None);
@@ -696,6 +730,244 @@ mod tests {
     }
 
     #[test]
+    fn home_frames_require_current_turn_and_preserve_address_without_execution() {
+        let mut state = Conversations::default();
+        let a = execution("session", 1);
+        let b = execution("session", 2);
+        state.begin_home_turn("A".into());
+        state.home_turn_started("stale", Some(b.clone()));
+        assert!(!state.live.contains_key(&Target::Home));
+        state.home_turn_started("A", None);
+        let queued_draft = input("queued is not writable");
+        assert!(matches!(
+            state.submit(&Target::Home, &queued_draft, true),
+            Submission::Blocked(_)
+        ));
+        assert!(state.pending.is_empty());
+        state.home_turn_started("A", Some(a.clone()));
+        state.home_turn_started("A", None);
+        state.home_turn_started("A", Some(a.clone()));
+        assert_eq!(state.live.get(&Target::Home), Some(&a));
+        state.begin_home_turn("B".into());
+        state.home_turn_started("A", Some(a.clone()));
+        assert!(!state.live.contains_key(&Target::Home));
+        state.home_turn_started("B", Some(b.clone()));
+        state.home_turn_started("A", Some(a));
+        state.home_turn_started("B", None);
+        assert_eq!(state.live.get(&Target::Home), Some(&b));
+        state.set_execution(Target::Home, None);
+        state.home_turn_started("B", Some(b));
+        assert!(!state.live.contains_key(&Target::Home));
+    }
+
+    #[test]
+    fn only_clearing_or_dismissal_releases_expired_execution_draft() {
+        let mut state = Conversations::default();
+        let old = execution("session", 1);
+        let draft = input("stale correction");
+        state.set_execution(Target::Home, Some(old));
+        state.observe_draft(&Target::Home, &draft, true);
+        state.set_execution(Target::Home, None);
+        state.observe_draft(&Target::Home, &draft, false);
+        assert!(matches!(
+            state.submit(&Target::Home, &draft, false),
+            Submission::Blocked(_)
+        ));
+        let edited = input("fresh prompt");
+        state.observe_draft(&Target::Home, &edited, false);
+        assert!(matches!(
+            state.submit(&Target::Home, &edited, false),
+            Submission::Blocked(_)
+        ));
+        assert!(state.is_correction_draft(&Target::Home));
+        state.observe_draft(&Target::Home, &input(""), false);
+        assert_eq!(
+            state.submit(&Target::Home, &edited, false),
+            Submission::HomePrompt
+        );
+
+        state.dismiss(&Target::Home);
+        state.set_execution(Target::Home, Some(execution("session", 2)));
+        state.observe_draft(&Target::Home, &draft, true);
+        state.set_execution(Target::Home, None);
+        state.observe_draft(&Target::Home, &edited, false);
+        assert!(matches!(
+            state.submit(&Target::Home, &edited, false),
+            Submission::Blocked(_)
+        ));
+        state.dismiss(&Target::Home);
+        assert_eq!(
+            state.submit(&Target::Home, &edited, false),
+            Submission::HomePrompt
+        );
+    }
+
+    #[test]
+    fn originating_receipt_cannot_clear_successor_even_without_revision_change() {
+        for result in [Ok(()), Err("controller_busy".into())] {
+            let mut state = Conversations::default();
+            let a = execution("session", 1);
+            let b = execution("session", 2);
+            let draft = input("correction for A");
+            state.begin_home_turn("A".into());
+            state.home_turn_started("A", Some(a.clone()));
+            let id = correction(state.submit(&Target::Home, &draft, true), &a, draft.text());
+            let revision = state.drafts[&Target::Home].revision;
+            state.set_execution(Target::Home, None);
+            state.begin_home_turn("B".into());
+            state.home_turn_started("B", Some(b.clone()));
+            // Lifecycle rebinding must be safe independently of edit revisions.
+            state.drafts.get_mut(&Target::Home).unwrap().address = Address::Execution(b);
+            assert_eq!(state.drafts[&Target::Home].revision, revision);
+            let receipt = state.finish(id, result.clone()).unwrap();
+            assert_eq!(
+                receipt.text,
+                "correction for A [execution session/session-1 nonce 1]"
+            );
+            assert_eq!(receipt.result, result);
+            assert!(!receipt.clear_draft);
+            assert!(state.drafts.contains_key(&Target::Home));
+            assert!(state.finish(id, Ok(())).is_none());
+        }
+    }
+
+    #[test]
+    fn pending_home_receipt_does_not_block_fresh_idle_prompt() {
+        for result in [Ok(()), Err("delivery unknown".into())] {
+            let mut state = Conversations::default();
+            let a = execution("session", 1);
+            state.begin_home_turn("A".into());
+            state.home_turn_started("A", Some(a.clone()));
+            let id = correction(
+                state.submit(&Target::Home, &input("for A"), true),
+                &a,
+                "for A",
+            );
+            state.set_execution(Target::Home, None);
+            state.dismiss(&Target::Home);
+            let successor = input("prompt B");
+            state.observe_draft(&Target::Home, &successor, false);
+            let revision = state.drafts[&Target::Home].revision;
+            assert_eq!(
+                state.submit(&Target::Home, &successor, false),
+                Submission::HomePrompt
+            );
+            assert!(state.pending.contains_key(&id));
+
+            let receipt = state.finish(id, result.clone()).unwrap();
+            assert_eq!(receipt.target, Target::Home);
+            assert_eq!(receipt.text, "for A [execution session/session-1 nonce 1]");
+            assert_eq!(receipt.result, result);
+            assert!(!receipt.clear_draft);
+            assert_eq!(state.drafts[&Target::Home].revision, revision);
+            assert_eq!(state.drafts[&Target::Home].text, successor.text());
+            assert!(!state.is_correction_draft(&Target::Home));
+            assert_eq!(
+                state.submit(&Target::Home, &successor, false),
+                Submission::HomePrompt
+            );
+        }
+    }
+
+    #[test]
+    fn pending_receipt_still_blocks_same_execution_after_dismissal() {
+        let mut state = Conversations::default();
+        let a = execution("session", 1);
+        state.set_execution(Target::Home, Some(a.clone()));
+        let id = correction(
+            state.submit(&Target::Home, &input("first"), true),
+            &a,
+            "first",
+        );
+        state.dismiss(&Target::Home);
+        let replacement = input("replacement");
+        assert_eq!(
+            state.submit(&Target::Home, &replacement, true),
+            Submission::Blocked("delivery is pending for this conversation")
+        );
+        assert!(!state.finish(id, Ok(())).unwrap().clear_draft);
+        correction(
+            state.submit(&Target::Home, &replacement, true),
+            &a,
+            "replacement",
+        );
+    }
+
+    #[test]
+    fn pending_a_receipt_preserves_fresh_b_draft() {
+        for result in [Ok(()), Err("delivery unknown".into())] {
+            let mut state = Conversations::default();
+            let a = execution("session", 1);
+            let b = execution("session", 2);
+            state.begin_home_turn("A".into());
+            state.home_turn_started("A", Some(a.clone()));
+            let id = correction(
+                state.submit(&Target::Home, &input("for A"), true),
+                &a,
+                "for A",
+            );
+            state.set_execution(Target::Home, None);
+            state.observe_draft(&Target::Home, &InputBuffer::new(), false);
+            state.begin_home_turn("B".into());
+            let successor = input("for B");
+            state.observe_draft(&Target::Home, &successor, true);
+            let revision = state.drafts[&Target::Home].revision;
+            state.home_turn_started("B", Some(b.clone()));
+            let b_id = correction(state.submit(&Target::Home, &successor, true), &b, "for B");
+            assert_ne!(id, b_id);
+            let receipt = state.finish(id, result).unwrap();
+            assert!(!receipt.clear_draft);
+            assert_eq!(receipt.text, "for A [execution session/session-1 nonce 1]");
+            assert_eq!(state.drafts[&Target::Home].revision, revision);
+            assert_eq!(state.drafts[&Target::Home].text, successor.text());
+            assert!(state.pending.contains_key(&b_id));
+            assert_eq!(
+                state.submit(&Target::Home, &successor, true),
+                Submission::Blocked("delivery is pending for this conversation")
+            );
+            assert!(state.finish(b_id, Ok(())).unwrap().clear_draft);
+        }
+    }
+
+    #[test]
+    fn receipt_after_end_does_not_clear_unchanged_stale_draft() {
+        let mut state = Conversations::default();
+        let a = execution("session", 1);
+        state.set_execution(Target::Home, Some(a.clone()));
+        let draft = input("for A");
+        let id = correction(state.submit(&Target::Home, &draft, true), &a, draft.text());
+        state.set_execution(Target::Home, None);
+        state.set_execution(Target::Home, Some(execution("session", 2)));
+        assert!(!state.finish(id, Ok(())).unwrap().clear_draft);
+        assert!(matches!(
+            state.submit(&Target::Home, &draft, true),
+            Submission::Blocked(_)
+        ));
+    }
+
+    #[test]
+    fn controller_busy_preserves_draft_until_explicit_retry() {
+        let mut state = Conversations::default();
+        let a = execution("session", 1);
+        let draft = input("retry me");
+        state.set_execution(Target::Home, Some(a.clone()));
+        let id = correction(state.submit(&Target::Home, &draft, true), &a, draft.text());
+        let revision = state.drafts[&Target::Home].revision;
+        let receipt = state.finish(id, Err("controller_busy".into())).unwrap();
+        assert!(!receipt.clear_draft);
+        assert_eq!(
+            receipt.text,
+            "retry me [execution session/session-1 nonce 1]"
+        );
+        assert_eq!(state.drafts[&Target::Home].revision, revision);
+        assert!(state.pending.is_empty());
+        let retry = correction(state.submit(&Target::Home, &draft, true), &a, draft.text());
+        assert_ne!(id, retry);
+        assert!(state.finish(id, Ok(())).is_none());
+        assert!(state.finish(retry, Ok(())).unwrap().clear_draft);
+    }
+
+    #[test]
     fn uncertain_delivery_retains_original_and_new_drafts_without_resubmitting() {
         let mut state = Conversations::default();
         let live = execution("runner", 4);
@@ -707,7 +979,7 @@ mod tests {
             .finish(id, Err("disconnected; delivery unknown".into()))
             .unwrap();
         assert_eq!(receipt.target, stage());
-        assert_eq!(receipt.text, "one");
+        assert!(receipt.text.starts_with("one [execution "));
         assert!(!receipt.clear_draft);
 
         assert!(state.pending.is_empty());

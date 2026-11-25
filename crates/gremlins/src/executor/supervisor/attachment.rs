@@ -174,22 +174,22 @@ async fn write_run_history(
 #[derive(Clone, Copy)]
 enum PassiveStream<'a> {
     Run(&'a str),
-    Watch(&'a gremlins_magic_bus::CorrId),
+    Watch(&'a gremlins_magic_bus::CorrId, &'a WatchMetadata),
 }
 
 impl PassiveStream<'_> {
     fn frame(self, dispatch: &DispatchEvent<EventKind>) -> Option<Value> {
         match self {
             Self::Run(id) => run_display_frame(dispatch, id),
-            Self::Watch(filter) => watch_frame(dispatch, filter),
+            Self::Watch(filter, metadata) => metadata.frame(dispatch, filter),
         }
     }
 
     fn terminal_update(self, dispatch: &DispatchEvent<EventKind>, displayed: bool) -> Option<bool> {
         let id = match self {
             Self::Run(id) => id,
-            Self::Watch(filter) if displayed => filter.run().expect("watch run"),
-            Self::Watch(_) => return None,
+            Self::Watch(filter, _) if displayed => filter.run().expect("watch run"),
+            Self::Watch(..) => return None,
         };
         if dispatch.corr_id().run() != Some(id) || !event_run_id_matches(dispatch.kind(), id) {
             return None;
@@ -206,7 +206,7 @@ impl PassiveStream<'_> {
             Self::Run(id) => serde_json::json!({
                 "type": "replay_checkpoint", "id": id, "scope": "run",
             }),
-            Self::Watch(filter) => serde_json::json!({
+            Self::Watch(filter, _) => serde_json::json!({
                 "type": "replay_checkpoint", "id": filter.run(), "scope": "run",
                 "stage": filter.stage(), "stage_run_id": filter.stage_run_id(),
             }),
@@ -391,6 +391,73 @@ fn watch_filter(request: &Value) -> Result<(gremlins_magic_bus::CorrId, bool), S
     Ok((filter, replay))
 }
 
+#[derive(Default)]
+struct WatchMetadata {
+    stage_types: std::sync::Mutex<std::collections::HashMap<(String, String, String), String>>,
+}
+
+impl WatchMetadata {
+    fn record_boundary(
+        &self,
+        dispatch: &DispatchEvent<EventKind>,
+        filter: &gremlins_magic_bus::CorrId,
+    ) {
+        let EventKind::StageBoundary {
+            id,
+            stage,
+            stage_run_id,
+            stage_type,
+            ..
+        } = dispatch.kind()
+        else {
+            return;
+        };
+        let corr = dispatch.corr_id();
+        if corr.matches_prefix(filter)
+            && corr.run() == Some(id.as_str())
+            && corr.stage() == Some(stage.as_str())
+            && corr.stage_run_id() == Some(stage_run_id.as_str())
+        {
+            self.stage_types
+                .lock()
+                .expect("watch metadata poisoned")
+                .insert(
+                    (id.clone(), stage.clone(), stage_run_id.clone()),
+                    stage_type.clone(),
+                );
+        }
+    }
+
+    fn frame(
+        &self,
+        dispatch: &DispatchEvent<EventKind>,
+        filter: &gremlins_magic_bus::CorrId,
+    ) -> Option<Value> {
+        let mut frame = watch_frame(dispatch, filter)?;
+        self.record_boundary(dispatch, filter);
+        let corr = dispatch.corr_id();
+        if let (Some(run), Some(stage), Some(invocation)) =
+            (corr.run(), corr.stage(), corr.stage_run_id())
+        {
+            let key = (run.to_owned(), stage.to_owned(), invocation.to_owned());
+            let mut types = self.stage_types.lock().expect("watch metadata poisoned");
+            if let Some(stage_type) = dispatch
+                .stage_type()
+                .or_else(|| types.get(&key).map(String::as_str))
+            {
+                frame["stage_type"] = serde_json::json!(stage_type);
+            }
+            if matches!(
+                dispatch.kind(),
+                EventKind::StageBoundary { active: false, .. }
+            ) {
+                types.remove(&key);
+            }
+        }
+        Some(frame)
+    }
+}
+
 fn watch_frame(
     dispatch: &DispatchEvent<EventKind>,
     filter: &gremlins_magic_bus::CorrId,
@@ -426,6 +493,9 @@ fn watch_frame(
     if let Some(stage_run_id) = corr.stage_run_id() {
         frame["stage_run_id"] = serde_json::json!(stage_run_id);
     }
+    if let Some(turn) = corr.turn_token() {
+        frame["correlation_turn"] = serde_json::json!(turn);
+    }
     Some(frame)
 }
 
@@ -444,8 +514,14 @@ async fn write_watch_history(
     writer: &SharedWriter,
     filter: &gremlins_magic_bus::CorrId,
     history: HistorySnapshot<EventKind>,
+    metadata: &WatchMetadata,
 ) -> Result<bool, String> {
-    write_history(writer, PassiveStream::Watch(filter), history).await
+    // A retained closing boundary remains authoritative when entry was evicted.
+    // Collect before writing so earlier retained chunks carry the same identity.
+    for dispatch in &history.events {
+        metadata.record_boundary(dispatch, filter);
+    }
+    write_history(writer, PassiveStream::Watch(filter, metadata), history).await
 }
 
 /// Observe native history/live events without acquiring an input lease.
@@ -499,8 +575,9 @@ pub(crate) async fn handle_watch(
     {
         return;
     }
+    let metadata = WatchMetadata::default();
     if let Some(history) = history {
-        match write_watch_history(writer, &filter, history).await {
+        match write_watch_history(writer, &filter, history, &metadata).await {
             Ok(false) => {}
             Ok(true) | Err(_) => return,
         }
@@ -518,7 +595,7 @@ pub(crate) async fn handle_watch(
             }
             event = rx.recv() => {
                 if !matches!(
-                    forward_passive(writer, PassiveStream::Watch(&filter), event).await,
+                    forward_passive(writer, PassiveStream::Watch(&filter, &metadata), event).await,
                     Ok(false)
                 ) {
                     break;
@@ -1867,7 +1944,8 @@ mod routing_tests {
         let stopped =
             |corr, id: &str| DispatchEvent::new(corr, EventKind::RunStopped { id: id.into() });
         let parent = stopped(CorrId::new().with_run("parent"), "parent");
-        let watch = PassiveStream::Watch(&filter);
+        let metadata = WatchMetadata::default();
+        let watch = PassiveStream::Watch(&filter, &metadata);
         let run = PassiveStream::Run("parent");
         // A stage watch must not close on a parent event outside its selector.
         assert!(
@@ -2016,9 +2094,11 @@ mod routing_tests {
         let (client, server) = tokio::net::UnixStream::pair().unwrap();
         let (_, write) = server.into_split();
         let writer = SharedWriter::new(write);
-        assert!(!write_watch_history(&writer, &filter, history)
-            .await
-            .unwrap());
+        assert!(
+            !write_watch_history(&writer, &filter, history, &WatchMetadata::default())
+                .await
+                .unwrap()
+        );
         let live = watch_frame(&rx.try_recv().unwrap(), &filter).unwrap();
         writer.write_json_line(&live).await.unwrap();
         let mut reader = BufReader::new(client);
@@ -2048,6 +2128,392 @@ mod routing_tests {
     }
 
     #[tokio::test]
+    async fn watch_running_invocation_type_survives_evicted_entry_and_turn_started() {
+        use gremlins_magic_bus::{Bus, CorrId, SubscriberRegistration};
+        for stage_type in [
+            Some("agent"),
+            Some("exec"),
+            Some("sequence"),
+            Some("parallel"),
+            Some("unknown"),
+            None,
+        ] {
+            let bus = Bus::with_history_limits(1, 1)
+                .with_invocation_metadata(EventKind::invocation_metadata);
+            let filter = CorrId::new().with_run("running-watch");
+            let corr = filter
+                .clone()
+                .with_stage("worker")
+                .with_stage_run_id("one")
+                .with_turn_token("caller-turn");
+            let boundary = |active| {
+                DispatchEvent::new(
+                    corr.clone(),
+                    EventKind::StageBoundary {
+                        id: "running-watch".into(),
+                        stage: "worker".into(),
+                        stage_run_id: "one".into(),
+                        stage_type: stage_type.unwrap_or("unknown").into(),
+                        active,
+                    },
+                )
+            };
+            if stage_type.is_some() {
+                bus.emit(boundary(true));
+            }
+            bus.emit(DispatchEvent::new(
+                corr.clone(),
+                EventKind::TurnStarted {
+                    stage_run_id: "one".into(),
+                },
+            ));
+            bus.emit(DispatchEvent::new(
+                corr.clone(),
+                EventKind::StreamChunk {
+                    text: "retained".into(),
+                },
+            ));
+            let (_, mut rx, history) = bus
+                .subscribe_with_history(SubscriberRegistration::lag_tolerant(filter.clone(), 256))
+                .unwrap();
+            assert!(!history.complete);
+            assert_eq!(history.events.len(), 1);
+            assert!(matches!(
+                history.events[0].kind(),
+                EventKind::StreamChunk { .. }
+            ));
+            let cut = history.through_sequence;
+            let (client, server) = tokio::net::UnixStream::pair().unwrap();
+            let (_, write) = server.into_split();
+            let writer = SharedWriter::new(write);
+            let metadata = WatchMetadata::default();
+            assert!(!write_watch_history(&writer, &filter, history, &metadata)
+                .await
+                .unwrap());
+            let mut reader = BufReader::new(client);
+            let gap = socket::read_json_line(&mut reader).await.unwrap().unwrap();
+            assert_eq!(gap["type"], "history_gap");
+            let retained = socket::read_json_line(&mut reader).await.unwrap().unwrap();
+            assert_eq!(retained["type"], "stream_chunk");
+            assert_eq!(retained["sequence"], cut);
+            assert_eq!(
+                retained.get("stage_type").and_then(Value::as_str),
+                stage_type
+            );
+            let checkpoint = socket::read_json_line(&mut reader).await.unwrap().unwrap();
+            assert_eq!(checkpoint["type"], "replay_checkpoint");
+            assert_eq!(checkpoint["complete"], false);
+            assert_eq!(checkpoint["through_sequence"], cut);
+            bus.emit_async(DispatchEvent::new(
+                corr.clone(),
+                EventKind::StreamChunk {
+                    text: "live".into(),
+                },
+            ))
+            .await;
+            assert!(!forward_passive(
+                &writer,
+                PassiveStream::Watch(&filter, &metadata),
+                rx.recv().await
+            )
+            .await
+            .unwrap());
+            let live = socket::read_json_line(&mut reader).await.unwrap().unwrap();
+            assert_eq!(live["sequence"], cut + 1);
+            assert_eq!(live.get("stage_type").and_then(Value::as_str), stage_type);
+            assert_eq!(live["stage_run_id"], "one");
+            assert_eq!(live["correlation_turn"], "caller-turn");
+            // Other stages, invocations, and descendant runs cannot inherit this type.
+            for unrelated in [
+                corr.clone().with_stage("other"),
+                corr.clone().with_stage_run_id("two"),
+                corr.clone().with_run("running-watch:child"),
+            ] {
+                bus.emit(DispatchEvent::new(
+                    unrelated,
+                    EventKind::StreamChunk {
+                        text: "unknown".into(),
+                    },
+                ));
+                let gremlins_magic_bus::Recv::Event(event) = rx.recv().await else {
+                    panic!("missing chunk")
+                };
+                assert!(metadata
+                    .frame(&event, &filter)
+                    .unwrap()
+                    .get("stage_type")
+                    .is_none());
+            }
+            if stage_type.is_some() {
+                bus.emit(boundary(false));
+                let _ = rx.recv().await;
+                bus.emit(DispatchEvent::new(
+                    corr.clone(),
+                    EventKind::StreamChunk {
+                        text: "after close".into(),
+                    },
+                ));
+                let gremlins_magic_bus::Recv::Event(event) = rx.recv().await else {
+                    panic!("missing chunk")
+                };
+                assert!(event.stage_type().is_none());
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn watch_truncated_replay_uses_closing_boundary_without_guessing_agents() {
+        use gremlins_magic_bus::{Bus, CorrId, SubscriberRegistration};
+        for stage_type in ["agent", "exec", "sequence", "parallel", "unknown"] {
+            let bus = Bus::with_history_limits(2, 2);
+            let filter = CorrId::new().with_run("truncated-watch");
+            let corr = filter
+                .clone()
+                .with_stage("worker")
+                .with_stage_run_id("one")
+                .with_turn_token("caller-turn");
+            let boundary = |active| {
+                DispatchEvent::new(
+                    corr.clone(),
+                    EventKind::StageBoundary {
+                        id: "truncated-watch".into(),
+                        stage: "worker".into(),
+                        stage_run_id: "one".into(),
+                        stage_type: stage_type.into(),
+                        active,
+                    },
+                )
+            };
+            bus.emit(boundary(true));
+            bus.emit(DispatchEvent::new(
+                corr.clone(),
+                EventKind::StreamChunk {
+                    text: "retained".into(),
+                },
+            ));
+            bus.emit(boundary(false));
+            let (_, _, history) = bus
+                .subscribe_with_history(SubscriberRegistration::lag_tolerant(filter.clone(), 256))
+                .unwrap();
+            assert!(!history.complete);
+            assert_eq!(history.events.len(), 2);
+            let (client, server) = tokio::net::UnixStream::pair().unwrap();
+            let (_, write) = server.into_split();
+            let metadata = WatchMetadata::default();
+            assert!(
+                !write_watch_history(&SharedWriter::new(write), &filter, history, &metadata)
+                    .await
+                    .unwrap()
+            );
+            let mut reader = BufReader::new(client);
+            assert_eq!(
+                socket::read_json_line(&mut reader).await.unwrap().unwrap()["type"],
+                "history_gap"
+            );
+            let chunk = socket::read_json_line(&mut reader).await.unwrap().unwrap();
+            assert_eq!(chunk["type"], "stream_chunk");
+            assert_eq!(chunk["sequence"], 2);
+            assert_eq!(chunk["stage_type"], stage_type);
+            assert_eq!(chunk["stage_run_id"], "one");
+            assert_eq!(chunk["correlation_turn"], "caller-turn");
+            assert_eq!(
+                socket::read_json_line(&mut reader).await.unwrap().unwrap()["active"],
+                false
+            );
+            let checkpoint = socket::read_json_line(&mut reader).await.unwrap().unwrap();
+            assert_eq!(checkpoint["type"], "replay_checkpoint");
+            assert_eq!(checkpoint["complete"], false);
+            assert_eq!(checkpoint["through_sequence"], 3);
+            assert_eq!(checkpoint["evicted_through_sequence"], 1);
+            // Retrospective closing evidence must not classify later live frames.
+            let after_close = metadata
+                .frame(
+                    &DispatchEvent::new(
+                        corr.clone(),
+                        EventKind::StreamChunk {
+                            text: "after close".into(),
+                        },
+                    ),
+                    &filter,
+                )
+                .unwrap();
+            assert!(after_close.get("stage_type").is_none());
+            for unrelated in [
+                filter.clone().with_stage("worker").with_stage_run_id("two"),
+                CorrId::new()
+                    .with_run("truncated-watch:child")
+                    .with_stage("worker")
+                    .with_stage_run_id("one"),
+            ] {
+                let frame = metadata
+                    .frame(
+                        &DispatchEvent::new(
+                            unrelated,
+                            EventKind::StreamChunk {
+                                text: "unknown".into(),
+                            },
+                        ),
+                        &filter,
+                    )
+                    .unwrap();
+                assert!(frame.get("stage_type").is_none());
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn watch_truncated_replay_without_type_evidence_stays_unclassified() {
+        use gremlins_magic_bus::{Bus, CorrId, SubscriberRegistration};
+        let bus = Bus::with_history_limits(1, 1);
+        let corr = CorrId::new()
+            .with_run("unknown-watch")
+            .with_stage("worker")
+            .with_stage_run_id("one")
+            .with_turn_token("turn");
+        bus.emit(DispatchEvent::new(
+            corr.clone(),
+            EventKind::StageBoundary {
+                id: "unknown-watch".into(),
+                stage: "worker".into(),
+                stage_run_id: "one".into(),
+                stage_type: "agent".into(),
+                active: true,
+            },
+        ));
+        bus.emit(DispatchEvent::new(
+            corr.clone(),
+            EventKind::StreamChunk {
+                text: "retained".into(),
+            },
+        ));
+        let (_, _, history) = bus
+            .subscribe_with_history(SubscriberRegistration::lag_tolerant(corr.clone(), 256))
+            .unwrap();
+        assert!(!history.complete);
+        let (client, server) = tokio::net::UnixStream::pair().unwrap();
+        let (_, write) = server.into_split();
+        write_watch_history(
+            &SharedWriter::new(write),
+            &corr,
+            history,
+            &WatchMetadata::default(),
+        )
+        .await
+        .unwrap();
+        let mut reader = BufReader::new(client);
+        assert_eq!(
+            socket::read_json_line(&mut reader).await.unwrap().unwrap()["type"],
+            "history_gap"
+        );
+        let frame = socket::read_json_line(&mut reader).await.unwrap().unwrap();
+        assert_eq!(frame["type"], "stream_chunk");
+        assert!(frame.get("stage_type").is_none());
+        assert_eq!(frame["stage_run_id"], "one");
+        assert_eq!(frame["correlation_turn"], "turn");
+    }
+
+    #[test]
+    fn watch_stamped_closing_boundary_clears_fallback_metadata() {
+        use gremlins_magic_bus::{Bus, CorrId, SubscriberRegistration};
+        let filter = CorrId::new().with_run("closed-watch");
+        let corr = filter.clone().with_stage("worker").with_stage_run_id("one");
+        let bus =
+            Bus::with_history_limits(4, 4).with_invocation_metadata(EventKind::invocation_metadata);
+        for active in [true, false] {
+            bus.emit(DispatchEvent::new(
+                corr.clone(),
+                EventKind::StageBoundary {
+                    id: "closed-watch".into(),
+                    stage: "worker".into(),
+                    stage_run_id: "one".into(),
+                    stage_type: "exec".into(),
+                    active,
+                },
+            ));
+        }
+        let (_, _, history) = bus
+            .subscribe_with_history(SubscriberRegistration::lossless(filter.clone()))
+            .unwrap();
+        let metadata = WatchMetadata::default();
+        for dispatch in &history.events {
+            // Exercise the replay prepass as well as envelope-stamped boundaries.
+            metadata.record_boundary(dispatch, &filter);
+        }
+        for dispatch in &history.events {
+            assert_eq!(dispatch.stage_type(), Some("exec"));
+            assert_eq!(
+                metadata.frame(dispatch, &filter).unwrap()["stage_type"],
+                "exec"
+            );
+        }
+        let frame = metadata
+            .frame(
+                &DispatchEvent::new(
+                    corr,
+                    EventKind::StreamChunk {
+                        text: "late".into(),
+                    },
+                ),
+                &filter,
+            )
+            .unwrap();
+        assert!(frame.get("stage_type").is_none());
+        assert!(metadata.stage_types.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn watch_boundary_metadata_requires_consistent_identity() {
+        use gremlins_magic_bus::CorrId;
+        let filter = CorrId::new().with_run("metadata-watch");
+        let corr = filter.clone().with_stage("worker").with_stage_run_id("one");
+        for (run, stage, invocation) in [
+            ("other", "worker", "one"),
+            ("metadata-watch", "container", "one"),
+            ("metadata-watch", "worker", "other"),
+        ] {
+            let metadata = WatchMetadata::default();
+            let bus = gremlins_magic_bus::Bus::with_history_limits(1, 1)
+                .with_invocation_metadata(EventKind::invocation_metadata);
+            let boundary = DispatchEvent::new(
+                corr.clone(),
+                EventKind::StageBoundary {
+                    id: run.into(),
+                    stage: stage.into(),
+                    stage_run_id: invocation.into(),
+                    stage_type: "agent".into(),
+                    active: true,
+                },
+            );
+            metadata.record_boundary(&boundary, &filter);
+            bus.emit(boundary);
+            bus.emit(DispatchEvent::new(
+                corr.clone(),
+                EventKind::StreamChunk {
+                    text: "chunk".into(),
+                },
+            ));
+            let (_, _, history) =
+                bus.subscribe_with_history(
+                    gremlins_magic_bus::SubscriberRegistration::lag_tolerant(filter.clone(), 16),
+                )
+                .unwrap();
+            assert!(history.events[0].stage_type().is_none());
+            let frame = metadata
+                .frame(
+                    &DispatchEvent::new(
+                        corr.clone(),
+                        EventKind::StreamChunk {
+                            text: "unclassified".into(),
+                        },
+                    ),
+                    &filter,
+                )
+                .unwrap();
+            assert!(frame.get("stage_type").is_none());
+        }
+    }
+
+    #[tokio::test]
     async fn watch_gap_keeps_native_watermarks_and_parent_terminal() {
         use gremlins_magic_bus::{Bus, CorrId, SubscriberRegistration};
         let bus = Bus::with_history_limits(1, 1);
@@ -2070,9 +2536,11 @@ mod routing_tests {
         let (client, server) = tokio::net::UnixStream::pair().unwrap();
         let (_, write) = server.into_split();
         let writer = SharedWriter::new(write);
-        assert!(write_watch_history(&writer, &filter, history)
-            .await
-            .unwrap());
+        assert!(
+            write_watch_history(&writer, &filter, history, &WatchMetadata::default())
+                .await
+                .unwrap()
+        );
         let mut reader = BufReader::new(client);
         let gap = socket::read_json_line(&mut reader).await.unwrap().unwrap();
         assert_eq!(gap["type"], "history_gap");
@@ -2144,7 +2612,8 @@ mod routing_tests {
             let (blocked_tx, blocked_rx) = tokio::sync::oneshot::channel();
             let (resume_tx, resume_rx) = tokio::sync::oneshot::channel();
             let send = tokio::spawn(async move {
-                let replay = write_watch_history(&writer, &replay_filter, history);
+                let metadata = WatchMetadata::default();
+                let replay = write_watch_history(&writer, &replay_filter, history, &metadata);
                 tokio::pin!(replay);
                 // Keep the same future alive: the undrained socket cannot fit this output.
                 assert!(tokio::time::timeout(Duration::from_millis(50), &mut replay)

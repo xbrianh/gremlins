@@ -29,10 +29,30 @@ pub(super) fn invocation_from_frame(frame: &Value) -> Option<Invocation> {
 pub(crate) struct Execution {
     pub run_id: String,
     pub stage_run_id: String,
+    // Zero denotes an unpinned native bus identity; never send it as a nonce.
     pub nonce: u64,
 }
 
 impl Execution {
+    /// Native watch identity, independent of debugger attachment metadata.
+    pub(super) fn from_bus_frame(frame: &Value) -> Option<Self> {
+        let field = |key: &str| frame[key].as_str().filter(|s| !s.trim().is_empty());
+        Some(Self {
+            run_id: field("run_id")?.to_owned(),
+            stage_run_id: field("stage_run_id")?.to_owned(),
+            nonce: 0,
+        })
+    }
+
+    pub(super) fn input_request(&self, session: &str, req_id: &str) -> Value {
+        let mut request = json!({"op":"input", "session_id":session,
+            "id":self.run_id, "stage_run_id":self.stage_run_id, "req_id":req_id});
+        if self.nonce != 0 {
+            request["nonce"] = json!(self.nonce);
+        }
+        request
+    }
+
     pub(super) fn from_frame(frame: &Value) -> Option<Self> {
         Some(Self {
             run_id: frame["id"].as_str()?.to_owned(),
@@ -107,6 +127,29 @@ impl Selector<'_> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn native_bus_identity_needs_no_debugger_metadata() {
+        let frame = json!({"type":"stream_chunk", "run_id":"home", "stage":"chat",
+            "stage_run_id":"invocation", "sequence":12, "text":"hello"});
+        let execution = Execution::from_bus_frame(&frame).unwrap();
+        assert_eq!(
+            execution.input_request("owner", "7"),
+            json!({"op":"input",
+            "session_id":"owner", "id":"home", "stage_run_id":"invocation", "req_id":"7"})
+        );
+        assert!(Execution::from_frame(&frame).is_none());
+        for key in ["run_id", "stage_run_id"] {
+            for value in [Value::Null, json!(""), json!(" "), json!(9)] {
+                let mut invalid = frame.clone();
+                invalid[key] = value;
+                assert!(Execution::from_bus_frame(&invalid).is_none());
+            }
+        }
+        let mut pinned = execution;
+        pinned.nonce = 9;
+        assert_eq!(pinned.input_request("owner", "7")["nonce"], 9);
+    }
 
     #[test]
     fn exact_selector_sends_and_compares_advertised_stage_run_id() {

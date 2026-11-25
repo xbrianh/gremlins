@@ -177,6 +177,25 @@ pub enum EventKind {
 }
 
 impl EventKind {
+    /// Accept a boundary only when its payload agrees with the routed identity.
+    pub fn invocation_metadata(event: &crate::DispatchEvent<Self>) -> Option<(String, bool)> {
+        let Self::StageBoundary {
+            id,
+            stage,
+            stage_run_id,
+            stage_type,
+            active,
+        } = event.kind()
+        else {
+            return None;
+        };
+        let corr = event.corr_id();
+        (corr.run() == Some(id.as_str())
+            && corr.stage() == Some(stage.as_str())
+            && corr.stage_run_id() == Some(stage_run_id.as_str()))
+        .then(|| (stage_type.clone(), *active))
+    }
+
     /// Returns `true` for events that are part of the chat streaming protocol.
     /// OperatorMessage is included so that a listener watching stream events
     /// also receives the delivered-message notification.

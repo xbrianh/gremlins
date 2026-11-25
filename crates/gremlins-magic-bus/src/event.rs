@@ -49,6 +49,7 @@ pub struct DispatchEvent<P> {
     kind: P,
     ts: Timestamp,
     sequence: u64,
+    stage_type: Option<String>,
 }
 
 impl<P> DispatchEvent<P> {
@@ -58,6 +59,7 @@ impl<P> DispatchEvent<P> {
             kind,
             ts: Timestamp::now(),
             sequence: 0,
+            stage_type: None,
         }
     }
 
@@ -68,6 +70,7 @@ impl<P> DispatchEvent<P> {
             kind,
             ts,
             sequence: 0,
+            stage_type: None,
         }
     }
 
@@ -81,6 +84,15 @@ impl<P> DispatchEvent<P> {
 
     pub(crate) fn set_sequence(&mut self, sequence: u64) {
         self.sequence = sequence;
+    }
+
+    /// Authoritative invocation metadata, independent of journal retention.
+    pub fn stage_type(&self) -> Option<&str> {
+        self.stage_type.as_deref()
+    }
+
+    pub(crate) fn set_stage_type(&mut self, stage_type: Option<String>) {
+        self.stage_type = stage_type;
     }
 
     pub fn corr_id(&self) -> &CorrId {

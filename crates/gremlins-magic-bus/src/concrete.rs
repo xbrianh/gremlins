@@ -17,7 +17,8 @@ pub fn init_bus() -> &'static Bus<EventKind> {
     BUS.get_or_init(|| {
         let bus = Bus::with_history_limits_and_retention(16_384, 65_536, |kind| {
             !matches!(kind, EventKind::PromptRequest { .. })
-        });
+        })
+        .with_invocation_metadata(EventKind::invocation_metadata);
         // One-time registration: log every LogLine event via the log crate so
         // call sites only need `emit_event(EventKind::LogLine { … })` — the bus
         // subscriber handles the `log::info!()` side automatically.

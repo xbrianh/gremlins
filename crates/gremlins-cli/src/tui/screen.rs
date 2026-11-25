@@ -613,7 +613,9 @@ impl<B: Backend> LiveArea<B> {
         }
         let message = match receipt.result {
             // Home's owner stream does not forward operator-message events.
-            Ok(()) if receipt.target.is_home() => format!("> {}", receipt.text),
+            Ok(()) if receipt.target.is_home() => {
+                format!("correction delivered: {}", receipt.text)
+            }
             Ok(()) => return,
             Err(reason) => format!("correction: {}\n{reason}", receipt.text),
         };
@@ -2477,7 +2479,14 @@ mod tests {
             live.compose(&app).unwrap();
             let visible = dump_buffer(live.backend().buffer());
             if success {
-                assert_eq!(visible.matches("> home correction").count(), 1, "{visible}");
+                assert_eq!(
+                    visible
+                        .matches("correction delivered: home correction")
+                        .count(),
+                    1,
+                    "{visible}"
+                );
+                assert!(!visible.contains("> home correction"), "{visible}");
             } else {
                 assert_eq!(
                     visible.matches("correction: home correction").count(),

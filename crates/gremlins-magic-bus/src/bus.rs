@@ -9,7 +9,7 @@
 //! No lock is held while running read, persistence, or retention callbacks,
 //! or while awaiting bounded channel capacity.
 
-use std::collections::{BTreeMap, HashMap, VecDeque};
+use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
 use std::future::Future;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Mutex;
@@ -41,9 +41,17 @@ pub struct Bus<P> {
     state: Mutex<BusState<P>>,
     next_id: AtomicU64,
     retain: Box<dyn Fn(&P) -> bool + Send + Sync>,
+    invocation_metadata: Option<InvocationMetadata<P>>,
 }
 
+type InvocationMetadata<P> = Box<dyn Fn(&DispatchEvent<P>) -> Option<(String, bool)> + Send + Sync>;
+
 struct BusState<P> {
+    // Separate from journal eviction: running invocations can outlive entries.
+    // All indexes are bounded by the history limits, even without closes.
+    stage_types: HashMap<(String, String, String), (String, u64)>,
+    stage_type_lru: BTreeMap<u64, (String, String, String)>,
+    stage_type_runs: HashMap<String, BTreeSet<u64>>,
     subscribers: Vec<(u64, CorrId, SubscriberMailbox<P>)>,
     journal: BTreeMap<u64, DispatchEvent<P>>,
     runs: HashMap<String, VecDeque<u64>>,
@@ -54,6 +62,76 @@ struct BusState<P> {
 }
 
 impl<P: Clone> BusState<P> {
+    fn classify(
+        &mut self,
+        event: &mut DispatchEvent<P>,
+        boundary: Option<(String, bool)>,
+        retain: bool,
+    ) {
+        let corr = event.corr_id();
+        let (Some(run), Some(stage), Some(invocation)) =
+            (corr.run(), corr.stage(), corr.stage_run_id())
+        else {
+            event.set_stage_type(None);
+            return;
+        };
+        let key = (run.to_owned(), stage.to_owned(), invocation.to_owned());
+        let run = key.0.clone();
+        let stage_type = boundary
+            .as_ref()
+            .map(|(kind, _)| kind.clone())
+            .or_else(|| self.stage_types.get(&key).map(|(kind, _)| kind.clone()));
+        event.set_stage_type(stage_type.clone());
+        let cached = self.stage_types.get(&key).map(|(_, stamp)| *stamp);
+        if let Some(stamp) = cached {
+            self.remove_stage_type(stamp);
+        }
+        if matches!(boundary, Some((_, false))) {
+            return;
+        }
+        // Rejected entries cannot create metadata; rejected events can refresh
+        // existing invocations without increasing cache occupancy.
+        if self.per_run_limit == 0 || self.global_limit == 0 || (!retain && cached.is_none()) {
+            return;
+        }
+        let Some(stage_type) = stage_type else {
+            return;
+        };
+        if let Some(oldest) = self.stage_type_runs.get(&run).and_then(|entries| {
+            (entries.len() >= self.per_run_limit).then(|| *entries.first().unwrap())
+        }) {
+            self.remove_stage_type(oldest);
+        }
+        if self.stage_types.len() >= self.global_limit {
+            let oldest = *self.stage_type_lru.first_key_value().unwrap().0;
+            self.remove_stage_type(oldest);
+        }
+        // Recording follows under the same lock; its sequence is a unique stamp.
+        let stamp = self
+            .sequence
+            .checked_add(1)
+            .expect("bus sequence exhausted");
+        self.stage_type_runs
+            .entry(run.to_owned())
+            .or_default()
+            .insert(stamp);
+        self.stage_type_lru.insert(stamp, key.clone());
+        self.stage_types.insert(key, (stage_type, stamp));
+    }
+
+    fn remove_stage_type(&mut self, stamp: u64) {
+        let key = self
+            .stage_type_lru
+            .remove(&stamp)
+            .expect("cached invocation");
+        self.stage_types.remove(&key);
+        let entries = self.stage_type_runs.get_mut(&key.0).expect("cached run");
+        entries.remove(&stamp);
+        if entries.is_empty() {
+            self.stage_type_runs.remove(&key.0);
+        }
+    }
+
     fn record(&mut self, event: &mut DispatchEvent<P>, retain: bool) {
         event.set_sequence(0);
         if event.corr_id().run().is_none() {
@@ -129,6 +207,9 @@ impl<P: Clone + Send + 'static> Bus<P> {
     ) -> Self {
         Self {
             state: Mutex::new(BusState {
+                stage_types: HashMap::new(),
+                stage_type_lru: BTreeMap::new(),
+                stage_type_runs: HashMap::new(),
                 subscribers: Vec::new(),
                 journal: BTreeMap::new(),
                 runs: HashMap::new(),
@@ -139,7 +220,18 @@ impl<P: Clone + Send + 'static> Bus<P> {
             }),
             next_id: AtomicU64::new(1),
             retain: Box::new(retain),
+            invocation_metadata: None,
         }
+    }
+
+    /// Configure authoritative invocation boundaries. Classification runs outside
+    /// the bus lock; updates and envelope stamping share the history/live lock.
+    pub fn with_invocation_metadata(
+        mut self,
+        classify: impl Fn(&DispatchEvent<P>) -> Option<(String, bool)> + Send + Sync + 'static,
+    ) -> Self {
+        self.invocation_metadata = Some(Box::new(classify));
+        self
     }
 
     /// Run a synchronous read without holding the bus mutex.
@@ -245,7 +337,9 @@ impl<P: Clone + Send + 'static> Bus<P> {
 
     fn emit_recorded(&self, mut event: DispatchEvent<P>) -> DispatchEvent<P> {
         let retain = event.corr_id().run().is_some() && (self.retain)(event.kind());
+        let boundary = self.invocation_metadata.as_ref().and_then(|f| f(&event));
         let mut state = self.state.lock().expect("bus state poisoned");
+        state.classify(&mut event, boundary, retain);
         state.record(&mut event, retain);
         for (_id, prefix, mailbox) in &state.subscribers {
             if event.corr_id().matches_prefix(prefix) {
@@ -266,8 +360,10 @@ impl<P: Clone + Send + 'static> Bus<P> {
     /// Direct `Subscriber::send` calls bypass this bus ordering contract.
     pub async fn emit_async(&self, mut event: DispatchEvent<P>) {
         let retain = event.corr_id().run().is_some() && (self.retain)(event.kind());
+        let boundary = self.invocation_metadata.as_ref().and_then(|f| f(&event));
         let pending = {
             let mut state = self.state.lock().expect("bus state poisoned");
+            state.classify(&mut event, boundary, retain);
             state.record(&mut event, retain);
             let mut pending = Vec::new();
             let waker = futures::task::noop_waker();
@@ -316,6 +412,132 @@ mod tests {
         assert_eq!(actual.kind(), expected.kind());
         assert_eq!(actual.ts().monotonic(), expected.ts().monotonic());
         assert_eq!(actual.ts().wall(), expected.ts().wall());
+    }
+
+    fn invocation(run: &str, id: &str) -> CorrId {
+        CorrId::new()
+            .with_run(run)
+            .with_stage("build")
+            .with_stage_run_id(id)
+    }
+
+    fn classification_bus(per_run: usize, global: usize, retain: bool) -> Bus<Payload> {
+        Bus::<Payload>::with_history_limits_and_retention(per_run, global, move |_| retain)
+            .with_invocation_metadata(|event| match event.kind().0 {
+                1 => Some(("shell".to_owned(), true)),
+                2 => Some(("shell".to_owned(), false)),
+                _ => None,
+            })
+    }
+
+    fn assert_cache_bounds(bus: &Bus<Payload>, expected: usize) {
+        let state = bus.state.lock().unwrap();
+        assert_eq!(state.stage_types.len(), expected);
+        assert_eq!(state.stage_type_lru.len(), expected);
+        assert_eq!(
+            state
+                .stage_type_runs
+                .values()
+                .map(BTreeSet::len)
+                .sum::<usize>(),
+            expected
+        );
+        assert!(state
+            .stage_type_runs
+            .values()
+            .all(|entries| !entries.is_empty() && entries.len() <= state.per_run_limit));
+        assert!(expected <= state.global_limit);
+    }
+
+    #[test]
+    fn invocation_cache_bounds_missing_closes_across_runs() {
+        let bus = classification_bus(2, 5, true);
+        for n in 0..1000 {
+            bus.emit(DispatchEvent::new(
+                invocation(&format!("run-{n}"), "entry"),
+                Payload(1),
+            ));
+            assert_cache_bounds(&bus, (n + 1).min(5));
+        }
+        assert_eq!(bus.state.lock().unwrap().stage_type_runs.len(), 5);
+    }
+
+    #[test]
+    fn invocation_cache_bounds_missing_closes_in_one_run() {
+        let bus = classification_bus(3, 10, true);
+        for n in 0..1000 {
+            bus.emit(DispatchEvent::new(
+                invocation("run", &n.to_string()),
+                Payload(1),
+            ));
+            assert_cache_bounds(&bus, (n + 1).min(3));
+        }
+        assert_eq!(bus.state.lock().unwrap().stage_type_runs.len(), 1);
+    }
+
+    #[test]
+    fn invocation_cache_zero_and_rejected_retention() {
+        for (per_run, global, retain) in [(0, 10, true), (10, 0, true), (0, 0, true), (3, 5, false)]
+        {
+            let bus = classification_bus(per_run, global, retain);
+            for n in 0..100 {
+                let id = invocation(&format!("run-{n}"), "entry");
+                let entry = bus.emit_recorded(DispatchEvent::new(id.clone(), Payload(1)));
+                assert_eq!(entry.stage_type(), Some("shell"));
+                let log = bus.emit_recorded(DispatchEvent::new(id, Payload(0)));
+                assert_eq!(log.stage_type(), None);
+                assert_cache_bounds(&bus, 0);
+            }
+            assert!(bus.state.lock().unwrap().stage_type_runs.is_empty());
+        }
+    }
+
+    #[tokio::test]
+    async fn invocation_cache_preserves_evicted_entry_and_refreshes_lru() {
+        // Exercise both the per-run and global LRU eviction paths.
+        for (per_run, global) in [(2, 10), (10, 2)] {
+            let bus = classification_bus(per_run, global, true);
+            let a = invocation("run", "a");
+            let b = invocation("run", "b");
+            let c = invocation("run", "c");
+            bus.emit(DispatchEvent::new(a.clone(), Payload(1)));
+            bus.emit_async(DispatchEvent::new(b.clone(), Payload(1)))
+                .await;
+            for _ in 0..12 {
+                bus.emit_async(DispatchEvent::new(a.clone(), Payload(0)))
+                    .await;
+            }
+            assert!(bus
+                .state
+                .lock()
+                .unwrap()
+                .journal
+                .values()
+                .all(|event| event.kind().0 != 1));
+            bus.emit(DispatchEvent::new(c.clone(), Payload(1)));
+            assert_eq!(
+                bus.emit_recorded(DispatchEvent::new(a.clone(), Payload(0)))
+                    .stage_type(),
+                Some("shell")
+            );
+            assert_eq!(
+                bus.emit_recorded(DispatchEvent::new(b, Payload(0)))
+                    .stage_type(),
+                None
+            );
+            assert_cache_bounds(&bus, 2);
+            assert_eq!(
+                bus.emit_recorded(DispatchEvent::new(a.clone(), Payload(2)))
+                    .stage_type(),
+                Some("shell")
+            );
+            assert_eq!(
+                bus.emit_recorded(DispatchEvent::new(a, Payload(0)))
+                    .stage_type(),
+                None
+            );
+            assert_cache_bounds(&bus, 1);
+        }
     }
 
     #[test]
