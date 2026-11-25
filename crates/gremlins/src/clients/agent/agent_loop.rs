@@ -14,7 +14,9 @@ use crate::clients::interactive::InteractiveSession;
 use gremlins_magic_bus::EventKind;
 
 use super::done_assess::DoneAssessment;
-use super::interactive::{announce_live_disconnect, interactive_loop, InteractiveLoopResult};
+use super::interactive::{
+    announce_live_disconnect, inbox_boundary, interactive_loop, InteractiveLoopResult,
+};
 use crate::clients::cancel::{default_classify, is_retryable, CancelToken};
 use crate::clients::conversation::{Conversation, TurnScriptError};
 use crate::clients::error::ClientError;
@@ -96,6 +98,7 @@ pub(super) struct LoopState {
     pub(super) total_cache_creation_tokens: Option<u64>,
     pub(super) total_reasoning_tokens: Option<u64>,
     pending_run_one_turn: bool,
+    pending_inbox_step: bool,
     pub(super) interactive: InteractiveSession,
     pub(super) remaining_turns: usize,
     pub(super) reminder_budget: usize,
@@ -205,6 +208,7 @@ impl LoopState {
             total_cache_creation_tokens: None,
             total_reasoning_tokens: None,
             pending_run_one_turn: false,
+            pending_inbox_step: false,
             interactive,
             remaining_turns: max_turns,
             reminder_budget,
@@ -593,12 +597,51 @@ impl LoopState {
         cancel: &CancelToken,
         prefix: &str,
     ) -> Result<InteractiveBoundary, ClientError> {
+        let boundary = self.await_interactive_gates(cancel, prefix).await?;
+        if matches!(boundary, InteractiveBoundary::RunTurn) {
+            self.pending_inbox_step = false;
+        }
+        Ok(boundary)
+    }
+
+    async fn await_interactive_gates(
+        &mut self,
+        cancel: &CancelToken,
+        prefix: &str,
+    ) -> Result<InteractiveBoundary, ClientError> {
+        // Inbox pause is independent of debugger leases and must be checked
+        // before a legacy deferred turn can bypass the pause gate.
+        if self.interactive.input_pending() || self.interactive.inbox_paused() {
+            let step = std::mem::take(&mut self.pending_inbox_step);
+            self.system_prompt = self.original_system_prompt.clone();
+            self.pending_inbox_step = inbox_boundary(
+                cancel,
+                &mut *self.conv,
+                &mut self.interactive,
+                self.turn_num,
+                &self.message_prefix,
+                &self.corr_id,
+                step,
+            )
+            .await?;
+            // Input incorporation does not authorize the independent debugger gate.
+        }
         // A deferred step belongs to the debugger that granted it. Retire its
         // inbox and prompt before looking for a successor at this boundary.
         let retired = self.retire_revoked_debugger().await;
-        if !retired && std::mem::take(&mut self.pending_run_one_turn) {
-            return Ok(InteractiveBoundary::RunTurn);
+        if !retired {
+            if self.interactive.deferred_debug_turns > 0 {
+                self.interactive.deferred_debug_turns -= 1;
+                self.pending_run_one_turn = false;
+                return Ok(InteractiveBoundary::RunTurn);
+            }
+            if std::mem::take(&mut self.pending_run_one_turn) {
+                return Ok(InteractiveBoundary::RunTurn);
+            }
         }
+        // An inbox step authorizes only the inbox gate. Without a debugger
+        // the ordinary RunTurn path below consumes it; with one, retain it
+        // until that independent gate also authorizes a turn.
         if !self.interactive.accepts_commands() {
             return Ok(InteractiveBoundary::RunTurn);
         }
@@ -606,7 +649,9 @@ impl LoopState {
             return Ok(InteractiveBoundary::RunTurn);
         }
         let boundary = match self.enter_interactive_mode(cancel, prefix).await? {
-            InteractiveLoopResult::Resumed => InteractiveBoundary::ContinueLoop,
+            InteractiveLoopResult::Resumed | InteractiveLoopResult::InputPending => {
+                InteractiveBoundary::ContinueLoop
+            }
             InteractiveLoopResult::RunOneTurn | InteractiveLoopResult::MessageDelivered => {
                 InteractiveBoundary::RunTurn
             }
@@ -632,6 +677,21 @@ impl LoopState {
         cancel: &CancelToken,
         prefix: &str,
     ) -> Result<(), ClientError> {
+        if self.interactive.input_pending() || self.interactive.inbox_paused() {
+            self.system_prompt = self.original_system_prompt.clone();
+            self.pending_inbox_step = inbox_boundary(
+                cancel,
+                &mut *self.conv,
+                &mut self.interactive,
+                self.turn_num,
+                &self.message_prefix,
+                &self.corr_id,
+                std::mem::take(&mut self.pending_inbox_step),
+            )
+            .await?;
+            self.pending_run_one_turn = false;
+            return Ok(());
+        }
         if !self.interactive.accepts_commands() {
             return Ok(());
         }
@@ -669,6 +729,7 @@ impl LoopState {
         )
         .await
         {
+            Ok(InteractiveLoopResult::InputPending) => Ok(InteractiveLoopResult::InputPending),
             Ok(InteractiveLoopResult::MessageDelivered) => {
                 // Delivery may retain the debugger lease; restore the original prompt.
                 self.system_prompt = self.original_system_prompt.clone();
@@ -6407,3 +6468,6 @@ mod tests {
         assert!(!required.exists());
     }
 }
+
+#[cfg(test)]
+mod input_tests;

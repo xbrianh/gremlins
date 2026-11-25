@@ -1,8 +1,8 @@
-//! Execution-scoped correction inboxes, independent of debugger attachments.
+//! Execution-scoped command inboxes, independent of debugger attachments.
 
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex, Weak};
-use tokio::sync::{mpsc, oneshot};
+use tokio::sync::{mpsc, oneshot, Notify};
 
 pub(crate) const INPUT_CAPACITY: usize = 16;
 
@@ -43,6 +43,7 @@ impl InputRegistry {
     ) -> (InputReceiver, Arc<InputRevoker>) {
         let (sender, receiver) = mpsc::channel(INPUT_CAPACITY);
         let shared = Arc::new(Shared {
+            pending: Notify::new(),
             state: Mutex::new(State {
                 sender: Some(sender),
                 next_id: 0,
@@ -81,6 +82,7 @@ impl InputRegistry {
 
 #[derive(Debug)]
 struct Shared {
+    pending: Notify,
     state: Mutex<State>,
 }
 
@@ -113,7 +115,27 @@ impl Shared {
 struct Queued {
     id: u64,
     request_id: String,
-    text: String,
+    payload: Payload,
+}
+
+#[derive(Debug)]
+enum Payload {
+    Correction(String),
+    Control(InputControl),
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum InputControl {
+    Pause,
+    Step,
+    Resume,
+    Bail,
+}
+
+#[derive(Debug)]
+pub(crate) enum InputCommand {
+    Correction(Correction),
+    Control(Control),
 }
 
 #[derive(Clone, Debug)]
@@ -128,6 +150,18 @@ impl InputSender {
         request_id: String,
         text: String,
     ) -> Result<Receipt, InputRejected> {
+        self.enqueue(request_id, Payload::Correction(text))
+    }
+
+    pub(crate) fn try_control(
+        &self,
+        request_id: String,
+        control: InputControl,
+    ) -> Result<Receipt, InputRejected> {
+        self.enqueue(request_id, Payload::Control(control))
+    }
+
+    fn enqueue(&self, request_id: String, payload: Payload) -> Result<Receipt, InputRejected> {
         let mut state = self.shared.state.lock().unwrap();
         let sender = state.sender.as_ref().ok_or(InputRejected::Revoked)?;
         let id = state.next_id;
@@ -136,7 +170,7 @@ impl InputSender {
             .try_send(Queued {
                 id,
                 request_id,
-                text,
+                payload,
             })
             .map_err(|error| match error {
                 mpsc::error::TrySendError::Full(_) => InputRejected::Full,
@@ -145,6 +179,7 @@ impl InputSender {
         let (completion, receipt) = oneshot::channel();
         state.next_id = next_id;
         state.pending.insert(id, completion);
+        self.shared.pending.notify_waiters();
         Ok(receipt)
     }
 }
@@ -174,22 +209,60 @@ pub(crate) struct InputReceiver {
 }
 
 impl InputReceiver {
-    pub(crate) fn try_recv(&mut self) -> Result<Correction, mpsc::error::TryRecvError> {
+    pub(crate) fn pending(&self) -> bool {
+        let state = self.shared.state.lock().unwrap();
+        state.sender.is_some() && !self.receiver.is_empty()
+    }
+
+    /// Wait only for queued input. Revocation and endpoint drops do not wake this wait.
+    pub(crate) async fn wait_pending(&self) {
+        loop {
+            let notified = self.shared.pending.notified();
+            tokio::pin!(notified);
+            notified.as_mut().enable();
+            if self.pending() {
+                return;
+            }
+            notified.await;
+        }
+    }
+
+    pub(crate) async fn recv(&mut self) -> Option<InputCommand> {
+        self.shared.state.lock().unwrap().sender.as_ref()?;
+        // Channel closure wakes this receive on revocation, unlike wait_pending,
+        // which must only interrupt a stream for accepted input.
+        let queued = self.receiver.recv().await?;
+        self.command(queued).ok()
+    }
+
+    pub(crate) fn try_recv(&mut self) -> Result<InputCommand, mpsc::error::TryRecvError> {
         let state = self.shared.state.lock().unwrap();
         if state.sender.is_none() {
             return Err(mpsc::error::TryRecvError::Disconnected);
         }
         drop(state);
         let queued = self.receiver.try_recv()?;
+        self.command(queued)
+    }
+
+    fn command(&self, queued: Queued) -> Result<InputCommand, mpsc::error::TryRecvError> {
         let state = self.shared.state.lock().unwrap();
         if state.sender.is_none() {
             return Err(mpsc::error::TryRecvError::Disconnected);
         }
-        Ok(Correction {
-            request_id: queued.request_id,
-            text: queued.text,
-            id: queued.id,
-            shared: self.shared.clone(),
+        Ok(match queued.payload {
+            Payload::Correction(text) => InputCommand::Correction(Correction {
+                request_id: queued.request_id,
+                text,
+                id: queued.id,
+                shared: self.shared.clone(),
+            }),
+            Payload::Control(control) => InputCommand::Control(Control {
+                request_id: queued.request_id,
+                control,
+                id: queued.id,
+                shared: self.shared.clone(),
+            }),
         })
     }
 }
@@ -231,9 +304,58 @@ impl Drop for Correction {
     }
 }
 
+#[derive(Debug)]
+pub(crate) struct Control {
+    pub(crate) request_id: String,
+    pub(crate) control: InputControl,
+    id: u64,
+    shared: Arc<Shared>,
+}
+
+impl Control {
+    /// Apply and acknowledge atomically with respect to revocation.
+    /// `apply` must not re-enter this inbox or cancel it.
+    pub(crate) fn incorporate(self, apply: impl FnOnce(&str, InputControl)) -> bool {
+        let mut state = self.shared.state.lock().unwrap();
+        if !state.pending.contains_key(&self.id) {
+            return false;
+        }
+        apply(&self.request_id, self.control);
+        if let Some(receipt) = state.pending.remove(&self.id) {
+            let _ = receipt.send(Delivery::Delivered);
+        }
+        true
+    }
+}
+
+impl Drop for Control {
+    fn drop(&mut self) {
+        self.shared.settle(self.id, Delivery::NotDelivered);
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::future::Future;
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::task::{Context, Poll, Wake, Waker};
+
+    #[derive(Default)]
+    struct Flag(AtomicBool);
+
+    impl Wake for Flag {
+        fn wake(self: Arc<Self>) {
+            self.0.store(true, Ordering::SeqCst);
+        }
+    }
+
+    fn receive(receiver: &mut InputReceiver) -> Correction {
+        let InputCommand::Correction(correction) = receiver.try_recv().unwrap() else {
+            panic!("expected correction");
+        };
+        correction
+    }
 
     fn identity(stage_run_id: &str) -> ExecutionIdentity {
         ExecutionIdentity {
@@ -241,6 +363,148 @@ mod tests {
             stage_name: "stage".into(),
             stage_run_id: stage_run_id.into(),
         }
+    }
+
+    #[tokio::test]
+    async fn controls_are_distinct_and_receipted() {
+        let registry = InputRegistry::default();
+        let (mut receiver, revoker) = registry.register(identity("controls"), |_| {});
+        let sender = registry.sender(&identity("controls")).unwrap();
+        for control in [
+            InputControl::Pause,
+            InputControl::Step,
+            InputControl::Resume,
+            InputControl::Bail,
+        ] {
+            let receipt = sender.try_control("request".into(), control).unwrap();
+            assert!(receiver.pending());
+            receiver.wait_pending().await;
+            let InputCommand::Control(command) = receiver.recv().await.unwrap() else {
+                panic!("expected control");
+            };
+            assert!(!receiver.pending());
+            assert!(command.incorporate(|id, value| {
+                assert_eq!(id, "request");
+                assert_eq!(value, control);
+            }));
+            assert_eq!(receipt.await.unwrap(), Delivery::Delivered);
+        }
+        let dropped = sender
+            .try_control("drop".into(), InputControl::Pause)
+            .unwrap();
+        drop(receiver.try_recv().unwrap());
+        assert_eq!(dropped.await.unwrap(), Delivery::NotDelivered);
+        let revoked = sender
+            .try_control("revoke".into(), InputControl::Bail)
+            .unwrap();
+        let InputCommand::Control(command) = receiver.try_recv().unwrap() else {
+            panic!("expected control");
+        };
+        revoker.revoke();
+        assert!(!command.incorporate(|_, _| panic!("revoked control applied")));
+        assert_eq!(revoked.await.unwrap(), Delivery::NotDelivered);
+    }
+
+    #[test]
+    fn pending_wakes_only_on_accepted_sends() {
+        let registry = InputRegistry::default();
+        let (mut receiver, revoker) = registry.register(identity("wake"), |_| {});
+        let sender = registry.sender(&identity("wake")).unwrap();
+        let flag = Arc::new(Flag::default());
+        let waker = Waker::from(flag.clone());
+        let mut cx = Context::from_waker(&waker);
+        {
+            let wait = receiver.wait_pending();
+            tokio::pin!(wait);
+            assert!(wait.as_mut().poll(&mut cx).is_pending());
+            drop(sender.clone());
+            assert!(!flag.0.load(Ordering::SeqCst));
+            let receipt = sender.try_send("correction".into(), "text".into()).unwrap();
+            assert!(flag.0.swap(false, Ordering::SeqCst));
+            assert_eq!(wait.as_mut().poll(&mut cx), Poll::Ready(()));
+            drop(receipt);
+        }
+        drop(receiver.try_recv().unwrap());
+        let shared = receiver.shared.clone();
+        let notification = shared.pending.notified();
+        tokio::pin!(notification);
+        assert!(notification.as_mut().poll(&mut cx).is_pending());
+        for _ in 0..INPUT_CAPACITY {
+            sender
+                .try_control("fill".into(), InputControl::Pause)
+                .unwrap();
+        }
+        assert!(flag.0.swap(false, Ordering::SeqCst));
+        assert!(notification.as_mut().poll(&mut cx).is_ready());
+        let notification = shared.pending.notified();
+        tokio::pin!(notification);
+        assert!(notification.as_mut().poll(&mut cx).is_pending());
+        assert_eq!(
+            sender
+                .try_control("full".into(), InputControl::Step)
+                .unwrap_err(),
+            InputRejected::Full
+        );
+        revoker.revoke();
+        assert_eq!(
+            sender
+                .try_control("late".into(), InputControl::Resume)
+                .unwrap_err(),
+            InputRejected::Revoked
+        );
+        drop(sender);
+        drop(receiver);
+        drop(revoker);
+        assert!(!flag.0.load(Ordering::SeqCst));
+        assert!(notification.as_mut().poll(&mut cx).is_pending());
+    }
+
+    #[test]
+    fn recv_wakes_on_revocation_and_rejects_buffered_input() {
+        // Cover both an empty channel and input arriving before revocation but
+        // not yet observed by the receiver.
+        for queued in [false, true] {
+            let registry = InputRegistry::default();
+            let (mut receiver, revoker) = registry.register(identity("recv"), |_| {});
+            let sender = registry.sender(&identity("recv")).unwrap();
+            let flag = Arc::new(Flag::default());
+            let waker = Waker::from(flag.clone());
+            let mut cx = Context::from_waker(&waker);
+            {
+                let receive = receiver.recv();
+                tokio::pin!(receive);
+                assert!(receive.as_mut().poll(&mut cx).is_pending());
+                let receipt =
+                    queued.then(|| sender.try_send("queued".into(), "text".into()).unwrap());
+                revoker.revoke();
+                assert!(flag.0.load(Ordering::SeqCst));
+                assert!(matches!(receive.as_mut().poll(&mut cx), Poll::Ready(None)));
+                if let Some(mut receipt) = receipt {
+                    assert_eq!(receipt.try_recv(), Ok(Delivery::NotDelivered));
+                }
+            }
+            // Revocation before the first poll must also return immediately.
+            let receive = receiver.recv();
+            tokio::pin!(receive);
+            assert!(matches!(receive.as_mut().poll(&mut cx), Poll::Ready(None)));
+        }
+    }
+
+    #[test]
+    fn wait_pending_stays_asleep_on_revocation() {
+        let registry = InputRegistry::default();
+        let (receiver, revoker) = registry.register(identity("pending"), |_| {});
+        let sender = registry.sender(&identity("pending")).unwrap();
+        let flag = Arc::new(Flag::default());
+        let waker = Waker::from(flag.clone());
+        let mut cx = Context::from_waker(&waker);
+        let wait = receiver.wait_pending();
+        tokio::pin!(wait);
+        assert!(wait.as_mut().poll(&mut cx).is_pending());
+        revoker.revoke();
+        drop(sender);
+        assert!(!flag.0.load(Ordering::SeqCst));
+        assert!(wait.as_mut().poll(&mut cx).is_pending());
     }
 
     #[test]
@@ -287,7 +551,7 @@ mod tests {
             .try_send("request".into(), "correction".into())
             .unwrap();
         drop(first);
-        let correction = receiver.try_recv().unwrap();
+        let correction = receive(&mut receiver);
         assert_eq!(correction.request_id, "request");
         assert_eq!(correction.text, "correction");
         assert!(correction.incorporate(|request_id, text| {
@@ -305,8 +569,8 @@ mod tests {
         let sender = registry.sender(&identity("one")).unwrap();
         let mut first = sender.try_send("same".into(), "first".into()).unwrap();
         let mut second = sender.try_send("same".into(), "second".into()).unwrap();
-        let correction = receiver.try_recv().unwrap();
-        receiver.try_recv().unwrap().incorporate(|_, _| {});
+        let correction = receive(&mut receiver);
+        receive(&mut receiver).incorporate(|_, _| {});
         assert_eq!(second.try_recv(), Ok(Delivery::Delivered));
         assert_eq!(first.try_recv(), Err(oneshot::error::TryRecvError::Empty));
         drop(correction);
@@ -329,7 +593,7 @@ mod tests {
             InputRejected::Full
         );
         for i in 0..INPUT_CAPACITY {
-            let correction = receiver.try_recv().unwrap();
+            let correction = receive(&mut receiver);
             assert_eq!(correction.request_id, i.to_string());
             correction.incorporate(|_, _| {});
         }
@@ -346,9 +610,9 @@ mod tests {
         let sender = registry.sender(&identity("one")).unwrap();
         let clone = sender.clone();
         let mut delivered = sender.try_send("done".into(), "text".into()).unwrap();
-        receiver.try_recv().unwrap().incorporate(|_, _| {});
+        receive(&mut receiver).incorporate(|_, _| {});
         let mut in_flight = sender.try_send("polled".into(), "text".into()).unwrap();
-        let correction = receiver.try_recv().unwrap();
+        let correction = receive(&mut receiver);
         let mut queued = sender.try_send("queued".into(), "text".into()).unwrap();
         revoker.clone().revoke();
         assert_eq!(in_flight.try_recv(), Ok(Delivery::NotDelivered));
@@ -373,7 +637,7 @@ mod tests {
         let (mut receiver, _revoker) = registry.register(identity("one"), |_| {});
         let sender = registry.sender(&identity("one")).unwrap();
         let mut receipt = sender.try_send("request".into(), "text".into()).unwrap();
-        let correction = receiver.try_recv().unwrap();
+        let correction = receive(&mut receiver);
         drop(receiver);
         assert_eq!(receipt.try_recv(), Ok(Delivery::NotDelivered));
         assert!(!correction.incorporate(|_, _| panic!("revoked input applied")));
@@ -389,7 +653,7 @@ mod tests {
         let (mut receiver, revoker) = registry.register(identity("one"), |_| {});
         let sender = registry.sender(&identity("one")).unwrap();
         let mut receipt = sender.try_send("request".into(), "text".into()).unwrap();
-        let correction = receiver.try_recv().unwrap();
+        let correction = receive(&mut receiver);
         let (started, revoking) = std::sync::mpsc::channel();
         let mut conversation = String::new();
         std::thread::scope(|scope| {

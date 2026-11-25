@@ -11,7 +11,12 @@ fn identity(stage: &str, stage_run: &str) -> ExecutionIdentity {
 }
 
 fn receive(session: &mut InteractiveSession) -> crate::clients::execution_input::Correction {
-    session.try_recv_input().unwrap()
+    match session.try_recv_input().unwrap() {
+        crate::clients::execution_input::InputCommand::Correction(correction) => correction,
+        crate::clients::execution_input::InputCommand::Control(_) => {
+            panic!("expected correction, received control")
+        }
+    }
 }
 
 #[test]
@@ -294,6 +299,53 @@ fn execution_drop_and_factory_teardown_revoke_retained_senders() {
         ));
         polled.incorporate(|_, _| {});
     }
+}
+
+#[tokio::test]
+async fn factory_drop_wakes_next_input_on_paused_session_without_cancellation() {
+    paused_next_input_ends(true).await;
+}
+
+#[tokio::test]
+async fn replacement_wakes_next_input_on_paused_session_without_cancellation() {
+    paused_next_input_ends(false).await;
+}
+
+async fn paused_next_input_ends(drop_factory: bool) {
+    use std::future::{poll_fn, Future};
+    use std::task::Poll;
+    use std::time::Duration;
+
+    let registry = InputRegistry::default();
+    let (mut factory, _handle) = InteractiveSessionFactory::for_pipeline();
+    let mut session = factory.next_session_for_stage("a-1", true, None).unwrap();
+    session.bind_input(&registry, identity("A", "a-1"), true, None);
+    session.set_inbox_paused(true);
+    {
+        let next = session.next_input();
+        tokio::pin!(next);
+        poll_fn(|cx| {
+            assert!(next.as_mut().poll(cx).is_pending());
+            Poll::Ready(())
+        })
+        .await;
+
+        let _successor = if drop_factory {
+            drop(factory);
+            None
+        } else {
+            Some(factory.next_session_for_stage("a-2", true, None).unwrap())
+        };
+        assert!(tokio::time::timeout(Duration::from_secs(1), next)
+            .await
+            .expect("execution end must wake paused input without Resume")
+            .is_none());
+    }
+    assert!(session.inbox_paused());
+    tokio::time::timeout(Duration::from_secs(1), session.wait_execution_end())
+        .await
+        .expect("execution end remains latched");
+    assert!(session.next_input().await.is_none());
 }
 
 #[test]

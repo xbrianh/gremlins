@@ -8,7 +8,7 @@ static NEXT_LEASE_ID: AtomicU64 = AtomicU64::new(1);
 
 use crate::clients::cancel::{CancelListener, CancelToken};
 use crate::clients::execution_input::{
-    Correction, ExecutionIdentity, InputReceiver, InputRegistry, InputRevoker, InputSender,
+    ExecutionIdentity, InputCommand, InputReceiver, InputRegistry, InputRevoker, InputSender,
 };
 use crate::clients::protocol::UsageStats;
 use tokio::sync::{mpsc, oneshot, Notify};
@@ -37,6 +37,8 @@ pub(crate) const MESSAGE_DELIVERED_REASON: &str = "message delivered";
 pub(crate) enum InteractiveCommand {
     /// Inject text and run a single step with a debug-amended system prompt.
     Inject(String),
+    /// Internal wakeup; execution input never grants a debugger turn.
+    InputPending,
     /// Deliver a correction, release the pause slot, and resume the agent loop.
     /// Does NOT amend the system prompt — keeps the original model/prompt.
     ///
@@ -995,6 +997,9 @@ impl InteractiveSessionFactory {
             input_identity: None,
             input: None,
             input_revoker: None,
+            inbox_paused: false,
+            inbox_steps: 0,
+            deferred_debug_turns: 0,
         }
     }
 }
@@ -1004,6 +1009,9 @@ pub struct InteractiveSession {
     input_identity: Option<ExecutionIdentity>,
     input: Option<InputReceiver>,
     input_revoker: Option<Arc<InputRevoker>>,
+    inbox_paused: bool,
+    inbox_steps: usize,
+    pub(crate) deferred_debug_turns: usize,
     slot: Arc<PauseSlot>,
     /// Identifies this execution so commands can be checked against the
     /// correct agent loop invocation.
@@ -1065,12 +1073,67 @@ impl InteractiveSession {
     }
 
     /// Poll execution input without exposing the receiver to providers.
-    #[allow(dead_code)] // Pending provider conversion.
-    pub(crate) fn try_recv_input(&mut self) -> Result<Correction, mpsc::error::TryRecvError> {
+    pub(crate) fn try_recv_input(&mut self) -> Result<InputCommand, mpsc::error::TryRecvError> {
         self.input
             .as_mut()
             .ok_or(mpsc::error::TryRecvError::Disconnected)?
             .try_recv()
+    }
+
+    pub(crate) fn input_pending(&self) -> bool {
+        self.input.as_ref().is_some_and(InputReceiver::pending)
+    }
+
+    /// Wake for input or execution retirement; token cancellation is selected by the caller.
+    pub(crate) async fn input_requested(&self) {
+        tokio::select! {
+            _ = self.wait_execution_end() => {},
+            _ = async {
+                match &self.input {
+                    Some(input) => input.wait_pending().await,
+                    None => std::future::pending().await,
+                }
+            } => {},
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) async fn next_input(&mut self) -> Option<InputCommand> {
+        let input = self.input.as_mut()?;
+        tokio::select! {
+            biased;
+            _ = self.end_signal.wait() => None,
+            command = input.recv() => command,
+        }
+    }
+
+    pub(crate) async fn wait_execution_end(&self) {
+        self.end_signal.wait().await;
+    }
+
+    pub(crate) fn grant_inbox_step(&mut self) {
+        self.inbox_steps += 1;
+    }
+
+    pub(crate) fn take_inbox_step(&mut self) -> bool {
+        if self.inbox_steps == 0 {
+            false
+        } else {
+            self.inbox_steps -= 1;
+            true
+        }
+    }
+
+    pub(crate) fn clear_inbox_steps(&mut self) {
+        self.inbox_steps = 0;
+    }
+
+    pub(crate) fn inbox_paused(&self) -> bool {
+        self.inbox_paused
+    }
+
+    pub(crate) fn set_inbox_paused(&mut self, paused: bool) {
+        self.inbox_paused = paused;
     }
 
     pub fn unattached() -> Self {
@@ -1121,12 +1184,25 @@ impl InteractiveSession {
             *terminal.0.lock().unwrap_or_else(|e| e.into_inner()) = inbox.ended.take();
         }
         inbox.handed_off = true;
+        // An unused grant from the previous lease cannot release this pause.
+        self.deferred_debug_turns = 0;
         self.active = Some(inbox);
         true
     }
 
     pub(crate) async fn paused(&mut self) -> bool {
+        self.wait_interruption(false).await
+    }
+
+    pub(crate) async fn stream_interrupted(&mut self) -> bool {
+        self.wait_interruption(true).await
+    }
+
+    async fn wait_interruption(&mut self, include_input: bool) -> bool {
         loop {
+            if include_input && self.input_pending() {
+                return true;
+            }
             if self.has_revoked_debugger() || self.accept_pause() {
                 return true;
             }
@@ -1140,6 +1216,7 @@ impl InteractiveSession {
             tokio::select! {
                 biased;
                 _ = self.end_signal.wait() => return false,
+                _ = self.input_requested(), if include_input => return true,
                 _ = requested => {},
             }
             if self.end_signal.is_ended() {
@@ -1160,6 +1237,7 @@ impl InteractiveSession {
     /// does not mutate slot state or the supervisor-owned terminal sender.
     pub(crate) fn discard_revoked_inbox(&mut self) {
         if !self.has_accepted_acquisition() {
+            self.deferred_debug_turns = 0;
             self.active = None;
         }
     }
@@ -1190,6 +1268,7 @@ impl InteractiveSession {
     }
 
     pub(crate) fn finish_attachment(&mut self, outcome: DebugOutcome) -> bool {
+        self.deferred_debug_turns = 0;
         let Some(inbox) = self.active.as_mut() else {
             return false;
         };
@@ -1230,6 +1309,7 @@ impl InteractiveSession {
 
     /// Release only the accepted lease owned by this execution's active inbox.
     fn release_accepted_lease(&mut self) {
+        self.deferred_debug_turns = 0;
         let Some(inbox) = self.active.take() else {
             return;
         };
@@ -1279,6 +1359,12 @@ impl InteractiveSession {
                     None
                 }
             },
+            _ = async {
+                match &self.input {
+                    Some(input) => input.wait_pending().await,
+                    None => std::future::pending().await,
+                }
+            } => Some(InteractiveCommand::InputPending),
         }
     }
 }
