@@ -35,15 +35,41 @@ pub(crate) struct InputRegistry {
 }
 
 impl InputRegistry {
-    /// Panics if this identity already has a live, unrevoked inbox.
+    #[cfg(test)]
     pub(crate) fn register(
         &self,
         identity: ExecutionIdentity,
         initialize: impl FnOnce(Arc<InputRevoker>),
     ) -> (InputReceiver, Arc<InputRevoker>) {
+        self.register_with_nonce(identity, None, initialize)
+    }
+
+    /// Panics if this identity already has a live, unrevoked inbox.
+    #[cfg(test)]
+    pub(crate) fn register_with_nonce(
+        &self,
+        identity: ExecutionIdentity,
+        nonce: Option<u64>,
+        initialize: impl FnOnce(Arc<InputRevoker>),
+    ) -> (InputReceiver, Arc<InputRevoker>) {
+        self.register_with_aliases(identity, [], nonce, initialize)
+    }
+
+    /// Publish all routes atomically; every route resolves to the canonical identity.
+    pub(crate) fn register_with_aliases(
+        &self,
+        identity: ExecutionIdentity,
+        aliases: impl IntoIterator<Item = ExecutionIdentity>,
+        nonce: Option<u64>,
+        initialize: impl FnOnce(Arc<InputRevoker>),
+    ) -> (InputReceiver, Arc<InputRevoker>) {
+        let routes: Vec<_> = std::iter::once(identity.clone()).chain(aliases).collect();
         let (sender, receiver) = mpsc::channel(INPUT_CAPACITY);
         let shared = Arc::new(Shared {
+            identity,
+            nonce,
             pending: Notify::new(),
+            closed: Notify::new(),
             state: Mutex::new(State {
                 sender: Some(sender),
                 next_id: 0,
@@ -57,13 +83,17 @@ impl InputRegistry {
         initialize(revoker.clone());
         let mut entries = self.entries.lock().unwrap();
         entries.retain(|_, entry| entry.strong_count() != 0);
-        if let Some(existing) = entries.get(&identity).and_then(Weak::upgrade) {
-            assert!(
-                existing.state.lock().unwrap().sender.is_none(),
-                "execution input identity is already registered: {identity:?}"
-            );
+        for route in &routes {
+            if let Some(existing) = entries.get(route).and_then(Weak::upgrade) {
+                assert!(
+                    existing.state.lock().unwrap().sender.is_none(),
+                    "execution input identity is already registered: {route:?}"
+                );
+            }
         }
-        entries.insert(identity, Arc::downgrade(&shared));
+        for route in routes {
+            entries.insert(route, Arc::downgrade(&shared));
+        }
         (
             InputReceiver {
                 shared: shared.clone(),
@@ -71,6 +101,30 @@ impl InputRegistry {
             },
             revoker,
         )
+    }
+
+    /// Resolve only live inboxes; debugger snapshots are not routing authority.
+    pub(crate) fn resolve(
+        &self,
+        run_id: &str,
+        stage_run_id: &str,
+        stage: Option<&str>,
+    ) -> Option<(ExecutionIdentity, InputSender)> {
+        let entries = self.entries.lock().unwrap();
+        let mut matches = entries.iter().filter_map(|(identity, entry)| {
+            if identity.run_id != run_id
+                || identity.stage_run_id != stage_run_id
+                || stage.is_some_and(|stage| identity.stage_name != stage)
+            {
+                return None;
+            }
+            let shared = entry.upgrade()?;
+            let active = shared.state.lock().unwrap().sender.is_some();
+            active.then(|| (shared.identity.clone(), InputSender { shared }))
+        });
+        let matched = matches.next()?;
+        // Never select an arbitrary inbox when an incomplete identity is ambiguous.
+        matches.next().is_none().then_some(matched)
     }
 
     pub(crate) fn sender(&self, identity: &ExecutionIdentity) -> Option<InputSender> {
@@ -82,7 +136,10 @@ impl InputRegistry {
 
 #[derive(Debug)]
 struct Shared {
+    identity: ExecutionIdentity,
+    nonce: Option<u64>,
     pending: Notify,
+    closed: Notify,
     state: Mutex<State>,
 }
 
@@ -101,6 +158,8 @@ impl Shared {
         for (_, receipt) in state.pending.drain() {
             let _ = receipt.send(Delivery::NotDelivered);
         }
+        drop(state);
+        self.closed.notify_waiters();
     }
 
     fn settle(&self, id: u64, delivery: Delivery) {
@@ -144,6 +203,27 @@ pub(crate) struct InputSender {
 }
 
 impl InputSender {
+    /// The invocation nonce captured when this exact inbox was registered.
+    pub(crate) fn nonce(&self) -> Option<u64> {
+        self.shared.nonce
+    }
+
+    pub(crate) fn is_closed(&self) -> bool {
+        self.shared.state.lock().unwrap().sender.is_none()
+    }
+
+    pub(crate) async fn closed(&self) {
+        loop {
+            let notified = self.shared.closed.notified();
+            tokio::pin!(notified);
+            notified.as_mut().enable();
+            if self.is_closed() {
+                return;
+            }
+            notified.await;
+        }
+    }
+
     /// Acceptance means enqueued, not yet incorporated into the conversation.
     pub(crate) fn try_send(
         &self,
@@ -363,6 +443,56 @@ mod tests {
             stage_name: "stage".into(),
             stage_run_id: stage_run_id.into(),
         }
+    }
+
+    #[tokio::test]
+    async fn aliases_share_delivery_revocation_and_never_follow_replacement() {
+        let registry = InputRegistry::default();
+        let canonical = identity("invocation");
+        let alias = identity("prepared");
+        let (mut inbox, revoke) =
+            registry.register_with_aliases(canonical.clone(), [alias.clone()], Some(7), |_| {});
+        let (resolved, exact) = registry
+            .resolve("run", "invocation", Some("stage"))
+            .unwrap();
+        let (aliased, prepared) = registry.resolve("run", "prepared", None).unwrap();
+        assert_eq!(resolved, canonical);
+        assert_eq!(aliased, canonical);
+        assert!(Arc::ptr_eq(&exact.shared, &prepared.shared));
+        assert!(registry.resolve("other", "prepared", None).is_none());
+        assert!(registry.resolve("run", "prepared", Some("other")).is_none());
+        let delivered = prepared.try_send("one".into(), "hello".into()).unwrap();
+        assert!(receive(&mut inbox).incorporate(|_, text| assert_eq!(text, "hello")));
+        assert_eq!(delivered.await.unwrap(), Delivery::Delivered);
+        let held = exact.try_send("held".into(), "old".into()).unwrap();
+        let correction = receive(&mut inbox);
+        let queued = prepared.try_send("queued".into(), "old".into()).unwrap();
+        revoke.revoke();
+        assert_eq!(held.await.unwrap(), Delivery::NotDelivered);
+        assert_eq!(queued.await.unwrap(), Delivery::NotDelivered);
+        assert!(!correction.incorporate(|_, _| panic!("revoked input applied")));
+        assert!(registry.resolve("run", "invocation", None).is_none());
+        assert!(registry.resolve("run", "prepared", None).is_none());
+        let successor = identity("successor");
+        let (mut next, _revoke) =
+            registry.register_with_aliases(successor.clone(), [alias], Some(8), |_| {});
+        assert_eq!(
+            registry.resolve("run", "prepared", None).unwrap().0,
+            successor
+        );
+        for stale in [exact, prepared] {
+            assert!(stale.is_closed());
+            assert_eq!(
+                stale.try_send("late".into(), "old".into()).unwrap_err(),
+                InputRejected::Revoked
+            );
+        }
+        drop(inbox);
+        assert!(matches!(
+            next.try_recv(),
+            Err(mpsc::error::TryRecvError::Empty)
+        ));
+        assert!(registry.resolve("run", "prepared", None).is_some());
     }
 
     #[tokio::test]
@@ -686,6 +816,94 @@ mod tests {
         assert!(weak.upgrade().is_none());
         assert!(registry.sender(&identity("one")).is_none());
         let (_receiver, _revoker) = registry.register(identity("one"), |_| {});
+    }
+
+    #[test]
+    fn resolve_matches_exact_fields_and_keeps_concurrent_inboxes() {
+        let registry = InputRegistry::default();
+        let (mut first, revoker) = registry.register(identity("one"), |_| {});
+        let (mut second, _revoker) = registry.register(identity("two"), |_| {});
+        assert!(registry.resolve("other", "one", None).is_none());
+        assert!(registry.resolve("run", "missing", None).is_none());
+        assert!(registry.resolve("run", "one", Some("other")).is_none());
+        for stage in [None, Some("stage")] {
+            let (resolved, sender) = registry.resolve("run", "one", stage).unwrap();
+            assert_eq!(resolved, identity("one"));
+            let _receipt = sender.try_send("first".into(), "one".into()).unwrap();
+            assert_eq!(receive(&mut first).text, "one");
+        }
+        revoker.revoke();
+        assert!(registry.resolve("run", "one", None).is_none());
+        let (resolved, sender) = registry.resolve("run", "two", None).unwrap();
+        assert_eq!(resolved, identity("two"));
+        let _receipt = sender.try_send("second".into(), "two".into()).unwrap();
+        assert_eq!(receive(&mut second).text, "two");
+    }
+
+    #[test]
+    fn resolve_never_arbitrarily_selects_an_ambiguous_stage() {
+        let registry = InputRegistry::default();
+        let (_first, revoker) = registry.register(identity("one"), |_| {});
+        let mut other = identity("one");
+        other.stage_name = "other".into();
+        let (_second, _revoker) = registry.register(other.clone(), |_| {});
+        assert!(registry.resolve("run", "one", None).is_none());
+        assert_eq!(
+            registry.resolve("run", "one", Some("stage")).unwrap().0,
+            identity("one")
+        );
+        assert_eq!(
+            registry.resolve("run", "one", Some("other")).unwrap().0,
+            other
+        );
+        revoker.revoke();
+        assert_eq!(registry.resolve("run", "one", None).unwrap().0, other);
+    }
+
+    #[tokio::test]
+    async fn closed_wakes_all_waiters_and_latches_after_revocation() {
+        let registry = InputRegistry::default();
+        let (receiver, revoker) = registry.register(identity("one"), |_| {});
+        let sender = registry.sender(&identity("one")).unwrap();
+        assert!(!sender.is_closed());
+        let flag = Arc::new(Flag::default());
+        let waker = Waker::from(flag.clone());
+        let mut context = Context::from_waker(&waker);
+        let first = sender.closed();
+        let second = sender.closed();
+        tokio::pin!(first, second);
+        assert!(first.as_mut().poll(&mut context).is_pending());
+        assert!(second.as_mut().poll(&mut context).is_pending());
+        revoker.revoke();
+        assert!(flag.0.load(Ordering::SeqCst));
+        assert!(first.as_mut().poll(&mut context).is_ready());
+        assert!(second.as_mut().poll(&mut context).is_ready());
+        assert!(sender.is_closed());
+        sender.closed().await;
+        revoker.revoke();
+        drop(receiver);
+        sender.closed().await;
+    }
+
+    #[tokio::test]
+    async fn closed_observes_receiver_drop_and_does_not_follow_replacement() {
+        let registry = InputRegistry::default();
+        let (receiver, _revoker) = registry.register(identity("one"), |_| {});
+        let old = registry.sender(&identity("one")).unwrap();
+        // Constructing the future must not create a missed-notification window.
+        let closed = old.closed();
+        drop(receiver);
+        closed.await;
+        let (_receiver, revoker) = registry.register(identity("one"), |_| {});
+        let new = registry.resolve("run", "one", None).unwrap().1;
+        assert!(!new.is_closed());
+        old.closed().await;
+        assert_eq!(
+            old.try_send("old".into(), "text".into()).unwrap_err(),
+            InputRejected::Revoked
+        );
+        revoker.revoke();
+        new.closed().await;
     }
 
     #[test]

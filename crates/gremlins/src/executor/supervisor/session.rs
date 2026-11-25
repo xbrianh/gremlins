@@ -16,7 +16,6 @@ use crate::executor::socket;
 
 use gremlins_magic_bus::connection::{ConnectionGuard, SharedWriter};
 
-use super::attachment::handle_attach;
 use super::chat::{handle_cancel_chat, handle_chat};
 use super::log_handler::handle_log;
 use super::ops::{handle_chat_model, handle_compact, handle_session_stop};
@@ -109,12 +108,14 @@ pub(crate) async fn run_session_listener(
                         let (read_half, write_half) = stream.into_split();
                         let registry_for_task = Arc::clone(&registry);
                         let session_id_for_task = session_id.clone();
+                        let owner_for_task = session_task.clone();
                         let aux_task = tokio::spawn(async move {
-                            handle_session_aux(
+                            handle_session_aux_owned(
                                 read_half,
                                 write_half,
                                 session_id_for_task,
                                 registry_for_task,
+                                Some(owner_for_task),
                             )
                             .await;
                         });
@@ -353,11 +354,22 @@ pub(crate) async fn handle_session_op(
 
 /// Serve a single auxiliary connection. First request names a streaming op
 /// (`log`/`attach`).
+#[cfg(test)]
 pub(crate) async fn handle_session_aux(
     read_half: OwnedReadHalf,
     write_half: tokio::net::unix::OwnedWriteHalf,
     session_id: String,
     registry: Arc<RunRegistry>,
+) {
+    handle_session_aux_owned(read_half, write_half, session_id, registry, None).await;
+}
+
+async fn handle_session_aux_owned(
+    read_half: OwnedReadHalf,
+    write_half: tokio::net::unix::OwnedWriteHalf,
+    session_id: String,
+    registry: Arc<RunRegistry>,
+    owner: Option<SessionTaskHandle>,
 ) {
     // Hold the connection-count guard for the lifetime of the aux connection.
     let _guard = {
@@ -394,7 +406,17 @@ pub(crate) async fn handle_session_aux(
             handle_log(&request, &registry, reader, &writer).await;
         }
         "attach" | "watch" => {
-            handle_attach(&request, &registry, reader, &writer).await;
+            super::attachment::handle_attach_owned(
+                &request,
+                &registry,
+                owner.as_ref(),
+                reader,
+                &writer,
+            )
+            .await;
+        }
+        "input" => {
+            super::input::handle_input(&request, &registry, owner.as_ref(), reader, &writer).await;
         }
         _ => {
             let resp = error_response(&format!("unknown session op: {op:?}"));

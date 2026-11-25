@@ -818,6 +818,7 @@ async fn readonly_backend_receives_the_stage_run_target_identity() {
 }
 
 struct ChatBackend {
+    release: Arc<tokio::sync::Notify>,
     wait_for_cancel: bool,
     fail: bool,
 }
@@ -845,6 +846,7 @@ impl Backend for ChatBackend {
                 text: "CHAT_MARKER".into(),
             },
         );
+        self.release.notified().await;
         if self.wait_for_cancel {
             params.cancel_token.as_ref().unwrap().cancelled().await;
         }
@@ -874,13 +876,15 @@ impl Backend for ChatBackend {
 }
 
 #[tokio::test]
-async fn chat_output_uses_invocation_identity_without_replacing_prepared_input_target() {
+async fn chat_input_and_output_use_invocation_identity_without_replacing_prepared_target() {
     // Repeat the same turn name, including on failure, to catch identity reuse.
     for mode in ["success", "failure", "cancel", "abort"] {
         let spec = format!("cmd/chat-invocation-{}", state::token_hex(8));
+        let release = Arc::new(tokio::sync::Notify::new());
         install_test_backend(
             &spec,
             Arc::new(ChatBackend {
+                release: release.clone(),
                 wait_for_cancel: matches!(mode, "cancel" | "abort"),
                 fail: mode != "success",
             }),
@@ -898,6 +902,7 @@ async fn chat_output_uses_invocation_identity_without_replacing_prepared_input_t
                 .collect(),
         );
         let (sessions, handle) = crate::clients::interactive::InteractiveSessionFactory::for_chat();
+        handle.set_input_registry(gremlin.execution_inputs.clone());
         gremlin.interactive_sessions = Some(sessions);
         let id = gremlin.id.to_string();
         let mut bus = Subscription::new(CorrId::new().with_run(&id));
@@ -940,6 +945,58 @@ async fn chat_output_uses_invocation_identity_without_replacing_prepared_input_t
             assert_eq!(handle.target().stage_run_id(), Some(session_id.as_str()));
             assert_eq!(handle.target().nonce(), target.nonce());
             assert_ne!(marker.corr_id().stage_run_id(), Some(session_id.as_str()));
+            let stage_run_id = marker.corr_id().stage_run_id().unwrap();
+            let (identity, sender) = handle
+                .resolve_input(&id, stage_run_id, Some("chat-0001"))
+                .expect("exact invocation must resolve to its input sender");
+            assert_eq!(identity.run_id, id);
+            assert_eq!(identity.stage_name, "chat-0001");
+            assert_eq!(identity.stage_run_id, stage_run_id);
+            assert_eq!(sender.nonce(), Some(target.nonce()));
+            assert!(!sender.is_closed());
+            let (prepared_identity, prepared_sender) = handle
+                .resolve_input(&id, &session_id, Some("chat-0001"))
+                .expect("prepared owner descriptor must resolve to the same invocation inbox");
+            assert_eq!(prepared_identity, identity);
+            assert_eq!(prepared_sender.nonce(), sender.nonce());
+            let mut receipts = Vec::new();
+            for index in 0..crate::clients::execution_input::INPUT_CAPACITY {
+                let input = if index % 2 == 0 {
+                    &sender
+                } else {
+                    &prepared_sender
+                };
+                receipts.push(
+                    input
+                        .try_send(format!("input-{index}"), "hi".into())
+                        .unwrap(),
+                );
+            }
+            for input in [&sender, &prepared_sender] {
+                assert_eq!(
+                    input.try_send("overflow".into(), "hi".into()).unwrap_err(),
+                    crate::clients::execution_input::InputRejected::Full,
+                );
+            }
+            let (shutdown, _) = tokio::sync::watch::channel(false);
+            let registry = crate::executor::supervisor::run_registry::RunRegistry::new(shutdown);
+            let claim = registry
+                .claim_controller(&id, &identity.stage_run_id)
+                .unwrap();
+            assert!(matches!(
+                registry.claim_controller(&id, &prepared_identity.stage_run_id),
+                Err("controller_busy")
+            ));
+            drop(claim);
+            let claim = registry
+                .claim_controller(&id, &prepared_identity.stage_run_id)
+                .unwrap();
+            assert!(matches!(
+                registry.claim_controller(&id, &identity.stage_run_id),
+                Err("controller_busy")
+            ));
+            drop(claim);
+            release.notify_one();
             if mode == "abort" {
                 task.abort();
             } else if mode == "cancel" {
@@ -975,6 +1032,16 @@ async fn chat_output_uses_invocation_identity_without_replacing_prepared_input_t
             assert!(pair[0].sequence() < marker.sequence());
             assert!(marker.sequence() < pair[1].sequence());
             assert!(execution_end.is_ended());
+            assert!(sender.is_closed());
+            assert!(prepared_sender.is_closed());
+            for receipt in receipts {
+                assert_eq!(
+                    receipt.await.unwrap(),
+                    crate::clients::execution_input::Delivery::NotDelivered
+                );
+            }
+            assert!(handle.resolve_input(&id, stage_run_id, None).is_none());
+            assert!(handle.resolve_input(&id, &session_id, None).is_none());
             assert_eq!(target.stage_run_id(), Some(session_id.as_str()));
             if let Some(g) = recovered {
                 gremlin = g;

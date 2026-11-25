@@ -17,15 +17,17 @@ use tokio::io::{AsyncWriteExt, BufReader};
 use tokio::net::{TcpListener, UnixStream};
 use tokio::time::timeout;
 
-use super::{create_chat_gremlin, model, spawn_test_actor};
+use super::{create_chat_gremlin, create_session, model, spawn_test_actor};
 use crate::clients::backend::RunParams;
 use crate::clients::error::ClientError;
-use crate::clients::interactive::InteractiveCommand;
+use crate::clients::execution_input::ExecutionIdentity;
+use crate::clients::interactive::{InteractiveCommand, InteractiveSession};
 use crate::definition::StaticDefinition;
 use crate::executor::gremlin::{Gremlin, GremlinConfig};
 use crate::executor::socket;
 use crate::executor::supervisor::attachment::handle_conversation_attach;
 use crate::executor::supervisor::run_registry::RunRegistry;
+use crate::executor::supervisor::session_task::SessionTaskHandle;
 use crate::executor::supervisor::test_provider::pending_request;
 use crate::executor::supervisor::CancelToken;
 use crate::test_support::Sandbox;
@@ -44,6 +46,12 @@ fn assert_retired_key_error(frame: &Value, retired: &str) {
     assert!(error.contains("stage_run_id"), "{frame}");
 }
 
+async fn chat_owner(registry: &Arc<RunRegistry>, id: &str) -> SessionTaskHandle {
+    let (_, owner) = create_session(registry).await;
+    assert!(owner.add_chat_id(id).await);
+    owner
+}
+
 /// Returns a `BufReader` connected to a spawned handler (fire-and-forget).
 fn connect(registry: &Arc<RunRegistry>, id: &str) -> BufReader<UnixStream> {
     let (server, client) = UnixStream::pair().unwrap();
@@ -52,10 +60,12 @@ fn connect(registry: &Arc<RunRegistry>, id: &str) -> BufReader<UnixStream> {
     let registry = registry.clone();
     tokio::spawn(async move {
         let (read, write) = server.into_split();
+        let owner = chat_owner(&registry, &id).await;
         handle_conversation_attach(
             &request,
             &id,
             &registry,
+            Some(&owner),
             BufReader::new(read),
             &SharedWriter::new(write),
         )
@@ -87,10 +97,12 @@ fn connection_mode(
     let id = id.to_string();
     let handler = async move {
         let (read, write) = server.into_split();
+        let owner = chat_owner(&registry, &id).await;
         handle_conversation_attach(
             &request,
             &id,
             &registry,
+            Some(&owner),
             BufReader::new(read),
             &SharedWriter::new(write),
         )
@@ -177,6 +189,28 @@ async fn synthetic_run(id: &str) -> (Arc<RunRegistry>, Gremlin, tempfile::TempDi
         .await;
     gremlin.state.set_stage("chat-0001", None, "");
     (registry, gremlin, dir)
+}
+
+/// Synthetic executions still need the stage-entry inbox registration that the
+/// real executor performs after selecting a command-capable backend.
+fn synthetic_session(gremlin: &mut Gremlin) -> InteractiveSession {
+    synthetic_session_with_identity(gremlin, None)
+}
+
+fn synthetic_session_with_identity(
+    gremlin: &mut Gremlin,
+    canonical: Option<&str>,
+) -> InteractiveSession {
+    let mut session = gremlin.next_interactive_session();
+    let identity = ExecutionIdentity {
+        run_id: gremlin.id.to_string(),
+        stage_name: "chat-0001".into(),
+        stage_run_id: canonical
+            .map(str::to_owned)
+            .unwrap_or_else(|| session.snapshot().stage_run_id().unwrap().to_owned()),
+    };
+    session.bind_input(&gremlin.execution_inputs, identity, true, None);
+    session
 }
 
 /// Poll an unspawned handler only while the chosen peer action is running.
@@ -268,6 +302,257 @@ fn run_connection_replay(
     (BufReader::new(client), task)
 }
 
+fn owned_request(
+    registry: &Arc<RunRegistry>,
+    owner: Option<&SessionTaskHandle>,
+    request: Value,
+) -> (BufReader<UnixStream>, tokio::task::JoinHandle<()>) {
+    let (server, client) = UnixStream::pair().unwrap();
+    let registry = registry.clone();
+    let owner = owner.cloned();
+    let task = tokio::spawn(async move {
+        let (read, write) = server.into_split();
+        crate::executor::supervisor::attachment::handle_attach_owned(
+            &request,
+            &registry,
+            owner.as_ref(),
+            BufReader::new(read),
+            &SharedWriter::new(write),
+        )
+        .await;
+    });
+    (BufReader::new(client), task)
+}
+
+#[tokio::test]
+async fn writable_chat_attach_requires_trusted_owner_even_with_spoofed_session_id() {
+    timeout(Duration::from_secs(5), async {
+        let id = "legacy-chat-auth";
+        let (registry, mut gremlin, _dir) = synthetic_run(id).await;
+        let mut execution = synthetic_session(&mut gremlin);
+        let (owner_id, owner) = create_session(&registry).await;
+        assert!(owner.add_chat_id(id).await);
+        let (_, foreign) = create_session(&registry).await;
+        let closed = chat_owner(&registry, id).await;
+        closed.mark_closed().await;
+        for mode in ["control", "debugger"] {
+            for unauthorized in [None, Some(&foreign), Some(&closed)] {
+                let request = json!({"op":"attach", "scope":"conversation", "id":id,
+                    "mode":mode, "session_id":owner_id, "req_id":"unauthorized"});
+                let (mut client, task) = owned_request(&registry, unauthorized, request);
+                let frame = run_frame(&mut client).await;
+                assert_eq!(frame["type"], "error", "{frame}");
+                assert!(
+                    frame["message"]
+                        .as_str()
+                        .unwrap()
+                        .contains("owning session"),
+                    "{frame}"
+                );
+                task.await.unwrap();
+                assert!(!execution.accept_pause());
+                assert!(!execution.is_attached());
+            }
+        }
+        // Neither global nor foreign passive viewers need ownership.
+        for viewer in [None, Some(&foreign), Some(&closed), Some(&owner)] {
+            let (mut client, task) = owned_request(
+                &registry,
+                viewer,
+                json!({"op":"attach", "scope":"conversation", "id":id, "mode":"passive"}),
+            );
+            attach_ack(&mut client).await;
+            assert!(!execution.accept_pause());
+            assert!(!execution.is_attached());
+            drop(client);
+            task.await.unwrap();
+        }
+        let (mut client, task) = owned_request(
+            &registry,
+            Some(&owner),
+            json!({"op":"attach", "scope":"conversation", "id":id, "mode":"debugger"}),
+        );
+        attach_ack(&mut client).await;
+        waiting_for_ready(&mut client).await;
+        assert!(execution.accept_pause());
+        drop(client);
+        task.await.unwrap();
+        registry.stop_run(id).await.unwrap();
+    })
+    .await
+    .unwrap();
+}
+
+#[tokio::test]
+async fn writable_attach_rejects_live_target_without_input_registration() {
+    timeout(Duration::from_secs(5), async {
+        let id = "attach-missing-input-registration";
+        let (registry, mut gremlin, _dir) = synthetic_run(id).await;
+        // Deliberately bypass synthetic_session: a debugger snapshot alone must
+        // never grant control over an execution without a canonical inbox.
+        let mut session = gremlin.next_interactive_session();
+        let owner = chat_owner(&registry, id).await;
+        for mode in ["control", "debugger"] {
+            let (mut client, task) = owned_request(
+                &registry,
+                Some(&owner),
+                json!({"op":"attach", "scope":"conversation", "id":id,
+                    "mode":mode, "req_id":"missing-registration"}),
+            );
+            let frame = run_frame(&mut client).await;
+            assert_eq!(frame["type"], "error", "{frame}");
+            assert_eq!(frame["req_id"], "missing-registration", "{frame}");
+            task.await.unwrap();
+            assert!(!session.accept_pause());
+            assert!(!session.is_attached());
+        }
+        registry.stop_run(id).await.unwrap();
+    })
+    .await
+    .unwrap();
+}
+
+#[tokio::test]
+async fn controller_busy_is_correlated_without_pause_or_readiness_live_and_gap() {
+    timeout(Duration::from_secs(5), async {
+        for gap in [false, true] {
+            let id = format!("legacy-busy-{gap}");
+            let (registry, mut gremlin, _dir) = synthetic_run(&id).await;
+            let owner = chat_owner(&registry, &id).await;
+            let (interactive, _, _) = registry.get_run_interactive(&id).await.unwrap();
+            // The debugger alias differs from the canonical execution identity.
+            // A claim made through the canonical input path must block both
+            // immediate and gap-following legacy attach paths.
+            let canonical = "canonical-busy-execution";
+            let mut execution =
+                (!gap).then(|| synthetic_session_with_identity(&mut gremlin, Some(canonical)));
+            let modes: &[&str] = if gap {
+                &["debugger"]
+            } else {
+                &["control", "debugger"]
+            };
+            for mode in modes {
+                let mut claim = execution.as_ref().map(|_| {
+                    assert_ne!(interactive.target().stage_run_id(), Some(canonical));
+                    registry.claim_controller(&id, canonical).unwrap()
+                });
+                let (mut client, task) = owned_request(
+                    &registry,
+                    Some(&owner),
+                    json!({"op":"attach", "scope":"conversation", "id":id,
+                        "mode":mode, "req_id":"busy-correlation"}),
+                );
+                if gap {
+                    assert!(
+                        timeout(
+                            Duration::from_millis(30),
+                            socket::read_json_line(&mut client)
+                        )
+                        .await
+                        .is_err(),
+                        "gap must not report readiness before a live target exists"
+                    );
+                    let next = synthetic_session_with_identity(&mut gremlin, Some(canonical));
+                    assert_ne!(interactive.target().stage_run_id(), Some(canonical));
+                    claim = Some(registry.claim_controller(&id, canonical).unwrap());
+                    execution = Some(next);
+                }
+                let frame = run_frame(&mut client).await;
+                assert_eq!(frame["type"], "error", "{frame}");
+                assert_eq!(frame["req_id"], "busy-correlation", "{frame}");
+                assert!(frame.to_string().contains("controller_busy"), "{frame}");
+                task.await.unwrap();
+                let current = execution.as_mut().unwrap();
+                assert!(!current.accept_pause());
+                assert!(!current.is_attached());
+                drop(claim);
+                if gap {
+                    drop(execution.take());
+                }
+            }
+            registry.stop_run(&id).await.unwrap();
+        }
+    })
+    .await
+    .unwrap();
+}
+
+#[tokio::test]
+async fn legacy_gap_attach_acknowledges_only_claimed_live_successor() {
+    timeout(Duration::from_secs(5), async {
+        for ended in [false, true] {
+            for busy in [false, true] {
+                let id = format!("legacy-gap-{ended}-{busy}");
+                let (registry, mut gremlin, _dir) = synthetic_run(&id).await;
+                let owner = chat_owner(&registry, &id).await;
+                let (interactive, _, _) = registry.get_run_interactive(&id).await.unwrap();
+                if ended {
+                    let previous = synthetic_session(&mut gremlin);
+                    assert!(interactive.target().accepts_commands());
+                    drop(previous);
+                    assert!(interactive.target().end_signal().is_ended());
+                    assert!(interactive.target().accepts_commands());
+                }
+                let (mut client, task) = owned_request(
+                    &registry,
+                    Some(&owner),
+                    json!({"op":"attach", "id":id, "scope":"conversation",
+                        "mode":"debugger", "req_id":"follow"}),
+                );
+                assert!(
+                    timeout(
+                        Duration::from_millis(30),
+                        socket::read_json_line(&mut client)
+                    )
+                    .await
+                    .is_err(),
+                    "unclaimed gap must not advertise any capabilities"
+                );
+                let mut successor = synthetic_session(&mut gremlin);
+                let target = interactive.target();
+                let claim = busy.then(|| {
+                    registry
+                        .claim_controller(&id, target.stage_run_id().unwrap())
+                        .unwrap()
+                });
+                let frame = run_frame(&mut client).await;
+                if busy {
+                    assert_eq!(frame["type"], "error", "{frame}");
+                    assert_eq!(frame["message"], "controller_busy", "{frame}");
+                    assert_eq!(frame["req_id"], "follow");
+                    task.await.unwrap();
+                    assert!(!successor.accept_pause());
+                    assert!(!successor.is_attached());
+                } else {
+                    assert_eq!(frame["type"], "attached", "{frame}");
+                    assert_eq!(frame["stage_run_id"], target.stage_run_id().unwrap());
+                    assert_eq!(frame["nonce"], target.nonce());
+                    for capability in ["message", "continue", "bail"] {
+                        assert!(frame["capabilities"]
+                            .as_array()
+                            .unwrap()
+                            .contains(&json!(capability)));
+                    }
+                    assert!(registry
+                        .claim_controller(&id, target.stage_run_id().unwrap())
+                        .is_err());
+                    waiting_for_ready(&mut client).await;
+                    assert!(successor.accept_pause());
+                    drop(client);
+                    task.await.unwrap();
+                    assert!(registry
+                        .claim_controller(&id, target.stage_run_id().unwrap())
+                        .is_ok());
+                }
+                drop(claim);
+                registry.stop_run(&id).await.unwrap();
+            }
+        }
+    })
+    .await
+    .unwrap();
+}
+
 async fn run_frame(client: &mut BufReader<UnixStream>) -> Value {
     timeout(Duration::from_secs(5), socket::read_json_line(client))
         .await
@@ -281,10 +566,10 @@ async fn retired_target_keys_rejected_on_initial_attach_before_resolution() {
     timeout(Duration::from_secs(10), async {
         let id = "retired-initial-attach";
         let (registry, mut gremlin, _dir) = synthetic_run(id).await;
-        let first = gremlin.next_interactive_session();
+        let first = synthetic_session(&mut gremlin);
         let target = first.snapshot();
         drop(first);
-        let mut session = gremlin.next_interactive_session();
+        let mut session = synthetic_session(&mut gremlin);
         assert_ne!(target.stage_run_id(), session.snapshot().stage_run_id());
         for retired in ["stage_id", "execution_id"] {
             for with_new_key in [false, true] {
@@ -348,7 +633,7 @@ async fn retired_target_keys_rejected_in_stream_without_delivery() {
     timeout(Duration::from_secs(10), async {
         let id = "retired-stream-command";
         let (registry, mut gremlin, _dir) = synthetic_run(id).await;
-        let mut session = gremlin.next_interactive_session();
+        let mut session = synthetic_session(&mut gremlin);
         let (mut client, handler) = connection(&registry, id);
         let handler = tokio::spawn(handler);
         let ack = attach_ack(&mut client).await;
@@ -399,7 +684,7 @@ async fn run_attachment_follows_agent_to_exec_with_exact_scope_and_bus_display_s
     use gremlins_magic_bus::{emit_corr_event, CorrId};
     let id = "run-display-scope";
     let (registry, mut gremlin, _dir) = synthetic_run(id).await;
-    let mut session = gremlin.next_interactive_session();
+    let mut session = synthetic_session(&mut gremlin);
     let (mut client, task) = run_connection(&registry, id);
     let attached = run_frame(&mut client).await;
     assert_eq!(attached["capabilities"], json!(["observe"]));
@@ -664,7 +949,7 @@ async fn observed_readiness_is_not_control_readiness() {
         for mode in [Some("passive"), Some("control")] {
             let id = format!("observed-ready-{}", mode.unwrap());
             let (registry, mut gremlin, _dir) = synthetic_run(&id).await;
-            let mut session = gremlin.next_interactive_session();
+            let mut session = synthetic_session(&mut gremlin);
             let (mut observer, handler) = connection_mode(&registry, &id, mode);
             let task = tokio::spawn(handler);
             let ack = attach_ack(&mut observer).await;
@@ -707,13 +992,15 @@ async fn incorporation_releases_temporary_lease_while_display_is_blocked() {
     timeout(Duration::from_secs(5), async {
         let id = "incorporation-blocked-display";
         let (registry, mut gremlin, _dir) = synthetic_run(id).await;
-        let mut session = gremlin.next_interactive_session();
+        let mut session = synthetic_session(&mut gremlin);
         let (mut client, read, writer, mut filler) = backpressure_peers();
         let request = json!({"op":"attach", "scope":"conversation", "id":id, "mode":"control"});
         let handler = {
             let registry = &registry;
             async move {
-                handle_conversation_attach(&request, id, registry, read, &writer).await;
+                let owner = chat_owner(registry, id).await;
+                handle_conversation_attach(&request, id, registry, Some(&owner), read, &writer)
+                    .await;
             }
         };
         tokio::pin!(handler);
@@ -815,7 +1102,7 @@ async fn default_and_control_observe_attach_do_not_pause() {
         for mode in [None, Some("control")] {
             let id = "observe-no-pause";
             let (registry, mut gremlin, _dir) = synthetic_run(id).await;
-            let mut session = gremlin.next_interactive_session();
+            let mut session = synthetic_session(&mut gremlin);
             let (mut client, handler) = connection_mode(&registry, id, mode);
             tokio::pin!(handler);
             drive(
@@ -918,7 +1205,7 @@ async fn confirmed_message_survives_execution_end_scenario(
     );
     let req_id = "confirmed-original-request";
     let (registry, mut gremlin, _dir) = synthetic_run(&id).await;
-    let mut session = gremlin.next_interactive_session();
+    let mut session = synthetic_session(&mut gremlin);
     let (mut client, handler) = connection_mode(&registry, &id, mode);
     tokio::pin!(handler);
     let text = "incorporated before end";
@@ -1099,11 +1386,12 @@ async fn successful_delivery_under_backpressure(queue_message: bool) {
     timeout(Duration::from_secs(10), async {
         let id = format!("delivery-backpressure-{queue_message}");
         let (registry, mut gremlin, _dir) = synthetic_run(&id).await;
-        let mut session = gremlin.next_interactive_session();
+        let mut session = synthetic_session(&mut gremlin);
         let (mut client, read, writer, mut filler) = backpressure_peers();
         let request = json!({"op":"attach", "scope":"conversation", "id":id});
+        let owner = chat_owner(&registry, &id).await;
         let handler = handle_conversation_attach(
-            &request, &id, &registry, read, &writer,
+            &request, &id, &registry, Some(&owner), read, &writer,
         );
         tokio::pin!(handler);
         let ack = drive("backpressure acknowledgement", &mut handler, attach_ack(&mut client)).await;
@@ -1186,7 +1474,7 @@ async fn successful_correction_preserves_command_queued_behind_blocked_delivery(
 async fn message_interrupted(accepted: bool, end_execution: bool) {
     let id = format!("message-interrupted-{accepted}-{end_execution}");
     let (registry, mut gremlin, _dir) = synthetic_run(&id).await;
-    let mut session = gremlin.next_interactive_session();
+    let mut session = synthetic_session(&mut gremlin);
     let (mut client, handler) = connection_mode(&registry, &id, None);
     let handler = tokio::spawn(handler);
     let ack = attach_ack(&mut client).await;
@@ -1218,7 +1506,7 @@ async fn message_interrupted(accepted: bool, end_execution: bool) {
         }
         assert_eq!(dropped, 1, "missing or duplicate correction outcome");
         handler.await.unwrap();
-        let mut successor = gremlin.next_interactive_session();
+        let mut successor = synthetic_session(&mut gremlin);
         assert!(!successor.accept_pause(), "message reserved a successor");
     } else {
         drop(client);
@@ -1256,7 +1544,7 @@ async fn observe_nonmessage_acquires_retained_live_target() {
     timeout(Duration::from_secs(5), async {
         let id = "observe-retained-command";
         let (registry, mut gremlin, _dir) = synthetic_run(id).await;
-        let mut session = gremlin.next_interactive_session();
+        let mut session = synthetic_session(&mut gremlin);
         let (mut client, handler) = connection_mode(&registry, id, None);
         let handler = tokio::spawn(handler);
         attach_ack(&mut client).await;
@@ -1279,7 +1567,7 @@ async fn retained_debugger_message_keeps_ownership_until_replaced() {
     timeout(Duration::from_secs(5), async {
         let id = "retained-message-owner";
         let (registry, mut gremlin, _dir) = synthetic_run(id).await;
-        let mut session = gremlin.next_interactive_session();
+        let mut session = synthetic_session(&mut gremlin);
         let (mut first, handler) = connection(&registry, id);
         let handler = tokio::spawn(handler);
         let ack = attach_ack(&mut first).await;
@@ -1312,7 +1600,7 @@ async fn retained_debugger_message_keeps_ownership_until_replaced() {
         let contender_handler = tokio::spawn(contender_handler);
         let busy = next_response(&mut contender).await;
         assert_eq!(busy["type"], "error", "{busy}");
-        assert_eq!(busy["message"], "busy", "{busy}");
+        assert_eq!(busy["message"], "controller_busy", "{busy}");
         drop(contender);
         contender_handler.await.unwrap();
 
@@ -1322,7 +1610,7 @@ async fn retained_debugger_message_keeps_ownership_until_replaced() {
         send_message(&mut competitor, "must not enter history", "competitor").await;
         let busy = next_response(&mut competitor).await;
         assert_eq!(busy["type"], "error", "{busy}");
-        assert_eq!(busy["message"], "busy", "{busy}");
+        assert_eq!(busy["message"], "controller_busy", "{busy}");
         drop(competitor);
         competing_handler.await.unwrap();
         assert!(session.has_accepted_acquisition());
@@ -1382,11 +1670,16 @@ async fn reserved_debugger_disconnect(handoff: bool, accepted: bool) {
         .await;
     let (mut owner, handler) = connection(&registry, &id);
     let handler = tokio::spawn(handler);
-    wait_for(&mut owner, |f| {
-        f["type"] == "status" && f["stage"] == "waiting_for_ready"
-    })
-    .await;
-    let mut session = handoff.then(|| gremlin.next_interactive_session());
+    assert!(
+        timeout(
+            Duration::from_millis(30),
+            socket::read_json_line(&mut owner)
+        )
+        .await
+        .is_err(),
+        "between-turn attachment must not acknowledge before claiming a live execution"
+    );
+    let mut session = handoff.then(|| synthetic_session(&mut gremlin));
     let mut owner = Some(owner);
     let mut handler = Some(handler);
     if !accepted {
@@ -1395,7 +1688,7 @@ async fn reserved_debugger_disconnect(handoff: bool, accepted: bool) {
     }
     let mut session = session
         .take()
-        .unwrap_or_else(|| gremlin.next_interactive_session());
+        .unwrap_or_else(|| synthetic_session(&mut gremlin));
     if !accepted {
         assert!(
             !session.accept_pause(),
@@ -1415,6 +1708,10 @@ async fn reserved_debugger_disconnect(handoff: bool, accepted: bool) {
     );
     tokio::pin!(agent);
     if accepted {
+        // The gap waiter must bind the minted execution and acquire its lease
+        // before the agent is polled; registration no longer reserves a pause.
+        attach_ack(owner.as_mut().unwrap()).await;
+        waiting_for_ready(owner.as_mut().unwrap()).await;
         tokio::select! {
             result = &mut agent => panic!("agent stopped: {result:?}"),
             _ = wait_for(owner.as_mut().unwrap(), |f| f["type"] == "ready") => {}
@@ -1450,7 +1747,7 @@ async fn old_default_attachment_cannot_bind_same_nonce_replacement() {
     timeout(Duration::from_secs(5), async {
         let id = "old-default-replacement";
         let (registry, mut old, dir) = synthetic_run(id).await;
-        let old_session = old.next_interactive_session();
+        let old_session = synthetic_session(&mut old);
         let (mut client, handler) = connection_mode(&registry, id, None);
         tokio::pin!(handler);
         let ack = tokio::select! {
@@ -1475,7 +1772,7 @@ async fn old_default_attachment_cannot_bind_same_nonce_replacement() {
             .register_chat_gremlin(id.into(), replacement, CancelToken::new())
             .await;
         replacement.state.set_stage("chat-0001", None, "");
-        let mut session = replacement.next_interactive_session();
+        let mut session = synthetic_session(&mut replacement);
         let (handle, _, _) = registry.get_run_interactive(id).await.unwrap();
         assert_eq!(ack["nonce"], handle.target().nonce());
         assert_ne!(ack["stage_run_id"], json!(handle.target().stage_run_id()));
@@ -1530,7 +1827,7 @@ async fn default_attach_during_live_request_only_pauses_for_immediate_correction
             .register_chat_gremlin(id.into(), gremlin, cancel.clone())
             .await;
         gremlin.state.set_stage("chat-0001", None, "");
-        let session = gremlin.next_interactive_session();
+        let session = synthetic_session(&mut gremlin);
         let agent = gremlin.client.run(
             RunParams {
                 prompt: "Original task.".into(),
@@ -1819,7 +2116,7 @@ async fn debugger_bus_done_and_lease_done_complete_once_with_or_without_executio
         for end_before_poll in [false, true] {
             let id = format!("debugger-completion-{end_before_poll}");
             let (registry, mut gremlin, _dir) = synthetic_run(&id).await;
-            let mut session = gremlin.next_interactive_session();
+            let mut session = synthetic_session(&mut gremlin);
             let execution = session.snapshot().stage_run_id().unwrap().to_owned();
             let (mut client, handler) = connection(&registry, &id);
             let handler = tokio::spawn(handler);
@@ -1851,7 +2148,7 @@ async fn debugger_bus_done_and_lease_done_complete_once_with_or_without_executio
                 assert_eq!(frame["summary"], "A complete", "{frame}");
             }
             drop(session);
-            let mut successor = gremlin.next_interactive_session();
+            let mut successor = synthetic_session(&mut gremlin);
             assert!(!successor.accept_pause(), "debugger reserved successor");
             emit_text(&id, successor.snapshot().stage_run_id().unwrap(), "B live");
             handler.await.unwrap();
@@ -1870,7 +2167,7 @@ async fn debugger_done_while_waiting_for_ready_completes_once_without_pausing_su
         for end_before_poll in [false, true] {
             let id = format!("debugger-done-before-ready-{end_before_poll}");
             let (registry, mut gremlin, _dir) = synthetic_run(&id).await;
-            let session = gremlin.next_interactive_session();
+            let session = synthetic_session(&mut gremlin);
             let execution = session.snapshot().stage_run_id().unwrap().to_owned();
             let (mut client, handler) = connection(&registry, &id);
             tokio::pin!(handler);
@@ -1891,7 +2188,7 @@ async fn debugger_done_while_waiting_for_ready_completes_once_without_pausing_su
             };
             handler.await;
             drop(session);
-            let mut successor = gremlin.next_interactive_session();
+            let mut successor = synthetic_session(&mut gremlin);
             assert!(!successor.accept_pause(), "debugger reserved successor");
             emit_text(&id, successor.snapshot().stage_run_id().unwrap(), "B live");
             drain_debugger_done(&mut client, 0).await;
@@ -1910,7 +2207,7 @@ async fn debugger_quit_resumes_observing_same_execution_until_done() {
     timeout(Duration::from_secs(10), async {
         let id = "debugger-quit-resumes-observation";
         let (registry, mut gremlin, _dir) = synthetic_run(id).await;
-        let mut session = gremlin.next_interactive_session();
+        let mut session = synthetic_session(&mut gremlin);
         let execution = session.snapshot().stage_run_id().unwrap().to_owned();
         let (mut client, handler) = connection(&registry, id);
         let handler = tokio::spawn(handler);
@@ -1942,7 +2239,7 @@ async fn debugger_quit_resumes_observing_same_execution_until_done() {
         assert_eq!(frame["text"], "A after quit", "{frame}");
         emit_debugger_done(id, &execution, "A complete");
         drop(session);
-        let mut successor = gremlin.next_interactive_session();
+        let mut successor = synthetic_session(&mut gremlin);
         assert!(!successor.accept_pause(), "quit reserved successor");
         emit_text(id, successor.snapshot().stage_run_id().unwrap(), "B live");
         handler.await.unwrap();
@@ -1969,7 +2266,7 @@ async fn debugger_setup_expiry(gate: SetupExpiryGate) {
             SetupExpiryGate::BeforeLease => "debugger-ended-before-lease",
         };
         let (registry, mut gremlin, _dir) = synthetic_run(id).await;
-        let a = gremlin.next_interactive_session();
+        let a = synthetic_session(&mut gremlin);
         let execution = a.snapshot().stage_run_id().unwrap().to_owned();
         let (entered, release) = match gate {
             SetupExpiryGate::BeforeAck => setup_gate::install(id),
@@ -2005,7 +2302,7 @@ async fn debugger_setup_expiry(gate: SetupExpiryGate) {
             );
         }
         // No successor exists until the old handler has finished.
-        let mut b = gremlin.next_interactive_session();
+        let mut b = synthetic_session(&mut gremlin);
         assert!(!b.accept_pause(), "A's debugger reserved B during setup");
         drop(b);
         registry.stop_run(id).await.unwrap();
@@ -2037,7 +2334,7 @@ async fn observer_end_without_command_successor_or_run_end_and_idle_attach() {
             while let Some(frame) = socket::read_json_line(&mut initial).await.unwrap() {
                 assert_ne!(frame["type"], "ready", "{frame}");
             }
-            let mut session = gremlin.next_interactive_session();
+            let mut session = synthetic_session(&mut gremlin);
             assert!(!session.accept_pause(), "idle observer reserved first turn");
             let (mut client, handler) = connection_mode(&registry, &id, Some(mode));
             let task = tokio::spawn(handler);
@@ -2066,7 +2363,7 @@ async fn observer_end_without_command_successor_or_run_end_and_idle_attach() {
             while let Some(frame) = socket::read_json_line(&mut idle).await.unwrap() {
                 assert_ne!(frame["type"], "ready", "{frame}");
             }
-            let mut successor = gremlin.next_interactive_session();
+            let mut successor = synthetic_session(&mut gremlin);
             assert!(!successor.accept_pause());
             drop(successor);
             registry.stop_run(&id).await.unwrap();
@@ -2100,7 +2397,7 @@ async fn replacement_during_delivery_drops_correction_and_leaves_b_clean() {
             .register_chat_gremlin(id.into(), gremlin, CancelToken::new())
             .await;
         gremlin.state.set_stage("chat-0001", None, "");
-        let mut session = gremlin.next_interactive_session();
+        let mut session = synthetic_session(&mut gremlin);
         let (mut client, handler) = connection_mode(&registry, id, None);
         let task = tokio::spawn(handler);
         let ack = socket::read_json_line(&mut client).await.unwrap().unwrap();
@@ -2123,7 +2420,7 @@ async fn replacement_during_delivery_drops_correction_and_leaves_b_clean() {
         // Replace A within the same live gremlin, keeping A and its
         // incorporation sender alive. Neither run-end nor sender EOF can
         // accidentally satisfy this execution-replacement test.
-        let mut b_session = gremlin.next_interactive_session();
+        let mut b_session = synthetic_session(&mut gremlin);
         assert!(!b_session.accept_pause(), "A's temporary pause leaked to B");
         assert_eq!(
             registry
@@ -2402,7 +2699,7 @@ async fn drive_handshake(sandbox: &Sandbox, provider: &TcpListener, id: &str, at
         .register_chat_gremlin(id.into(), gremlin, cancel.clone())
         .await;
     gremlin.state.set_stage("chat-0001", None, "");
-    let session = gremlin.next_interactive_session();
+    let session = synthetic_session(&mut gremlin);
     let params = RunParams {
         prompt: "Review this.".into(),
         cwd: Some(sandbox.path().to_path_buf()),
@@ -2525,7 +2822,7 @@ async fn full_debug_queue_does_not_block_disconnect_and_reattach() {
             .register_chat_gremlin(id.into(), gremlin, CancelToken::new())
             .await;
         gremlin.state.set_stage("chat-0001", None, "");
-        let mut session = gremlin.next_interactive_session();
+        let mut session = synthetic_session(&mut gremlin);
 
         // Control attach requests the pause before the first command.
         let (mut client, handler) = connection(&registry, id);

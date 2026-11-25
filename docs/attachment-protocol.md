@@ -1,4 +1,68 @@
-# Attachment and watch replay protocol
+# Attachment, input, and watch replay protocol
+
+## Exact execution input
+
+The global control socket and verified session auxiliary socket accept a dedicated
+input connection:
+
+```json
+{"op":"input","id":"RUN","stage_run_id":"INVOCATION","stage":"build","session_id":"SESSION","req_id":"bind-1"}
+```
+
+`id`, `stage_run_id`, and `req_id` are required nonempty strings. `stage` is an optional
+nonempty consistency check, not a selector for a future execution. A nested
+`target` object may carry these identity fields instead. Retired `stage_id` and
+`execution_id` fields are rejected at either level. The live input registration,
+not a display event or stage name, is authoritative. Missing, stale, or revoked
+registrations fail before acknowledgment. There is no waiting for a successor.
+
+The response is `input_bound`, with `id`, `stage`, `stage_run_id`, and the bind
+`req_id`. Binding claims exclusive controller ownership for this exact invocation.
+It does not acquire a debugger pause lease, subscribe to display, replay history,
+or pause the agent. Commands are dispatched only after the bind acknowledgment
+has been written successfully. First acquisition wins across global, session, targeted chat,
+and still-writable legacy conversation attachments. A competing bind receives
+`{"type":"error","message":"controller_busy","req_id":"bind-1"}` immediately;
+there is no queue or automatic handoff. Watchers never contend. After release,
+a rejected caller must explicitly retry. Release sends no execution command:
+a paused execution stays paused, and accepted corrections retain their receipts.
+Late cleanup releases only its own acquisition, never a newer holder.
+One-shot targeted chat holds the same claim only through its enqueue attempt,
+not through receipt delivery or socket flushing. Chat-kind runs require
+the owning, open session: a claimed session id on a global socket is insufficient.
+The session listener supplies the trusted owner handle and checks its chat ids.
+
+Subsequent commands have a nonempty string `req_id`:
+
+```json
+{"cmd":"message","text":"Use the existing helper","req_id":"correction-1"}
+{"cmd":"pause","req_id":"pause-1"}
+{"cmd":"step","req_id":"step-1"}
+{"cmd":"resume","req_id":"resume-1"}
+{"cmd":"bail","req_id":"bail-1"}
+```
+
+Commands cannot carry identity fields or `target`: the socket remains bound to its
+original input sender even after an execution is replaced. `message` requires
+nonempty text. Accepted commands receive `queued`, followed by `delivered` when
+the consumer confirms incorporation/application, or `dropped` when delivery is
+not confirmed. These frames echo `req_id`; queue acceptance alone is not delivery.
+Rejected commands receive `error` with `message` and `req_id`, never `queued`.
+The execution inbox is bounded; a full or revoked inbox rejects immediately.
+Clients should use distinct request ids for unambiguous receipt correlation.
+At most 32 commands may await receipts on one connection. Excess requests receive
+a correlated error without closing the connection or discarding accepted receipts.
+
+`{"cmd":"detach"}` or EOF releases the controller claim without cancelling the
+run. Execution revocation settles outstanding receipts and emits `ended`; this
+connection never follows another invocation. Disconnect does not retract commands
+already accepted by the execution. Socket writing runs separately with bounded
+output and receipt tracking. Each write, including the bind acknowledgment, has
+a five-second timeout; expiry releases control without issuing a command.
+A slow peer cannot indefinitely retain ownership or
+block input lifecycle cleanup; overflow closes that connection, and outstanding
+wire notifications are best effort after disconnect. No display frames are sent.
+
 
 ## Read-only filtered bus watch
 

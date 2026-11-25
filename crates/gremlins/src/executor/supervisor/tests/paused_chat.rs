@@ -11,7 +11,7 @@ use tokio::time::timeout;
 use super::{create_session, read_until_type, spawn_test_actor};
 use crate::executor::socket::{read_json_line, write_json_line};
 use crate::executor::supervisor::test_provider::pending_request;
-use crate::executor::supervisor::{handle_connection, handle_session_main};
+use crate::executor::supervisor::{attachment, handle_session_main};
 use crate::test_support::Sandbox;
 
 const FIRST: &str = "Review my first draft.";
@@ -89,11 +89,21 @@ async fn cancel_paused_chat(mode: &str, lose_chat_writer: bool) {
     assert!(first["messages"].to_string().contains(FIRST), "{first}");
 
     let (debug, server) = UnixStream::pair().unwrap();
-    let debug_server = tokio::spawn(handle_connection(
-        server,
-        registry.clone(),
-        Default::default(),
-    ));
+    let debug_registry = registry.clone();
+    let debug_session = session.clone();
+    let debug_server = tokio::spawn(async move {
+        let (read, write) = server.into_split();
+        let mut reader = BufReader::new(read);
+        let request = read_json_line(&mut reader).await.unwrap().unwrap();
+        attachment::handle_attach_owned(
+            &request,
+            &debug_registry,
+            Some(&debug_session),
+            reader,
+            &SharedWriter::new(write),
+        )
+        .await;
+    });
     let (read, mut debug_write) = debug.into_split();
     let mut debug = BufReader::new(read);
     write_json_line(

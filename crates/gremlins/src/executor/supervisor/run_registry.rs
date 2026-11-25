@@ -9,7 +9,7 @@
 
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use tokio::sync::{mpsc, oneshot, watch, RwLock};
 
@@ -133,6 +133,49 @@ pub(crate) struct LaunchResult {
     pub gremlin_rx: oneshot::Receiver<Gremlin>,
 }
 
+type ControllerOwners = Arc<Mutex<HashMap<(String, String), Arc<()>>>>;
+
+#[derive(Default)]
+struct ControllerClaims {
+    owners: ControllerOwners,
+}
+
+/// Exclusive controller ownership for one exact execution.
+pub(crate) struct ControllerClaim {
+    owners: ControllerOwners,
+    key: (String, String),
+    token: Arc<()>,
+}
+
+impl ControllerClaims {
+    fn claim(&self, run_id: &str, stage_run_id: &str) -> Result<ControllerClaim, &'static str> {
+        let key = (run_id.to_owned(), stage_run_id.to_owned());
+        let mut owners = self.owners.lock().unwrap_or_else(|e| e.into_inner());
+        if owners.contains_key(&key) {
+            return Err("controller_busy");
+        }
+        let token = Arc::new(());
+        owners.insert(key.clone(), token.clone());
+        Ok(ControllerClaim {
+            owners: self.owners.clone(),
+            key,
+            token,
+        })
+    }
+}
+
+impl Drop for ControllerClaim {
+    fn drop(&mut self) {
+        let mut owners = self.owners.lock().unwrap_or_else(|e| e.into_inner());
+        if owners
+            .get(&self.key)
+            .is_some_and(|token| Arc::ptr_eq(token, &self.token))
+        {
+            owners.remove(&self.key);
+        }
+    }
+}
+
 // ── RunRegistry ─────────────────────────────────────────────────────────
 
 /// Shared registry owning the run map, connection counter, per-id locks, and
@@ -150,6 +193,7 @@ pub(crate) struct RunRegistry {
     chat_seq: RwLock<usize>,
     /// Live pending-output scopes (in memory only, never serialized).
     pending_scopes: PendingScopes,
+    controller_claims: ControllerClaims,
 }
 
 /// Pure helper shared with `state_view`: extract a human-readable definition
@@ -176,7 +220,16 @@ impl RunRegistry {
             id_locks: RwLock::new(HashMap::new()),
             chat_seq: RwLock::new(0),
             pending_scopes: PendingScopes::default(),
+            controller_claims: ControllerClaims::default(),
         }
+    }
+
+    pub(crate) fn claim_controller(
+        &self,
+        run_id: &str,
+        stage_run_id: &str,
+    ) -> Result<ControllerClaim, &'static str> {
+        self.controller_claims.claim(run_id, stage_run_id)
     }
 
     /// Open a pending-output scope for one producer invocation of `run_id`.
@@ -773,5 +826,74 @@ fn insert_run_entry_inner(
 fn release_log_sub(handle: &RunHandle) {
     if let Some(ref sub) = handle.log_sub {
         init_bus().unsubscribe(sub);
+    }
+}
+
+#[cfg(test)]
+mod controller_claim_tests {
+    use super::*;
+    use std::sync::Barrier;
+
+    #[test]
+    fn simultaneous_claims_have_exactly_one_winner() {
+        let (tx, _) = watch::channel(false);
+        let registry = Arc::new(RunRegistry::new(tx));
+        let start = Arc::new(Barrier::new(16));
+        let finish = Arc::new(Barrier::new(16));
+        let workers: Vec<_> = (0..16)
+            .map(|_| {
+                let registry = registry.clone();
+                let start = start.clone();
+                let finish = finish.clone();
+                std::thread::spawn(move || {
+                    start.wait();
+                    let claim = registry.claim_controller("run", "stage");
+                    let won = claim.is_ok();
+                    if !won {
+                        assert_eq!(claim.err(), Some("controller_busy"));
+                    }
+                    finish.wait();
+                    won
+                })
+            })
+            .collect();
+        assert_eq!(
+            workers
+                .into_iter()
+                .filter_map(|w| w.join().ok())
+                .filter(|won| *won)
+                .count(),
+            1
+        );
+        assert!(registry.claim_controller("run", "stage").is_ok());
+    }
+
+    #[test]
+    fn claims_are_exact_and_release_on_unwind() {
+        let claims = ControllerClaims::default();
+        let first = claims.claim("run", "stage").unwrap();
+        let successor = claims.claim("run", "next").unwrap();
+        let other_run = claims.claim("other", "stage").unwrap();
+        assert!(claims.claim("run", "stage").is_err());
+        drop(first);
+        assert!(claims.claim("run", "stage").is_ok());
+        drop((successor, other_run));
+        let _ = std::panic::catch_unwind(|| {
+            let _claim = claims.claim("run", "stage").unwrap();
+            panic!("cancel controller");
+        });
+        assert!(claims.claim("run", "stage").is_ok());
+    }
+
+    #[test]
+    fn stale_guard_cannot_release_replacement() {
+        let claims = ControllerClaims::default();
+        let stale = claims.claim("run", "stage").unwrap();
+        claims.owners.lock().unwrap().remove(&stale.key);
+        let replacement = claims.claim("run", "stage").unwrap();
+        drop(stale);
+        assert_eq!(claims.claim("run", "stage").err(), Some("controller_busy"));
+        drop(replacement);
+        assert!(claims.claim("run", "stage").is_ok());
     }
 }

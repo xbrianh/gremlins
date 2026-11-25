@@ -191,6 +191,7 @@ pub(crate) struct TurnSnapshot {
     pub turn: Option<String>,
     pub done: watch::Receiver<bool>,
     /// The opaque stage-run ID the turn announced at start, if any.
+    #[cfg(test)]
     pub stage_run_id: Option<String>,
 }
 
@@ -854,6 +855,7 @@ async fn run_session_task(
                     id: cur.id.clone(),
                     turn: cur.turn.clone(),
                     done: cur.done.clone(),
+                    #[cfg(test)]
                     stage_run_id: cur.stage_run_id.clone(),
                 });
                 let _ = respond.send(turn);

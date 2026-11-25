@@ -302,6 +302,16 @@ pub(crate) async fn handle_attach(
     reader: BufReader<tokio::net::unix::OwnedReadHalf>,
     writer: &SharedWriter,
 ) {
+    handle_attach_owned(request, registry, None, reader, writer).await;
+}
+
+pub(crate) async fn handle_attach_owned(
+    request: &Value,
+    registry: &Arc<RunRegistry>,
+    owner: Option<&super::session_task::SessionTaskHandle>,
+    reader: BufReader<tokio::net::unix::OwnedReadHalf>,
+    writer: &SharedWriter,
+) {
     if request.get("op").and_then(Value::as_str) == Some("watch") {
         handle_watch(request, registry, reader, writer).await;
         return;
@@ -328,7 +338,9 @@ pub(crate) async fn handle_attach(
         .unwrap_or("run");
 
     match scope {
-        "conversation" => handle_conversation_attach(request, id, registry, reader, writer).await,
+        "conversation" => {
+            handle_conversation_attach(request, id, registry, owner, reader, writer).await
+        }
         _ => handle_run_attach(request, id, registry, reader, writer).await,
     }
 }
@@ -629,6 +641,7 @@ pub(crate) async fn handle_conversation_attach(
     request: &Value,
     id: &str,
     registry: &Arc<RunRegistry>,
+    owner: Option<&super::session_task::SessionTaskHandle>,
     mut reader: BufReader<tokio::net::unix::OwnedReadHalf>,
     writer: &SharedWriter,
 ) {
@@ -644,10 +657,10 @@ pub(crate) async fn handle_conversation_attach(
     };
 
     // 2. Snapshot target and nonce before any async work.
-    let (mut target, between_turn) = handle.attachment_target();
+    let (mut target, mut between_turn) = handle.attachment_target();
     #[cfg(test)]
     setup_gate::wait(id).await;
-    let execution_nonce = target.nonce();
+    let mut execution_nonce = target.nonce();
     let mut stage_run_id = target.stage_run_id().map(|s| s.to_string());
     // Validate against the immutable snapshot used by the command loop, never
     // against a second lookup that might already describe a successor.
@@ -672,11 +685,30 @@ pub(crate) async fn handle_conversation_attach(
     let mut end_signal = target.end_signal();
 
     // Observation never owns a pause. Only explicit debugger intent may
-    // reserve entry into a future chat turn.
+    // follow a future chat turn.
     let mode = request
         .get("mode")
         .and_then(|v| v.as_str())
         .unwrap_or("control");
+
+    if mode != "passive"
+        && (between_turn || target.accepts_commands())
+        && store.read_str("kind") == "chat"
+    {
+        let authorized = match owner {
+            Some(owner) => {
+                !owner.is_closed().await
+                    && owner.get_chat_ids().await.iter().any(|owned| owned == id)
+            }
+            None => false,
+        };
+        if !authorized {
+            let mut response = error_response("chat input requires its owning session");
+            response["req_id"] = request.get("req_id").cloned().unwrap_or(Value::Null);
+            let _ = writer.write_json_line(&response).await;
+            return;
+        }
+    }
 
     // Observation requires a captured execution, including before the first turn.
     if mode != "debugger" && between_turn {
@@ -701,15 +733,76 @@ pub(crate) async fn handle_conversation_attach(
         }
     }
 
+    if between_turn && request.get("stage").is_some() {
+        let _ = writer
+            .write_json_line(&error_response("selected stage is not active"))
+            .await;
+        return;
+    }
+
+    if mode == "debugger" && between_turn {
+        // An ended target retains its backend capability, not live authority.
+        // Follow legacy unpinned requests, but acknowledge only the successor.
+        let mut retry_delay = std::time::Duration::from_millis(10);
+        loop {
+            let (candidate, gap) = handle.attachment_target();
+            if !gap {
+                target = candidate;
+                break;
+            }
+            tokio::select! {
+                _ = socket::read_json_line(&mut reader) => return,
+                changed = run_state.changed() => {
+                    if changed.is_err() || run_state.borrow().status != "running" { return; }
+                }
+                _ = tokio::time::sleep(retry_delay) => {
+                    retry_delay = (retry_delay * 2).min(std::time::Duration::from_millis(250));
+                }
+            }
+        }
+        between_turn = false;
+        execution_nonce = target.nonce();
+        stage_run_id = target.stage_run_id().map(str::to_owned);
+        end_signal = target.end_signal();
+    }
+
+    // Declare ownership before any lease so cancellation drops the lease first.
+    let mut controller_claim = None;
+    if mode != "passive" && !between_turn && target.accepts_commands() {
+        let Some(stage) = stage_run_id.as_deref() else {
+            let _ = writer
+                .write_json_line(&error_response("requested execution is not active"))
+                .await;
+            return;
+        };
+        let Some((canonical, _)) = handle
+            .resolve_input(id, stage, None)
+            .filter(|_| !end_signal.is_ended())
+        else {
+            let mut response = error_response("requested execution is not active");
+            response["req_id"] = request.get("req_id").cloned().unwrap_or(Value::Null);
+            let _ = writer.write_json_line(&response).await;
+            return;
+        };
+        match registry.claim_controller(id, &canonical.stage_run_id) {
+            Ok(claim) => controller_claim = Some(claim),
+            Err(error) => {
+                let mut response = error_response(error);
+                response["req_id"] = request.get("req_id").cloned().unwrap_or(Value::Null);
+                let _ = writer.write_json_line(&response).await;
+                return;
+            }
+        }
+    }
+
     // 5. Subscribe to run events before acknowledging.
     let (stream_sub, mut evt_rx) = subscribe_run_lag_tolerant(id, 256);
     let _stream_guard = BusSubGuard::new(stream_sub);
 
-    // 6. Emit attachment acknowledgment with stage run identity and a
-    //    stable execution nonce. Capabilities are computed from the actual
-    //    target's backend capability, not merely its stage type.
+    // Acknowledge the captured identity. Writable capabilities require both
+    // backend support and ownership of this exact live execution.
     let mut caps = vec!["observe"];
-    if mode != "passive" && target.accepts_commands() {
+    if controller_claim.is_some() && !end_signal.is_ended() {
         caps.extend(["message", "talk", "continue", "bail", "quit", "detach"]);
     }
     let mut ack = serde_json::json!({
@@ -739,7 +832,7 @@ pub(crate) async fn handle_conversation_attach(
         }
         ack["stage"] = Value::String(expected.to_owned());
     }
-    let ack_end = (!(mode == "debugger" && between_turn)).then_some(&end_signal);
+    let ack_end = Some(&end_signal);
     if !write_view(writer, &ack, ack_end).await {
         return;
     }
@@ -750,7 +843,7 @@ pub(crate) async fn handle_conversation_attach(
     // Backend capability is authoritative: debugger intent cannot turn a
     // noninteractive execution into a controller. Stream its captured target
     // without acquiring a lease, requesting a pause, or reporting lease end.
-    // Preserve explicit reservations across chat registration gaps.
+    // A followed read-only successor remains observation-only.
     if mode == "passive" || (!between_turn && !target.accepts_commands()) {
         handle_passive_conversation(
             stage_run_id.as_deref(),
@@ -763,15 +856,10 @@ pub(crate) async fn handle_conversation_attach(
         return;
     }
 
-    // Preserve pause-on-attach: existing debuggers wait for readiness before
-    // sending their first command. Only chat registration gaps reserve entry.
+    // Exact ownership was acquired before acknowledgment and debugger pause.
     let mut attachment = None;
     if mode == "debugger" {
-        let lease = if between_turn {
-            handle.attach_next_turn_debugger(stage_run_id.clone())
-        } else {
-            target.attach_debugger()
-        };
+        let lease = target.attach_debugger();
         let mut lease = match lease {
             Ok(lease) => lease,
             Err(error) => {
@@ -779,9 +867,8 @@ pub(crate) async fn handle_conversation_attach(
                 return;
             }
         };
-        // TOCTOU: do not wait on a stale ended signal when reserving a future
-        // turn; the bound target is selected only after readiness completes.
-        let readiness_end = (!between_turn).then(|| target.end_signal());
+        // Readiness belongs to the claimed execution, never its predecessor.
+        let readiness_end = Some(target.end_signal());
         let readiness = wait_for_ready_view(
             &mut lease,
             &mut run_state,
@@ -800,8 +887,7 @@ pub(crate) async fn handle_conversation_attach(
                 return;
             }
         };
-        // Only an explicit between-turn debugger reservation may bind a new
-        // execution. Ordinary viewers and corrections retain their snapshot.
+        // Ordinary viewers and corrections retain their captured execution.
         stage_run_id = target.stage_run_id().map(str::to_owned);
         end_signal = target.end_signal();
         attachment = Some(lease);
@@ -965,6 +1051,8 @@ pub(crate) async fn handle_conversation_attach(
             }
         }
     }
+    drop(attachment);
+    drop(controller_claim);
 }
 
 // ── Control-mode command dispatch ──────────────────────────────────────

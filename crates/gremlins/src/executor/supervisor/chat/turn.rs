@@ -247,6 +247,7 @@ async fn run_turn(
             cancel: turn_cancel.clone(),
             done: done_rx,
             hard: hard.clone(),
+            #[cfg(test)]
             stage_run_id: stage_run_id.clone(),
         })
         .await;
@@ -268,9 +269,9 @@ async fn run_turn(
         hard,
     });
 
-    // Announce this turn's stage run identity before any stream event so the
-    // client can target a correction at exactly this execution. Chat gremlins
-    // always carry an interactive factory; `None` (no factory) is a naked-run
+    // Announce the prepared input identity; run_agent registers its sender under
+    // this ID. Output boundaries retain their separate invocation identity.
+    // Chat gremlins always carry an interactive factory; `None` is a naked-run
     // case where there is nothing to target.
     if let Some(stage_run_id) = stage_run_id {
         let mut event = serde_json::to_value(EventKind::TurnStarted {

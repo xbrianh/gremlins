@@ -16,6 +16,7 @@ pub(crate) mod chat;
 pub(crate) mod chat_handle;
 pub(crate) mod chat_system_prompt;
 pub(crate) mod debug;
+pub(crate) mod input;
 pub(crate) mod lifecycle;
 pub(crate) mod log_handler;
 pub(crate) mod ops;
@@ -255,7 +256,7 @@ async fn handle_connection(
             break Some((request, reader));
         }
 
-        if op == "attach" || op == "watch" {
+        if op == "attach" || op == "watch" || op == "input" {
             // Stop the global event-forwarding task before handing
             // off to the scoped attachment handler.  If a prior
             // request already opened the event gate, unrelated
@@ -267,7 +268,11 @@ async fn handle_connection(
             event_handle.abort();
             init_bus().unsubscribe(&event_sub);
             let _ = event_handle.await;
-            attachment::handle_attach(&request, &registry, reader, &writer).await;
+            if op == "input" {
+                input::handle_input(&request, &registry, None, reader, &writer).await;
+            } else {
+                attachment::handle_attach(&request, &registry, reader, &writer).await;
+            }
             // The loop-scope teardown was already performed above;
             // return directly so we don't try to abort the already-
             // consumed event handle again.

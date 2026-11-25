@@ -2,6 +2,7 @@
 
 mod attachment;
 mod correction_chat;
+mod exact_input;
 mod home_identity;
 mod paused_chat;
 mod resume_context;
@@ -1412,7 +1413,7 @@ fn create_chat_gremlin_seeds_environment() {
 }
 
 /// The debug socket attaches after the first chat loop has finished. It
-/// keeps its handle while the next loop starts and acknowledges the pause.
+/// waits for the next execution, then pauses and injects without reconnecting.
 #[tokio::test]
 async fn debug_connection_injects_into_the_next_chat_loop_without_reconnecting() {
     use crate::clients::agent::agent_loop::{loop_opts, run_agent_loop, test_ctx};
@@ -1424,6 +1425,8 @@ async fn debug_connection_injects_into_the_next_chat_loop_without_reconnecting()
     let tmp = tempfile::tempdir().unwrap();
     let (registry, _) = spawn_test_actor().await;
     let id = "chat-debug-rotation";
+    let (_session_id, owner) = create_session(&registry).await;
+    owner.add_chat_id(id).await;
     let gremlin = create_chat_gremlin(
         id,
         &model("cmd/echo"),
@@ -1460,17 +1463,44 @@ async fn debug_connection_injects_into_the_next_chat_loop_without_reconnecting()
     let (server, client) = tokio::net::UnixStream::pair().unwrap();
     let (read, mut write) = client.into_split();
     let mut read = tokio::io::BufReader::new(read);
-    let debug = tokio::spawn(super::handle_connection(
-        server,
-        registry.clone(),
-        Default::default(),
-    ));
+    let debug_registry = registry.clone();
+    let debug_owner = owner.clone();
+    let debug = tokio::spawn(async move {
+        let (read, write) = server.into_split();
+        let mut reader = tokio::io::BufReader::new(read);
+        let request = socket::read_json_line(&mut reader).await.unwrap().unwrap();
+        super::attachment::handle_attach_owned(
+            &request,
+            &debug_registry,
+            Some(&debug_owner),
+            reader,
+            &gremlins_magic_bus::connection::SharedWriter::new(write),
+        )
+        .await;
+    });
     socket::write_json_line(
         &mut write,
         &json!({"op":"attach", "scope":"conversation", "id":id, "mode":"debugger"}),
     )
     .await
     .unwrap();
+    assert!(
+        tokio::time::timeout(Duration::from_millis(30), socket::read_json_line(&mut read))
+            .await
+            .is_err()
+    );
+
+    // Between turns attachment waits without acknowledging control. Publish the
+    // next execution, then wait for its claim and lease before running the mock.
+    gremlin.state.set_stage("chat-0002", None, "");
+    let mut next_session = gremlin.next_interactive_session();
+    let identity = crate::clients::execution_input::ExecutionIdentity {
+        run_id: id.into(),
+        stage_name: "chat-0002".into(),
+        stage_run_id: next_session.snapshot().stage_run_id().unwrap().to_owned(),
+    };
+    next_session.bind_input(&gremlin.execution_inputs, identity, true, None);
+    assert_eq!(read_until_type(&mut read, "attached").await["id"], id);
     loop {
         let status = read_until_type(&mut read, "status").await;
         if status["stage"] == "waiting_for_ready" {
@@ -1478,10 +1508,8 @@ async fn debug_connection_injects_into_the_next_chat_loop_without_reconnecting()
         }
     }
 
-    // Start the second loop *after* the connection has acquired its handle
-    // and signalled pause. Only this loop can have emitted the observed Ready.
-    gremlin.state.set_stage("chat-0002", None, "");
-    let second = tokio::spawn(run_turn(gremlin.next_interactive_session()));
+    // Only this loop can have emitted the observed Ready.
+    let second = tokio::spawn(run_turn(next_session));
     let ready = read_until_type(&mut read, "ready").await;
     assert_eq!(ready["id"], id);
     socket::write_json_line(&mut write, &json!({"op":"talk", "text":"use the new plan"}))
@@ -1510,6 +1538,7 @@ async fn debug_connection_injects_into_the_next_chat_loop_without_reconnecting()
     drop(write);
     debug.await.unwrap();
     registry.stop_run(id).await;
+    teardown_session(&owner).await;
 }
 
 /// EOF on the actual main session socket must still drain session

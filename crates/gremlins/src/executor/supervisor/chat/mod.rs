@@ -32,7 +32,7 @@ use std::sync::{Arc, OnceLock};
 use serde_json::{Map, Value};
 
 use crate::clients::client::{Client as ModelClient, ModelURI};
-use crate::clients::interactive::InteractiveCommand;
+use crate::clients::execution_input::Delivery;
 use crate::config;
 use crate::definition::ChatDefinition;
 use crate::executor::gremlin::{validate_gremlin_id, Gremlin};
@@ -64,9 +64,8 @@ pub(crate) struct CurrentTurn {
     /// finished still proceeds immediately.
     pub(crate) done: watch::Receiver<bool>,
     pub(crate) hard: Arc<AtomicBool>,
-    /// The opaque stage-run ID published at turn start. The attachment
-    /// handler uses this to bind observation to one execution, not the
-    /// resettable run-id/nonce pair.
+    /// Announcement metadata retained for lifecycle assertions, never input authority.
+    #[cfg(test)]
     pub(crate) stage_run_id: Option<String>,
 }
 
@@ -88,6 +87,14 @@ pub(crate) fn resolve_chat_env(
     }
 }
 
+fn chat_error(request: &Value, message: &str) -> Value {
+    let mut response = error_response(message);
+    if let Some(req_id) = request.get("req_id") {
+        response["req_id"] = req_id.clone();
+    }
+    response
+}
+
 pub(crate) async fn handle_chat(
     request: &Value,
     writer: &SharedWriter,
@@ -96,18 +103,30 @@ pub(crate) async fn handle_chat(
 ) {
     log::debug!("handle_chat: received chat request");
 
-    if ["stage_id", "execution_id", "stage_run_id"]
-        .iter()
-        .any(|key| request.get(key).is_some())
+    if [
+        "id",
+        "nonce",
+        "stage",
+        "stage_id",
+        "execution_id",
+        "stage_run_id",
+    ]
+    .iter()
+    .any(|key| request.get(key).is_some())
     {
         let _ = writer
-            .write_json_line(&error_response(
+            .write_json_line(&chat_error(
+                request,
                 "top-level stage-run selectors are not supported; use target with id, nonce, and stage_run_id",
             ))
             .await;
         return;
     }
     if let Some(error) = super::attachment::retired_target_error(request) {
+        let mut error = error;
+        if let Some(req_id) = request.get("req_id") {
+            error["req_id"] = req_id.clone();
+        }
         let _ = writer.write_json_line(&error).await;
         return;
     }
@@ -116,7 +135,7 @@ pub(crate) async fn handle_chat(
     // front-end never sends a gremlin id — it only addresses the session.
     let text = request.get("text").and_then(|v| v.as_str()).unwrap_or("");
     if text.is_empty() {
-        let resp = error_response("missing 'text' field");
+        let resp = chat_error(request, "missing 'text' field");
         let _ = writer.write_json_line(&resp).await;
         return;
     }
@@ -165,273 +184,107 @@ pub(crate) async fn handle_chat(
     //
     // When `target` is present the operator wants to correct a specific
     // in-flight execution without starting a new turn. The message goes
-    // through the run's InteractiveHandle directly — never through the
+    // through the exact execution's input inbox — never through the
     // session's persistent chat-gremlin task queue.
     if let Some(target) = request.get("target") {
         let Some(target_obj) = target.as_object() else {
             let _ = writer
-                .write_json_line(&error_response("target must be an object"))
+                .write_json_line(&chat_error(request, "target must be an object"))
                 .await;
             return;
         };
-        for retired_key in ["stage_id", "execution_id"] {
-            if target_obj.contains_key(retired_key) {
-                let _ = writer
-                    .write_json_line(&error_response(&format!(
-                        "target.{retired_key} is retired; use target.stage_run_id"
-                    )))
-                    .await;
-                return;
-            }
-        }
-        let target_id = target_obj.get("id").and_then(|v| v.as_str()).unwrap_or("");
-        let target_nonce = target_obj
-            .get("nonce")
-            .and_then(|v| v.as_u64())
-            .unwrap_or(0);
-
+        let target_id = target_obj.get("id").and_then(Value::as_str).unwrap_or("");
         if target_id.is_empty() {
-            let resp = error_response("target.id is required");
-            let _ = writer.write_json_line(&resp).await;
+            let _ = writer
+                .write_json_line(&chat_error(request, "target.id is required"))
+                .await;
             return;
         }
-        // Nonces start at 1; 0 means the field was missing or the client
-        // is holding a stale (unknown-run) nonce from a failed lookup.
+        let target_nonce = target_obj.get("nonce").and_then(Value::as_u64).unwrap_or(0);
         if target_nonce == 0 {
-            let resp = error_response("target.nonce is required");
-            let _ = writer.write_json_line(&resp).await;
+            let _ = writer
+                .write_json_line(&chat_error(request, "target.nonce is required"))
+                .await;
             return;
         }
-
         let Some(client_stage_run_id) = target_obj
             .get("stage_run_id")
             .and_then(Value::as_str)
-            .filter(|id| !id.is_empty())
+            .filter(|id| !id.trim().is_empty())
+            .map(str::to_owned)
         else {
             let _ = writer
-                .write_json_line(&error_response("target.stage_run_id is required"))
+                .write_json_line(&chat_error(request, "target.stage_run_id is required"))
                 .await;
             return;
         };
-
-        // ── Session ownership check ───────────────────────────────────
-        // The session socket provides transport isolation, but also verify
-        // that a chat gremlin target belongs to THIS session — not a
-        // different session's home chat. Pipeline (non-chat) runs are
-        // global and pass through; the nonce guards against stale targets.
-        {
-            let chat_ids = session_task.get_chat_ids().await;
-            if !chat_ids.iter().any(|id| id == target_id) {
-                // The target is not one of our chat gremlins. If the
-                // registry store records `kind: "chat"`, this is another
-                // session's chat gremlin — reject.
-                if let Some(store) = registry.get_run_store(target_id).await {
-                    if store.read_str("kind") == "chat" {
-                        let resp = error_response(&format!(
-                            "target {}: not owned by this session",
-                            target_id
-                        ));
-                        let _ = writer.write_json_line(&resp).await;
-                        return;
-                    }
-                }
-                // Not a chat gremlin (or not in the registry at all —
-                // the resolve below will surface that). Allow pipeline
-                // runs through.
-            }
-        }
-
-        // Resolve the interactive handle. `attach()` validates the nonce
-        // atomically, so we only need a single coarse liveness gate here.
-        let Some((interactive, _, _)) = registry.get_run_interactive(target_id).await else {
-            let resp = error_response(&format!("gremlin {} is not running", target_id));
-            let _ = writer.write_json_line(&resp).await;
-            return;
-        };
-
-        let debug_target = interactive.target();
-        let stage_run_id = debug_target.stage_run_id().map(|s| s.to_string());
-        if debug_target.nonce() != target_nonce {
-            let resp = error_response("execution has been replaced; target is stale");
-            let _ = writer.write_json_line(&resp).await;
-            return;
-        }
-        // Validate the client-supplied stage-run ID. The authoritative
-        // descriptor is the one the turn announced at start
-        // (`CurrentTurn.stage_run_id`), not a value sampled from the run
-        // map after enqueue.
-        //
-        // Chat turns: reject if `CurrentTurn` hasn't published its
-        // stage_run_id yet — the live-target snapshot would describe the
-        // *previous* execution between `prepare_next` and the
-        // `CurrentTurn` update. Pipeline runs (no matching turn) fall
-        // back to the live target's stage_run_id.
-        let current_turn = session_task.get_current_turn().await;
-        let is_chat_turn = current_turn.as_ref().is_some_and(|cur| cur.id == target_id);
-        let announced_stage_run_id = current_turn
-            .as_ref()
-            .filter(|cur| cur.id == target_id)
-            .and_then(|cur| cur.stage_run_id.clone());
-        let bound_stage_run_id = if is_chat_turn {
-            // For our own chat turn, only the announced descriptor is
-            // authoritative. Don't fall back to the live target.
-            announced_stage_run_id
-        } else {
-            // Pipeline run or cross-session target: use the live
-            // target's stage_run_id as the binding descriptor.
-            announced_stage_run_id.or_else(|| stage_run_id.clone())
-        };
-        {
-            let client_id = client_stage_run_id;
-            match bound_stage_run_id.as_deref() {
-                Some(actual) if actual != client_id || stage_run_id.as_deref() != Some(actual) => {
-                    let resp = error_response("stage_run_id mismatch: target has been replaced");
-                    let _ = writer.write_json_line(&resp).await;
-                    return;
-                }
-                None => {
-                    // No stage-run ID published yet for this
-                    // execution. For a chat turn this means
-                    // `TurnStarted` hasn't been emitted; for a
-                    // pipeline run it means the interactive slot
-                    // hasn't been minted. Reject.
-                    let resp = error_response("execution not yet started; retry after TurnStarted");
-                    let _ = writer.write_json_line(&resp).await;
-                    return;
-                }
-                _ => {}
-            }
-        }
-
-        // `attach()` checks the nonce under the slot lock, closing the
-        // TOCTOU window between the coarse check above and actual
-        // attachment.
-        let attachment = match debug_target.attach() {
-            Ok(a) => a,
-            Err(err) => {
-                let msg = match err {
-                    crate::clients::interactive::AttachError::NoLongerActive => {
-                        "agent stage is no longer active"
-                    }
-                    crate::clients::interactive::AttachError::Stale => {
-                        "execution has been replaced; target is stale"
-                    }
-                    crate::clients::interactive::AttachError::Busy => "debugger already attached",
+        let bound = match super::input::bind(request, registry, Some(session_task)).await {
+            Ok(bound) => bound,
+            Err(message) => {
+                let message = if message == "chat input requires its owning session" {
+                    format!("target {target_id}: not owned by this session")
+                } else {
+                    message
                 };
-                let resp = error_response(msg);
-                let _ = writer.write_json_line(&resp).await;
+                let _ = writer.write_json_line(&chat_error(request, &message)).await;
+                return;
+            }
+        };
+        let req_id = request
+            .get("req_id")
+            .and_then(Value::as_str)
+            .map(String::from);
+        let enqueue = bound
+            .sender
+            .try_send(req_id.clone().unwrap_or_default(), text.to_owned());
+        let identity = bound.identity.clone();
+        drop(bound);
+        let receipt = match enqueue {
+            Ok(receipt) => receipt,
+            Err(error) => {
+                let _ = writer
+                    .write_json_line(&chat_error(request, &error.to_string()))
+                    .await;
                 return;
             }
         };
 
-        // Preserve the immediate response contract: queued means the live
-        // execution owns the pending request, not that incorporation finished.
-        // Write it before spawning delivery so asynchronous notifications cannot
-        // overtake the request's acknowledgement.
+        // Acknowledge enqueue before any asynchronous receipt notification.
         let response = ok_response(serde_json::json!({
-            "id": target_id,
+            "id": identity.run_id,
             "status": "queued",
             "nonce": target_nonce,
+            "stage_run_id": client_stage_run_id,
+            "req_id": req_id,
         }));
         if writer.write_json_line(&response).await.is_err() {
             return;
         }
-
-        // Spawn a task that holds the attachment, waits for Ready, and
-        // delivers the message. The session dispatcher remains responsive
-        // and does not wait for the agent to process the command.
-        let correction_text = text.to_string();
-        let target_id_for_log = target_id.to_string();
-        let req_id = request
-            .get("req_id")
-            .and_then(|v| v.as_str())
-            .map(|s| s.to_string());
-        let writer_for_error = writer.clone();
-        let stage_run_id_for_task = stage_run_id.clone();
-        let execution_end = debug_target.end_signal();
+        let writer = writer.clone();
         tokio::spawn(async move {
-            // Wait for the agent to accept the pause.
-            let mut attachment = attachment;
-            let ready = tokio::select! {
-                biased;
-                _ = writer_for_error.closed() => return,
-                _ = execution_end.wait() => false,
-                result = &mut attachment.ready => result.is_ok(),
-            };
-            if !ready {
-                log::warn!(
-                    "correction for {}: agent exited before accepting pause",
-                    target_id_for_log
-                );
-                let mut payload = serde_json::json!({
-                    "type": "correction_dropped",
-                    "id": target_id_for_log,
-                    "reason": "agent exited before accepting pause",
-                    "req_id": req_id,
-                });
-                if let Some(ref stage_run_id) = stage_run_id_for_task {
-                    payload["stage_run_id"] = serde_json::Value::String(stage_run_id.clone());
-                }
-                let _ = writer_for_error.write_json_line(&payload).await;
-                return; // Attachment drop resets the pause slot.
-            }
-            // Deliver the correction without amending the system prompt.
-            let (delivery_tx, delivery_rx) = tokio::sync::oneshot::channel();
-            if let Err(e) = attachment.try_send(InteractiveCommand::Message(
-                correction_text.clone(),
-                req_id.clone(),
-                Some(delivery_tx),
-            )) {
-                log::warn!("correction for {}: send failed ({})", target_id_for_log, e);
-                // Notify the owner that the correction was dropped.
-                let mut payload = serde_json::json!({
-                    "type": "correction_dropped",
-                    "id": target_id_for_log,
-                    "reason": format!("command channel closed: {}", e),
-                    "req_id": req_id,
-                });
-                if let Some(ref stage_run_id) = stage_run_id_for_task {
-                    payload["stage_run_id"] = serde_json::Value::String(stage_run_id.clone());
-                }
-                let _ = writer_for_error.write_json_line(&payload).await;
-                return;
-            }
-            // Await delivery confirmation from the agent loop.
+            // A confirmed delivery remains authoritative even after execution ends.
             let delivery = tokio::select! {
-                biased;
-                _ = writer_for_error.closed() => return,
-                result = delivery_rx => result.map_err(|_| ()),
-                _ = execution_end.wait() => Err(()),
+                _ = writer.closed() => return,
+                result = receipt => result.unwrap_or(Delivery::NotDelivered),
             };
-            match delivery {
-                Ok(()) => {
-                    let mut payload = serde_json::json!({
-                        "type": "delivered",
-                        "id": target_id_for_log,
-                        "nonce": target_nonce,
-                        "req_id": req_id,
-                    });
-                    if let Some(ref stage_run_id) = stage_run_id_for_task {
-                        payload["stage_run_id"] = serde_json::Value::String(stage_run_id.clone());
-                    }
-                    let _ = writer_for_error.write_json_line(&payload).await;
-                }
-                Err(_) => {
-                    let mut payload = serde_json::json!({
-                        "type": "correction_dropped",
-                        "id": target_id_for_log,
-                        "reason": "agent exited before incorporation",
-                        "req_id": req_id,
-                    });
-                    if let Some(ref stage_run_id) = stage_run_id_for_task {
-                        payload["stage_run_id"] = serde_json::Value::String(stage_run_id.clone());
-                    }
-                    let _ = writer_for_error.write_json_line(&payload).await;
-                }
-            }
-            // Let the attachment drop naturally — it resets the pause slot
-            // for the next debugger. The agent has already consumed the
-            // command from its inbox.
+            let payload = if delivery == Delivery::Delivered {
+                serde_json::json!({
+                    "type": "delivered",
+                    "id": identity.run_id,
+                    "nonce": target_nonce,
+                    "stage_run_id": client_stage_run_id,
+                    "req_id": req_id,
+                })
+            } else {
+                serde_json::json!({
+                    "type": "correction_dropped",
+                    "id": identity.run_id,
+                    "stage_run_id": client_stage_run_id,
+                    "req_id": req_id,
+                    "reason": "agent exited before incorporation",
+                })
+            };
+            let _ = writer.write_json_line(&payload).await;
         });
 
         return;

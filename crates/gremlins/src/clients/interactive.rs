@@ -158,8 +158,6 @@ impl PauseState {
 pub(crate) struct PauseSlot {
     state: Mutex<PauseState>,
     input_revoker: Mutex<Option<Arc<InputRevoker>>>,
-    /// Only chat slots may reserve debugger commands between executions.
-    chat: bool,
     requested: Arc<Notify>,
     /// End signal for this execution, independently held by snapshots.
     end_signal: Mutex<EndSignal>,
@@ -300,29 +298,43 @@ impl EndSignal {
 /// The published run handle points to one execution at a time. A debugger
 /// snapshots its target *before* validating the active leaf against the store.
 #[derive(Clone, Debug, Default)]
-pub(crate) struct InteractiveHandle(
-    Arc<Mutex<DebugTarget>>,
-    Arc<PauseSlot>,
-    Arc<Mutex<InputRegistry>>,
-);
+pub(crate) struct InteractiveHandle {
+    target: Arc<Mutex<DebugTarget>>,
+    inputs: Arc<Mutex<InputRegistry>>,
+    /// Legacy between-turn reservations used by attachment lifecycle tests.
+    #[cfg(test)]
+    reservation_slot: Option<Arc<PauseSlot>>,
+}
 
 impl InteractiveHandle {
     pub(crate) fn set_input_registry(&self, registry: InputRegistry) {
-        *self.2.lock().unwrap() = registry;
+        *self.inputs.lock().unwrap() = registry;
     }
 
     #[allow(dead_code)] // Internal callers convert separately from legacy attachments.
     pub(crate) fn input_sender(&self, identity: &ExecutionIdentity) -> Option<InputSender> {
-        self.2.lock().unwrap().sender(identity)
+        self.inputs.lock().unwrap().sender(identity)
+    }
+
+    pub(crate) fn resolve_input(
+        &self,
+        run_id: &str,
+        stage_run_id: &str,
+        stage: Option<&str>,
+    ) -> Option<(ExecutionIdentity, InputSender)> {
+        self.inputs
+            .lock()
+            .unwrap()
+            .resolve(run_id, stage_run_id, stage)
     }
 
     pub(crate) fn target(&self) -> DebugTarget {
-        self.0.lock().unwrap().clone()
+        self.target.lock().unwrap().clone()
     }
 
     /// Capture setup intent with the target, before its execution can expire.
     pub(crate) fn attachment_target(&self) -> (DebugTarget, bool) {
-        let target = self.0.lock().unwrap();
+        let target = self.target.lock().unwrap();
         let between_turn = target.registration_only || target.end_signal.is_ended();
         (target.clone(), between_turn)
     }
@@ -338,26 +350,27 @@ impl InteractiveHandle {
     /// the execution as ended.
     #[cfg(test)]
     pub(crate) fn end_signal(&self) -> Option<EndSignal> {
-        let target = self.0.lock().unwrap();
+        let target = self.target.lock().unwrap();
         // A live registration slot before first publication is an observer
         // lifetime, while a dead slot means the registration itself is gone.
         target.slot.upgrade()?;
         Some(target.end_signal.clone())
     }
 
+    #[cfg(test)]
     pub(crate) fn attach_next_turn_debugger(
         &self,
         stage_run_id: Option<String>,
     ) -> Result<DebugAttachment, AttachError> {
-        let slot = self.1.clone();
+        let slot = self.reservation_slot.as_ref().ok_or(AttachError::Busy)?;
         let mut state = slot.state.lock().unwrap_or_else(|e| e.into_inner());
-        if !slot.chat || slot.registration_closed.load(Ordering::Acquire) {
+        if slot.registration_closed.load(Ordering::Acquire) {
             return Err(AttachError::Busy);
         }
         if !matches!(*state, PauseState::Idle) {
             return Err(AttachError::Busy);
         }
-        let target = self.0.lock().unwrap_or_else(|e| e.into_inner());
+        let target = self.target.lock().unwrap_or_else(|e| e.into_inner());
         let nonce = target.nonce;
         let observed_end = target.end_signal.clone();
         // The reservation-state lock serializes this check with `mint`, which
@@ -369,7 +382,7 @@ impl InteractiveHandle {
         }
         drop(target);
         let acquisition = NEXT_LEASE_ID.fetch_add(1, Ordering::Relaxed);
-        let owner = Arc::new(Mutex::new(Arc::downgrade(&slot)));
+        let owner = Arc::new(Mutex::new(Arc::downgrade(slot)));
         let (commands, rx) = mpsc::channel(8);
         let (tx, ready) = oneshot::channel();
         let (terminal, ended) = oneshot::channel();
@@ -388,7 +401,7 @@ impl InteractiveHandle {
         );
         Ok(DebugAttachment {
             owner,
-            reservation_slot: Some(Arc::downgrade(&slot)),
+            reservation_slot: Some(Arc::downgrade(slot)),
             nonce,
             acquisition,
             debugger: true,
@@ -400,7 +413,7 @@ impl InteractiveHandle {
     }
 
     fn publish(&self, slot: &Arc<PauseSlot>) {
-        *self.0.lock().unwrap() = DebugTarget {
+        *self.target.lock().unwrap() = DebugTarget {
             slot: Arc::downgrade(slot),
             nonce: slot.nonce.load(Ordering::Acquire),
             stage_run_id: slot.stage_run_id(),
@@ -691,7 +704,6 @@ pub(crate) struct InteractiveSessionFactory {
     handle: InteractiveHandle,
     /// Current live execution slot.
     current_slot: Option<Arc<PauseSlot>>,
-    chat: bool,
     next_terminal: Option<DebugTerminal>,
     /// Stable chat-registration inbox for between-turn debugger reservations.
     reservation_slot: Arc<PauseSlot>,
@@ -727,32 +739,29 @@ impl InteractiveSessionFactory {
         Self::with_chat(true)
     }
 
-    fn with_chat(chat: bool) -> (Self, InteractiveHandle) {
-        let registration_slot = Arc::new(PauseSlot {
-            chat,
-            ..PauseSlot::default()
-        });
+    fn with_chat(_chat: bool) -> (Self, InteractiveHandle) {
+        let registration_slot = Arc::new(PauseSlot::default());
         // Before the first execution is published, passive observers still
         // need a lifetime to wait on. Keep this registration-only target
         // observation-only; the first mint ends its signal and publishes the
         // actual execution target.
         let registration_signal = registration_slot.current_end_signal();
-        let handle = InteractiveHandle(
-            Arc::new(Mutex::new(DebugTarget {
+        let handle = InteractiveHandle {
+            target: Arc::new(Mutex::new(DebugTarget {
                 slot: Arc::downgrade(&registration_slot),
                 readonly: true,
                 end_signal: registration_signal,
                 registration_only: true,
                 ..DebugTarget::default()
             })),
-            registration_slot.clone(),
-            Arc::default(),
-        );
+            inputs: Arc::default(),
+            #[cfg(test)]
+            reservation_slot: _chat.then(|| registration_slot.clone()),
+        };
         (
             Self {
                 handle: handle.clone(),
                 current_slot: None,
-                chat,
                 next_terminal: None,
                 reservation_slot: registration_slot,
                 next_nonce: 1,
@@ -884,14 +893,13 @@ impl InteractiveSessionFactory {
             // The registration-only observation lifetime ends exactly when
             // the first execution is published.
             self.handle
-                .0
+                .target
                 .lock()
                 .unwrap_or_else(|e| e.into_inner())
                 .end_signal
                 .signal();
         }
         let slot: Arc<PauseSlot> = Arc::new(PauseSlot {
-            chat: self.chat,
             commands_supported: AtomicBool::new(accepts_commands),
             ..PauseSlot::default()
         });
@@ -1054,19 +1062,28 @@ impl InteractiveSession {
         );
         self.input_identity = Some(identity.clone());
         if accepts_commands {
-            let (receiver, revoker) = registry.register(identity, |revoker| {
-                if let Some(cancel) = cancel {
-                    cancel.listen(revoker.clone());
-                }
-                *self
-                    .slot
-                    .input_revoker
-                    .lock()
-                    .unwrap_or_else(|e| e.into_inner()) = Some(revoker.clone());
-                if self.end_signal.is_ended() {
-                    revoker.revoke();
-                }
-            });
+            let alias = self
+                .slot
+                .stage_run_id()
+                .filter(|id| id != &identity.stage_run_id)
+                .map(|stage_run_id| ExecutionIdentity {
+                    stage_run_id,
+                    ..identity.clone()
+                });
+            let (receiver, revoker) =
+                registry.register_with_aliases(identity, alias, Some(self.nonce), |revoker| {
+                    if let Some(cancel) = cancel {
+                        cancel.listen(revoker.clone());
+                    }
+                    *self
+                        .slot
+                        .input_revoker
+                        .lock()
+                        .unwrap_or_else(|e| e.into_inner()) = Some(revoker.clone());
+                    if self.end_signal.is_ended() {
+                        revoker.revoke();
+                    }
+                });
             self.input = Some(receiver);
             self.input_revoker = Some(revoker);
         }
@@ -1375,6 +1392,53 @@ mod input_tests;
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn resolve_input_uses_registry_without_a_published_debug_target() {
+        let handle = super::InteractiveHandle::default();
+        let registry = crate::clients::execution_input::InputRegistry::default();
+        let identity = crate::clients::execution_input::ExecutionIdentity {
+            run_id: "run".into(),
+            stage_run_id: "execution".into(),
+            stage_name: "stage".into(),
+        };
+        let (_receiver, revoker) = registry.register(identity.clone(), |_| {});
+        handle.set_input_registry(registry);
+        let (resolved, sender) = handle.resolve_input("run", "execution", None).unwrap();
+        assert_eq!(resolved, identity);
+        assert_eq!(sender.nonce(), None);
+        assert!(!sender.is_closed());
+        assert!(handle
+            .resolve_input("run", "execution", Some("other"))
+            .is_none());
+        revoker.revoke();
+        assert!(handle.resolve_input("run", "execution", None).is_none());
+    }
+
+    #[tokio::test]
+    async fn input_nonce_stays_bound_to_exact_session_after_replacement() {
+        let (mut sessions, handle) = InteractiveSessionFactory::for_pipeline();
+        let registry = InputRegistry::default();
+        handle.set_input_registry(registry.clone());
+        let mut first = sessions.next_session();
+        let first_nonce = first.nonce;
+        let identity = ExecutionIdentity {
+            run_id: "run".into(),
+            stage_name: "stage".into(),
+            stage_run_id: "execution".into(),
+        };
+        first.bind_input(&registry, identity.clone(), true, None);
+        let (_, sender) = handle.resolve_input("run", "execution", None).unwrap();
+        assert_eq!(sender.nonce(), Some(first_nonce));
+
+        let mut second = sessions.next_session();
+        assert_ne!(second.nonce, first_nonce);
+        second.bind_input(&registry, identity, true, None);
+        let (_, replacement) = handle.resolve_input("run", "execution", None).unwrap();
+        assert_eq!(replacement.nonce(), Some(second.nonce));
+        assert_eq!(sender.nonce(), Some(first_nonce));
+        assert!(sender.is_closed());
+    }
+
     use super::*;
     use futures::FutureExt;
 
