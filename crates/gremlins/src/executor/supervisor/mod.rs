@@ -16,6 +16,7 @@ pub(crate) mod chat;
 pub(crate) mod chat_handle;
 pub(crate) mod chat_system_prompt;
 pub(crate) mod input;
+mod input_wire;
 pub(crate) mod lifecycle;
 pub(crate) mod log_handler;
 pub(crate) mod ops;

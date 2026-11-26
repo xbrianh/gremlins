@@ -237,23 +237,7 @@ async fn forward_passive(
 }
 
 pub(super) fn retired_target_error(request: &Value) -> Option<Value> {
-    for key in ["stage_id", "execution_id"] {
-        if request.get(key).is_some() {
-            return Some(error_response(&format!(
-                "retired '{key}' field; use 'stage_run_id'"
-            )));
-        }
-        if request
-            .get("target")
-            .and_then(|target| target.get(key))
-            .is_some()
-        {
-            return Some(error_response(&format!(
-                "target.{key} is retired; use target.stage_run_id"
-            )));
-        }
-    }
-    None
+    super::input_wire::retired_target_message(request).map(|message| error_response(&message))
 }
 
 // ── Read-only, correlation-filtered watch ─────────────────────────────

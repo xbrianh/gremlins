@@ -9,6 +9,7 @@ use tokio::net::unix::OwnedReadHalf;
 use tokio::sync::mpsc;
 
 use super::error_response;
+use super::input_wire::{self, Command};
 use super::run_registry::{ControllerClaim, RunRegistry};
 use super::session_task::SessionTaskHandle;
 use crate::clients::execution_input::{Delivery, ExecutionIdentity, InputControl, InputSender};
@@ -19,29 +20,6 @@ pub(crate) struct BoundInput {
     _claim: ControllerClaim,
 }
 
-fn required<'a>(value: &'a Value, key: &str) -> Result<&'a str, String> {
-    value
-        .get(key)
-        .and_then(Value::as_str)
-        .filter(|s| !s.trim().is_empty())
-        .ok_or_else(|| format!("missing or invalid '{key}'"))
-}
-
-fn descriptor(request: &Value) -> Result<&Value, String> {
-    let target = request.get("target").unwrap_or(request);
-    if !target.is_object() || target.get("target").is_some() {
-        return Err("target must be a flat descriptor object".into());
-    }
-    if request.get("target").is_some() {
-        for key in ["id", "stage", "stage_run_id", "nonce"] {
-            if request.get(key).is_some() {
-                return Err(format!("'{key}' conflicts with target descriptor"));
-            }
-        }
-    }
-    Ok(target)
-}
-
 /// Resolve once, then acquire exclusive control of that exact invocation.
 /// `owner` must come from the verified socket/session context, never the request.
 pub(crate) async fn bind(
@@ -49,49 +27,16 @@ pub(crate) async fn bind(
     registry: &Arc<RunRegistry>,
     owner: Option<&SessionTaskHandle>,
 ) -> Result<BoundInput, String> {
-    if let Some(error) = super::attachment::retired_target_error(request) {
-        return Err(error["message"]
-            .as_str()
-            .unwrap_or("retired target field")
-            .into());
-    }
-    let fields = request
-        .as_object()
-        .ok_or("input request must be an object")?;
-    for key in fields.keys() {
-        if !matches!(
-            key.as_str(),
-            "op" | "session_id" | "req_id" | "target" | "id" | "stage" | "stage_run_id" | "nonce"
-        ) && !(key == "text" && request["op"] == "chat")
-        {
-            return Err(format!("unsupported input field '{key}'"));
-        }
-    }
-    let target = descriptor(request)?;
-    if request.get("target").is_some() {
-        for key in target.as_object().expect("validated descriptor").keys() {
-            if !matches!(key.as_str(), "id" | "stage" | "stage_run_id" | "nonce") {
-                return Err(format!("unsupported input target field '{key}'"));
-            }
-        }
-    }
-    let nonce = target
-        .get("nonce")
-        .map(|value| {
-            value
-                .as_u64()
-                .filter(|nonce| *nonce != 0)
-                .ok_or_else(|| "missing or invalid 'nonce'".to_string())
-        })
-        .transpose()?;
-    let run_id = required(target, "id")?;
-    crate::executor::gremlin::validate_gremlin_id(run_id).map_err(|e| e.to_string())?;
-    let stage_run_id = required(target, "stage_run_id")?;
-    let stage = if target.get("stage").is_some() {
-        Some(required(target, "stage")?)
-    } else {
-        None
-    };
+    let input_wire::Descriptor {
+        run_id,
+        stage_run_id,
+        stage,
+        nonce,
+    } = input_wire::descriptor(request, |id| {
+        crate::executor::gremlin::validate_gremlin_id(id)
+            .map(|_| ())
+            .map_err(|e| e.to_string())
+    })?;
     let (interactive, store, _) = registry
         .get_run_interactive(run_id)
         .await
@@ -136,28 +81,20 @@ fn command(
     request: &Value,
     sender: &InputSender,
 ) -> Result<crate::clients::execution_input::Receipt, String> {
-    if let Some(error) = super::attachment::retired_target_error(request) {
-        return Err(error["message"]
-            .as_str()
-            .unwrap_or("retired target field")
-            .into());
-    }
-    // A bound connection cannot be redirected, even to a same-name successor.
-    for key in ["target", "id", "stage", "stage_run_id", "nonce"] {
-        if request.get(key).is_some() {
-            return Err(format!("'{key}' is not allowed on a bound input command"));
+    let (req_id, control) = match input_wire::command(request)? {
+        Command::Message { req_id, text } => {
+            return sender
+                .try_send(req_id.to_owned(), text.to_owned())
+                .map_err(|e| e.to_string());
         }
-    }
-    let req_id = required(request, "req_id")?.to_owned();
-    match required(request, "cmd")? {
-        "message" => sender.try_send(req_id, required(request, "text")?.to_owned()),
-        "pause" => sender.try_control(req_id, InputControl::Pause),
-        "step" => sender.try_control(req_id, InputControl::Step),
-        "resume" => sender.try_control(req_id, InputControl::Resume),
-        "bail" => sender.try_control(req_id, InputControl::Bail),
-        _ => return Err("unknown input command".into()),
-    }
-    .map_err(|e| e.to_string())
+        Command::Pause { req_id } => (req_id, InputControl::Pause),
+        Command::Step { req_id } => (req_id, InputControl::Step),
+        Command::Resume { req_id } => (req_id, InputControl::Resume),
+        Command::Bail { req_id } => (req_id, InputControl::Bail),
+    };
+    sender
+        .try_control(req_id.to_owned(), control)
+        .map_err(|e| e.to_string())
 }
 
 const WRITE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
@@ -176,7 +113,7 @@ pub(crate) async fn handle_input(
     reader: BufReader<OwnedReadHalf>,
     writer: &SharedWriter,
 ) {
-    if let Err(message) = required(request, "req_id") {
+    if let Err(message) = input_wire::required(request, "req_id") {
         let mut error = error_response(&message);
         error["req_id"] = request.get("req_id").cloned().unwrap_or(Value::Null);
         let _ = writer.write_json_line(&error).await;
@@ -271,6 +208,19 @@ async fn serve_bound(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn canonical_id_error_precedes_missing_stage_run_id() {
+        for request in [json!({"id":"bad/id"}), json!({"target":{"id":"bad/id"}})] {
+            let expected = crate::executor::gremlin::validate_gremlin_id("bad/id").unwrap_err();
+            let error = input_wire::descriptor(&request, |id| {
+                crate::executor::gremlin::validate_gremlin_id(id).map(|_| ())
+            })
+            .unwrap_err();
+            assert_eq!(error, expected);
+        }
+    }
+
     fn inbox() -> (
         InputSender,
         crate::clients::execution_input::InputReceiver,
@@ -884,10 +834,10 @@ mod tests {
     #[test]
     fn exact_selector_fields_must_be_nonempty_strings() {
         for value in [Value::Null, json!(3), json!(""), json!("  ")] {
-            assert!(required(&json!({"stage_run_id":value}), "stage_run_id").is_err());
+            assert!(input_wire::required(&json!({"stage_run_id":value}), "stage_run_id").is_err());
         }
         assert_eq!(
-            required(&json!({"stage_run_id":"nonce"}), "stage_run_id").unwrap(),
+            input_wire::required(&json!({"stage_run_id":"nonce"}), "stage_run_id").unwrap(),
             "nonce"
         );
     }

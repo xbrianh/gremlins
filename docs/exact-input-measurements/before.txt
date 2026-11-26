@@ -1,0 +1,221 @@
+module                                                    tokens  footprint   comp                maint           drag
+----------------------------------------------------------------------------------------------------------------------
+gremlins                                                                               0.56 (0.54–0.59)       171716.9
+  gremlins::config                                         12010      12618   0.45                               444.3
+  gremlins::prelude                                          120      62153   0.98                               261.3
+  gremlins::model_uri                                       3084       3084   0.82                                87.4
+  gremlins::test_support                                    2821       2821   0.93                                63.1
+  gremlins::task_kind                                        608        608   0.93                                29.8
+  gremlins                                                   140        140   0.91                                14.8
+  gremlins::executor                                                                   0.49 (0.42–0.56)        99910.5
+    gremlins::executor::run_agent                           7203     280162   0.44                              2126.4
+    gremlins::executor::run                                 5862     280162   0.54                              1682.1
+    gremlins::executor::parallel                            5402     280162   0.57                              1531.6
+    gremlins::executor::gremlin                            16233     180946   0.52                              1416.7
+    gremlins::executor::bootstrap                           3997     280162   0.75                               988.9
+    gremlins::executor::state                              29301      44280   0.42                               899.9
+    gremlins::executor::dsl_done                            2268     193858   0.79                               737.4
+    gremlins::executor::run_exec                             832     280994   0.89                               691.4
+    gremlins::executor::exec_runner                         3222      65355   0.61                               684.2
+    gremlins::executor::agent_runner                        2195      51774   0.63                               572.0
+    gremlins::executor::accounting                          2104      44280   0.65                               504.8
+    gremlins::executor::blob_io                             1057      45337   0.81                               345.6
+    gremlins::executor::stage_invocation_tests             11291      11291   0.58                               302.7
+    gremlins::executor                                       860      45402   0.88                               291.2
+    gremlins::executor::vars                                1804       1804   0.62                               110.2
+    gremlins::executor::socket                              3012       3012   0.82                                86.4
+    gremlins::executor::stage_boundary                       564       3290   1.00                                57.4
+    gremlins::executor::supervisor                                                     0.62 (0.56–0.68)        50664.3
+      gremlins::executor::supervisor::attachment            4285     284447   0.61                              1405.2
+      gremlins::executor::supervisor::input                 2521     282683   0.61                              1400.8
+      gremlins::executor::supervisor::session               3519     280162   0.73                              1036.3
+      gremlins::executor::supervisor::session_task          7993     280162   0.74                              1004.4
+      gremlins::executor::supervisor::log_handler           2059     280162   0.77                               943.6
+      gremlins::executor::supervisor                        2504     280162   0.78                               914.6
+      gremlins::executor::supervisor::run_registry          6880     191590   0.71                               912.3
+      gremlins::executor::supervisor::lifecycle             1942     191590   0.77                               780.3
+      gremlins::executor::supervisor::state_view            1685     280162   0.89                               690.3
+      gremlins::executor::supervisor::tests                15269      15269   0.64                               305.8
+      gremlins::executor::supervisor::pending_scope         1822      46102   0.91                               267.2
+      gremlins::executor::supervisor::chat_handle            732      10752   1.00                               103.7
+      gremlins::executor::supervisor::prompt_msg             549       9004   0.99                                96.4
+      gremlins::executor::supervisor::log_handler_test      2569       2569   0.75                                94.7
+      gremlins::executor::supervisor::chat_system_prom       583        583   0.79                                41.1
+      gremlins::executor::supervisor::artifact_test_su       391        391   0.93                                23.5
+      gremlins::executor::supervisor::test_provider          316        316   0.98                                18.7
+      gremlins::executor::supervisor::ops                                              0.60 (0.58–0.62)        12907.2
+        gremlins::executor::supervisor::ops::control        6106     280162   0.50                              1847.5
+        gremlins::executor::supervisor::ops::query          3534     280162   0.69                              1156.1
+        gremlins::executor::supervisor::ops::model          1436     280162   0.76                               958.4
+        gremlins::executor::supervisor::ops                  624     280162   0.86                               746.4
+        gremlins::executor::supervisor::ops::snapshot_       963        963   0.90                                39.9
+      gremlins::executor::supervisor::chat                                             0.67 (0.61–0.72)         7648.3
+        gremlins::executor::supervisor::chat::turn          3703     280162   0.67                              1211.6
+        gremlins::executor::supervisor::chat::turn_run      2362     280162   0.76                               973.5
+        gremlins::executor::supervisor::chat                4872     280162   0.77                               943.6
+        gremlins::executor::supervisor::chat::payload        175       9179   0.84                               143.8
+        gremlins::executor::supervisor::chat::turn_run       625        625   0.84                                37.6
+      gremlins::executor::supervisor::tests                                            0.68 (0.64–0.72)         4151.1
+        gremlins::executor::supervisor::tests::correct     11057      11057   0.59                               294.9
+        gremlins::executor::supervisor::tests::resume_      9952       9952   0.66                               235.6
+        gremlins::executor::supervisor::tests::exact_i      9386       9386   0.66                               225.3
+        gremlins::executor::supervisor::tests::home_bu      5475       5475   0.65                               177.5
+        gremlins::executor::supervisor::tests::watch        6146       6146   0.68                               176.7
+        gremlins::executor::supervisor::tests::paused_      3431       3431   0.61                               156.8
+        gremlins::executor::supervisor::tests::home_id      3127       3127   0.66                               132.1
+        gremlins::executor::supervisor::tests::resume_      2213       2213   0.62                               120.2
+        gremlins::executor::supervisor::tests::resume_      3460       3460   0.72                               117.0
+        gremlins::executor::supervisor::tests::resume_      2732       2732   0.80                                86.2
+        gremlins::executor::supervisor::tests::resume_      1650       1650   0.77                                72.4
+        gremlins::executor::supervisor::tests::log_iso      1774       1774   0.79                                70.6
+    gremlins::executor::state                                                          0.64 (0.59–0.68)         2365.7
+      gremlins::executor::state::resume                     3235      47515   0.56                               661.0
+      gremlins::executor::state::publication_tests          4939       4939   0.66                               166.0
+      gremlins::executor::state::publication_boundary_      2571       2571   0.76                                91.8
+      gremlins::executor::state::revision                    483        483   0.86                                31.0
+    gremlins::executor::run_agent                                                      0.69 (0.65–0.72)          254.2
+      gremlins::executor::run_agent::bail_tests             2116       2116   0.63                               115.7
+  gremlins::clients                                                                    0.55 (0.53–0.56)        49796.0
+    gremlins::clients::openai_protocol                      2540      60965   0.76                               454.1
+    gremlins::clients::client                               3727      63599   0.78                               442.6
+    gremlins::clients                                        790      64714   0.88                               342.3
+    gremlins::clients::config                               6986      19604   0.65                               335.9
+    gremlins::clients::native                               1276      56617   0.97                               257.3
+    gremlins::clients::chatgpt_auth                         3378      22982   0.81                               246.1
+    gremlins::clients::backend                              2464      19578   0.83                               213.4
+    gremlins::clients::compaction                           1370       5264   0.62                               185.3
+    gremlins::clients::request_usage_tests                  7258       7258   0.71                               177.6
+    gremlins::clients::shell_parse                          4496       4496   0.68                               148.8
+    gremlins::clients::github_auth                          4359       6183   0.76                               142.4
+    gremlins::clients::interactive                          2304       6046   0.78                               134.4
+    gremlins::clients::conversation                         3224       3224   0.69                               122.1
+    gremlins::clients::lazy_auth_http                       1902       3726   0.78                               107.1
+    gremlins::clients::naked_conversation                   1514       4738   0.88                                94.1
+    gremlins::clients::execution_input                      2726       2726   0.78                                91.7
+    gremlins::clients::protocol                              670       3894   0.91                                78.9
+    gremlins::clients::token_provider                       1824       1824   0.79                                71.5
+    gremlins::clients::path_context                         1895       3909   0.96                                69.8
+    gremlins::clients::stream_json                          1625       1625   0.79                                67.5
+    gremlins::clients::azure_openai_responses_http          1570       1570   0.84                                59.5
+    gremlins::clients::cancels                               679       1695   0.88                                56.3
+    gremlins::clients::anthropic_bearer_http                 925        925   0.78                                52.6
+    gremlins::clients::format                               1339       1339   0.87                                50.8
+    gremlins::clients::cancel                                754       1016   0.86                                45.0
+    gremlins::clients::request_usage                         990        990   0.88                                42.4
+    gremlins::clients::params                               1031       1031   0.94                                37.6
+    gremlins::clients::copilot_test_support                  325        325   0.96                                19.8
+    gremlins::clients::error                                 262        262   0.94                                18.7
+    gremlins::clients::usage_normalize                       150        150   0.87                                17.1
+    gremlins::clients::backends                                                        0.58 (0.50–0.66)        14558.1
+      gremlins::clients::backends::anthropic                4220      85919   0.56                               888.9
+      gremlins::clients::backends::azure_openai             2235      88768   0.69                               650.8
+      gremlins::clients::backends::copilot                  6356      70916   0.69                               581.7
+      gremlins::clients::backends::chatgpt                  1411      85093   0.86                               411.4
+      gremlins::clients::backends::cmd                      3890      25093   0.67                               362.6
+      gremlins::clients::backends::openrouter                569      61534   0.89                               328.6
+      gremlins::clients::backends::openai                    166      61131   0.90                               317.5
+      gremlins::clients::backends::xai                       160      61125   0.92                               302.9
+      gremlins::clients::backends                           2126      21704   0.91                               186.2
+      gremlins::clients::backends::chatgpt                                             0.61 (0.59–0.64)         2188.6
+        gremlins::clients::backends::chatgpt::run_test     15616      15616   0.46                               479.1
+        gremlins::clients::backends::chatgpt::catalog       1218      24200   0.91                               196.7
+        gremlins::clients::backends::chatgpt::oauth          389      23371   0.98                               160.2
+      gremlins::clients::backends::copilot                                             0.74 (0.72–0.75)          851.6
+        gremlins::clients::backends::copilot::catalog       1760      70916   0.80                               439.1
+    gremlins::clients::tools                                                           0.60 (0.58–0.63)        10979.5
+      gremlins::clients::tools::tests                      34499      34499   0.57                               537.5
+      gremlins::clients::tools::dispatch                    1237      26626   0.78                               286.4
+      gremlins::clients::tools::sandbox                     2411      20026   0.77                               252.3
+      gremlins::clients::tools                               185      27697   0.95                               188.6
+      gremlins::clients::tools::registry                    1628      12192   0.92                               135.3
+      gremlins::clients::tools::defaults                     506      13119   0.95                               129.8
+      gremlins::clients::tools::runtime                     1484       9225   0.93                               115.9
+      gremlins::clients::tools::schema                      1264       4809   0.82                               109.1
+      gremlins::clients::tools::definitions                  886       4431   0.91                                84.2
+      gremlins::clients::tools::tool_specs                  3545       3545   0.97                                64.4
+      gremlins::clients::tools::util                         554        554   0.88                                32.2
+      gremlins::clients::tools::handlers                                               0.68 (0.62–0.74)         5783.6
+        gremlins::clients::tools::handlers::edit            9076      21822   0.51                               499.8
+        gremlins::clients::tools::handlers::websearch       1920      25071   0.72                               319.9
+        gremlins::clients::tools::handlers::bash            2571      23151   0.79                               254.8
+        gremlins::clients::tools::handlers::read            1547      14293   0.77                               213.1
+        gremlins::clients::tools::handlers::grep            2592      15338   0.82                               194.8
+        gremlins::clients::tools::handlers::landscape       1190      13936   0.82                               185.7
+        gremlins::clients::tools::handlers::task             713      13459   0.88                               158.6
+        gremlins::clients::tools::handlers::glob             828      13574   0.91                               147.3
+        gremlins::clients::tools::handlers::write            624      13370   0.95                               131.0
+        gremlins::clients::tools::handlers::skills           543      13289   0.97                               122.7
+        gremlins::clients::tools::handlers::done             342      13088   0.97                               121.8
+        gremlins::clients::tools::handlers                   421      12613   0.99                               115.9
+        gremlins::clients::tools::handlers::mischief         184      12376   1.00                               111.3
+        gremlins::clients::tools::handlers::edit                                       0.82 (0.77–0.88)           49.1
+          gremlins::clients::tools::handlers::edit::re       691        691   0.93                                31.7
+    gremlins::clients::agent                                                           0.57 (0.53–0.62)        10966.3
+      gremlins::clients::agent::agent_loop                 11203      54662   0.54                               743.0
+      gremlins::clients::agent::task                        2143      31466   0.47                               659.1
+      gremlins::clients::agent::stream_consume              1935      57587   0.64                               584.7
+      gremlins::clients::agent::done_assess                 1804      54662   0.70                               495.0
+      gremlins::clients::agent::turn_flow                   3724      58556   0.73                               473.8
+      gremlins::clients::agent::run_context                  646      23769   0.82                               242.6
+      gremlins::clients::agent::interactive                  646       9916   0.83                               151.8
+      gremlins::clients::agent::task_models                 1626       2234   0.92                                57.9
+      gremlins::clients::agent::system_prompts               984        984   0.84                                46.4
+      gremlins::clients::agent                                81         81   0.56                                27.5
+      gremlins::clients::agent::done_helpers                 170        170   0.99                                13.3
+      gremlins::clients::agent::agent_loop                                             0.72 (0.72–0.72)          853.1
+        gremlins::clients::agent::agent_loop::accounti      6438       6438   0.59                               225.0
+        gremlins::clients::agent::agent_loop::input_te      6060       6060   0.71                               162.3
+        gremlins::clients::agent::agent_loop::interrup       818        818   0.85                                41.6
+    gremlins::clients::interactive                                                     0.64 (0.57–0.71)          247.2
+      gremlins::clients::interactive::input_tests           3956       3956   0.81                               100.5
+  gremlins::builders                                                                   0.53 (0.47–0.59)         5447.1
+    gremlins::builders::definition                          4272      55809   0.60                               642.2
+    gremlins::builders::exec                                1749      27158   0.77                               293.8
+    gremlins::builders::agent                               2284      27693   0.78                               287.5
+    gremlins::builders                                       437      62470   0.97                               266.1
+    gremlins::builders::composite                           2191      16850   0.91                               164.1
+    gremlins::builders::artifacts                            632        632   0.95                                28.5
+  gremlins::definition                                                                 0.67 (0.60–0.74)         5438.7
+    gremlins::definition::chat                              1919      55809   0.84                               354.6
+    gremlins::definition                                    2805      55809   0.88                               322.9
+    gremlins::definition::static                                                       0.51 (0.43–0.59)         3892.6
+      gremlins::definition::static::expand                 11041      11041   0.38                               493.5
+      gremlins::definition::static::yaml                    9217       9217   0.66                               226.7
+      gremlins::definition::static                          5315       5315   0.64                               180.5
+      gremlins::definition::static::loader                  1973       1973   0.51                               150.3
+      gremlins::definition::static::bundle                   600        600   0.81                                39.8
+      gremlins::definition::static::prompts                  709        709   0.86                                38.2
+      gremlins::definition::static::resolve                  190        190   0.98                                14.5
+  gremlins::core                                                                       0.52 (0.42–0.62)         2505.8
+    gremlins::core::proc                                   14499      14499   0.47                               447.4
+    gremlins::core::env_file                                2017      16516   0.94                               150.3
+    gremlins::core::paths                                   2014       2014   0.80                                74.0
+    gremlins::core::logging                                  119        119   1.00                                11.0
+    gremlins::core                                            27         27   0.91                                 6.7
+    gremlins::core::discovery                                                          0.68 (0.64–0.71)          217.3
+      gremlins::core::discovery                             1559       1703   0.72                                83.4
+      gremlins::core::discovery::error                       144        144   0.97                                13.0
+  gremlins::stage_spec                                                                 0.51 (0.45–0.57)         1726.9
+    gremlins::stage_spec::node                              5064      14659   0.77                               215.8
+    gremlins::stage_spec::parallel                           866       4079   0.93                                75.9
+    gremlins::stage_spec::sequence                           104       3317   0.93                                68.4
+    gremlins::stage_spec::agent                              167       2012   0.90                                57.6
+    gremlins::stage_spec::done_check                         829       1845   1.00                                43.0
+    gremlins::stage_spec::exec                                67         67   0.81                                13.4
+    gremlins::stage_spec::composite                          129        129   0.94                                13.3
+    gremlins::stage_spec::constants                           88         88   0.89                                12.3
+    gremlins::stage_spec                                      33         33   0.89                                 7.6
+  gremlins::schemas                                                                    0.65 (0.63–0.66)         1619.3
+    gremlins::schemas::bootstrap                            3176      55809   0.71                               492.4
+    gremlins::schemas::error                                 632      14659   0.86                               170.7
+    gremlins::schemas                                          8          8   0.94                                 3.5
+  gremlins::conversation                                                               0.70 (0.65–0.75)         1195.1
+    gremlins::conversation::standard                        4079      29500   0.66                               399.4
+    gremlins::conversation::compaction                      2964       6858   0.76                               150.0
+    gremlins::conversation                                   119        119   0.87                                15.2
+  gremlins::artifacts                                                                  0.69 (0.66–0.71)         1015.5
+    gremlins::artifacts::resolve                            1483      45763   0.71                               438.9
+    gremlins::artifacts::uri                                 257        257   0.93                                19.4
+    gremlins::artifacts                                        8          8   0.91                                 3.7
+  gremlins::skills                                                                     0.62 (0.60–0.65)          390.1
+    gremlins::skills                                        5371       5371   0.71                               152.8
