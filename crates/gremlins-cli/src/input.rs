@@ -4,8 +4,8 @@ use serde_json::Value;
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 use tokio::io::BufReader;
-use tokio::net::{unix::OwnedWriteHalf, UnixStream};
-use tokio::sync::{oneshot, Mutex as AsyncMutex};
+use tokio::net::UnixStream;
+use tokio::sync::{mpsc, oneshot};
 use tokio::task::JoinHandle;
 
 type Reply = oneshot::Sender<Result<(), String>>;
@@ -20,6 +20,7 @@ struct Shared {
     state: Mutex<State>,
     // A separate descriptor permits synchronous shutdown even during a write.
     shutdown: std::os::unix::net::UnixStream,
+    failed: tokio::sync::Notify,
 }
 
 impl Shared {
@@ -32,13 +33,17 @@ impl Shared {
                 let _ = reply.send(Err(error.clone()));
             }
         }
+        self.failed.notify_one();
         let _ = self.shutdown.shutdown(std::net::Shutdown::Both);
     }
 
     fn receipt(&self, frame: Value) -> Result<(), String> {
         let kind = required(&frame, "type")?;
         if kind == "ended" {
-            return Err("input ended without confirmation".into());
+            return Err(format!(
+                "input ended without confirmation: {}",
+                frame["reason"].as_str().unwrap_or("target ended")
+            ));
         }
         if !matches!(kind, "queued" | "delivered" | "dropped" | "error") {
             return Err("unexpected input receipt".into());
@@ -65,7 +70,8 @@ impl Shared {
 
 pub(crate) struct InputClient {
     shared: Arc<Shared>,
-    writer: Arc<AsyncMutex<OwnedWriteHalf>>,
+    commands: mpsc::UnboundedSender<Value>,
+    writer: JoinHandle<()>,
     reader: JoinHandle<()>,
 }
 
@@ -99,6 +105,7 @@ impl InputClient {
         let shared = Arc::new(Shared {
             state: Mutex::new(State::default()),
             shutdown,
+            failed: tokio::sync::Notify::new(),
         });
         let task_shared = shared.clone();
         let reader = tokio::spawn(async move {
@@ -117,11 +124,37 @@ impl InputClient {
                 }
             }
         });
+        let (commands, mut queued) = mpsc::unbounded_channel::<Value>();
+        let task_shared = shared.clone();
+        let writer = tokio::spawn(async move {
+            let mut write = write;
+            while let Some(command) = queued.recv().await {
+                if task_shared.state.lock().unwrap().failure.is_some() {
+                    break;
+                }
+                if let Err(error) = socket::write_json_line(&mut write, &command).await {
+                    task_shared.fail(error);
+                    break;
+                }
+            }
+        });
         Ok(Self {
             shared,
-            writer: Arc::new(AsyncMutex::new(write)),
+            commands,
+            writer,
             reader,
         })
+    }
+
+    /// Wait for target termination or loss of the input connection, even when idle.
+    pub(crate) async fn wait_failed(&self) -> String {
+        loop {
+            let notified = self.shared.failed.notified();
+            if let Some(error) = self.shared.state.lock().unwrap().failure.clone() {
+                return error;
+            }
+            notified.await;
+        }
     }
 
     pub(crate) fn is_failed(&self) -> bool {
@@ -130,12 +163,15 @@ impl InputClient {
 
     pub(crate) fn close(&self) {
         self.shared.fail("input client closed");
+        self.writer.abort();
     }
 
     pub(crate) fn has_pending(&self) -> bool {
         !self.shared.state.lock().unwrap().pending.is_empty()
     }
 
+    /// Enqueue synchronously; the returned future resolves only on a final receipt.
+    /// Dropping that future does not cancel submission or release its request ID.
     pub(crate) fn send(
         &self,
         command: Value,
@@ -160,19 +196,14 @@ impl InputClient {
                 return Err("duplicate inflight input req_id".into());
             }
             state.pending.insert(id, reply);
+            // Register and enqueue synchronously under the same lock, preserving
+            // submission order even across concurrent callers. Dropping the receipt
+            // future cannot interrupt a JSON line or remove its receipt slot.
+            if self.commands.send(command).is_err() {
+                drop(state);
+                self.shared.fail("input writer closed");
+            }
         }
-        // Cancellation must not interrupt a JSON line or remove its receipt slot.
-        let writer = self.writer.clone();
-        let shared = self.shared.clone();
-        tokio::spawn(async move {
-            let mut writer = writer.lock().await;
-            if shared.state.lock().unwrap().failure.is_some() {
-                return;
-            }
-            if let Err(error) = socket::write_json_line(&mut *writer, &command).await {
-                shared.fail(error);
-            }
-        });
         Ok(received)
     }
 }
@@ -314,6 +345,57 @@ mod tests {
         )
         .await;
         assert_eq!(task.await.unwrap().err().unwrap(), "controller busy");
+    }
+
+    #[tokio::test]
+    async fn batch_submission_preserves_wire_order_and_receipts() {
+        let (client, mut peer) = bound().await;
+        let commands = [
+            json!({"cmd":"message","req_id":"m","text":"hello"}),
+            json!({"cmd":"pause","req_id":"p"}),
+            json!({"cmd":"step","req_id":"s"}),
+            json!({"cmd":"resume","req_id":"r"}),
+            json!({"cmd":"bail","req_id":"b","reason":"stop"}),
+        ];
+        // No yield or polling of receipt futures between submissions. Even a
+        // canceled receipt must leave its command in the FIFO and its slot live.
+        let canceled = client.send(json!({"cmd":"pause","req_id":"canceled"}));
+        drop(canceled);
+        let mut receipts = Vec::new();
+        for command in &commands {
+            receipts.push(client.send(command.clone()));
+        }
+        assert_eq!(client.shared.state.lock().unwrap().pending.len(), 6);
+        assert!(client
+            .send(json!({"cmd":"step","req_id":"canceled"}))
+            .await
+            .unwrap_err()
+            .contains("duplicate"));
+
+        assert_eq!(
+            frame(&mut peer).await,
+            json!({"cmd":"pause","req_id":"canceled"})
+        );
+        for command in &commands {
+            assert_eq!(frame(&mut peer).await, *command);
+        }
+        // All controls reached the wire before any terminal receipt. Complete
+        // out of order to verify each future receives its own result.
+        emit(&mut peer, json!({"type":"queued","req_id":"m"})).await;
+        for id in ["b", "r", "s", "p", "canceled"] {
+            emit(&mut peer, json!({"type":"delivered","req_id":id})).await;
+        }
+        emit(&mut peer, json!({"type":"dropped","req_id":"m"})).await;
+        for (index, receipt) in receipts.into_iter().enumerate() {
+            let result = timeout(Duration::from_secs(2), receipt).await.unwrap();
+            if index == 0 {
+                assert_eq!(result.unwrap_err(), "input not delivered (dropped)");
+            } else {
+                assert!(result.is_ok());
+            }
+        }
+        assert!(!client.has_pending());
+        assert!(!client.is_failed());
     }
 
     #[tokio::test]

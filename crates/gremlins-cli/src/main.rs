@@ -152,10 +152,17 @@ enum Cmds {
         /// Gremlin id whose log to follow.
         id: String,
     },
-    /// Interactively debug a running gremlin in an agent stage.
+    /// Send input only to known run and stage invocation IDs.
+    ///
+    /// Controls: /pause, /step, /continue (resume), /quit [reason] (bail).
+    /// /exit and EOF close locally after final receipts; observe via the bus-backed UI.
     Debug {
-        /// Gremlin id to debug.
+        /// Known run ID.
+        #[arg(value_name = "RUN_ID")]
         id: String,
+        /// Exact known stage invocation ID.
+        #[arg(value_name = "STAGE_RUN_ID")]
+        stage_run_id: String,
     },
     /// Remove a gremlin's filesystem assets.
     Clean {
@@ -334,7 +341,7 @@ async fn run_cli(cli: Cli, scope: Option<std::ffi::OsString>) {
             .await
         }
         Some(Cmds::Log { id }) => log_gremlin(&id).await,
-        Some(Cmds::Debug { id }) => debug_gremlin(&id).await,
+        Some(Cmds::Debug { id, stage_run_id }) => debug_gremlin(&id, &stage_run_id).await,
         Some(Cmds::Clean { id, keep }) => clean(&id, keep).await,
         Some(Cmds::Rm { id, all, purge }) => {
             if all {
@@ -1320,307 +1327,149 @@ async fn log_gremlin(id: &str) -> Result<(), String> {
     Ok(())
 }
 
-fn debug_frame_matches(frame: &Value, attachment: &Value) -> bool {
-    ["id", "scope", "stage_run_id", "nonce"].iter().all(|key| {
-        match (frame.get(key), attachment.get(key)) {
-            (Some(actual), Some(expected)) => actual == expected,
-            _ => true, // Session-level frames may omit invocation identity.
-        }
-    })
-}
-
-/// Interactive debug session for a running gremlin.
-///
-/// Connects to the executor socket, sends
-/// `{"op": "attach", "scope": "conversation", "id": "...", "mode": "debugger"}`,
-/// and enters an interactive line-based loop. Plain text becomes
-/// `{"op": "message", "text": "..."}` (deliver and resume autonomously).
-/// Slash commands: `/step`, `/continue`, `/exit`, `/quit [reason]`.
-async fn debug_gremlin(id: &str) -> Result<(), String> {
+/// Input-only session bound to one exact stage invocation.
+async fn debug_gremlin(id: &str, stage_run_id: &str) -> Result<(), String> {
     config::init_global().map_err(|e| e.to_string())?;
-
     validate_gremlin_id(id).map_err(|_| {
         format!("invalid gremlin id {id:?} — ids may contain only letters, numbers, '-', and '_'")
     })?;
 
-    let mut stream = match spawn::connect().await {
-        Ok(s) => s,
-        Err(_) => {
-            return Err("no executor running — start one with `gremlins launch ...`".to_string())
-        }
-    };
-
+    let mut stream = spawn::connect().await?;
     spawn::check_version(&mut stream).await?;
+    let input = input::InputClient::bind(
+        stream,
+        serde_json::json!({
+            "op": "input", "id": id, "stage_run_id": stage_run_id, "req_id": "bind"
+        }),
+    )
+    .await?;
 
-    let request = serde_json::json!({
-        "op": "attach", "scope": "conversation", "id": id, "mode": "debugger"
-    });
-    log::debug!("debug: sending request: {request}");
-    socket::write_json_line(&mut stream, &request).await?;
-    log::debug!("debug: request sent, waiting for agent to pause…");
-
-    eprintln!("debug: waiting for agent to pause…");
-
-    let (read_half, mut write_half) = stream.into_split();
-    let mut reader = tokio::io::BufReader::new(read_half);
-
-    // Spawn a blocking stdin reader thread so we can watch for /quit
-    // during the ready-wait phase without blocking the async runtime.
-    let (stdin_tx, mut stdin_rx) = tokio::sync::mpsc::unbounded_channel::<String>();
+    const MAX_LINE_BYTES: usize = 64 * 1024;
+    const MAX_OUTSTANDING: usize = 128;
+    // Backpressure the pipe without blocking controls behind delivery receipts.
+    let (stdin_tx, mut stdin_rx) = tokio::sync::mpsc::channel::<Result<String, String>>(16);
     std::thread::spawn(move || {
         let stdin = std::io::stdin();
-        let mut line_buf = String::new();
+        let mut stdin = stdin.lock();
         loop {
-            line_buf.clear();
-            match std::io::BufRead::read_line(&mut stdin.lock(), &mut line_buf) {
+            let mut line = String::new();
+            if stdin_tx.is_closed() {
+                break;
+            }
+            let mut limited = std::io::Read::take(&mut stdin, (MAX_LINE_BYTES + 1) as u64);
+            match std::io::BufRead::read_line(&mut limited, &mut line) {
                 Ok(0) => break,
                 Ok(_) => {
-                    let trimmed = line_buf.trim().to_string();
-                    if trimmed.is_empty() {
-                        continue;
+                    if line.len() > MAX_LINE_BYTES {
+                        let _ = stdin_tx.blocking_send(Err(format!(
+                            "stdin line exceeds {MAX_LINE_BYTES} bytes"
+                        )));
+                        break;
                     }
-                    if stdin_tx.send(trimmed).is_err() {
+                    let command = line.trim();
+                    let closes =
+                        matches!(command, "/exit" | "/quit") || command.starts_with("/quit ");
+                    if stdin_tx.blocking_send(Ok(line)).is_err() || closes {
                         break;
                     }
                 }
-                Err(_) => break,
+                Err(error) => {
+                    let _ = stdin_tx.blocking_send(Err(format!("read stdin: {error}")));
+                    break;
+                }
             }
         }
     });
 
-    // Wait for ready, but also watch for /quit from stdin.
-    // Use a channel-based socket reader so the read future is never
-    // dropped when stdin input wins the select — no buffered data is lost.
-    let (sock_tx, mut sock_rx) =
-        tokio::sync::mpsc::unbounded_channel::<Result<Option<Value>, String>>();
-    tokio::spawn(async move {
-        loop {
-            let result = socket::read_json_line(&mut reader).await;
-            let done = result.as_ref().ok().is_none_or(|o| o.is_none());
-            let _ = sock_tx.send(result);
-            if done {
-                break;
-            }
-        }
-    });
-
-    let mut stdin_closed = false;
-    let mut attachment = None;
+    let mut counter = 0u64;
+    let mut closing = false;
+    let mut session_failure = None;
+    let mut receipts = tokio::task::JoinSet::<Result<(), String>>::new();
     loop {
-        let line = if stdin_closed {
-            match sock_rx.recv().await {
-                Some(Ok(v)) => v,
-                Some(Err(e)) => return Err(e),
-                None => return Err("connection closed before ready".to_string()),
-            }
-        } else {
-            tokio::select! {
-                sock_result = sock_rx.recv() => {
-                    match sock_result {
-                        Some(Ok(v)) => v,
-                        Some(Err(e)) => return Err(e),
-                        None => return Err("connection closed before ready".to_string()),
-                    }
-                }
-                stdin_line = stdin_rx.recv() => {
-                    match stdin_line {
-                        Some(l) if l == "/quit" => {
-                            let cmd = serde_json::json!({"op": "bail", "reason": "operator stopped"});
-                            let _ = socket::write_json_line(&mut write_half, &cmd).await;
-                            eprintln!("debug: cancelled");
-                            return Ok(());
-                        }
-                        Some(l) if l.starts_with("/quit ") => {
-                            let reason = l.strip_prefix("/quit ").unwrap().trim();
-                            let cmd = serde_json::json!({"op": "bail", "reason": reason});
-                            let _ = socket::write_json_line(&mut write_half, &cmd).await;
-                            eprintln!("debug: cancelled");
-                            return Ok(());
-                        }
-                        Some(l) if l == "/continue" || l == "/exit" => {
-                            let cmd = serde_json::json!({"op": "quit"});
-                            let _ = socket::write_json_line(&mut write_half, &cmd).await;
-                            eprintln!("debug: resumed");
-                            return Ok(());
-                        }
-                        Some(_) => continue, // discard other input during wait
-                        None => {
-                            stdin_closed = true;
-                            continue;
-                        }
-                    }
-                }
-            }
-        };
-
-        if let (Some(frame), Some(bound)) = (&line, &attachment) {
-            if !debug_frame_matches(frame, bound) {
-                continue;
+        if closing {
+            stdin_rx.close();
+            if receipts.is_empty() {
+                return session_failure.map_or(Ok(()), Err);
             }
         }
-
-        match line {
-            Some(ref l) if l.get("type").and_then(|v| v.as_str()) == Some("error") => {
-                let msg = l
-                    .get("message")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("unknown error");
-                log::debug!("debug: received error: {msg}");
-                return Err(msg.to_string());
-            }
-            Some(ref l) if l.get("type").and_then(|v| v.as_str()) == Some("attached") => {
-                if attachment.is_none() {
-                    attachment = Some(l.clone());
-                }
-                log::debug!("debug: received attached for {id}");
-                let scope = l
-                    .get("scope")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("conversation");
-                eprintln!("debug: attached ({scope}) to gremlin {id}");
+        let line = tokio::select! {
+            biased;
+            // Final receipts own the delivery outcome. Once closing, a later
+            // end/disconnect must not override confirmations already received.
+            receipt = receipts.join_next(), if !receipts.is_empty() => {
+                receipt.unwrap().map_err(|error| format!("receipt task failed: {error}"))??;
                 continue;
-            }
-            Some(ref l) if l.get("type").and_then(|v| v.as_str()) == Some("ready") => {
-                log::debug!("debug: received ready for {id}");
-                eprintln!("debug: connected to gremlin {id}");
-                break;
-            }
-            Some(ref other) => {
-                log::debug!("debug: ignoring message during ready-wait: {other}");
+            },
+            error = input.wait_failed(), if !closing => {
+                // The transport has already resolved every registered receipt.
+                // Drain those results before reporting a session-level failure.
+                session_failure = Some(error);
+                closing = true;
                 continue;
-            }
-            None => {
-                log::debug!("debug: connection closed before ready");
-                return Err("connection closed before ready".to_string());
-            }
-        }
-    }
-
-    log::debug!("debug: connected to {id}, entering interactive loop");
-
-    // Tail the last ~20 lines of the gremlin log for immediate context.
-    // Read only the tail of the file (append-only log, no rotation) so
-    // startup time and memory stay bounded regardless of log length.
-    // Resolve the log through the latest attempt directory — the log is
-    // carried forward on `--stage` resume, so the attempt dir always
-    // has the full history.
-    let log_path = FileSystemStateStore::open(id)
-        .map(|store| store.root_dir().join("log"))
-        .unwrap_or_else(|_| config::state_root().join(id).join("log"));
-    if let Ok(lines) = tail_log_lines(&log_path, 20).await {
-        for line in &lines {
-            eprintln!("log: {line}");
-        }
-    }
-
-    // Drain any stdin lines queued during the ready-wait phase so they
-    // don't leak into the active-session loop as spurious commands.
-    while stdin_rx.try_recv().is_ok() {}
-
-    // Spawn a reader task to print agent events from the socket channel.
-    // Keep displaying only the invocation advertised by the attachment.
-    let read_handle = tokio::spawn(async move {
-        while let Some(Ok(Some(line))) = sock_rx.recv().await {
-            if let Some(bound) = &attachment {
-                if !debug_frame_matches(&line, bound) {
+            },
+            line = stdin_rx.recv(), if !closing => match line {
+                Some(line) => line?,
+                None => {
+                    closing = true;
                     continue;
                 }
-            }
-            let typ = line.get("type").and_then(|v| v.as_str()).unwrap_or("");
-            match typ {
-                "turn_complete" => {
-                    let text = line.get("text").and_then(|v| v.as_str()).unwrap_or("");
-                    let tool_calls = line.get("tool_calls").and_then(|v| v.as_array());
-                    if !text.is_empty() {
-                        eprintln!("{text}");
-                    }
-                    if let Some(tcs) = tool_calls {
-                        for tc in tcs {
-                            if let Some(name) = tc.as_str() {
-                                eprintln!("  [tool: {name}]");
-                            }
-                        }
-                    }
-                    eprintln!("debug: turn complete");
-                }
-                "done" => {
-                    eprintln!("debug: agent called Done");
-                }
-                "ended" => {
-                    let reason = line.get("reason").and_then(|v| v.as_str()).unwrap_or("");
-                    eprintln!("debug: session ended ({reason})");
-                    break;
-                }
-                "error" => {
-                    let msg = line.get("message").and_then(|v| v.as_str()).unwrap_or("");
-                    eprintln!("debug: error: {msg}");
-                    break;
-                }
-                "stream_chunk" => {
-                    // Stream chunks are silently consumed in the debug CLI path;
-                    // the full text arrives in turn_complete.
-                }
-                "reasoning_chunk" | "tool_output_chunk" | "tool_result" | "stream_reset"
-                | "lagged" | "operator_message" | "system_warning" => {
-                    // Additional conversation display frames — not surfaced in
-                    // the debug CLI path.
-                }
-                // A display `ready` frame (carries `turn`) is emitted between
-                // turns; the control `ready` was consumed during the wait above.
-                "ready" | "attached" => {
-                    log::debug!("debug: skipping display frame type={typ} (control variant already consumed)");
-                }
-                _ => {}
-            }
-        }
-    });
-
-    // Read stdin lines from the channel and forward to the socket.
-    loop {
-        let trimmed = match stdin_rx.recv().await {
-            Some(line) => line,
-            None => {
-                let cmd = serde_json::json!({"op": "quit"});
-                socket::write_json_line(&mut write_half, &cmd).await?;
-                break;
-            }
+            },
         };
-
-        let cmd = if trimmed == "/continue" || trimmed == "/exit" {
-            serde_json::json!({"op": "quit"})
-        } else if let Some(rest) = trimmed.strip_prefix("/quit ") {
-            serde_json::json!({"op": "bail", "reason": rest.trim()})
-        } else if trimmed == "/quit" {
-            serde_json::json!({"op": "bail", "reason": "operator stopped"})
-        } else if trimmed == "/step" {
-            serde_json::json!({"op": "continue"})
-        } else if trimmed == "/help" {
-            eprintln!("available commands:");
-            eprintln!("  /quit [reason]  — bail the stage (default: operator stopped)");
-            eprintln!("  /continue       — exit interactive mode, agent resumes autonomously");
-            eprintln!("  /exit           — alias for /continue");
-            eprintln!("  /step           — run one turn, then re-pause");
-            eprintln!("  /help           — show this help");
-            eprintln!("  <anything else> — send message, then resume autonomously");
+        let text = line.strip_suffix('\n').unwrap_or(&line);
+        let text = text.strip_suffix('\r').unwrap_or(text);
+        let command = text.trim();
+        if command.is_empty() {
             continue;
-        } else {
-            serde_json::json!({"op": "message", "text": trimmed})
-        };
+        }
+        if command == "/exit" {
+            closing = true;
+            continue;
+        }
+        if command == "/help" {
+            eprintln!("available commands:");
+            eprintln!("  /pause          — pause the stage");
+            eprintln!("  /step           — run one turn, then re-pause");
+            eprintln!("  /continue       — resume without closing input");
+            eprintln!("  /quit [reason]  — bail the stage (default: operator stopped), then close");
+            eprintln!("  /exit           — close locally (EOF does the same)");
+            eprintln!("  /help           — show this help");
+            eprintln!("  <anything else> — send a message");
+            eprintln!("Delivery waits for final receipts; observe via the bus-backed UI.");
+            continue;
+        }
 
-        let is_terminal = trimmed == "/quit"
-            || trimmed.starts_with("/quit ")
-            || trimmed == "/continue"
-            || trimmed == "/exit"
-            || cmd.get("op").and_then(|v| v.as_str()) == Some("message");
-        socket::write_json_line(&mut write_half, &cmd).await?;
-        if is_terminal {
-            break;
+        let mut request = match command {
+            "/pause" => serde_json::json!({"cmd": "pause"}),
+            "/step" => serde_json::json!({"cmd": "step"}),
+            "/continue" => serde_json::json!({"cmd": "resume"}),
+            "/quit" => serde_json::json!({"cmd": "bail", "reason": "operator stopped"}),
+            _ => {
+                if let Some(reason) = command.strip_prefix("/quit ") {
+                    serde_json::json!({"cmd": "bail", "reason": reason.trim()})
+                } else {
+                    serde_json::json!({"cmd": "message", "text": text})
+                }
+            }
+        };
+        if receipts.len() >= MAX_OUTSTANDING {
+            return Err(format!(
+                "outstanding input limit ({MAX_OUTSTANDING}) exceeded; delivery may be unconfirmed"
+            ));
+        }
+        let bail = request["cmd"] == "bail";
+        counter += 1;
+        let req_id = format!("input-{counter}");
+        request["req_id"] = serde_json::json!(req_id);
+        let receipt = input.send(request);
+        receipts.spawn(async move {
+            receipt.await?;
+            eprintln!("debug: delivered {req_id}");
+            Ok(())
+        });
+        if bail {
+            closing = true;
         }
     }
-
-    let _ = tokio::time::timeout(std::time::Duration::from_secs(2), read_handle).await;
-
-    Ok(())
 }
 
 // ---------------------------------------------------------------------------
@@ -2441,58 +2290,6 @@ fn parse_stage_inputs(raw: &[String]) -> Result<HashMap<String, String>, String>
         map.insert(key.to_string(), value);
     }
     Ok(map)
-}
-
-/// Read the last `n` lines from a file without loading the entire file.
-/// Reads backwards in chunks, so cost is O(n) not O(file_size).
-async fn tail_log_lines(path: &Path, n: usize) -> Result<Vec<String>, String> {
-    use tokio::io::{AsyncReadExt, AsyncSeekExt};
-
-    let mut f = tokio::fs::File::open(path)
-        .await
-        .map_err(|e| format!("open log: {e}"))?;
-
-    let file_len = f
-        .metadata()
-        .await
-        .map_err(|e| format!("stat log: {e}"))?
-        .len();
-
-    if file_len == 0 {
-        return Ok(Vec::new());
-    }
-
-    // Read the last chunk (up to 8 KiB) from the end of the file.
-    let chunk_size = 8192usize.min(file_len as usize);
-    let mut buf = vec![0u8; chunk_size];
-    f.seek(std::io::SeekFrom::End(-(chunk_size as i64)))
-        .await
-        .map_err(|e| format!("seek log: {e}"))?;
-    f.read_exact(&mut buf)
-        .await
-        .map_err(|e| format!("read log tail: {e}"))?;
-
-    // If the chunk doesn't start at a line boundary, skip the partial first line.
-    let start = if file_len > chunk_size as u64 {
-        // We didn't read from the beginning, so the first byte may be mid-line.
-        // Skip to the first newline.
-        buf.iter()
-            .position(|&b| b == b'\n')
-            .map(|p| p + 1)
-            .unwrap_or(0)
-    } else {
-        0
-    };
-
-    let text = std::str::from_utf8(&buf[start..]).map_err(|e| format!("utf-8: {e}"))?;
-    let all_lines: Vec<&str> = text.lines().collect();
-    let keep = if all_lines.len() > n {
-        &all_lines[all_lines.len() - n..]
-    } else {
-        &all_lines
-    };
-
-    Ok(keep.iter().map(|s| s.to_string()).collect())
 }
 
 // ── auth copilot ─────────────────────────────────────────────────────────

@@ -81,6 +81,44 @@ mod tests {
     }
 
     #[test]
+    fn chat_system_prompt_documents_exact_input_only_debug() {
+        let prompt = chat_system_prompt();
+        let normalized = prompt.split_whitespace().collect::<Vec<_>>().join(" ");
+        for required in [
+            "printf '%s\\n' 'message' | gremlins debug <run-id> <stage-run-id>",
+            "Both the run ID and stage-run ID are required",
+            "Do not substitute a stage name, run prefix, or inferred current stage",
+            "Do not guess IDs or invent a discovery command/API",
+            "ask for them rather than claiming you can discover them",
+            "Debug is input-only: it does not stream agent output or create an output subscription",
+            "separate bus-backed observation surface",
+            "hand off the exact run ID and stage-run ID",
+            "Each plain text line sends a message; it does not implicitly resume execution",
+            "`/pause` to pause, `/step` to advance one step",
+            "`/continue` to explicitly resume",
+            "`/quit [reason]` bails with an optional reason",
+            "`/exit` or EOF closes local input only; neither resumes nor bails",
+            "debug waits for the final receipt for submitted input",
+            "`queued` receipt means accepted into the queue, not delivered to the agent",
+            "CLI stdin commands, not agent tools or TUI slash commands",
+        ] {
+            assert!(
+                normalized.contains(required),
+                "chat prompt must document the debug contract: {required}"
+            );
+        }
+        for obsolete in [
+            "gremlins debug <id>",
+            "| `/debug <id>` | `gremlins debug <id>` |",
+        ] {
+            assert!(
+                !prompt.contains(obsolete),
+                "chat prompt must not advertise obsolete debug behavior: {obsolete}"
+            );
+        }
+    }
+
+    #[test]
     fn chat_preamble_wraps_context() {
         let context = "Environment:\nOS: macos\nShell: /bin/zsh";
         let preamble = build_chat_preamble(context, "");
@@ -189,7 +227,6 @@ mod tests {
             ("/stop <id>", "`gremlins stop <id>`"),
             ("/resume <id>", "`gremlins resume <id>`"),
             ("/log <id>", "`gremlins log <id>`"),
-            ("/debug <id>", "`gremlins debug <id>`"),
         ] {
             assert!(
                 prompt.contains(&format!("| `{cmd}` | {cli} |")),

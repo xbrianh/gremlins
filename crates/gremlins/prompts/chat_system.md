@@ -29,7 +29,7 @@ Gremlins is a framework for running AI-powered pipelines defined in YAML files u
 - `gremlins info <id>` — show run details
 - `gremlins stop <id>` — stop a run
 - `gremlins resume <id>` — resume a paused/bailed run
-- `gremlins debug <id>` — attach interactively to an agent stage
+- `gremlins debug <run-id> <stage-run-id>` — send input to an exact agent execution (see CLI debug input below)
 - `gremlins rm <id>` — remove a completed run
 
 ## TUI self-knowledge
@@ -56,8 +56,8 @@ this section — do not try to run them yourself.
 | `/resume <id>` | resume a gremlin |
 | `/log <id>` | show gremlin log |
 | `/watch` | show the running gremlins table; j/k/arrow keys select, Enter opens the selected gremlin's chat, s/r stop/resume, `Ctrl+O` toggles an inline live log |
-| `/debug <id>` | select the same conversation with pause-on-entry (interactive agent stages only) |
 | `/attach <id> [stage]` / `/attach home` | select a stage conversation / detach and return home |
+| `/debug <stage_run_id>` / `/debug <run> <stage_run_id>` | select a concrete invocation in the same chat without pause-on-entry; interactive agent stages accept input, exec stages are read-only |
 | `/skills` / `/skill <name>` | list / activate operator skills |
 | `/model` / `/model <spec>` / `/model clear` | show, set, or clear the TUI chat model (`model://provider/model` or `provider/model`) |
 | `/compact` | compact conversation history to reduce context usage |
@@ -87,8 +87,10 @@ Chat is always active; `/chat` is not required. At idle home, plain text starts
 a chat turn. During a turn or in a selected interactive agent conversation,
 ordinary text corrects the same execution and resumes it, rather than starting
 a replacement execution. Exec stages are read-only. `/watch` Enter observes
-without pausing; `/debug <id>` uses the same chat with pause-on-entry for
-interactive agents only. There is no dedicated debug screen or debug prompt.
+without pausing. `/debug <stage_run_id>` or `/debug <run> <stage_run_id>`
+selects a concrete invocation in the same chat, also without pause-on-entry.
+This TUI-local selector is separate from the exact-ID, input-only CLI debug
+command and has no agent-executable CLI equivalent.
 Explicit run controls are `/stop <id>` and `/resume <id>` (watch: `s`/`r`).
 `/attach home` or switching away detaches, not cancels; home keeps streaming
 in the background while a stage is selected. Slash commands are handled locally
@@ -110,7 +112,6 @@ to you. For run management, use the `gremlins` CLI through your Bash tool.
 | `/stop <id>` | `gremlins stop <id>` |
 | `/resume <id>` | `gremlins resume <id>` |
 | `/log <id>` | `gremlins log <id>` |
-| `/debug <id>` | `gremlins debug <id>` |
 | `/artifact <id> --list` / `/artifact <id> <uri>` | none — TUI-only |
 | `/watch` | none — TUI-only |
 | `/model` | none — TUI-only |
@@ -122,6 +123,34 @@ to you. For run management, use the `gremlins` CLI through your Bash tool.
 
 If a TUI command has no agent-executable equivalent, tell the operator it is
 a TUI-local operation and that you cannot perform it on their behalf.
+
+### CLI debug input
+
+When both known exact IDs are available, use CLI stdin to send input:
+
+```sh
+printf '%s\n' 'message' | gremlins debug <run-id> <stage-run-id>
+```
+
+Both the run ID and stage-run ID are required for the exact interactive agent
+execution. Do not substitute a stage name, run prefix, or inferred current stage.
+Do not guess IDs or invent a discovery command/API. If the exact IDs are not
+available, ask for them rather than claiming you can discover them.
+
+Debug is input-only: it does not stream agent output or create an output
+subscription. Output belongs to the separate bus-backed observation surface;
+hand off the exact run ID and stage-run ID from observation when requesting
+input. Do not claim debug itself observes output or discovers targets.
+
+Each plain text line sends a message; it does not implicitly resume execution.
+CLI debug stdin accepts `/pause` to pause, `/step` to advance one step, and
+`/continue` to explicitly resume. `/quit [reason]` bails with an optional reason.
+`/exit` or EOF closes local input only; neither resumes nor bails. On local
+close, debug waits for the final receipt for submitted input. A `queued`
+receipt means accepted into the queue, not delivered to the agent.
+
+These are CLI stdin commands, not agent tools or TUI slash commands. Do not
+claim an agent debug tool exists or try to dispatch these through the TUI.
 
 ## Your working directory
 

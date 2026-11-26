@@ -135,8 +135,10 @@ cargo build
 In `/watch`, select a run with `j`/`k` or the arrow keys and press `Enter`
 to observe its conversation. The execution keeps running unaided; selecting
 it does not pause it. `/attach <id> [stage]` selects a stage directly.
-`/debug <id>` opens that same chat with pause-on-entry for interactive agent
-stages only, not a separate debug screen. Exec stages are read-only.
+`/debug <stage_run_id>` or `/debug <run> <stage_run_id>` selects a concrete
+invocation in the same chat, without pause-on-entry. Interactive agent stages
+accept input; exec stages are read-only. The TUI `/debug` selector is separate
+from the exact-ID, input-only CLI debug command below.
 
 Ordinary text in the selected chat corrects the **same execution** and resumes
 it; it does not launch a replacement or a separate chat turn. Explicit run
@@ -148,6 +150,36 @@ continues streaming in the background while another conversation is selected.
 The inline watch log pane remains separate: `Ctrl+W` (or `Ctrl+O`) toggles it
 inside `/watch`; `Ctrl+W` from chat enters watch. `Esc` closes the pane first,
 then returns to chat.
+
+## CLI debug input
+
+`gremlins debug <run-id> <stage-run-id>` requires both known exact IDs for an
+interactive agent stage. A stage name, run prefix, or inferred current stage is
+not a substitute. Do not guess IDs or assume a discovery command exists.
+
+```sh
+printf '%s\n' 'message' | gremlins debug <run-id> <stage-run-id>
+```
+
+Debug is input-only: it does not stream agent output or create an output
+subscription. Observe output separately through the bus-backed observation
+surface and hand off the exact run ID and stage-run ID when requesting input.
+Do not infer a discovery API from that handoff.
+
+Each plain text line sends a message; it does not implicitly resume execution.
+The debug input commands are:
+
+| Input | Effect |
+|---|---|
+| `/pause` | Pause execution |
+| `/step` | Advance one step |
+| `/continue` | Explicitly resume execution |
+| `/quit [reason]` | Bail, with an optional reason |
+| `/exit` or EOF | Close local input only; do not resume or bail |
+
+On local close, debug waits for the final receipt for submitted input. A
+`queued` receipt means accepted into the queue, not delivered to the agent.
+These commands belong to CLI debug stdin, not agent tools or TUI slash commands.
 
 ## CLI subcommands
 
