@@ -84,7 +84,6 @@ impl Fixture {
         );
         assert!(self.attachment.target.is_none());
         assert!(self.attachment.task.is_none());
-        assert!(self.attachment.commands.is_none());
         self.assert_unsent();
     }
 
@@ -142,30 +141,6 @@ impl Fixture {
         apply_attachment_frame(&mut self.app, &mut self.live, &mut self.attachment, frame);
     }
 
-    async fn attach(&mut self, mode: &str, stage_run_id: &str) -> BufReader<UnixStream> {
-        self.app
-            .upsert_run_from_ls(&json!({"id":"run", "stage":"review", "status":"running"}));
-        match mode {
-            "debugger" => self.debug("run"),
-            _ => panic!("unexpected attachment mode: {mode}"),
-        }
-        let mut peer = self.peer().await;
-        assert_eq!(
-            read(&mut peer).await,
-            json!({"op":"attach", "scope":"conversation", "id":"run", "stage":"review", "session_id":"test", "mode":mode})
-        );
-        self.receive(&mut peer, json!({"type":"attached", "scope":"conversation", "id":"run", "stage":"review", "stage_run_id":stage_run_id, "nonce":9, "capabilities":["message"]})).await;
-        assert_eq!(self.app.screen, Screen::Chat);
-        assert_eq!(
-            self.app.selected_target,
-            Target::StageExecution {
-                run_id: "run".into(),
-                stage: "review".into()
-            }
-        );
-        peer
-    }
-
     async fn receive(&mut self, peer: &mut BufReader<UnixStream>, value: Value) {
         socket::write_json_line(peer.get_mut(), &value)
             .await
@@ -210,7 +185,6 @@ impl Fixture {
         let selected_stage = execution.map(|_| stage);
         self.receive(&mut peer, json!({"type":"watched", "scope":"run", "id":"run", "replay":true, "stage":selected_stage, "stage_run_id":execution})).await;
         assert_eq!(self.app.screen, Screen::Chat);
-        assert!(self.attachment.commands.is_none());
         assert!(self.attachment.execution.is_none());
         peer
     }
@@ -347,7 +321,6 @@ async fn home_selection_preserves_idle_and_streaming_drafts_without_attachment_o
     assert!(!f.app.active_request);
     assert!(f.attachment.target.is_none());
     assert!(f.attachment.task.is_none());
-    assert!(f.attachment.commands.is_none());
     assert!(!f.control("/continue"));
     f.assert_unsent();
     let owner = protocol::Execution {
@@ -385,88 +358,68 @@ async fn session_install_uses_authoritative_identity_before_turn_started() {
     f.app.active_request = true;
     f.app
         .upsert_run_from_ls(&json!({"id":"home", "stage":"chat", "status":"running"}));
-    f.home();
-    assert_eq!(f.app.selected_target, Target::Home);
-    assert!(f.attachment.task.is_none());
-    assert_ne!(attachment_target(&f.app, "test".into(), None), Target::Home);
+    for (run_id, expected) in [
+        ("home", Target::Home),
+        (
+            "test",
+            Target::StageExecution {
+                run_id: "test".into(),
+                stage: String::new(),
+            },
+        ),
+    ] {
+        attach_stage_entry(
+            &mut f.app,
+            &mut f.live,
+            &f.client,
+            run_id.into(),
+            None,
+            &mut f.attachment,
+            &f.tx,
+            &mut f.last_stage,
+        );
+        assert_eq!(f.app.selected_target, expected);
+        assert_eq!(f.attachment.task.is_none(), expected.is_home());
+        f.attachment.invalidate(&mut f.app);
+    }
     let (replacement, _peers) = client::DaemonClient::fake_with_identity(
         json!({"session_id":"sess-other", "home_run_id":"chat-reserved"}),
     );
     install_home_session(&mut f.app, &replacement).await;
-    assert_eq!(
-        attachment_target(&f.app, "chat-reserved".into(), None),
-        Target::Home
-    );
-    assert_ne!(attachment_target(&f.app, "home".into(), None), Target::Home);
+    assert_eq!(f.app.home_run_id.as_deref(), Some("chat-reserved"));
+    for (run_id, expected) in [
+        ("chat-reserved", Target::Home),
+        (
+            "home",
+            Target::StageExecution {
+                run_id: "home".into(),
+                stage: String::new(),
+            },
+        ),
+    ] {
+        attach_stage_entry(
+            &mut f.app,
+            &mut f.live,
+            &f.client,
+            run_id.into(),
+            None,
+            &mut f.attachment,
+            &f.tx,
+            &mut f.last_stage,
+        );
+        assert_eq!(f.app.selected_target, expected);
+        assert_eq!(f.attachment.task.is_none(), expected.is_home());
+        f.attachment.invalidate(&mut f.app);
+    }
     f.assert_unsent();
     replacement.shutdown().await;
     f.client.shutdown().await;
 }
 
 #[tokio::test]
-async fn unknown_stage_adopts_and_stores_advertised_stage_run_id() {
-    let mut f = Fixture::with_socket();
-    f.debug("unlisted");
-    let mut peer = f.peer().await;
-    let request = read(&mut peer).await;
-    assert_eq!(request["id"], "unlisted");
-    assert!(request.get("stage").is_none());
-    f.receive(&mut peer, json!({"type":"attached", "scope":"conversation", "id":"unlisted", "stage":"review", "stage_run_id":"exec", "nonce":9, "capabilities":["message"]})).await;
-    let target = Target::StageExecution {
-        run_id: "unlisted".into(),
-        stage: "review".into(),
-    };
-    assert_eq!(f.app.selected_target, target);
-    assert_eq!(f.attachment.target, Some(target.clone()));
-    let mut input = input_buffer::InputBuffer::new();
-    input.replace_all("correction");
-    let Submission::Correction { execution, .. } =
-        f.app.conversations.submit(&target, &input, false)
-    else {
-        panic!("advertised stage_run_id must enable correction selection")
-    };
-    assert_eq!(execution.stage_run_id, "exec");
-    assert_eq!(execution.nonce, 9);
-    assert_eq!(f.attachment.execution.as_ref(), Some(&execution));
-    for foreign in [
-        json!({"type":"stream_chunk", "stage_run_id":"other", "nonce":9, "text":"wrong stage run"}),
-        json!({"type":"stream_chunk", "stage_run_id":"exec", "nonce":10, "text":"wrong nonce"}),
-    ] {
-        socket::write_json_line(peer.get_mut(), &foreign)
-            .await
-            .unwrap();
-    }
-    f.receive(
-        &mut peer,
-        json!({"type":"stream_chunk", "stage_run_id":"exec", "nonce":9, "text":"adopted stream"}),
-    )
-    .await;
-    assert_eq!(f.live.response_text(), "adopted stream");
-    assert_eq!(
-        f.attachment.execution.as_ref().unwrap().stage_run_id,
-        "exec"
-    );
-    drop(peer);
-    f.frame().await;
-    assert_ne!(
-        f.app.conversation_status(&f.app.selected_target),
-        ConversationStatus::Ended
-    );
-    assert_eq!(f.live.response_text(), "adopted stream");
-    assert!(f.attachment.task.is_none());
-    assert!(f.attachment.execution.is_none());
-    assert!(f.attachment.commands.is_none());
-    let rendered = f.rendered();
-    assert!(rendered.contains("attachment disconnected"), "{rendered}");
-    assert!(rendered.contains("adopted stream"), "{rendered}");
-    assert!(!rendered.contains("ended:"), "{rendered}");
-    f.client.shutdown().await;
-}
-
-#[tokio::test]
-async fn home_debug_without_run_reports_why_it_cannot_attach() {
+async fn home_selection_without_run_is_passive() {
     let mut f = Fixture::new();
-    select_debugger_attachment(
+    select_passive_watch(
         &mut f.app,
         &mut f.live,
         &f.client,
@@ -475,121 +428,9 @@ async fn home_debug_without_run_reports_why_it_cannot_attach() {
         &f.tx,
         &mut f.last_stage,
     );
-    assert!(f.rendered().contains("home has no chat run to debug yet"));
+    assert_eq!(f.app.selected_target, Target::Home);
     assert!(f.attachment.task.is_none());
     f.assert_unsent();
-    f.client.shutdown().await;
-}
-
-#[tokio::test]
-async fn debug_partial_correction_then_exit_closes_without_execution_control() {
-    let mut f = Fixture::with_socket();
-    install_home_session(&mut f.app, &f.client).await;
-    f.app.replace_input("home draft");
-    let mut peer = f.attach("debugger", "original").await;
-    let target = f.app.selected_target.clone();
-    assert_eq!(
-        f.app.conversation_status(&target),
-        ConversationStatus::Running
-    );
-    f.receive(
-        &mut peer,
-        json!({"type":"stream_chunk", "text":"partial answer"}),
-    )
-    .await;
-    assert_eq!(f.live.response_text(), "partial answer");
-    assert_eq!(f.rendered().matches("partial answer").count(), 1);
-    assert!(
-        tokio::time::timeout(Duration::from_millis(30), socket::read_json_line(&mut peer))
-            .await
-            .is_err()
-    );
-    assert!(!f.control("use another approach"));
-    assert_eq!(f.live.response_text(), "partial answer");
-    let Submission::Correction {
-        id,
-        text,
-        execution,
-    } = f.app.conversations.submit(&target, &f.app.input, false)
-    else {
-        panic!("expected correction")
-    };
-    assert_eq!(execution.stage_run_id, "original");
-    send_attachment_correction(&mut f.app, &mut f.live, &f.attachment, id, &text);
-    assert_eq!(
-        f.live.response_text(),
-        "partial answer",
-        "sending alone must not split the transcript"
-    );
-    assert_eq!(
-        read(&mut peer).await,
-        json!({"op":"message", "req_id":id.to_string(), "text":"use another approach"})
-    );
-    f.receive(
-        &mut peer,
-        json!({"type":"operator_message", "text":"use another approach"}),
-    )
-    .await;
-    f.receive(
-        &mut peer,
-        json!({"type":"delivered", "req_id":id.to_string()}),
-    )
-    .await;
-    assert!(f.app.input.is_empty());
-    f.receive(
-        &mut peer,
-        json!({"type":"stream_chunk", "text":"corrected answer"}),
-    )
-    .await;
-    assert_eq!(
-        f.app.conversation_status(&target),
-        ConversationStatus::Running
-    );
-    let rendered = f.rendered();
-    assert_eq!(f.live.response_text(), "corrected answer");
-    for text in ["partial answer", "use another approach", "corrected answer"] {
-        assert_eq!(rendered.matches(text).count(), 1, "{rendered}");
-    }
-    assert!(f.control("/exit"));
-    assert_eq!(f.app.selected_target, Target::Home);
-    assert_eq!(f.app.input.text(), "home draft");
-    // EOF, rather than a cancel/continue/quit, is the only detach effect.
-    f.assert_closed(&mut peer).await;
-    assert_eq!(f.app.active_runs["run"].status, "running");
-    f.client.shutdown().await;
-}
-
-#[tokio::test]
-async fn rapid_debug_home_debug_rejects_buffered_old_generation_for_same_execution() {
-    let mut f = Fixture::with_socket();
-    install_home_session(&mut f.app, &f.client).await;
-    let mut first = f.attach("debugger", "same-execution").await;
-    socket::write_json_line(
-        first.get_mut(),
-        &json!({"type":"stream_chunk", "text":"stale buffered output"}),
-    )
-    .await
-    .unwrap();
-    let buffered = tokio::time::timeout(Duration::from_secs(2), f.rx.recv())
-        .await
-        .unwrap()
-        .unwrap();
-    f.home();
-    let mut current = f.attach("debugger", "same-execution").await;
-    assert_ne!(buffered.generation, f.attachment.generation);
-    assert_eq!(buffered.execution, f.attachment.execution);
-    apply_attachment_frame(&mut f.app, &mut f.live, &mut f.attachment, buffered);
-    f.receive(
-        &mut current,
-        json!({"type":"stream_chunk", "text":"current output"}),
-    )
-    .await;
-    assert_eq!(f.live.response_text(), "current output");
-    let rendered = f.rendered();
-    assert!(!rendered.contains("stale buffered output"), "{rendered}");
-    assert_eq!(rendered.matches("current output").count(), 1, "{rendered}");
-    f.assert_unsent();
-    f.attachment.invalidate(&mut f.app);
     f.client.shutdown().await;
 }
 
@@ -668,9 +509,10 @@ async fn watch_enter_exact_invocation_outside_retention_is_passive_and_isolates_
         f.app.conversations.submit(&target, &input, false),
         Submission::Correction { .. }
     ));
-    for command in ["/continue", "/quit", "/bail stop"] {
+    for command in ["/continue", "/bail stop"] {
         assert!(f.control(command));
     }
+    assert!(!f.control("/quit"));
     assert!(
         tokio::time::timeout(Duration::from_millis(30), socket::read_json_line(&mut peer))
             .await
@@ -732,7 +574,6 @@ async fn passive_replay_survives_closing_absent_inline_follow_until_incomplete_c
         })
     );
     assert!(f.attachment.task.is_some());
-    assert!(f.attachment.commands.is_none());
     f.attachment.invalidate(&mut f.app);
     f.assert_closed(&mut peer).await;
     f.client.shutdown().await;
@@ -801,7 +642,6 @@ async fn opening_inline_follow_preserves_passive_replay_until_incomplete_checkpo
         })
     );
     assert!(f.attachment.task.is_some());
-    assert!(f.attachment.commands.is_none());
     close_watch_follow(&mut f.app, &mut f.live, &mut f.follow);
     f.attachment.invalidate(&mut f.app);
     f.assert_closed(&mut peer).await;
@@ -825,29 +665,26 @@ async fn attach_authoritative_home_preserves_idle_and_streaming_drafts_without_s
             "idle draft"
         };
         f.app.replace_input(draft);
-        for stage in [None, Some("chat".into())] {
-            attach_stage_entry(
-                &mut f.app,
-                &mut f.live,
-                &f.client,
-                "home".into(),
-                stage,
-                &mut f.attachment,
-                &f.tx,
-                &mut f.last_stage,
-            );
-            assert_eq!(f.app.selected_target, Target::Home);
-            assert_eq!(f.app.screen, Screen::Chat);
-            assert_eq!(f.app.input.text(), draft);
-            assert_eq!(f.app.active_request, streaming);
-            if streaming {
-                assert_eq!(f.live.response_text(), "home streaming response");
-            }
-            assert!(f.attachment.target.is_none());
-            assert!(f.attachment.task.is_none());
-            assert!(f.attachment.commands.is_none());
-            f.assert_unsent();
+        attach_stage_entry(
+            &mut f.app,
+            &mut f.live,
+            &f.client,
+            "home".into(),
+            None,
+            &mut f.attachment,
+            &f.tx,
+            &mut f.last_stage,
+        );
+        assert_eq!(f.app.selected_target, Target::Home);
+        assert_eq!(f.app.screen, Screen::Chat);
+        assert_eq!(f.app.input.text(), draft);
+        assert_eq!(f.app.active_request, streaming);
+        if streaming {
+            assert_eq!(f.live.response_text(), "home streaming response");
         }
+        assert!(f.attachment.target.is_none());
+        assert!(f.attachment.task.is_none());
+        f.assert_unsent();
     }
     assert!(
         tokio::time::timeout(
@@ -858,6 +695,67 @@ async fn attach_authoritative_home_preserves_idle_and_streaming_drafts_without_s
         .is_err(),
         "home attach must not open an auxiliary socket"
     );
+    f.client.shutdown().await;
+}
+
+#[tokio::test]
+async fn attach_unresolved_home_stage_is_view_only_without_input_or_chat_fallback() {
+    let mut f = Fixture::with_watch_socket(1);
+    install_home_session(&mut f.app, &f.client).await;
+    attach_stage_entry(
+        &mut f.app,
+        &mut f.live,
+        &f.client,
+        "home".into(),
+        Some("chat".into()),
+        &mut f.attachment,
+        &f.tx,
+        &mut f.last_stage,
+    );
+    let target = Target::StageExecution {
+        run_id: "home".into(),
+        stage: "chat".into(),
+    };
+    assert_eq!(f.app.selected_target, target);
+    assert_eq!(f.app.screen, Screen::Chat);
+    assert_eq!(
+        f.app.conversation_status(&target),
+        ConversationStatus::ReadOnly
+    );
+    assert!(f.attachment.execution.is_none());
+    assert!(f.attachment.task.is_some());
+    let mut peer = f.peer().await;
+    assert_eq!(
+        read(&mut peer).await,
+        json!({"op":"watch", "scope":"run", "id":"home", "stage":"chat", "session_id":"test", "replay":true})
+    );
+    f.receive(&mut peer, json!({"type":"watched", "scope":"run", "id":"home", "stage":"chat", "stage_run_id":null, "replay":true})).await;
+    assert_eq!(f.app.selected_target, target);
+    assert!(f.attachment.execution.is_none());
+    assert!(f.rendered().contains("view-only selection"));
+    f.app.replace_input("not a home chat prompt");
+    let (tx, mut rx) = mpsc::unbounded_channel();
+    assert!(f.submit(&tx, false));
+    assert!(rx.try_recv().is_err());
+    assert_eq!(f.app.input.text(), "not a home chat prompt");
+    f.assert_unsent();
+    assert!(
+        tokio::time::timeout(Duration::from_millis(50), socket::read_json_line(&mut peer))
+            .await
+            .is_err(),
+        "view-only submission must not send input on the watch socket"
+    );
+    assert!(
+        tokio::time::timeout(
+            Duration::from_millis(50),
+            f.socket.as_ref().unwrap().0.accept()
+        )
+        .await
+        .is_err(),
+        "view-only submission must not open an input socket"
+    );
+    f.attachment.invalidate(&mut f.app);
+    f.assert_closed(&mut peer).await;
     f.client.shutdown().await;
 }
 
@@ -894,7 +792,6 @@ async fn run_only_attach_command_does_not_infer_current_stage() {
         json!({"op":"watch", "scope":"run", "id":"run", "session_id":"test", "replay":true})
     );
     f.receive(&mut peer, json!({"type":"watched", "scope":"run", "id":"run", "replay":true, "stage":null, "stage_run_id":null})).await;
-    assert!(f.attachment.commands.is_none());
     f.attachment.invalidate(&mut f.app);
     f.assert_closed(&mut peer).await;
     f.client.shutdown().await;
@@ -984,11 +881,11 @@ async fn watch_rejection_closes_auxiliary_socket_without_attach_or_control_fallb
     )
     .await;
     assert!(f.rendered().contains("watch rejected"));
-    assert!(f.attachment.commands.is_none());
     assert!(f.attachment.execution.is_none());
-    for command in ["/continue", "/quit", "/bail stop"] {
+    for command in ["/continue", "/bail stop"] {
         assert!(f.control(command));
     }
+    assert!(!f.control("/quit"));
     assert!(f.control("/exit"));
     f.assert_closed(&mut peer).await;
     assert!(
@@ -1118,13 +1015,15 @@ impl Fixture {
         assert!(self.attachment.target.is_none());
     }
 
-    async fn correction_peer(&self) -> BufReader<UnixStream> {
+    async fn correction_peer(&self) -> (BufReader<UnixStream>, Value) {
         let mut peer = self.peer().await;
+        let request = read(&mut peer).await;
         assert_eq!(
-            read(&mut peer).await,
-            json!({"op":"attach", "scope":"conversation", "mode":"control", "id":"home", "stage_run_id":"exec-A", "nonce":23, "session_id":"test"})
+            request,
+            json!({"op":"input", "session_id":"test", "id":"home", "stage_run_id":"exec-A", "nonce":23, "req_id":request["req_id"]})
         );
-        peer
+        assert!(request["req_id"].as_str().unwrap().parse::<u64>().is_ok());
+        (peer, request)
     }
 }
 
@@ -1281,7 +1180,7 @@ async fn home_stale_task_progress_cannot_render_or_rebind_replacement() {
 
 #[tokio::test]
 async fn home_queued_draft_waits_for_any_agent_execution_then_delivers_exact_correction() {
-    let mut f = Fixture::with_socket();
+    let mut f = Fixture::with_watch_socket(1);
     let (tx, mut rx) = mpsc::unbounded_channel();
     let mut active = Some("A".into());
     f.start_home("A");
@@ -1290,12 +1189,9 @@ async fn home_queued_draft_waits_for_any_agent_execution_then_delivers_exact_cor
     f.assert_unsent();
     assert!(rx.try_recv().is_err());
     assert_eq!(f.app.input.text(), "  stop here\n");
-    assert!(tokio::time::timeout(
-        Duration::from_millis(30),
-        f.socket.as_ref().unwrap().0.accept()
-    )
-    .await
-    .is_err());
+    assert!(tokio::time::timeout(Duration::from_millis(30), rx.recv())
+        .await
+        .is_err());
 
     // No TurnStarted or capabilities: an ordinary agent frame carries identity.
     f.home_event(
@@ -1305,12 +1201,12 @@ async fn home_queued_draft_waits_for_any_agent_execution_then_delivers_exact_cor
         Some(home_execution()),
     );
     assert!(f.submit(&tx, true));
-    let mut peer = f.correction_peer().await;
-    socket::write_json_line(peer.get_mut(), &json!({"type":"attached","scope":"conversation","id":"home","stage_run_id":"exec-A","nonce":23,"capabilities":["observe","message"]})).await.unwrap();
+    let (mut peer, request) = f.correction_peer().await;
+    socket::write_json_line(peer.get_mut(), &json!({"type":"input_bound","id":"home","stage_run_id":"exec-A","req_id":request["req_id"]})).await.unwrap();
     let command = read(&mut peer).await;
     assert_eq!(
         command,
-        json!({"op":"message","req_id":command["req_id"],"text":"  stop here\n"})
+        json!({"cmd":"message","req_id":request["req_id"],"text":"  stop here\n"})
     );
     assert!(command["req_id"].as_str().unwrap().parse::<u64>().is_ok());
     socket::write_json_line(peer.get_mut(), &json!({"type":"delivered","scope":"conversation","id":"home","stage_run_id":"exec-A","nonce":23,"req_id":command["req_id"]})).await.unwrap();
@@ -1320,13 +1216,20 @@ async fn home_queued_draft_waits_for_any_agent_execution_then_delivers_exact_cor
     f.live
         .show_receipt(f.app.finish_delivery(id, result).unwrap());
     assert!(f.app.input.is_empty());
-    assert!(socket::read_json_line(&mut peer).await.unwrap().is_none());
+    f.client.release_inputs();
+    assert!(
+        tokio::time::timeout(Duration::from_secs(2), socket::read_json_line(&mut peer))
+            .await
+            .unwrap()
+            .unwrap()
+            .is_none()
+    );
     f.assert_unsent();
 }
 
 #[tokio::test]
 async fn home_rejected_corrections_preserve_draft_and_require_explicit_retry() {
-    let mut f = Fixture::with_socket();
+    let mut f = Fixture::with_watch_socket(3);
     let (tx, mut rx) = mpsc::unbounded_channel();
     let mut active = Some("A".into());
     f.start_home("A");
@@ -1339,7 +1242,7 @@ async fn home_rejected_corrections_preserve_draft_and_require_explicit_retry() {
     f.app.replace_input("keep this correction");
     for reason in ["busy", "unsupported", "not_ready"] {
         assert!(f.submit(&tx, true));
-        let mut peer = f.correction_peer().await;
+        let (mut peer, _) = f.correction_peer().await;
         socket::write_json_line(peer.get_mut(), &json!({"type":"error","message":reason}))
             .await
             .unwrap();
@@ -1348,14 +1251,18 @@ async fn home_rejected_corrections_preserve_draft_and_require_explicit_retry() {
         f.live
             .show_receipt(f.app.finish_delivery(id, result).unwrap());
         assert_eq!(f.app.input.text(), "keep this correction");
-        assert!(socket::read_json_line(&mut peer).await.unwrap().is_none());
+        f.client.release_inputs();
+        assert!(
+            tokio::time::timeout(Duration::from_secs(2), socket::read_json_line(&mut peer))
+                .await
+                .unwrap()
+                .unwrap()
+                .is_none()
+        );
         assert!(rx.try_recv().is_err());
-        assert!(tokio::time::timeout(
-            Duration::from_millis(30),
-            f.socket.as_ref().unwrap().0.accept()
-        )
-        .await
-        .is_err());
+        assert!(tokio::time::timeout(Duration::from_millis(30), rx.recv())
+            .await
+            .is_err());
         f.assert_unsent();
     }
 }
@@ -1466,7 +1373,7 @@ async fn home_tool_result_recovers_missing_chunks_once() {
 
 #[tokio::test]
 async fn home_late_delivery_for_a_cannot_clear_b_draft() {
-    let mut f = Fixture::with_socket();
+    let mut f = Fixture::with_watch_socket(1);
     let (tx, mut rx) = mpsc::unbounded_channel();
     let mut active = Some("A".into());
     f.start_home("A");
@@ -1478,9 +1385,13 @@ async fn home_late_delivery_for_a_cannot_clear_b_draft() {
     );
     f.app.replace_input("A correction");
     assert!(f.submit(&tx, true));
-    let mut peer = f.correction_peer().await;
-    socket::write_json_line(peer.get_mut(), &json!({"type":"attached","scope":"conversation","id":"home","stage_run_id":"exec-A","nonce":23,"capabilities":["message"]})).await.unwrap();
+    let (mut peer, request) = f.correction_peer().await;
+    socket::write_json_line(peer.get_mut(), &json!({"type":"input_bound","id":"home","stage_run_id":"exec-A","req_id":request["req_id"]})).await.unwrap();
     let command = read(&mut peer).await;
+    assert_eq!(
+        command,
+        json!({"cmd":"message","req_id":request["req_id"],"text":"A correction"})
+    );
     f.home_event(
         &mut active,
         "A",
@@ -2055,6 +1966,435 @@ async fn home_queued_a_non_delivery_preserves_identity_after_normal_b_submission
     f.client.shutdown().await;
 }
 
+impl Fixture {
+    fn siblings(&mut self, kind: &str) {
+        for id in ["A", "B"] {
+            self.app.observe_pipeline_frame(&json!({"type":"stage_boundary", "run_id":"run", "stage":"review", "stage_run_id":id, "stage_type":kind, "active":true}));
+        }
+    }
+
+    async fn exact(&mut self, id: &str) -> BufReader<UnixStream> {
+        self.debug(&format!("run {id}"));
+        let mut peer = self.peer().await;
+        assert_eq!(
+            read(&mut peer).await,
+            json!({"op":"watch", "scope":"run", "id":"run", "stage":"review", "stage_run_id":id, "session_id":"test", "replay":true})
+        );
+        self.receive(&mut peer, json!({"type":"watched", "scope":"run", "id":"run", "stage":"review", "stage_run_id":id, "replay":true})).await;
+        peer
+    }
+
+    async fn attach_exact(&mut self, id: &str) -> BufReader<UnixStream> {
+        let Some(commands::CommandResult::AttachStage { run_id, stage }) =
+            commands::dispatch(&format!("/attach run review {id}"))
+        else {
+            panic!("expected attach command");
+        };
+        attach_stage_entry(
+            &mut self.app,
+            &mut self.live,
+            &self.client,
+            run_id,
+            stage,
+            &mut self.attachment,
+            &self.tx,
+            &mut self.last_stage,
+        );
+        let mut peer = self.peer().await;
+        assert_eq!(
+            read(&mut peer).await,
+            json!({"op":"watch", "scope":"run", "id":"run", "stage":"review", "stage_run_id":id, "session_id":"test", "replay":true})
+        );
+        self.receive(&mut peer, json!({"type":"watched", "scope":"run", "id":"run", "stage":"review", "stage_run_id":id, "replay":true})).await;
+        peer
+    }
+
+    async fn bind_selected(&self, id: &str) -> BufReader<UnixStream> {
+        let mut peer = self.peer().await;
+        let request = read(&mut peer).await;
+        assert_eq!(
+            request,
+            json!({"op":"input", "session_id":"test", "id":"run", "stage_run_id":id, "req_id":request["req_id"]})
+        );
+        assert!(!request["req_id"].as_str().unwrap().is_empty());
+        socket::write_json_line(peer.get_mut(), &json!({"type":"input_bound", "id":"run", "stage_run_id":id, "req_id":request["req_id"]})).await.unwrap();
+        peer
+    }
+}
+
+#[tokio::test]
+async fn attach_explicit_identity_never_selects_live_same_name_sibling() {
+    let mut f = Fixture::with_watch_socket(2);
+    f.siblings("agent");
+    let _a = f.attach_exact("A").await;
+    assert_eq!(f.attachment.execution.as_ref().unwrap().stage_run_id, "A");
+    f.home();
+    f.app.observe_pipeline_frame(&json!({"type":"stage_boundary", "run_id":"run", "stage":"review", "stage_run_id":"A", "stage_type":"agent", "active":false}));
+    let _expired_a = f.attach_exact("A").await;
+    assert!(
+        matches!(&f.app.selected_target, Target::Invocation { stage_run_id, .. } if stage_run_id == "A")
+    );
+    assert!(f.attachment.execution.is_none());
+    assert_eq!(
+        f.app.conversation_status(&f.app.selected_target),
+        ConversationStatus::ReadOnly
+    );
+    assert!(f.rendered().contains("requested invocation is unavailable"));
+    assert!(!f.control("/quit"));
+    f.assert_unsent();
+    f.client.shutdown().await;
+}
+
+#[tokio::test]
+async fn unsent_parked_a_draft_cannot_correct_reentered_b() {
+    let mut f = Fixture::with_watch_socket(3);
+    f.app.observe_pipeline_frame(&json!({"type":"stage_boundary", "run_id":"run", "stage":"review", "stage_run_id":"A", "stage_type":"agent", "active":true}));
+    let _a = f.attach_exact("A").await;
+    f.app.replace_input("UNSENT A correction");
+    f.home();
+    f.app.observe_pipeline_frame(&json!({"type":"stage_boundary", "run_id":"run", "stage":"review", "stage_run_id":"A", "stage_type":"agent", "active":false}));
+    f.app.observe_pipeline_frame(&json!({"type":"stage_boundary", "run_id":"run", "stage":"review", "stage_run_id":"B", "stage_type":"agent", "active":true}));
+    let mut b = f.attach_exact("B").await;
+    assert!(f.app.input.is_empty());
+    let _expired_a = f.attach_exact("A").await;
+    assert_eq!(f.app.input.text(), "UNSENT A correction");
+    let (tx, mut rx) = mpsc::unbounded_channel();
+    assert!(f.submit(&tx, false));
+    assert_eq!(f.app.input.text(), "UNSENT A correction");
+    assert!(rx.try_recv().is_err());
+    assert!(socket::read_json_line(&mut b).await.unwrap().is_none());
+    assert!(tokio::time::timeout(
+        Duration::from_millis(30),
+        f.socket.as_ref().unwrap().0.accept()
+    )
+    .await
+    .is_err());
+    f.assert_unsent();
+    f.client.shutdown().await;
+}
+
+#[tokio::test]
+async fn returning_home_preserves_parked_exact_correction_address() {
+    let mut f = Fixture::with_watch_socket(2);
+    let mut active = Some("A".into());
+    f.start_home("A");
+    f.home_event(
+        &mut active,
+        "A",
+        json!({"type":"stream_chunk", "text":"working"}),
+        Some(home_execution()),
+    );
+    f.app.replace_input("parked home correction");
+    f.siblings("agent");
+    let _stage = f.exact("B").await;
+    f.home();
+    assert_eq!(f.app.input.text(), "parked home correction");
+    let (tx, mut rx) = mpsc::unbounded_channel();
+    assert!(f.submit(&tx, true));
+    let (mut peer, request) = f.correction_peer().await;
+    socket::write_json_line(peer.get_mut(), &json!({"type":"input_bound", "id":"home", "stage_run_id":"exec-A", "req_id":request["req_id"]})).await.unwrap();
+    let command = read(&mut peer).await;
+    assert_eq!(
+        command,
+        json!({"cmd":"message", "req_id":request["req_id"], "text":"parked home correction"})
+    );
+    socket::write_json_line(
+        peer.get_mut(),
+        &json!({"type":"delivered", "req_id":command["req_id"]}),
+    )
+    .await
+    .unwrap();
+    let (id, result) = delivery(&mut rx).await;
+    assert!(result.is_ok());
+    f.live
+        .show_receipt(f.app.finish_delivery(id, result).unwrap());
+    assert!(f.app.input.is_empty());
+    f.assert_unsent();
+    f.client.shutdown().await;
+}
+
+#[tokio::test]
+async fn run_only_quit_falls_through_to_local_dispatch() {
+    let mut f = Fixture::with_watch_socket(1);
+    f.siblings("agent");
+    attach_stage_entry(
+        &mut f.app,
+        &mut f.live,
+        &f.client,
+        "run".into(),
+        None,
+        &mut f.attachment,
+        &f.tx,
+        &mut f.last_stage,
+    );
+    assert!(!f.control("/quit"));
+    assert_eq!(f.app.input.text(), "/quit");
+    assert!(matches!(
+        commands::dispatch(f.app.input.text()),
+        Some(commands::CommandResult::Quit)
+    ));
+    f.assert_unsent();
+    f.client.shutdown().await;
+}
+
+#[tokio::test]
+async fn exact_debug_is_passive_first_input_is_a_and_bus_continues_once() {
+    let mut f = Fixture::with_watch_socket(2);
+    f.siblings("agent");
+    let mut bus = f.exact("A").await;
+    assert_eq!(f.attachment.execution.as_ref().unwrap().stage_run_id, "A");
+    assert_eq!(
+        f.app.conversation_status(&f.app.selected_target),
+        ConversationStatus::Running
+    );
+    assert!(
+        tokio::time::timeout(Duration::from_millis(30), socket::read_json_line(&mut bus))
+            .await
+            .is_err()
+    );
+    let (tx, mut rx) = mpsc::unbounded_channel();
+    f.app.replace_input("correct A");
+    assert!(f.submit(&tx, false));
+    let mut input = f.bind_selected("A").await;
+    let command = read(&mut input).await;
+    assert_eq!(
+        command,
+        json!({"cmd":"message", "req_id":command["req_id"], "text":"correct A"})
+    );
+    socket::write_json_line(
+        input.get_mut(),
+        &json!({"type":"delivered", "req_id":command["req_id"]}),
+    )
+    .await
+    .unwrap();
+    let (id, result) = delivery(&mut rx).await;
+    f.live
+        .show_receipt(f.app.finish_delivery(id, result).unwrap());
+    assert!(f.app.input.is_empty());
+    for (id, sequence, text) in [
+        ("B", 1, "sibling output"),
+        ("A", 2, "bus keeps streaming"),
+        ("A", 2, "bus keeps streaming"),
+    ] {
+        f.receive(&mut bus, json!({"type":"stream_chunk", "run_id":"run", "stage":"review", "stage_run_id":id, "sequence":sequence, "text":text})).await;
+    }
+    let rendered = f.rendered();
+    assert!(!rendered.contains("sibling output"));
+    assert_eq!(
+        rendered.matches("bus keeps streaming").count(),
+        1,
+        "{rendered}"
+    );
+    f.assert_unsent();
+    f.client.shutdown().await;
+}
+
+#[tokio::test]
+async fn selected_rejections_keep_draft_and_only_explicit_retry_binds_again() {
+    let mut f = Fixture::with_watch_socket(4);
+    f.siblings("agent");
+    let _bus = f.exact("A").await;
+    let (tx, mut rx) = mpsc::unbounded_channel();
+    f.app.replace_input("keep correction");
+    for reason in ["busy", "unsupported", "wrong ack"] {
+        assert!(f.submit(&tx, false));
+        let (mut peer, request) = f.native_input_peer("run", "A").await;
+        let response = if reason == "wrong ack" {
+            json!({"type":"input_bound", "id":"run", "stage_run_id":"B", "req_id":request["req_id"]})
+        } else {
+            json!({"type":"error", "message":reason})
+        };
+        socket::write_json_line(peer.get_mut(), &response)
+            .await
+            .unwrap();
+        let (id, result) = delivery(&mut rx).await;
+        assert!(result.is_err());
+        f.live
+            .show_receipt(f.app.finish_delivery(id, result).unwrap());
+        assert_eq!(f.app.input.text(), "keep correction");
+        assert!(socket::read_json_line(&mut peer).await.unwrap().is_none());
+        assert!(rx.try_recv().is_err());
+        f.assert_unsent();
+    }
+    f.client.shutdown().await;
+}
+
+#[tokio::test]
+async fn selected_exec_is_readonly_and_quit_outside_selection_is_local() {
+    let mut f = Fixture::with_watch_socket(1);
+    assert!(!f.control("/quit"));
+    assert!(matches!(
+        commands::dispatch("/quit"),
+        Some(commands::CommandResult::Quit)
+    ));
+    f.siblings("exec");
+    let _bus = f.exact("A").await;
+    assert_eq!(
+        f.app.conversation_status(&f.app.selected_target),
+        ConversationStatus::ReadOnly
+    );
+    f.app.replace_input("do not send");
+    let (tx, mut rx) = mpsc::unbounded_channel();
+    assert!(f.submit(&tx, false));
+    assert_eq!(f.app.input.text(), "do not send");
+    assert!(f.control("/pause"));
+    assert!(!f.control("/quit"));
+    assert!(matches!(
+        commands::dispatch(f.app.input.text()),
+        Some(commands::CommandResult::Quit)
+    ));
+    assert!(rx.try_recv().is_err());
+    f.assert_unsent();
+    f.client.shutdown().await;
+}
+
+#[tokio::test]
+async fn delayed_selected_a_delivery_preserves_new_a_and_b_drafts() {
+    let mut f = Fixture::with_watch_socket(3);
+    f.siblings("agent");
+    let _a_bus = f.exact("A").await;
+    let a = f.app.selected_target.clone();
+    let (tx, mut rx) = mpsc::unbounded_channel();
+    f.app.replace_input("old A correction");
+    assert!(f.submit(&tx, false));
+    let mut input = f.bind_selected("A").await;
+    let command = read(&mut input).await;
+    socket::write_json_line(
+        input.get_mut(),
+        &json!({"type":"queued", "req_id":command["req_id"]}),
+    )
+    .await
+    .unwrap();
+    f.app.replace_input("new A draft");
+    let _b_bus = f.exact("B").await;
+    f.app.replace_input("new B draft");
+    socket::write_json_line(
+        input.get_mut(),
+        &json!({"type":"delivered", "req_id":command["req_id"]}),
+    )
+    .await
+    .unwrap();
+    let (id, result) = delivery(&mut rx).await;
+    assert!(result.is_ok());
+    let receipt = f.app.finish_delivery(id, result).unwrap();
+    assert!(!receipt.clear_draft);
+    f.live.show_receipt(receipt);
+    assert_eq!(f.app.input.text(), "new B draft");
+    assert!(!f.rendered().contains("correction delivered"));
+    f.live.select_conversation(&mut f.app, a);
+    assert_eq!(f.app.input.text(), "new A draft");
+    assert_eq!(f.rendered().matches("correction delivered").count(), 1);
+    f.client.shutdown().await;
+}
+
+#[tokio::test]
+async fn queued_selected_disconnect_or_drop_is_not_delivery() {
+    for disconnect in [false, true] {
+        let mut f = Fixture::with_watch_socket(2);
+        f.siblings("agent");
+        let _bus = f.exact("A").await;
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        f.app.replace_input("recover this");
+        assert!(f.submit(&tx, false));
+        let mut input = f.bind_selected("A").await;
+        let command = read(&mut input).await;
+        socket::write_json_line(
+            input.get_mut(),
+            &json!({"type":"queued", "req_id":command["req_id"]}),
+        )
+        .await
+        .unwrap();
+        tokio::task::yield_now().await;
+        assert!(rx.try_recv().is_err());
+        assert_eq!(f.app.input.text(), "recover this");
+        if !disconnect {
+            socket::write_json_line(
+                input.get_mut(),
+                &json!({"type":"dropped", "req_id":command["req_id"]}),
+            )
+            .await
+            .unwrap();
+        }
+        drop(input);
+        let (id, result) = delivery(&mut rx).await;
+        assert!(result.is_err());
+        f.live
+            .show_receipt(f.app.finish_delivery(id, result).unwrap());
+        assert_eq!(f.app.input.text(), "recover this");
+        f.assert_unsent();
+        f.client.shutdown().await;
+    }
+}
+
+#[tokio::test]
+async fn selected_controls_reuse_native_handle_and_leaving_paused_sends_nothing() {
+    let mut f = Fixture::with_watch_socket(4);
+    f.siblings("agent");
+    let mut bus = f.exact("A").await;
+    assert!(f.control("/pause"));
+    let mut input = f.bind_selected("A").await;
+    for (index, (text, cmd)) in [
+        ("/pause", "pause"),
+        ("/step", "step"),
+        ("/continue", "step"),
+        ("/resume-execution", "resume"),
+        ("/quit", "resume"),
+        ("/bail enough", "bail"),
+        ("/quit stop now", "bail"),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        if index != 0 {
+            assert!(f.control(text));
+        }
+        let command = read(&mut input).await;
+        if cmd == "bail" {
+            assert_eq!(command["reason"], text.split_once(' ').unwrap().1);
+        }
+        assert_eq!(command["cmd"], cmd);
+        assert!(command.get("id").is_none());
+        socket::write_json_line(
+            input.get_mut(),
+            &json!({"type":"delivered", "req_id":command["req_id"]}),
+        )
+        .await
+        .unwrap();
+        f.frame().await;
+    }
+    f.app
+        .set_conversation_status(f.app.selected_target.clone(), ConversationStatus::Paused);
+    assert!(f.control("/exit"));
+    assert_eq!(f.app.selected_target, Target::Home);
+    assert!(socket::read_json_line(&mut input).await.unwrap().is_none());
+    f.assert_closed(&mut bus).await;
+    let mut bus = f.exact("A").await;
+    assert_eq!(
+        f.app.conversation_status(&f.app.selected_target),
+        ConversationStatus::Paused
+    );
+    assert_eq!(f.attachment.execution.as_ref().unwrap().stage_run_id, "A");
+    assert!(
+        tokio::time::timeout(Duration::from_millis(50), socket::read_json_line(&mut bus))
+            .await
+            .is_err(),
+        "reselecting a paused invocation must not send a control"
+    );
+    f.assert_unsent();
+    assert!(f.control("/resume-execution"));
+    let mut input = f.bind_selected("A").await;
+    let command = read(&mut input).await;
+    assert_eq!(command["cmd"], "resume");
+    socket::write_json_line(
+        input.get_mut(),
+        &json!({"type":"delivered", "req_id":command["req_id"]}),
+    )
+    .await
+    .unwrap();
+    f.frame().await;
+    f.client.shutdown().await;
+}
+
 struct Sandbox {
     _lock: std::sync::MutexGuard<'static, ()>,
     _dir: tempfile::TempDir,
@@ -2096,78 +2436,4 @@ async fn read<S: tokio::io::AsyncRead + Unpin>(peer: &mut BufReader<S>) -> Value
         .expect("socket request timed out")
         .unwrap()
         .unwrap()
-}
-
-#[tokio::test]
-async fn debug_leaving_before_ready_ignores_buffered_late_ready() {
-    let mut f = Fixture::with_socket();
-    let mut peer = f.attach("debugger", "exec").await;
-    let target = f.app.selected_target.clone();
-    f.receive(&mut peer, json!({"type":"waiting_for_ready"}))
-        .await;
-    socket::write_json_line(peer.get_mut(), &json!({"type":"ready"}))
-        .await
-        .unwrap();
-    let late = tokio::time::timeout(Duration::from_secs(2), f.rx.recv())
-        .await
-        .unwrap()
-        .unwrap();
-    assert!(f.control("/exit"));
-    let rendered = f.rendered();
-    apply_attachment_frame(&mut f.app, &mut f.live, &mut f.attachment, late);
-    assert_eq!(f.app.selected_target, Target::Home);
-    assert_ne!(
-        f.app.conversation_status(&target),
-        ConversationStatus::Paused
-    );
-    assert_eq!(f.rendered(), rendered);
-    f.assert_closed(&mut peer).await;
-    f.client.shutdown().await;
-}
-
-#[tokio::test]
-async fn debug_uses_aux_mode_identity_controls_and_detach() {
-    let mut f = Fixture::with_socket();
-    for mode in ["debugger"] {
-        let mut peer = f.attach(mode, "exec").await;
-        let execution = f.attachment.execution.as_ref().unwrap();
-        assert_eq!(execution.run_id, "run");
-        assert_eq!(execution.stage_run_id, "exec");
-        assert_eq!(execution.nonce, 9);
-        assert_eq!(
-            f.app.conversation_status(&f.app.selected_target),
-            ConversationStatus::Running
-        );
-        if mode == "debugger" {
-            f.receive(&mut peer, json!({"type":"ready"})).await;
-            assert_eq!(
-                f.app.conversation_status(&f.app.selected_target),
-                ConversationStatus::Paused
-            );
-        }
-        for (input, expected) in [
-            (
-                "/continue",
-                json!({"op":"continue", "req_id":"selected-control"}),
-            ),
-            ("/quit", json!({"op":"quit", "req_id":"selected-control"})),
-            (
-                "/quit stop now",
-                json!({"op":"bail", "reason":"stop now", "req_id":"selected-control"}),
-            ),
-            (
-                "/bail enough",
-                json!({"op":"bail", "reason":"enough", "req_id":"selected-control"}),
-            ),
-        ] {
-            assert!(f.control(input));
-            assert!(f.app.input.is_empty());
-            assert_eq!(read(&mut peer).await, expected);
-        }
-
-        assert!(f.control("/exit"));
-        assert_eq!(f.app.selected_target, Target::Home);
-        f.assert_closed(&mut peer).await;
-    }
-    f.client.shutdown().await;
 }

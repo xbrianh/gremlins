@@ -15,8 +15,9 @@
 pub(crate) mod attachment;
 mod home;
 
-use std::collections::VecDeque;
-use std::sync::Arc;
+use std::collections::{HashMap, VecDeque};
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Mutex as StdMutex};
 
 use super::protocol::{Execution, Selector};
 use gremlins::executor::socket;
@@ -249,6 +250,13 @@ impl Connection {
     }
 }
 
+struct SelectedInput {
+    input: Arc<crate::input::InputClient>,
+    epoch: u64,
+}
+
+type SelectedInputs = HashMap<(String, String, u64), SelectedInput>;
+
 /// A persistent client for the executor daemon.
 ///
 /// `control` is the shared executor socket; `session` is the current
@@ -263,6 +271,8 @@ pub struct DaemonClient {
     /// session operation's restart and drop un-acked waiters.
     session_recreate: Mutex<()>,
     home_display: Mutex<Option<home::Display>>,
+    selected_inputs: StdMutex<SelectedInputs>,
+    input_epoch: AtomicU64,
     #[cfg(test)]
     aux_streams: Arc<Mutex<Option<VecDeque<tokio::net::UnixStream>>>>,
 }
@@ -306,6 +316,8 @@ impl DaemonClient {
                 out,
                 session_recreate: Mutex::new(()),
                 home_display: Mutex::new(None),
+                selected_inputs: StdMutex::new(HashMap::new()),
+                input_epoch: AtomicU64::new(0),
                 aux_streams: Arc::new(Mutex::new(Some(streams.into()))),
             },
             [control_peer, session_peer],
@@ -390,16 +402,6 @@ impl DaemonClient {
         socket::connect_session_socket(&state_root, &self.session_id().await).await
     }
 
-    async fn attach_conversation(
-        &self,
-        selector: Selector<'_>,
-    ) -> Result<(BufReader<tokio::net::UnixStream>, Execution), String> {
-        let session = self.session_id().await;
-        let stream =
-            socket::connect_session_socket(&gremlins::config::state_root(), &session).await?;
-        attach_conversation(stream, &session, selector).await
-    }
-
     /// Send exactly one correction on a socket pinned to the operator's execution.
     /// This connection never forwards display frames to either TUI event stream.
     pub async fn deliver_correction(
@@ -408,13 +410,121 @@ impl DaemonClient {
         id: u64,
         text: &str,
     ) -> Result<(), String> {
-        if execution.nonce == 0 {
-            let session = self.session_id().await;
-            let stream = self.open_aux_stream().await?;
-            return send_native_correction(stream, &session, execution, id, text).await;
+        self.selected_input(
+            execution,
+            json!({"cmd":"message", "req_id":id.to_string(), "text":text}),
+        )
+        .await
+    }
+
+    /// Send native input to exactly this execution. Queued is not delivery.
+    /// Cloning the handle before waiting lets controls unblock a pending message.
+    pub async fn selected_input(
+        &self,
+        execution: &Execution,
+        command: Value,
+    ) -> Result<(), String> {
+        self.selected_input_at(self.input_epoch(), execution, command)
+            .await
+    }
+
+    pub fn input_epoch(&self) -> u64 {
+        self.input_epoch.load(Ordering::SeqCst)
+    }
+
+    pub async fn selected_input_at(
+        &self,
+        epoch: u64,
+        execution: &Execution,
+        command: Value,
+    ) -> Result<(), String> {
+        let key = (
+            execution.run_id.clone(),
+            execution.stage_run_id.clone(),
+            execution.nonce,
+        );
+        let input = {
+            let _session_guard = self.session_recreate.lock().await;
+            let cached = {
+                let mut inputs = self.selected_inputs.lock().unwrap();
+                if self.input_epoch.load(Ordering::SeqCst) != epoch {
+                    return Err("input selection invalidated".into());
+                }
+                if inputs
+                    .get(&key)
+                    .is_some_and(|selected| selected.input.is_failed())
+                {
+                    inputs.remove(&key);
+                }
+                inputs.get_mut(&key).map(|selected| {
+                    selected.epoch = epoch;
+                    Arc::clone(&selected.input)
+                })
+            };
+            if let Some(input) = cached {
+                input
+            } else {
+                let req_id = command["req_id"]
+                    .as_str()
+                    .filter(|id| !id.is_empty())
+                    .ok_or("input requires nonempty string 'req_id'")?;
+                let session = self.session_id().await;
+                let stream = self.open_aux_stream().await?;
+                let input = Arc::new(
+                    crate::input::InputClient::bind(
+                        stream,
+                        execution.input_request(&session, req_id),
+                    )
+                    .await?,
+                );
+                let mut inputs = self.selected_inputs.lock().unwrap();
+                if self.input_epoch.load(Ordering::SeqCst) != epoch {
+                    return Err("input selection invalidated".into());
+                }
+                inputs.insert(
+                    key.clone(),
+                    SelectedInput {
+                        input: Arc::clone(&input),
+                        epoch,
+                    },
+                );
+                input
+            }
+        };
+        let receipt = {
+            let _inputs = self.selected_inputs.lock().unwrap();
+            if self.input_epoch.load(Ordering::SeqCst) != epoch {
+                return Err("input selection invalidated".into());
+            }
+            // Registration and selection release are serialized; waiting is not.
+            input.send(command)
+        };
+        let result = receipt.await;
+        let mut inputs = self.selected_inputs.lock().unwrap();
+        if inputs.get(&key).is_some_and(|selected| {
+            selected.epoch != self.input_epoch.load(Ordering::SeqCst)
+                && Arc::ptr_eq(&selected.input, &input)
+                && !input.has_pending()
+        }) {
+            inputs.remove(&key);
         }
-        let (stream, bound) = self.attach_conversation(Selector::Exact(execution)).await?;
-        send_correction(stream, &bound, id, text).await
+        result
+    }
+
+    /// Release idle handles, retaining bindings needed to unblock queued input.
+    pub fn release_inputs(&self) {
+        let mut inputs = self.selected_inputs.lock().unwrap();
+        self.input_epoch.fetch_add(1, Ordering::SeqCst);
+        inputs.retain(|_, selected| selected.input.has_pending());
+    }
+
+    fn invalidate_inputs(&self) {
+        let mut inputs = self.selected_inputs.lock().unwrap();
+        self.input_epoch.fetch_add(1, Ordering::SeqCst);
+        for selected in inputs.values() {
+            selected.input.close();
+        }
+        inputs.clear();
     }
 
     /// Open a dedicated session connection for a streaming log follow.
@@ -524,6 +634,7 @@ impl DaemonClient {
     pub async fn recreate_session(&self) -> Result<(), String> {
         let _recreate_guard = self.session_recreate.lock().await;
 
+        self.invalidate_inputs();
         self.home_display.lock().await.take();
         let close_request = serde_json::json!({"op": "close_session"});
         let _ = self.session.send_on_session(close_request).await?;
@@ -545,6 +656,7 @@ impl DaemonClient {
     /// Abort both background read loops, closing the sockets.
     pub async fn shutdown(&self) {
         self.home_display.lock().await.take();
+        self.invalidate_inputs();
         self.control.shutdown().await;
         self.session.shutdown().await;
     }
@@ -555,114 +667,6 @@ impl DaemonClient {
     pub fn chat_sender(&self) -> mpsc::UnboundedSender<ChatEvent> {
         self.out.chat_tx.clone()
     }
-}
-
-async fn attach_conversation(
-    stream: tokio::net::UnixStream,
-    session: &str,
-    selector: Selector<'_>,
-) -> Result<(BufReader<tokio::net::UnixStream>, Execution), String> {
-    let mut stream = BufReader::new(stream);
-    socket::write_json_line(stream.get_mut(), &selector.request(session)).await?;
-    let ack = attachment::read_ack(&mut stream).await?;
-    Ok((stream, selector.binding(&ack)?))
-}
-
-async fn send_native_correction(
-    stream: tokio::net::UnixStream,
-    session: &str,
-    execution: &Execution,
-    id: u64,
-    text: &str,
-) -> Result<(), String> {
-    let mut stream = BufReader::new(stream);
-    let req_id = id.to_string();
-    socket::write_json_line(stream.get_mut(), &execution.input_request(session, &req_id)).await?;
-    let ack = attachment::read_ack(&mut stream).await?;
-    if ack["type"] == "error" {
-        return Err(ack["message"].as_str().unwrap_or("input rejected").into());
-    }
-    if ack["type"] != "input_bound"
-        || ack["req_id"] != req_id
-        || ack["id"] != execution.run_id
-        || ack["stage_run_id"] != execution.stage_run_id
-    {
-        return Err("input binding acknowledgment mismatch".into());
-    }
-    let uncertain = |reason: String| format!("delivery uncertain: {reason}");
-    socket::write_json_line(
-        stream.get_mut(),
-        &json!({"cmd":"message", "req_id":req_id, "text":text}),
-    )
-    .await
-    .map_err(uncertain)?;
-    while let Some(frame) = socket::read_json_line(&mut stream)
-        .await
-        .map_err(uncertain)?
-    {
-        if frame["type"] == "ended" {
-            break;
-        }
-        if frame["req_id"] != req_id {
-            return Err(uncertain("mismatched input receipt".into()));
-        }
-        match frame["type"].as_str() {
-            Some("queued") => continue,
-            Some("delivered") => return Ok(()),
-            Some("dropped") => return Err("correction not delivered".into()),
-            Some("error") => {
-                return Err(frame["message"].as_str().unwrap_or("input rejected").into())
-            }
-            _ => return Err(uncertain("unexpected input receipt".into())),
-        }
-    }
-    Err(uncertain("input closed without confirmation".into()))
-}
-
-async fn send_correction(
-    mut stream: BufReader<tokio::net::UnixStream>,
-    execution: &Execution,
-    id: u64,
-    text: &str,
-) -> Result<(), String> {
-    let req_id = id.to_string();
-    let message = json!({"op":"message", "req_id":req_id, "text":text});
-    let uncertain = |reason: String| format!("delivery uncertain: {reason}");
-    socket::write_json_line(stream.get_mut(), &message)
-        .await
-        .map_err(uncertain)?;
-    while let Some(frame) = socket::read_json_line(&mut stream)
-        .await
-        .map_err(uncertain)?
-    {
-        match frame["type"].as_str() {
-            Some(kind @ ("delivered" | "correction_dropped")) => {
-                if frame["scope"] != "conversation"
-                    || frame["req_id"] != req_id
-                    || Execution::from_frame(&frame).as_ref() != Some(execution)
-                {
-                    return Err(uncertain("mismatched acknowledgment".to_owned()));
-                }
-                return if kind == "delivered" {
-                    Ok(())
-                } else {
-                    Err("correction not delivered".to_owned())
-                };
-            }
-            // Errors from the command handler are unscoped. A scoped error
-            // is a display event from the conversation, not a rejection.
-            Some("error") if frame.get("scope").is_none() => {
-                return Err(frame["message"]
-                    .as_str()
-                    .unwrap_or("correction rejected")
-                    .to_owned())
-            }
-            _ => {}
-        }
-    }
-    Err(uncertain(
-        "attachment closed without confirmation".to_owned(),
-    ))
 }
 
 async fn follow_run(
@@ -796,6 +800,8 @@ pub async fn connect() -> Result<
             out,
             session_recreate: Mutex::new(()),
             home_display: Mutex::new(None),
+            selected_inputs: StdMutex::new(HashMap::new()),
+            input_epoch: AtomicU64::new(0),
             #[cfg(test)]
             aux_streams: Arc::new(Mutex::new(None)),
         },
@@ -892,77 +898,6 @@ async fn read_loop(
     // Drop all pending response senders so waiters see "connection
     // closed" instead of hanging forever.
     responses.lock().await.clear();
-}
-
-#[cfg(test)]
-mod native_input_tests {
-    use super::*;
-
-    async fn exchange(ack: Value, receipts: Vec<Value>) -> Result<(), String> {
-        let (client, server) = tokio::net::UnixStream::pair().unwrap();
-        let peer = tokio::spawn(async move {
-            let mut server = BufReader::new(server);
-            let request = socket::read_json_line(&mut server).await.unwrap().unwrap();
-            assert_eq!(
-                request,
-                json!({"op":"input", "session_id":"owner", "id":"home",
-                "stage_run_id":"exact", "req_id":"7"})
-            );
-            socket::write_json_line(server.get_mut(), &ack)
-                .await
-                .unwrap();
-            if ack["type"] != "input_bound" || ack["stage_run_id"] != "exact" {
-                assert!(socket::read_json_line(&mut server).await.unwrap().is_none());
-                return;
-            }
-            assert_eq!(
-                socket::read_json_line(&mut server).await.unwrap().unwrap(),
-                json!({"cmd":"message", "req_id":"7", "text":"fix"})
-            );
-            for receipt in receipts {
-                socket::write_json_line(server.get_mut(), &receipt)
-                    .await
-                    .unwrap();
-            }
-        });
-        let execution =
-            Execution::from_bus_frame(&json!({"run_id":"home", "stage_run_id":"exact"})).unwrap();
-        let result = send_native_correction(client, "owner", &execution, 7, "fix").await;
-        peer.await.unwrap();
-        result
-    }
-
-    fn ack() -> Value {
-        json!({"type":"input_bound", "id":"home", "stage_run_id":"exact", "req_id":"7"})
-    }
-
-    #[tokio::test]
-    async fn native_input_requires_exact_binding_and_delivered_receipt() {
-        assert!(exchange(
-            ack(),
-            vec![
-                json!({"type":"queued", "req_id":"7"}),
-                json!({"type":"delivered", "req_id":"7"})
-            ]
-        )
-        .await
-        .is_ok());
-        for receipts in [
-            vec![],
-            vec![json!({"type":"queued", "req_id":"7"})],
-            vec![json!({"type":"dropped", "req_id":"7"})],
-            vec![json!({"type":"delivered", "req_id":"other"})],
-            vec![json!({"type":"error", "req_id":"7", "message":"busy"})],
-        ] {
-            assert!(exchange(ack(), receipts).await.is_err());
-        }
-        let mut wrong = ack();
-        wrong["stage_run_id"] = json!("successor");
-        assert!(exchange(wrong, vec![]).await.is_err());
-        assert!(exchange(json!({"type":"error", "message":"busy"}), vec![])
-            .await
-            .is_err());
-    }
 }
 
 #[cfg(test)]
@@ -1750,124 +1685,540 @@ mod correction_tests {
         assert!(chat_rx.recv().await.is_none());
     }
 
-    fn execution() -> Execution {
-        Execution {
-            run_id: "pipeline".into(),
-            stage_run_id: "exec-stage".into(),
-            nonce: 9,
-        }
-    }
+    #[tokio::test]
+    async fn stale_epoch_before_first_poll_rejects_without_auxiliary_bind() {
+        use tokio::time::{timeout, Duration};
 
-    fn frame(kind: &str) -> Value {
-        json!({"type":kind,"id":"pipeline","nonce":9,"scope":"conversation","stage_run_id":"exec-stage"})
-    }
-
-    fn attached() -> Value {
-        let mut ack = frame("attached");
-        ack["capabilities"] = json!(["observe", "message"]);
-        ack
-    }
-
-    /// Drive the actual auxiliary socket; assert exactly one undecorated
-    /// message (or none if the handshake failed), then EOF, with no retries.
-    async fn exchange(ack: Value, expect_message: bool, replies: Vec<Value>) -> Result<(), String> {
-        let (client, server) = UnixStream::pair().unwrap();
-        let server = tokio::spawn(async move {
-            let mut peer = BufReader::new(server);
-            let attach = socket::read_json_line(&mut peer).await.unwrap().unwrap();
-            assert_eq!(
-                attach,
-                json!({"op":"attach", "scope":"conversation", "mode":"control", "id":"pipeline", "stage_run_id":"exec-stage", "nonce":9,"session_id":"owner"})
+        timeout(Duration::from_secs(3), async {
+            let execution = Execution {
+                run_id: "pipeline".into(),
+                stage_run_id: "exec-stage".into(),
+                nonce: 9,
+            };
+            let (stream, peer) = UnixStream::pair().unwrap();
+            let (client, _peers) = DaemonClient::fake_with_aux_streams(
+                json!({"session_id":"owner", "home_run_id":"home"}),
+                vec![stream],
             );
-            socket::write_json_line(peer.get_mut(), &ack).await.unwrap();
-            if expect_message {
-                let cmd = socket::read_json_line(&mut peer).await.unwrap().unwrap();
-                assert_eq!(
-                    cmd,
-                    json!({"op":"message", "text":"  stop here\n", "req_id":"17"})
-                );
+            let epoch = client.input_epoch();
+            let pending =
+                client.selected_input_at(epoch, &execution, json!({"cmd":"pause", "req_id":"17"}));
+            client.release_inputs();
+            assert_eq!(pending.await.unwrap_err(), "input selection invalidated");
+            assert!(client.selected_inputs.lock().unwrap().is_empty());
+            assert_eq!(client.aux_streams.lock().await.as_ref().unwrap().len(), 1);
+            let mut peer = BufReader::new(peer);
+            assert!(
+                timeout(Duration::from_millis(20), socket::read_json_line(&mut peer))
+                    .await
+                    .is_err()
+            );
+            client.shutdown().await;
+        })
+        .await
+        .unwrap();
+    }
+
+    #[tokio::test]
+    async fn disconnected_cached_input_rebinds_only_on_next_explicit_command() {
+        use tokio::time::{timeout, Duration};
+
+        timeout(Duration::from_secs(3), async {
+            let execution = Execution {
+                run_id: "pipeline".into(),
+                stage_run_id: "exec-stage".into(),
+                nonce: 9,
+            };
+            let (old_stream, old_peer) = UnixStream::pair().unwrap();
+            let (new_stream, new_peer) = UnixStream::pair().unwrap();
+            let (client, _peers) = DaemonClient::fake_with_aux_streams(
+                json!({"session_id":"owner", "home_run_id":"home"}),
+                vec![old_stream, new_stream],
+            );
+            let client = Arc::new(client);
+            let sending = Arc::clone(&client);
+            let target = execution.clone();
+            let first = tokio::spawn(async move {
+                sending
+                    .selected_input(&target, json!({"cmd":"pause", "req_id":"17"}))
+                    .await
+            });
+            let mut old_peer = BufReader::new(old_peer);
+            let bind = socket::read_json_line(&mut old_peer)
+                .await
+                .unwrap()
+                .unwrap();
+            assert_eq!(bind, execution.input_request("owner", "17"));
+            socket::write_json_line(
+                old_peer.get_mut(),
+                &json!({
+                    "type":"input_bound", "id":bind["id"],
+                    "stage_run_id":bind["stage_run_id"], "req_id":bind["req_id"]
+                }),
+            )
+            .await
+            .unwrap();
+            assert_eq!(
+                socket::read_json_line(&mut old_peer)
+                    .await
+                    .unwrap()
+                    .unwrap(),
+                json!({"cmd":"pause", "req_id":"17"})
+            );
+            let old_input = Arc::clone(
+                &client
+                    .selected_inputs
+                    .lock()
+                    .unwrap()
+                    .values()
+                    .next()
+                    .unwrap()
+                    .input,
+            );
+            drop(old_peer);
+            assert!(first
+                .await
+                .unwrap()
+                .unwrap_err()
+                .starts_with("delivery uncertain:"));
+            assert!(old_input.is_failed());
+            assert_eq!(client.selected_inputs.lock().unwrap().len(), 1);
+            assert_eq!(client.aux_streams.lock().await.as_ref().unwrap().len(), 1);
+            let mut new_peer = BufReader::new(new_peer);
+            assert!(timeout(
+                Duration::from_millis(20),
+                socket::read_json_line(&mut new_peer)
+            )
+            .await
+            .is_err());
+
+            let sending = Arc::clone(&client);
+            let target = execution.clone();
+            let second = tokio::spawn(async move {
+                sending
+                    .selected_input(&target, json!({"cmd":"resume", "req_id":"18"}))
+                    .await
+            });
+            let bind = socket::read_json_line(&mut new_peer)
+                .await
+                .unwrap()
+                .unwrap();
+            assert_eq!(bind, execution.input_request("owner", "18"));
+            socket::write_json_line(
+                new_peer.get_mut(),
+                &json!({
+                    "type":"input_bound", "id":bind["id"],
+                    "stage_run_id":bind["stage_run_id"], "req_id":bind["req_id"]
+                }),
+            )
+            .await
+            .unwrap();
+            assert_eq!(
+                socket::read_json_line(&mut new_peer)
+                    .await
+                    .unwrap()
+                    .unwrap(),
+                json!({"cmd":"resume", "req_id":"18"})
+            );
+            {
+                let inputs = client.selected_inputs.lock().unwrap();
+                assert_eq!(inputs.len(), 1);
+                let selected = inputs
+                    .get(&(
+                        execution.run_id.clone(),
+                        execution.stage_run_id.clone(),
+                        execution.nonce,
+                    ))
+                    .unwrap();
+                assert!(!Arc::ptr_eq(&selected.input, &old_input));
             }
-            for reply in replies {
-                socket::write_json_line(peer.get_mut(), &reply)
+            socket::write_json_line(
+                new_peer.get_mut(),
+                &json!({"type":"delivered", "req_id":"18"}),
+            )
+            .await
+            .unwrap();
+            second.await.unwrap().unwrap();
+            assert!(timeout(
+                Duration::from_millis(20),
+                socket::read_json_line(&mut new_peer)
+            )
+            .await
+            .is_err());
+            client.shutdown().await;
+            assert!(socket::read_json_line(&mut new_peer)
+                .await
+                .unwrap()
+                .is_none());
+        })
+        .await
+        .unwrap();
+    }
+
+    #[tokio::test]
+    async fn invalidate_and_shutdown_close_queued_input_with_live_waiter() {
+        use tokio::time::{timeout, Duration};
+
+        timeout(Duration::from_secs(3), async {
+            for shutdown in [false, true] {
+                let execution = Execution {
+                    run_id: "pipeline".into(),
+                    stage_run_id: "exec-stage".into(),
+                    nonce: 9,
+                };
+                let (stream, peer) = UnixStream::pair().unwrap();
+                let (client, _peers) = DaemonClient::fake_with_aux_streams(
+                    json!({"session_id":"owner", "home_run_id":"home"}),
+                    vec![stream],
+                );
+                let client = Arc::new(client);
+                let sending = Arc::clone(&client);
+                let waiter = tokio::spawn(async move {
+                    sending
+                        .deliver_correction(&execution, 17, "queued correction")
+                        .await
+                });
+                let mut peer = BufReader::new(peer);
+                let bind = socket::read_json_line(&mut peer).await.unwrap().unwrap();
+                socket::write_json_line(
+                    peer.get_mut(),
+                    &json!({
+                        "type":"input_bound", "id":bind["id"],
+                        "stage_run_id":bind["stage_run_id"], "req_id":bind["req_id"]
+                    }),
+                )
+                .await
+                .unwrap();
+                assert_eq!(
+                    socket::read_json_line(&mut peer).await.unwrap().unwrap(),
+                    json!({"cmd":"message", "req_id":"17", "text":"queued correction"})
+                );
+                socket::write_json_line(peer.get_mut(), &json!({"type":"queued", "req_id":"17"}))
+                    .await
+                    .unwrap();
+                let input = Arc::clone(
+                    &client
+                        .selected_inputs
+                        .lock()
+                        .unwrap()
+                        .values()
+                        .next()
+                        .unwrap()
+                        .input,
+                );
+                assert!(input.has_pending());
+                assert!(Arc::strong_count(&input) >= 3);
+                assert!(!waiter.is_finished());
+                if shutdown {
+                    client.shutdown().await;
+                } else {
+                    client.invalidate_inputs();
+                }
+                assert!(client.selected_inputs.lock().unwrap().is_empty());
+                assert!(input.is_failed());
+                assert!(!input.has_pending());
+                assert!(socket::read_json_line(&mut peer).await.unwrap().is_none());
+                assert_eq!(
+                    waiter.await.unwrap().unwrap_err(),
+                    "delivery uncertain: input client closed"
+                );
+                if !shutdown {
+                    client.shutdown().await;
+                }
+            }
+        })
+        .await
+        .unwrap();
+    }
+
+    #[tokio::test]
+    async fn invalidation_during_bind_rejects_command_without_writing() {
+        tokio::time::timeout(std::time::Duration::from_secs(3), async {
+            let execution = Execution {
+                run_id: "pipeline".into(),
+                stage_run_id: "exec-stage".into(),
+                nonce: 9,
+            };
+            let (stream, peer) = UnixStream::pair().unwrap();
+            let (client, _peers) = DaemonClient::fake_with_aux_streams(
+                json!({"session_id":"owner", "home_run_id":"home"}),
+                vec![stream],
+            );
+            let client = Arc::new(client);
+            let sending = Arc::clone(&client);
+            let task =
+                tokio::spawn(
+                    async move { sending.deliver_correction(&execution, 17, "stale").await },
+                );
+            let mut peer = BufReader::new(peer);
+            let bind = socket::read_json_line(&mut peer).await.unwrap().unwrap();
+            client.release_inputs();
+            socket::write_json_line(
+                peer.get_mut(),
+                &json!({"type":"input_bound", "id":bind["id"],
+                    "stage_run_id":bind["stage_run_id"], "req_id":bind["req_id"]}),
+            )
+            .await
+            .unwrap();
+            assert_eq!(
+                task.await.unwrap().unwrap_err(),
+                "input selection invalidated"
+            );
+            assert!(client.selected_inputs.lock().unwrap().is_empty());
+            assert!(socket::read_json_line(&mut peer).await.unwrap().is_none());
+        })
+        .await
+        .unwrap();
+    }
+
+    #[tokio::test]
+    async fn release_preserves_pending_receipt_and_new_selection() {
+        tokio::time::timeout(std::time::Duration::from_secs(3), async {
+            let execution = Execution {
+                run_id: "pipeline".into(),
+                stage_run_id: "exec-stage".into(),
+                nonce: 9,
+            };
+            let (old_stream, old_peer) = UnixStream::pair().unwrap();
+            let (new_stream, new_peer) = UnixStream::pair().unwrap();
+            let (client, _peers) = DaemonClient::fake_with_aux_streams(
+                json!({"session_id":"owner", "home_run_id":"home"}),
+                vec![old_stream, new_stream],
+            );
+            let client = Arc::new(client);
+            let mut peers = [BufReader::new(old_peer), BufReader::new(new_peer)];
+            let mut tasks = Vec::new();
+            for (index, peer) in peers.iter_mut().enumerate() {
+                let sending = Arc::clone(&client);
+                let mut execution = execution.clone();
+                execution.stage_run_id = format!("exec-{index}");
+                tasks.push(tokio::spawn(async move {
+                    sending
+                        .deliver_correction(&execution, index as u64, "text")
+                        .await
+                }));
+                let bind = socket::read_json_line(peer).await.unwrap().unwrap();
+                socket::write_json_line(
+                    peer.get_mut(),
+                    &json!({"type":"input_bound", "id":bind["id"],
+                        "stage_run_id":bind["stage_run_id"], "req_id":bind["req_id"]}),
+                )
+                .await
+                .unwrap();
+                let command = socket::read_json_line(peer).await.unwrap().unwrap();
+                assert_eq!(command["req_id"], index.to_string());
+                if index == 0 {
+                    socket::write_json_line(
+                        peer.get_mut(),
+                        &json!({"type":"queued", "req_id":"0"}),
+                    )
+                    .await
+                    .unwrap();
+                    client.release_inputs();
+                }
+            }
+            socket::write_json_line(
+                peers[0].get_mut(),
+                &json!({"type":"delivered", "req_id":"0"}),
+            )
+            .await
+            .unwrap();
+            tasks.remove(0).await.unwrap().unwrap();
+            // A settles in the background while B remains selected and pending.
+            assert!(!tasks[0].is_finished());
+            assert!(socket::read_json_line(&mut peers[0])
+                .await
+                .unwrap()
+                .is_none());
+            {
+                let inputs = client.selected_inputs.lock().unwrap();
+                assert_eq!(inputs.len(), 1);
+                assert!(inputs.keys().any(|key| key.1 == "exec-1"));
+            }
+            socket::write_json_line(
+                peers[1].get_mut(),
+                &json!({"type":"delivered", "req_id":"1"}),
+            )
+            .await
+            .unwrap();
+            tasks.remove(0).await.unwrap().unwrap();
+            assert_eq!(client.selected_inputs.lock().unwrap().len(), 1);
+            client.release_inputs();
+            assert!(client.selected_inputs.lock().unwrap().is_empty());
+            assert!(socket::read_json_line(&mut peers[1])
+                .await
+                .unwrap()
+                .is_none());
+        })
+        .await
+        .unwrap();
+    }
+
+    #[tokio::test]
+    async fn deselected_queued_correction_resumes_on_original_binding() {
+        use tokio::time::{timeout, Duration};
+
+        timeout(Duration::from_secs(3), async {
+            let execution = Execution {
+                run_id: "pipeline".into(),
+                stage_run_id: "exec-stage".into(),
+                nonce: 9,
+            };
+            let (stream, peer) = UnixStream::pair().unwrap();
+            let (client, peers) = DaemonClient::fake_with_aux_streams(
+                json!({"session_id":"owner", "home_run_id":"home"}),
+                vec![stream],
+            );
+            let client = Arc::new(client);
+            let sending = Arc::clone(&client);
+            let target = execution.clone();
+            let correction =
+                tokio::spawn(
+                    async move { sending.deliver_correction(&target, 17, "correction").await },
+                );
+            let mut peer = BufReader::new(peer);
+            let bind = socket::read_json_line(&mut peer).await.unwrap().unwrap();
+            socket::write_json_line(
+                peer.get_mut(),
+                &json!({"type":"input_bound", "id":bind["id"],
+                    "stage_run_id":bind["stage_run_id"], "req_id":bind["req_id"]}),
+            )
+            .await
+            .unwrap();
+            assert_eq!(
+                socket::read_json_line(&mut peer).await.unwrap().unwrap(),
+                json!({"cmd":"message", "req_id":"17", "text":"correction"})
+            );
+            socket::write_json_line(peer.get_mut(), &json!({"type":"queued", "req_id":"17"}))
+                .await
+                .unwrap();
+
+            // Leaving and returning must neither control execution nor lose its binding.
+            client.release_inputs();
+            client.release_inputs();
+            assert!(!correction.is_finished());
+            assert!(
+                timeout(Duration::from_millis(20), socket::read_json_line(&mut peer))
+                    .await
+                    .is_err()
+            );
+            for stream in peers {
+                let mut stream = BufReader::new(stream);
+                assert!(timeout(
+                    Duration::from_millis(20),
+                    socket::read_json_line(&mut stream)
+                )
+                .await
+                .is_err());
+            }
+            let sending = Arc::clone(&client);
+            let resume = tokio::spawn(async move {
+                sending
+                    .selected_input(&execution, json!({"cmd":"resume", "req_id":"18"}))
+                    .await
+            });
+            assert_eq!(
+                socket::read_json_line(&mut peer).await.unwrap().unwrap(),
+                json!({"cmd":"resume", "req_id":"18"})
+            );
+            socket::write_json_line(peer.get_mut(), &json!({"type":"delivered", "req_id":"18"}))
+                .await
+                .unwrap();
+            resume.await.unwrap().unwrap();
+            assert!(!correction.is_finished());
+            socket::write_json_line(peer.get_mut(), &json!({"type":"delivered", "req_id":"17"}))
+                .await
+                .unwrap();
+            correction.await.unwrap().unwrap();
+            // Reopening A claims the binding for the current selection; the old
+            // message's completion must not release it.
+            assert_eq!(client.selected_inputs.lock().unwrap().len(), 1);
+            client.release_inputs();
+            assert!(client.selected_inputs.lock().unwrap().is_empty());
+            assert!(socket::read_json_line(&mut peer).await.unwrap().is_none());
+        })
+        .await
+        .unwrap();
+    }
+
+    #[tokio::test]
+    async fn correction_and_controls_reuse_one_native_input_socket() {
+        use tokio::time::{timeout, Duration};
+
+        timeout(Duration::from_secs(3), async {
+            let execution = Execution {
+                run_id: "pipeline".into(),
+                stage_run_id: "exec-stage".into(),
+                nonce: 9,
+            };
+            let (stream, peer) = UnixStream::pair().unwrap();
+            let (client, [_control, _session]) = DaemonClient::fake_with_aux_streams(
+                json!({"session_id":"owner", "home_run_id":"home"}),
+                vec![stream],
+            );
+            let server = tokio::spawn(async move {
+                let mut peer = BufReader::new(peer);
+                let mut request = socket::read_json_line(&mut peer).await.unwrap().unwrap();
+                // Only the native binding fields and an optional nonce are allowed.
+                if let Some(nonce) = request.as_object_mut().unwrap().remove("nonce") {
+                    assert_eq!(nonce, json!(9));
+                }
+                assert_eq!(
+                    request,
+                    json!({"op":"input", "session_id":"owner", "id":"pipeline",
+                        "stage_run_id":"exec-stage", "req_id":"17"})
+                );
+                socket::write_json_line(
+                    peer.get_mut(),
+                    &json!({
+                        "type":"input_bound", "id":"pipeline",
+                        "stage_run_id":"exec-stage", "req_id":"17"
+                    }),
+                )
+                .await
+                .unwrap();
+                for (cmd, req_id) in [
+                    ("message", "17"),
+                    ("pause", "18"),
+                    ("step", "19"),
+                    ("resume", "20"),
+                    ("bail", "21"),
+                ] {
+                    let command = socket::read_json_line(&mut peer).await.unwrap().unwrap();
+                    let mut expected = json!({"cmd":cmd, "req_id":req_id});
+                    if cmd == "message" {
+                        expected["text"] = json!("  stop here\n");
+                    }
+                    assert_eq!(command, expected);
+                    socket::write_json_line(
+                        peer.get_mut(),
+                        &json!({"type":"delivered", "req_id":req_id}),
+                    )
+                    .await
+                    .unwrap();
+                }
+                assert!(socket::read_json_line(&mut peer).await.unwrap().is_none());
+            });
+
+            client
+                .deliver_correction(&execution, 17, "  stop here\n")
+                .await
+                .unwrap();
+            for (cmd, req_id) in [
+                ("pause", "18"),
+                ("step", "19"),
+                ("resume", "20"),
+                ("bail", "21"),
+            ] {
+                client
+                    .selected_input(&execution, json!({"cmd":cmd, "req_id":req_id}))
                     .await
                     .unwrap();
             }
-            use tokio::io::AsyncWriteExt;
-            let _ = peer.get_mut().shutdown().await;
-            assert!(socket::read_json_line(&mut peer).await.unwrap().is_none());
-        });
-        let result = match attach_conversation(client, "owner", Selector::Exact(&execution())).await
-        {
-            Ok((stream, bound)) => {
-                assert_eq!(bound.stage_run_id, "exec-stage");
-                assert_eq!(bound, execution());
-                send_correction(stream, &bound, 17, "  stop here\n").await
-            }
-            Err(reason) => Err(reason),
-        };
-        server.await.unwrap();
-        result
-    }
-
-    #[tokio::test]
-    async fn correction_sends_only_stage_run_id_and_compares_receipt_identity() {
-        let mut delivered = frame("delivered");
-        delivered["req_id"] = json!("17");
-        exchange(
-            attached(),
-            true,
-            vec![frame("operator_message"), frame("error"), delivered.clone()],
-        )
+            client.shutdown().await;
+            server.await.unwrap();
+        })
         .await
         .unwrap();
-        for (field, wrong) in [
-            ("req_id", json!("16")),
-            ("stage_run_id", json!("next")),
-            ("nonce", json!(10)),
-            ("id", json!("home")),
-        ] {
-            let mut foreign = delivered.clone();
-            foreign[field] = wrong;
-            let err = exchange(attached(), true, vec![foreign]).await.unwrap_err();
-            assert!(err.contains("uncertain"), "{err}");
-        }
-    }
-
-    #[tokio::test]
-    async fn stale_and_read_only_attachments_receive_no_message() {
-        for (field, wrong) in [
-            ("capabilities", json!(["observe"])),
-            ("stage_run_id", json!("replacement")),
-            ("id", json!("foreign")),
-            ("nonce", json!(11)),
-        ] {
-            let mut ack = attached();
-            ack[field] = wrong;
-            assert!(exchange(ack, false, vec![]).await.is_err());
-        }
-    }
-
-    #[tokio::test]
-    async fn correction_dropped_busy_and_unconfirmed_disconnect_are_not_success() {
-        let mut dropped = frame("correction_dropped");
-        dropped["req_id"] = json!("17");
-        assert!(exchange(attached(), true, vec![dropped])
-            .await
-            .unwrap_err()
-            .contains("not delivered"));
-        assert_eq!(
-            exchange(
-                attached(),
-                true,
-                vec![json!({"type":"error","message":"busy"})]
-            )
-            .await
-            .unwrap_err(),
-            "busy"
-        );
-        assert!(exchange(attached(), true, vec![])
-            .await
-            .unwrap_err()
-            .contains("uncertain"));
     }
 }

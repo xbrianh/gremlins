@@ -26,6 +26,7 @@ use gremlins::schemas::bootstrap;
 use serde_json::Value;
 
 mod display;
+mod input;
 mod spawn;
 mod tui;
 

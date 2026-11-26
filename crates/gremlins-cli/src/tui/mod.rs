@@ -1,7 +1,9 @@
+#[cfg_attr(not(test), allow(dead_code))]
 pub mod app;
 pub mod buffer;
 mod chat_context;
 mod chat_prefetch;
+#[allow(dead_code)]
 pub mod client;
 pub mod commands;
 pub mod completion;
@@ -11,6 +13,7 @@ use home_events::{apply_home_event, apply_home_identity};
 pub mod input_buffer;
 pub mod markdown;
 pub mod motif;
+#[cfg_attr(not(test), allow(dead_code))]
 mod protocol;
 pub mod screen;
 pub mod theme;
@@ -68,11 +71,13 @@ struct AttachmentFrame {
 #[derive(Default)]
 struct Attachment {
     generation: u64,
+    control_sequence: u64,
     task: Option<AbortOnDrop>,
     target: Option<Target>,
     execution: Option<protocol::Execution>,
-    commands: Option<mpsc::UnboundedSender<serde_json::Value>>,
     observed_sequences: HashMap<Target, SequenceRanges>,
+    client: Option<Arc<client::DaemonClient>>,
+    receipts: Option<mpsc::UnboundedSender<AttachmentFrame>>,
 }
 
 /// Sorted, disjoint inclusive ranges; retained across selection changes.
@@ -110,11 +115,12 @@ impl SequenceRanges {
 impl Attachment {
     fn invalidate(&mut self, app: &mut App) {
         app.abandon_pipeline_replay();
-        self.commands = None;
+        if let Some(client) = &self.client {
+            client.release_inputs();
+        }
         self.task = None;
         self.generation = self.generation.wrapping_add(1);
         if let Some(target) = self.target.take() {
-            app.conversations.retire_pending(&target);
             if target.is_home() && app.conversation_status(&target) == ConversationStatus::Paused {
                 app.set_conversation_status(target.clone(), ConversationStatus::Running);
             }
@@ -125,18 +131,6 @@ impl Attachment {
         self.execution = None;
     }
 
-    fn send(&self, command: serde_json::Value) -> Result<(), String> {
-        self.commands
-            .as_ref()
-            .ok_or_else(|| "no active conversation attachment".to_string())?
-            .send(command)
-            .map_err(|_| "conversation attachment disconnected".to_string())
-    }
-
-    fn routes_correction(&self, target: &Target, execution: &protocol::Execution) -> bool {
-        self.target.as_ref() == Some(target) && self.execution.as_ref() == Some(execution)
-    }
-
     fn accepts(&self, frame: &AttachmentFrame) -> bool {
         self.generation == frame.generation
             && (self.target.as_ref() == Some(&frame.target)
@@ -144,7 +138,9 @@ impl Attachment {
                     (Some(Target::StageExecution { run_id: pinned, .. }),
                      Target::StageExecution { run_id, stage })
                     if pinned == run_id && stage.is_empty() && self.execution.is_some()))
-            && (self.execution.is_none() || self.execution == frame.execution)
+            && (frame.value["_passive_watch"] == true
+                || self.execution.is_none()
+                || self.execution == frame.execution)
     }
 }
 
@@ -153,46 +149,11 @@ async fn install_home_session(app: &mut App, client: &client::DaemonClient) {
     app.home_run_id = Some(client.home_run_id().await);
 }
 
-fn attachment_target(app: &App, run_id: String, stage: Option<String>) -> Target {
-    if app.home_run_id.as_deref() == Some(&run_id) {
-        return Target::Home;
-    }
-    let stage = stage.unwrap_or_else(|| {
-        app.active_runs
-            .get(&run_id)
-            .map(|r| {
-                if r.sub_stage.is_empty() {
-                    r.stage.clone()
-                } else {
-                    r.sub_stage.clone()
-                }
-            })
-            .unwrap_or_default()
-    });
-    Target::StageExecution { run_id, stage }
-}
-
-fn send_attachment_correction<B: ratatui::backend::Backend>(
-    app: &mut App,
-    live: &mut LiveArea<B>,
-    attachment: &Attachment,
-    id: u64,
-    text: &str,
-) {
-    if let Err(reason) =
-        attachment.send(serde_json::json!({"op":"message", "req_id":id.to_string(), "text":text}))
-    {
-        if let Some(receipt) = app.finish_delivery(id, Err(reason)) {
-            live.show_receipt(receipt);
-        }
-    }
-}
-
 fn route_submission<B: ratatui::backend::Backend>(
     app: &mut App,
     live: &mut LiveArea<B>,
     client: &Arc<client::DaemonClient>,
-    attachment: &Attachment,
+    _attachment: &Attachment,
     delivery_tx: &mpsc::UnboundedSender<(u64, Result<(), String>)>,
     home_busy: bool,
 ) -> bool {
@@ -217,14 +178,17 @@ fn route_submission<B: ratatui::backend::Backend>(
             execution,
             text,
         } => {
-            if attachment.routes_correction(&app.selected_target, &execution) {
-                send_attachment_correction(app, live, attachment, id, &text);
-                return true;
-            }
             let c = Arc::clone(client);
             let tx = delivery_tx.clone();
+            let epoch = c.input_epoch();
             tokio::spawn(async move {
-                let outcome = c.deliver_correction(&execution, id, &text).await;
+                let outcome = c
+                    .selected_input_at(
+                        epoch,
+                        &execution,
+                        serde_json::json!({"cmd":"message", "req_id":id.to_string(), "text":text}),
+                    )
+                    .await;
                 let _ = tx.send((id, outcome));
             });
             true
@@ -237,20 +201,29 @@ fn selected_control<B: ratatui::backend::Backend>(
     live: &mut LiveArea<B>,
     attachment: &mut Attachment,
 ) -> bool {
-    // Home without a debugger leaves /quit to dispatch (TUI exit); with a
-    // debugger attachment it resumes the execution through the controls below.
+    // Unselected home leaves /quit to dispatch (local TUI exit).
     if app.selected_target.is_home() && attachment.target != Some(Target::Home) {
         return false;
     }
     let input = app.input.text().trim();
     let (command, reason) = input.split_once(char::is_whitespace).unwrap_or((input, ""));
     let reason = reason.trim();
+    if command == "/quit"
+        && reason.is_empty()
+        && (attachment.target.as_ref() != Some(&app.selected_target)
+            || attachment.execution.is_none()
+            || app.conversation_status(&app.selected_target) == ConversationStatus::ReadOnly)
+    {
+        return false;
+    }
     let op = match command {
         "/exit" if reason.is_empty() => "detach",
-        "/continue" if reason.is_empty() => "continue",
+        "/pause" if reason.is_empty() => "pause",
+        "/step" | "/continue" if reason.is_empty() => "step",
+        "/resume-execution" if reason.is_empty() => "resume",
         // Bare /quit resumes the debugged execution; /quit <reason> bails it.
         // Outside a selected attachment, dispatch handles /quit as TUI exit.
-        "/quit" if reason.is_empty() => "quit",
+        "/quit" if reason.is_empty() => "resume",
         "/quit" | "/bail" => "bail",
         _ => return false,
     };
@@ -264,12 +237,33 @@ fn selected_control<B: ratatui::backend::Backend>(
     } else if app.conversation_status(&app.selected_target) == ConversationStatus::ReadOnly {
         live.push_transcript_line("selected conversation is read-only".to_string());
     } else {
-        let mut request = serde_json::json!({"op":op, "req_id":"selected-control"});
+        attachment.control_sequence = attachment.control_sequence.wrapping_add(1);
+        let mut request = serde_json::json!({"cmd":op, "req_id":format!("selected-control-{}-{}", attachment.generation, attachment.control_sequence)});
         if op == "bail" {
             request["reason"] = serde_json::json!(reason);
         }
-        if let Err(reason) = attachment.send(request) {
-            live.push_transcript_line(format!("{op} failed: {reason}"));
+        if let (Some(client), Some(tx), Some(execution)) = (
+            attachment.client.clone(),
+            attachment.receipts.clone(),
+            attachment.execution.clone(),
+        ) {
+            let target = app.selected_target.clone();
+            let generation = attachment.generation;
+            let epoch = client.input_epoch();
+            tokio::spawn(async move {
+                let result = client.selected_input_at(epoch, &execution, request).await;
+                let _ = tx.send(AttachmentFrame {
+                    generation,
+                    target,
+                    execution: Some(execution),
+                    value: serde_json::json!({"_control_receipt":true, "command":op,
+                        "error":result.err()}),
+                });
+            });
+        } else {
+            live.push_transcript_line(
+                "selected conversation has no live agent execution".to_string(),
+            );
         }
     }
     true
@@ -302,7 +296,30 @@ fn attach_stage_entry<B: ratatui::backend::Backend>(
     tx: &mpsc::UnboundedSender<AttachmentFrame>,
     last_stage: &mut Option<Target>,
 ) {
-    let target = if app.home_run_id.as_deref() == Some(run_id.as_str()) {
+    let stage_parts: Vec<_> = stage.as_deref().unwrap_or("").split_whitespace().collect();
+    let exact = if let [name, stage_run_id] = stage_parts.as_slice() {
+        Some(Target::Invocation {
+            run_id: run_id.clone(),
+            stage: (*name).into(),
+            stage_run_id: (*stage_run_id).into(),
+        })
+    } else if let [name] = stage_parts.as_slice() {
+        let mut matches = app
+            .live_executions
+            .values()
+            .filter(|e| e.run_id == run_id && (e.stage == *name || e.stage_run_id == *name));
+        let first = matches.next().map(|e| e.target());
+        if matches.next().is_none() {
+            first
+        } else {
+            None
+        }
+    } else {
+        None
+    };
+    let target = if let Some(target) = exact {
+        target
+    } else if stage.is_none() && app.home_run_id.as_deref() == Some(run_id.as_str()) {
         Target::Home
     } else {
         Target::StageExecution {
@@ -310,7 +327,18 @@ fn attach_stage_entry<B: ratatui::backend::Backend>(
             stage: stage.unwrap_or_default(),
         }
     };
+    let view_only = matches!(target, Target::StageExecution { .. });
+    let unavailable = matches!(&target, Target::Invocation { .. })
+        && !app.live_executions.values().any(|e| e.target() == target);
     select_passive_watch(app, live, client, target, attachment, tx, last_stage);
+    if unavailable {
+        live.push_transcript_line(
+            "requested invocation is unavailable — retained output is view-only".into(),
+        );
+    }
+    if view_only {
+        live.push_transcript_line("view-only selection — use /attach <run> <stage> <stage_run_id> to select an exact agent execution".into());
+    }
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -324,63 +352,51 @@ fn debug_entry<B: ratatui::backend::Backend>(
     last_stage: &mut Option<Target>,
     follow: &mut Option<tokio::task::JoinHandle<()>>,
 ) {
+    let parts: Vec<_> = id.split_whitespace().collect();
+    let mut matches = app
+        .live_executions
+        .values()
+        .filter(|e| match parts.as_slice() {
+            [stage_run_id] => e.stage_run_id == *stage_run_id,
+            [run_id, stage_run_id] => e.run_id == *run_id && e.stage_run_id == *stage_run_id,
+            _ => false,
+        });
+    let target = matches.next().map(|e| e.target());
+    if target.is_none() || matches.next().is_some() {
+        live.push_transcript_line(
+            "select a live invocation: /debug <run> <stage_run_id>; find its stage_run_id in /watch (Enter selects the concrete row)".into(),
+        );
+        return;
+    }
     close_watch_follow(app, live, follow);
-    let target = attachment_target(app, id, None);
-    select_debugger_attachment(app, live, client, target, attachment, tx, last_stage);
+    let target = target.unwrap();
+    select_passive_watch(app, live, client, target, attachment, tx, last_stage);
 }
 
-#[allow(clippy::too_many_arguments)]
-fn select_debugger_attachment<B: ratatui::backend::Backend>(
-    app: &mut App,
-    live: &mut LiveArea<B>,
-    client: &Arc<client::DaemonClient>,
-    target: Target,
-    attachment: &mut Attachment,
-    tx: &mpsc::UnboundedSender<AttachmentFrame>,
-    last_stage: &mut Option<Target>,
-) {
-    attachment.invalidate(app);
-    app.screen = Screen::Chat;
-    live.exit_screen_view();
-    live.select_conversation(app, target.clone());
-    let (run_id, stage) = match &target {
-        Target::Home => {
-            let Some(id) = app.home_run_id.clone() else {
-                live.push_transcript_line("home has no chat run to debug yet".to_string());
-                return;
-            };
-            (id, None)
-        }
-        Target::Invocation { .. } => {
-            live.push_transcript_line("debugging an exact invocation is unsupported".to_string());
-            return;
-        }
-        Target::StageExecution { run_id, stage } => {
-            *last_stage = Some(target.clone());
-            app.conversations.set_execution(target.clone(), None);
-            (run_id.clone(), (!stage.is_empty()).then(|| stage.clone()))
-        }
-    };
-    attachment.target = Some(target.clone());
-    let generation = attachment.generation;
-    let mut transport = client.start_attachment(run_id, stage, "debugger");
-    attachment.commands = Some(transport.commands.clone());
-    let tx = tx.clone();
-    attachment.task = Some(AbortOnDrop(tokio::spawn(async move {
-        while let Some(frame) = transport.frames.recv().await {
-            if tx
-                .send(AttachmentFrame {
-                    generation,
-                    target: target.clone(),
-                    execution: frame.execution,
-                    value: frame.value,
-                })
-                .is_err()
-            {
-                break;
-            }
-        }
-    })));
+/// Only lifecycle-confirmed agent invocations grant an input address.
+fn pin_exact_execution(app: &mut App, target: &Target, attachment: &mut Attachment) {
+    let execution = app
+        .live_executions
+        .values()
+        .find(|e| e.target() == *target && e.stage_type == "agent")
+        .map(|e| protocol::Execution {
+            run_id: e.run_id.clone(),
+            stage_run_id: e.stage_run_id.clone(),
+            nonce: 0,
+        });
+    attachment.execution = execution.clone();
+    app.conversations
+        .set_execution(target.clone(), execution.clone());
+    app.set_conversation_status(
+        target.clone(),
+        if execution.is_none() {
+            ConversationStatus::ReadOnly
+        } else if app.conversation_status(target) == ConversationStatus::Paused {
+            ConversationStatus::Paused
+        } else {
+            ConversationStatus::Running
+        },
+    );
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -394,6 +410,11 @@ fn select_passive_watch<B: ratatui::backend::Backend>(
     last_stage: &mut Option<Target>,
 ) {
     attachment.invalidate(app);
+    attachment.client = Some(Arc::clone(client));
+    attachment.receipts = Some(tx.clone());
+    if !target.is_home() {
+        pin_exact_execution(app, &target, attachment);
+    }
     app.screen = Screen::Chat;
     live.exit_screen_view();
     live.select_conversation(app, target.clone());
@@ -415,8 +436,10 @@ fn select_passive_watch<B: ratatui::backend::Backend>(
         ),
     };
     *last_stage = Some(target.clone());
-    app.set_conversation_status(target.clone(), ConversationStatus::ReadOnly);
-    app.conversations.set_execution(target.clone(), None);
+    if attachment.execution.is_none() {
+        app.set_conversation_status(target.clone(), ConversationStatus::ReadOnly);
+        app.conversations.set_execution(target.clone(), None);
+    }
     attachment.target = Some(target.clone());
     let generation = attachment.generation;
     let client = Arc::clone(client);
@@ -505,6 +528,14 @@ fn apply_passive_watch_frame<B: ratatui::backend::Backend>(
         return;
     }
     app.observe_pipeline_frame(value);
+    if matches!(frame.target, Target::Invocation { .. })
+        && attachment.execution.is_none()
+        && app.conversation_status(&frame.target) != ConversationStatus::Ended
+        && kind == "stage_boundary"
+        && value["active"] == true
+    {
+        pin_exact_execution(app, &frame.target, attachment);
+    }
     if matches!(kind, "transport_error" | "error") {
         app.abandon_pipeline_replay();
     }
@@ -542,8 +573,19 @@ fn apply_passive_watch_frame<B: ratatui::backend::Backend>(
                 continue;
             }
         }
-        // Observation never grants a correction address or debugger controls.
-        app.set_conversation_status(target.clone(), ConversationStatus::ReadOnly);
+        let terminal = matches!(kind, "done" | "ended")
+            || (kind == "stage_boundary" && value["active"] == false);
+        if terminal {
+            app.conversations.set_execution(target.clone(), None);
+            app.set_conversation_status(target.clone(), ConversationStatus::Ended);
+            if attachment.target.as_ref() == Some(&target) {
+                attachment.execution = None;
+            }
+        } else if (attachment.target.as_ref() != Some(&target) || attachment.execution.is_none())
+            && app.conversation_status(&target) != ConversationStatus::Ended
+        {
+            app.set_conversation_status(target.clone(), ConversationStatus::ReadOnly);
+        }
         render_execution_frame(live, &target, value);
     }
 }
@@ -554,147 +596,22 @@ fn apply_attachment_frame<B: ratatui::backend::Backend>(
     attachment: &mut Attachment,
     frame: AttachmentFrame,
 ) {
+    if frame.value["_control_receipt"] == true {
+        let command = frame.value["command"].as_str().unwrap_or("control");
+        live.with_target_transcript(&frame.target, |live, _| {
+            let message = match frame.value["error"].as_str() {
+                Some(reason) => format!("{command} failed: {reason}"),
+                None => format!("{command} acknowledged"),
+            };
+            live.push_transcript_line(message);
+        });
+        return;
+    }
     if !attachment.accepts(&frame) {
         return;
     }
     if frame.value["_passive_watch"] == true {
         apply_passive_watch_frame(app, live, attachment, &frame);
-        return;
-    }
-    let mut frame = frame;
-    if let Target::StageExecution { stage, .. } = &frame.target {
-        if stage.is_empty() && attachment.execution.is_some() {
-            frame.target = attachment
-                .target
-                .clone()
-                .expect("accepted attachment has target");
-        }
-    }
-    let value = &frame.value;
-    // A run-only selector is provisional until the daemon identifies its stage.
-    if value["type"] == "attached" {
-        if let Target::StageExecution { run_id, stage } = &frame.target {
-            if stage.is_empty() {
-                if let Some(stage) = value["stage"].as_str().filter(|stage| !stage.is_empty()) {
-                    let target = Target::StageExecution {
-                        run_id: run_id.clone(),
-                        stage: stage.into(),
-                    };
-                    attachment.target = Some(target.clone());
-                    if app.selected_target == frame.target {
-                        live.select_conversation(app, target.clone());
-                    }
-                    frame.target = target;
-                }
-            }
-        }
-    }
-    let kind = value["type"].as_str().unwrap_or("");
-    // The debug lease ended, not the execution or its observation stream.
-    if kind == "ended" && value["reason"] == "resumed" {
-        app.set_conversation_status(frame.target.clone(), ConversationStatus::Running);
-        return;
-    }
-    if matches!(kind, "delivered" | "correction_dropped" | "error") {
-        if let Some(id) = value["req_id"]
-            .as_str()
-            .and_then(|id| id.parse::<u64>().ok())
-            .or_else(|| value["req_id"].as_u64())
-        {
-            let result = if kind == "delivered" {
-                Ok(())
-            } else {
-                Err(value["message"]
-                    .as_str()
-                    .or(value["reason"].as_str())
-                    .unwrap_or("correction not delivered")
-                    .to_owned())
-            };
-            if let Some(receipt) = app.finish_delivery(id, result) {
-                live.show_receipt(receipt);
-            }
-            return;
-        }
-    }
-    if kind == "transport_error" {
-        let reason = value["reason"]
-            .as_str()
-            .unwrap_or("attachment disconnected");
-        for receipt in app.conversations.fail_pending(&frame.target, reason) {
-            live.show_receipt(receipt);
-        }
-        live.with_target_transcript(&frame.target, |live, _| {
-            live.push_transcript_line(format!("attachment disconnected: {reason}"));
-        });
-        // Losing observation is not evidence that the execution ended.
-        attachment.invalidate(app);
-        return;
-    }
-    if kind == "error" && value.get("req_id").is_none() {
-        let reason = value["message"]
-            .as_str()
-            .unwrap_or("attachment command failed");
-        for receipt in app.conversations.fail_pending(&frame.target, reason) {
-            live.show_receipt(receipt);
-        }
-    }
-    // Home's owning chat stream remains the sole transcript/lifecycle writer.
-    // In particular, debug `done.summary` is suppressed in favor of that stream,
-    // rather than appended as a duplicate or competing final response.
-    if frame.target.is_home() {
-        if kind == "attached" {
-            attachment.execution = frame.execution;
-        } else if matches!(kind, "ready" | "execution_ready") {
-            app.set_conversation_status(Target::Home, ConversationStatus::Paused);
-        } else if kind == "command_ack" {
-            app.set_conversation_status(Target::Home, ConversationStatus::Running);
-        } else if matches!(kind, "error" | "ended" | "detached") {
-            if let Some(message) = value["message"].as_str().or(value["reason"].as_str()) {
-                live.with_target_transcript(&Target::Home, |live, _| {
-                    live.push_transcript_line(format!("{kind}: {message}"));
-                });
-            }
-        }
-        if matches!(kind, "done" | "ended" | "detached") {
-            attachment.invalidate(app);
-        }
-        return;
-    }
-    if kind == "attached" {
-        attachment.execution = frame.execution.clone();
-        let writable = value["capabilities"]
-            .as_array()
-            .is_some_and(|caps| caps.iter().any(|c| c == "message"));
-        app.set_conversation_status(
-            frame.target.clone(),
-            if writable {
-                ConversationStatus::Running
-            } else {
-                ConversationStatus::ReadOnly
-            },
-        );
-        app.conversations.set_execution(
-            frame.target.clone(),
-            if writable { frame.execution } else { None },
-        );
-    }
-    if kind == "ready" || kind == "execution_ready" {
-        app.set_conversation_status(frame.target.clone(), ConversationStatus::Paused);
-    } else if matches!(
-        kind,
-        "operator_message" | "stream_chunk" | "reasoning_chunk" | "command_ack"
-    ) && app.conversation_status(&frame.target) != ConversationStatus::ReadOnly
-    {
-        app.set_conversation_status(frame.target.clone(), ConversationStatus::Running);
-    }
-    if matches!(kind, "done" | "ended" | "detached") {
-        app.set_conversation_status(frame.target.clone(), ConversationStatus::Ended);
-        app.conversations.set_execution(frame.target.clone(), None);
-        live.set_target_active_request(&frame.target, false);
-    }
-    render_execution_frame(live, &frame.target, value);
-    if matches!(kind, "done" | "ended" | "detached") {
-        attachment.invalidate(app);
     }
 }
 
@@ -3087,6 +3004,7 @@ async fn run_app(live_area: &mut LiveArea) -> io::Result<()> {
     }
 
     attachment.invalidate(&mut app);
+    client.release_inputs();
 
     // Close the persistent socket connection.
     client.shutdown().await;
@@ -3335,7 +3253,10 @@ mod attachment_tests {
     ) {
         let mut app = App::new();
         let mut live = LiveArea::with_backend(ratatui::backend::TestBackend::new(100, 40), 100, 40);
-        let target = attachment_target(&app, "run".into(), Some("review".into()));
+        let target = Target::StageExecution {
+            run_id: "run".into(),
+            stage: "review".into(),
+        };
         live.select_conversation(&mut app, target.clone());
         app.conversations.set_execution(
             target.clone(),
@@ -3517,139 +3438,109 @@ mod attachment_tests {
     }
 
     #[test]
-    fn failed_attachment_send_preserves_draft_and_renders_error() {
-        let (mut app, mut live, mut attachment, target) = correction_fixture();
+    fn failed_native_delivery_preserves_draft_and_renders_error() {
+        let (mut app, mut live, _, target) = correction_fixture();
         let id = pending_correction(&mut app, &target, "keep this correction");
-        let (commands, rx) = mpsc::unbounded_channel();
-        drop(rx);
-        attachment.commands = Some(commands);
-        send_attachment_correction(&mut app, &mut live, &attachment, id, "keep this correction");
+        let receipt = app
+            .finish_delivery(id, Err("input disconnected".into()))
+            .unwrap();
+        live.show_receipt(receipt);
         assert_eq!(app.input.text(), "keep this correction");
         let rendered = rendered_attachment(&mut live, &app);
         assert!(rendered.contains("correction: keep this correction"));
-        assert!(rendered.contains("conversation attachment disconnected"));
-
+        assert!(rendered.contains("input disconnected"));
         let retry = pending_correction(&mut app, &target, "keep this correction");
-        let (commands, mut rx) = mpsc::unbounded_channel();
-        attachment.commands = Some(commands);
-        send_attachment_correction(
-            &mut app,
-            &mut live,
-            &attachment,
-            retry,
-            "keep this correction",
-        );
-        assert_eq!(
-            rx.try_recv().unwrap(),
-            serde_json::json!({
-                "op":"message", "req_id":retry.to_string(), "text":"keep this correction"
-            })
-        );
+        assert_ne!(retry, id);
     }
 
     #[test]
-    fn invalidating_pending_correction_preserves_ui_and_ignores_old_receipt() {
-        let (mut app, mut live, mut attachment, target) = correction_fixture();
-        let id = pending_correction(&mut app, &target, "original correction");
-        live.push_response("partial response");
-        attachment.invalidate(&mut app);
-        // Even on a current stream, a retired receipt cannot change the UI.
-        attachment.target = Some(target.clone());
-        let generation = attachment.generation;
-        apply_attachment_frame(
-            &mut app,
-            &mut live,
-            &mut attachment,
-            correction_frame(
-                &target,
-                generation,
-                serde_json::json!({
-                    "type":"delivered", "req_id":id.to_string()
-                }),
-            ),
-        );
-        assert_eq!(app.input.text(), "original correction");
-        assert_eq!(live.response_text(), "partial response");
-        let rendered = rendered_attachment(&mut live, &app);
-        assert!(!rendered.contains("correction:"));
-    }
-
-    #[test]
-    fn attachment_error_without_request_id_preserves_target_scoped_input_and_status() {
-        let (mut app, mut live, mut attachment, target) = correction_fixture();
-        let execution = protocol::Execution {
+    fn exact_agent_selection_pins_native_address_but_exec_does_not() {
+        let mut app = App::new();
+        let mut attachment = Attachment::default();
+        let mut execution = app::LiveExecution {
             run_id: "run".into(),
-            stage_run_id: "execution".into(),
-            nonce: 7,
+            stage: "work".into(),
+            stage_type: "agent".into(),
+            stage_run_id: "exact".into(),
         };
-        attachment.execution = Some(execution.clone());
-        pending_correction(&mut app, &target, "keep this correction");
+        let target = execution.target();
+        app.live_executions.insert("key".into(), execution.clone());
+        pin_exact_execution(&mut app, &target, &mut attachment);
+        assert_eq!(attachment.execution.as_ref().unwrap().stage_run_id, "exact");
+        assert_eq!(
+            app.conversation_status(&target),
+            ConversationStatus::Running
+        );
         app.set_conversation_status(target.clone(), ConversationStatus::Paused);
-        live.select_conversation(&mut app, Target::Home);
-        app.replace_input("unrelated home draft");
-        app.set_conversation_status(Target::Home, ConversationStatus::Running);
+        pin_exact_execution(&mut app, &target, &mut attachment);
+        assert_eq!(app.conversation_status(&target), ConversationStatus::Paused);
+        assert_eq!(attachment.execution.as_ref().unwrap().stage_run_id, "exact");
+        execution.stage_type = "exec".into();
+        app.live_executions.insert("key".into(), execution);
+        pin_exact_execution(&mut app, &target, &mut attachment);
+        assert!(attachment.execution.is_none());
+        assert_eq!(
+            app.conversation_status(&target),
+            ConversationStatus::ReadOnly
+        );
+    }
+
+    #[test]
+    fn control_receipt_survives_selection_generation_change() {
+        let (mut app, mut live, mut attachment, target) = correction_fixture();
+        attachment.invalidate(&mut app);
         apply_attachment_frame(
             &mut app,
             &mut live,
             &mut attachment,
             AttachmentFrame {
-                execution: Some(execution),
-                ..correction_frame(
-                    &target,
-                    0,
-                    serde_json::json!({
-                        "type":"error", "message":"command rejected"
-                    }),
-                )
+                generation: u64::MAX,
+                target: target.clone(),
+                execution: None,
+                value: serde_json::json!({"_control_receipt":true,"command":"pause","error":"rejected"}),
             },
         );
-        assert_eq!(app.input.text(), "unrelated home draft");
-        assert_eq!(
-            app.conversation_status(&Target::Home),
-            ConversationStatus::Running
-        );
-        assert!(!rendered_attachment(&mut live, &app).contains("command rejected"));
-        live.select_conversation(&mut app, target.clone());
-        assert_eq!(app.input.text(), "keep this correction");
-        assert_eq!(app.conversation_status(&target), ConversationStatus::Paused);
+        assert!(rendered_attachment(&mut live, &app).contains("pause failed: rejected"));
+    }
+
+    #[test]
+    fn invalidating_pending_correction_preserves_receipt_and_draft() {
+        let (mut app, mut live, mut attachment, target) = correction_fixture();
+        let id = pending_correction(&mut app, &target, "original correction");
+        live.push_response("partial response");
+        attachment.invalidate(&mut app);
+        // Selection release preserves pending delivery; its native receipt still settles.
+        let receipt = app.finish_delivery(id, Ok(())).unwrap();
+        live.show_receipt(receipt);
+        assert_eq!(app.input.text(), "original correction");
+        assert_eq!(live.response_text(), "partial response");
         let rendered = rendered_attachment(&mut live, &app);
-        assert!(rendered.contains("correction: keep this correction"));
-        assert!(rendered.contains("error: command rejected"));
+        assert!(!rendered.contains("correction:"));
+        assert!(app.finish_delivery(id, Ok(())).is_none());
     }
 
     #[test]
     fn repeated_correction_rejections_render_once() {
-        for kind in ["error", "correction_dropped"] {
-            let (mut app, mut live, mut attachment, target) = correction_fixture();
-            let id = pending_correction(&mut app, &target, "unique correction");
-            for _ in 0..2 {
-                apply_attachment_frame(
-                    &mut app,
-                    &mut live,
-                    &mut attachment,
-                    correction_frame(
-                        &target,
-                        0,
-                        serde_json::json!({
-                            "type":kind, "req_id":id.to_string(), "message":"delivery rejected"
-                        }),
-                    ),
-                );
+        let (mut app, mut live, _, target) = correction_fixture();
+        let id = pending_correction(&mut app, &target, "unique correction");
+        for _ in 0..2 {
+            if let Some(receipt) = app.finish_delivery(id, Err("delivery rejected".into())) {
+                live.show_receipt(receipt);
             }
-            assert_eq!(app.input.text(), "unique correction");
-            app.clear_input();
-            let rendered = rendered_attachment(&mut live, &app);
-            assert_eq!(
-                rendered.matches("delivery rejected").count(),
-                1,
-                "{rendered}"
-            );
-            assert_eq!(
-                rendered.matches("unique correction").count(),
-                1,
-                "{rendered}"
-            );
         }
+        assert_eq!(app.input.text(), "unique correction");
+        app.clear_input();
+        let rendered = rendered_attachment(&mut live, &app);
+        assert_eq!(
+            rendered.matches("delivery rejected").count(),
+            1,
+            "{rendered}"
+        );
+        assert_eq!(
+            rendered.matches("unique correction").count(),
+            1,
+            "{rendered}"
+        );
     }
 
     #[test]
@@ -3664,284 +3555,15 @@ mod attachment_tests {
                 &target,
                 0,
                 serde_json::json!({
-                    "type":"error", "req_id":"selected-control", "message":"cannot continue"
+                    "_control_receipt":true, "command":"continue", "error":"cannot continue"
                 }),
             ),
         );
         assert_eq!(app.input.text(), "keep this correction");
-        apply_attachment_frame(
-            &mut app,
-            &mut live,
-            &mut attachment,
-            correction_frame(
-                &target,
-                0,
-                serde_json::json!({
-                    "type":"delivered", "req_id":id.to_string()
-                }),
-            ),
-        );
+        assert!(rendered_attachment(&mut live, &app).contains("continue failed: cannot continue"));
+        let receipt = app.finish_delivery(id, Ok(())).unwrap();
+        live.show_receipt(receipt);
         assert!(app.input.is_empty());
-    }
-
-    #[test]
-    fn home_debug_done_defers_summary_and_lifecycle_to_owner() {
-        let mut app = App::new();
-        let mut live = LiveArea::with_backend(ratatui::backend::TestBackend::new(100, 40), 100, 40);
-        app.active_request = true;
-        live.submit_prompt("question".into());
-        live.push_response("owner response");
-        let mut attachment = Attachment {
-            target: Some(Target::Home),
-            ..Default::default()
-        };
-        apply_attachment_frame(
-            &mut app,
-            &mut live,
-            &mut attachment,
-            correction_frame(
-                &Target::Home,
-                0,
-                serde_json::json!({
-                    "type":"done", "text":"debug response", "summary":"debug summary"
-                }),
-            ),
-        );
-        assert!(app.active_request);
-        assert!(live.has_current_turn());
-        assert_eq!(live.response_text(), "owner response");
-        let rendered = rendered_attachment(&mut live, &app);
-        assert!(!rendered.contains("debug summary"));
-        assert!(!rendered.contains("debug response"));
-    }
-
-    #[test]
-    fn debug_resumed_keeps_attachment_and_appends_to_current_response() {
-        let (mut app, mut live, mut attachment, target) = correction_fixture();
-        live.submit_prompt("question".into());
-        live.push_response("preserved prefix ");
-        app.set_conversation_status(target.clone(), ConversationStatus::Paused);
-        for value in [
-            serde_json::json!({"type":"ended", "reason":"resumed"}),
-            serde_json::json!({"type":"stream_chunk", "text":"later output"}),
-        ] {
-            apply_attachment_frame(
-                &mut app,
-                &mut live,
-                &mut attachment,
-                correction_frame(&target, 0, value),
-            );
-            assert_eq!(attachment.target.as_ref(), Some(&target));
-            assert_eq!(attachment.generation, 0);
-            assert_eq!(
-                app.conversation_status(&target),
-                ConversationStatus::Running
-            );
-            assert!(live.has_current_turn());
-        }
-        assert_eq!(live.response_text(), "preserved prefix later output");
-    }
-
-    #[test]
-    fn home_exit_after_ready_restores_running_without_retiring_owner() {
-        let mut app = App::new();
-        let mut live = LiveArea::with_backend(ratatui::backend::TestBackend::new(80, 24), 80, 24);
-        let execution = protocol::Execution {
-            run_id: "chat".into(),
-            stage_run_id: "turn".into(),
-            nonce: 7,
-        };
-        app.conversations
-            .set_execution(Target::Home, Some(execution.clone()));
-        app.active_request = true;
-        live.submit_prompt("question".into());
-        live.push_response("owner response");
-        let mut attachment = Attachment {
-            target: Some(Target::Home),
-            ..Default::default()
-        };
-        for kind in ["attached", "ready"] {
-            apply_attachment_frame(
-                &mut app,
-                &mut live,
-                &mut attachment,
-                AttachmentFrame {
-                    generation: 0,
-                    target: Target::Home,
-                    execution: Some(execution.clone()),
-                    value: serde_json::json!({"type":kind, "capabilities":["message"]}),
-                },
-            );
-        }
-        assert_eq!(
-            app.conversation_status(&Target::Home),
-            ConversationStatus::Paused
-        );
-        app.replace_input("/exit");
-        assert!(selected_control(&mut app, &mut live, &mut attachment));
-        assert_eq!(
-            app.conversation_status(&Target::Home),
-            ConversationStatus::Running
-        );
-        assert_eq!(app.selected_target, Target::Home);
-        assert!(attachment.target.is_none());
-        assert!(app.input.is_empty());
-        assert!(app.active_request);
-        assert!(live.target_has_current_turn(&Target::Home));
-        assert_eq!(live.response_text(), "owner response");
-        live.push_response(" continues");
-        assert_eq!(live.response_text(), "owner response continues");
-        app.replace_input("still addressed to owner");
-        assert!(matches!(
-            app.conversations.submit(&Target::Home, &app.input, true),
-            Submission::Correction { execution: addressed, .. } if addressed == execution
-        ));
-    }
-
-    #[test]
-    fn home_debug_control_does_not_duplicate_or_retire_owner_stream() {
-        let mut app = App::new();
-        let mut live = LiveArea::with_backend(ratatui::backend::TestBackend::new(80, 24), 80, 24);
-        let execution = protocol::Execution {
-            run_id: "chat".into(),
-            stage_run_id: "turn".into(),
-            nonce: 7,
-        };
-        app.conversations
-            .set_execution(Target::Home, Some(execution.clone()));
-        app.active_request = true;
-        live.push_response("owner response");
-        let mut attachment = Attachment {
-            target: Some(Target::Home),
-            ..Default::default()
-        };
-        for kind in ["attached", "ready", "stream_chunk", "turn_complete", "done"] {
-            apply_attachment_frame(
-                &mut app,
-                &mut live,
-                &mut attachment,
-                AttachmentFrame {
-                    generation: 0,
-                    target: Target::Home,
-                    execution: Some(execution.clone()),
-                    value: serde_json::json!({"type":kind, "text":"duplicate", "capabilities":["message"]}),
-                },
-            );
-            if kind == "ready" {
-                assert_eq!(
-                    app.conversation_status(&Target::Home),
-                    ConversationStatus::Paused
-                );
-            }
-        }
-        assert_eq!(live.response_text(), "owner response");
-        assert!(app.active_request);
-        app.replace_input("still addressed to owner");
-        assert!(
-            matches!(app.conversations.submit(&Target::Home, &app.input, true), Submission::Correction { execution: addressed, .. } if addressed == execution)
-        );
-        assert!(attachment.target.is_none());
-    }
-
-    #[test]
-    fn observer_ack_addresses_corrections_and_detach_rejects_late_frames() {
-        let (mut app, mut live, mut attachment, target) = correction_fixture();
-        app.conversations.set_execution(target.clone(), None);
-        live.select_conversation(&mut app, target.clone());
-        let execution = protocol::Execution {
-            run_id: "run".into(),
-            stage_run_id: "execution".into(),
-            nonce: 7,
-        };
-        let frame = |kind: &str| AttachmentFrame {
-            generation: 0,
-            target: target.clone(),
-            execution: Some(execution.clone()),
-            value: serde_json::json!({"type":kind, "capabilities":["message"], "text":"late"}),
-        };
-        apply_attachment_frame(&mut app, &mut live, &mut attachment, frame("attached"));
-        app.replace_input("correction");
-        assert!(matches!(
-            app.conversations.submit(&target, &app.input, false),
-            Submission::Correction { execution: addressed, .. } if addressed == execution
-        ));
-        apply_attachment_frame(&mut app, &mut live, &mut attachment, frame("detached"));
-        apply_attachment_frame(&mut app, &mut live, &mut attachment, frame("stream_chunk"));
-        assert!(live.response_text().is_empty());
-    }
-
-    #[test]
-    fn attachment_status_tracks_pause_resume_and_end() {
-        let mut app = App::new();
-        let mut live = LiveArea::with_backend(ratatui::backend::TestBackend::new(80, 24), 80, 24);
-        let target = Target::StageExecution {
-            run_id: "run".into(),
-            stage: "review".into(),
-        };
-        let mut attachment = Attachment {
-            target: Some(target.clone()),
-            ..Default::default()
-        };
-        for (kind, status) in [
-            ("attached", ConversationStatus::Running),
-            ("ready", ConversationStatus::Paused),
-            ("operator_message", ConversationStatus::Running),
-            ("ended", ConversationStatus::Ended),
-        ] {
-            apply_attachment_frame(
-                &mut app,
-                &mut live,
-                &mut attachment,
-                AttachmentFrame {
-                    generation: 0,
-                    target: target.clone(),
-                    execution: None,
-                    value: serde_json::json!({"type":kind,"capabilities":["message"]}),
-                },
-            );
-            assert_eq!(app.conversation_status(&target), status);
-        }
-    }
-
-    #[test]
-    fn watch_home_is_not_a_stage_attachment() {
-        let mut app = App::new();
-        app.home_run_id = Some("sess-actual".into());
-        assert!(matches!(
-            attachment_target(&app, "chat".into(), None),
-            Target::StageExecution { .. }
-        ));
-        assert_eq!(
-            attachment_target(&app, "sess-actual".into(), Some("ignored".into())),
-            Target::Home
-        );
-    }
-
-    #[test]
-    fn pinned_attachment_rejects_successor_execution() {
-        let target = Target::StageExecution {
-            run_id: "run".into(),
-            stage: "review".into(),
-        };
-        let execution = protocol::Execution {
-            run_id: "run".into(),
-            stage_run_id: "A".into(),
-            nonce: 1,
-        };
-        let attachment = Attachment {
-            target: Some(target.clone()),
-            execution: Some(execution.clone()),
-            ..Default::default()
-        };
-        let mut frame = AttachmentFrame {
-            generation: 0,
-            target,
-            execution: Some(execution),
-            value: serde_json::json!({}),
-        };
-        assert!(attachment.accepts(&frame));
-        frame.execution.as_mut().unwrap().stage_run_id = "B".into();
-        assert!(!attachment.accepts(&frame));
     }
 
     fn rendered_attachment(
@@ -4147,7 +3769,11 @@ mod attachment_tests {
     fn attachment_task_progress_renders_live_text_and_reasoning() {
         let mut app = App::new();
         let mut live = LiveArea::with_backend(ratatui::backend::TestBackend::new(100, 40), 100, 40);
-        let target = attachment_target(&app, "run".into(), Some("review".into()));
+        let target = Target::Invocation {
+            run_id: "run".into(),
+            stage: "review".into(),
+            stage_run_id: "execution".into(),
+        };
         live.select_conversation(&mut app, target.clone());
         let mut attachment = Attachment {
             target: Some(target.clone()),
@@ -4162,6 +3788,8 @@ mod attachment_tests {
                 target,
                 execution: None,
                 value: serde_json::json!({
+                    "_passive_watch": true,
+                    "run_id": "run", "stage": "review", "stage_run_id": "execution",
                     "type": "task_progress",
                     "parent_id": "task-1",
                     "kind": "Scout",
@@ -4189,7 +3817,11 @@ mod attachment_tests {
             let mut app = App::new();
             let mut live =
                 LiveArea::with_backend(ratatui::backend::TestBackend::new(100, 40), 100, 40);
-            let target = attachment_target(&app, "run".into(), Some("review".into()));
+            let target = Target::Invocation {
+                run_id: "run".into(),
+                stage: "review".into(),
+                stage_run_id: "execution".into(),
+            };
             live.select_conversation(&mut app, target.clone());
             let mut attachment = Attachment {
                 target: Some(target.clone()),
@@ -4205,17 +3837,11 @@ mod attachment_tests {
                 if !with_operator_message && value["type"] == "operator_message" {
                     continue;
                 }
-                apply_attachment_frame(
-                    &mut app,
-                    &mut live,
-                    &mut attachment,
-                    AttachmentFrame {
-                        generation: 0,
-                        target: target.clone(),
-                        execution: None,
-                        value,
-                    },
-                );
+                let mut value = value;
+                value["run_id"] = serde_json::json!("run");
+                value["stage"] = serde_json::json!("review");
+                value["stage_run_id"] = serde_json::json!("execution");
+                passive_frame(&mut app, &mut live, &mut attachment, value);
             }
             assert_eq!(live.target_has_current_turn(&target), with_operator_message);
             let before_done = rendered_attachment(&mut live, &app);
@@ -4226,7 +3852,9 @@ mod attachment_tests {
                 generation: 0,
                 target: target.clone(),
                 execution: None,
-                value: serde_json::json!({"type":"done", "text":"answer body", "summary":"distinct summary"}),
+                value: serde_json::json!({"_passive_watch":true,
+                    "run_id":"run", "stage":"review", "stage_run_id":"execution",
+                    "sequence":10, "type":"done", "text":"answer body", "summary":"distinct summary"}),
             };
             apply_attachment_frame(&mut app, &mut live, &mut attachment, done());
             apply_attachment_frame(&mut app, &mut live, &mut attachment, done());
@@ -4256,22 +3884,13 @@ mod attachment_tests {
                 &target,
                 0,
                 serde_json::json!({
-                    "type":"operator_message", "text":"unique correction"
+                    "_passive_watch":true, "run_id":"run", "stage":"review",
+                    "stage_run_id":"execution", "type":"operator_message", "text":"unique correction"
                 }),
             ),
         );
-        apply_attachment_frame(
-            &mut app,
-            &mut live,
-            &mut attachment,
-            correction_frame(
-                &target,
-                0,
-                serde_json::json!({
-                    "type":"delivered", "req_id":id.to_string()
-                }),
-            ),
-        );
+        let receipt = app.finish_delivery(id, Ok(())).unwrap();
+        live.show_receipt(receipt);
         assert!(app.input.is_empty());
         let rendered = rendered_attachment(&mut live, &app);
         assert_eq!(

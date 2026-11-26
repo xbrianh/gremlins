@@ -2311,7 +2311,9 @@ impl InputBarWidget {
                 .max(1)
                 .min(u16::MAX as usize)) as u16
         } else {
-            self.wrapped_rows(width, ctx.input, ctx.completion_preview)
+            wrapped_height(&Self::context_lines(ctx), width)
+                .max(1)
+                .min(u16::MAX as usize) as u16
         }
     }
 
@@ -2365,6 +2367,29 @@ impl InputBarWidget {
                 }
             })
             .collect()
+    }
+
+    fn context_lines(ctx: &RenderContext) -> Vec<Line<'static>> {
+        let mut lines = Self::full_lines(ctx.input);
+        let command_only = !ctx.target_is_home
+            && matches!(
+                ctx.conversation_status,
+                ConversationStatus::ReadOnly | ConversationStatus::Ended | ConversationStatus::Idle
+            );
+        if command_only {
+            // Keep the prompt two cells wide so cursor and scroll geometry stay unchanged.
+            lines[0].spans[0].content = ": ".into();
+            if ctx.input.is_empty() {
+                lines[0].spans.push(Span::styled(
+                    "local commands only (/help)",
+                    Style::default()
+                        .fg(DEFAULT_THEME.subtle)
+                        .add_modifier(Modifier::DIM),
+                ));
+                return lines;
+            }
+        }
+        Self::preview_lines(lines, ctx.completion_preview)
     }
 
     /// Extend the final logical line with a dimmed inline preview suffix.
@@ -2594,17 +2619,18 @@ impl LiveAreaWidget for InputBarWidget {
         // immediately after the real input on the final line. Measurement now
         // includes the preview so the extended line is allocated enough rows;
         // cursor position is still computed from `ctx.input` alone.
-        let lines = Self::preview_lines(Self::full_lines(ctx.input), ctx.completion_preview);
+        let lines = Self::context_lines(ctx);
+        let full_rows = wrapped_height(&lines, width).max(1).min(u16::MAX as usize) as u16;
         let paragraph = Paragraph::new(lines).wrap(Wrap { trim: false });
 
         // Render into a full-width buffer at the paragraph's natural height,
         // then copy the visible window into `area`.
-        let full_rows = self
-            .wrapped_rows(width, ctx.input, ctx.completion_preview)
-            .max(1);
         let full_area = Rect::new(0, 0, width, full_rows);
         let mut full_buf = Buffer::empty(full_area);
         paragraph.render(full_area, &mut full_buf);
+
+        let cursor = ctx.cursor.min(ctx.input.len());
+        self.ensure_cursor_visible(cursor, ctx.input, width, area.height);
 
         // Copy the visible vertical window. Unwritten cells stay `Reset` so
         // the input bar keeps the surrounding screen background.
@@ -2621,11 +2647,6 @@ impl LiveAreaWidget for InputBarWidget {
 
         // Draw the cursor cell at the current cursor position, only when it
         // falls inside the visible window.
-        let cursor = ctx.cursor.min(ctx.input.len());
-        // Reconcile the vertical scroll against the *actual* allocated height
-        // (which may be smaller than the requested 5-row cap when the viewport
-        // is short), so the cursor stays visible even after shrinking.
-        self.ensure_cursor_visible(cursor, ctx.input, width, area.height);
         let (row, col_in_row) = Self::cursor_position(cursor, ctx.input, width);
         let vis_row = row.checked_sub(self.v_scroll);
         if let Some(vis_row) = vis_row {
@@ -4876,6 +4897,116 @@ mod tests {
             .wrap(Wrap { trim: false })
             .render(area, &mut buf);
         rendered_rows(&buf, width, height)
+    }
+
+    #[test]
+    fn input_bar_view_only_targets_render_local_command_placeholder() {
+        for status in [
+            ConversationStatus::ReadOnly,
+            ConversationStatus::Ended,
+            ConversationStatus::Idle,
+        ] {
+            let mut ctx = input_ctx("", 0);
+            ctx.target_is_home = false;
+            ctx.conversation_status = status;
+            let mut bar = InputBarWidget::new();
+            for width in [80, 12] {
+                let height = bar.desired_height(width, &ctx);
+                let lines = InputBarWidget::context_lines(&ctx);
+                assert_eq!(height as usize, wrapped_height(&lines, width));
+                let area = Rect::new(0, 0, width, height);
+                let mut buf = Buffer::empty(area);
+                bar.render(area, &mut buf, &ctx);
+                assert_eq!(
+                    rendered_rows(&buf, width, height),
+                    full_rendered_rows(&lines, width)
+                );
+                assert_eq!(buf[(2, 0)].style().bg, Some(DEFAULT_THEME.cursor));
+                assert_eq!(lines[0].to_string(), ": local commands only (/help)");
+                assert_eq!(ctx.input, "");
+            }
+        }
+    }
+
+    #[test]
+    fn input_bar_home_and_interactive_agents_keep_composer() {
+        for home in [true, false] {
+            for status in [
+                ConversationStatus::ReadOnly,
+                ConversationStatus::Ended,
+                ConversationStatus::Idle,
+                ConversationStatus::Running,
+                ConversationStatus::Paused,
+            ] {
+                if !home
+                    && !matches!(
+                        status,
+                        ConversationStatus::Running | ConversationStatus::Paused
+                    )
+                {
+                    continue;
+                }
+                for input in ["", "/help", "draft text"] {
+                    let mut ctx = input_ctx(input, input.len());
+                    ctx.target_is_home = home;
+                    ctx.conversation_status = status;
+                    let area = Rect::new(0, 0, 80, 1);
+                    let mut buf = Buffer::empty(area);
+                    InputBarWidget::new().render(area, &mut buf, &ctx);
+                    assert_eq!(
+                        rendered_rows(&buf, 80, 1),
+                        full_rendered_rows(&InputBarWidget::full_lines(input), 80)
+                    );
+                    assert_eq!(buf[(0, 0)].symbol(), glyph::CHEVRON);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn input_bar_local_commands_preserve_drafts_wrapping_and_cursor() {
+        for input in [
+            "/help",
+            "/watch run",
+            "draft 😀 text\nsecond line",
+            "a\nb\nc\nd\ne\nf\ng",
+        ] {
+            for cursor in input
+                .char_indices()
+                .map(|(i, _)| i)
+                .chain(std::iter::once(input.len()))
+            {
+                let mut ctx = input_ctx(input, cursor);
+                ctx.target_is_home = false;
+                ctx.conversation_status = ConversationStatus::ReadOnly;
+                ctx.completion_preview = Some(" suffix");
+                let mut bar = InputBarWidget::new();
+                let width = 10;
+                let height = bar.min_height(width, &ctx);
+                let area = Rect::new(0, 0, width, height);
+                let mut buf = Buffer::empty(area);
+                bar.render(area, &mut buf, &ctx);
+                let lines = InputBarWidget::context_lines(&ctx);
+                assert!(lines[0].to_string().starts_with(": "));
+                assert!(!lines[0].to_string().contains("local commands only"));
+                let expected = full_rendered_rows(&lines, width);
+                assert_eq!(
+                    rendered_rows(&buf, width, height),
+                    expected[bar.v_scroll as usize..]
+                        .iter()
+                        .take(height as usize)
+                        .cloned()
+                        .collect::<Vec<_>>()
+                );
+                let (row, col) = InputBarWidget::cursor_position(cursor, input, width);
+                assert_eq!(
+                    buf[(col, row - bar.v_scroll)].style().bg,
+                    Some(DEFAULT_THEME.cursor)
+                );
+                assert_eq!(ctx.input, input);
+                assert_eq!(ctx.cursor, cursor);
+            }
+        }
     }
 
     #[test]

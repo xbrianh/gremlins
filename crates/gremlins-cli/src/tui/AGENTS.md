@@ -6,16 +6,16 @@ Terminal UI for the `gremlins` CLI. Built on **ratatui** with **crossterm** for 
 
 | File | Role |
 |------|------|
-| `mod.rs` | Module root. `run()` entry point, `run_app()` event loop, selected-conversation UI routing (`Attachment`, `AttachmentFrame`, `select_passive_watch`, `select_debugger_attachment`, `apply_attachment_frame`), `format_socket_response()`. |
+| `mod.rs` | Module root. `run()` entry point, `run_app()` event loop, bus-selected conversation routing, exact invocation resolution, lazy native input, and receipt handling, `format_socket_response()`. |
 | `app.rs` | Pure state (`App`). Active runs, chat id, full-screen marker (`Screen`), input history, cursor state. No I/O, no widget ownership. |
 | `buffer.rs` | Display buffer: `LineBuffer` (styled FIFO, with drain-head and wrapping helpers). Plus `wrapped_height` and `line_wrapped_height` utilities. |
 | `markdown.rs` | Markdown-to-ratatui renderer. Turns a markdown string into `Vec<Line<'static>>` of styled spans via `pulldown-cmark` (tables, strikethrough, task lists). |
 | `screen.rs` | `LiveArea` — owns the main terminal screen, the typed widget `Scene` (`transcript`/`reasoning`/`input_bar`/`info_bar` fields plus a typed `ScreenView` enum), diff-driven double buffering, `commit_scrollback()` (renders overflow + `scroll_region_up`), raw-mode/cursor lifecycle. Also defines the full-screen `RunsView` body with its inline watch stream pane. |
 | `widgets.rs` | `LiveAreaWidget` trait + the shared recursive layout engine + concrete widgets: composite transcript (single styled FIFO + current-turn draft state + one embedded tool `StreamingWidget` child), the `StreamingWidget` primitive, input bar, info bar. Selected conversations share these widgets. |
 | `client.rs` | Persistent `DaemonClient`. Long-lived socket for request/response + unsolicited `DaemonEvent` broadcast. Also dedicated `follow_log()` and passive native `follow_run()` connections. |
-| `client/attachment.rs` | Persistent attachment transport: socket handshake, ack validation, execution/nonce pinning, command writes, terminal/disconnect frames, and abort-on-drop lifetime. Exposes execution/value frames, never UI targets or generations. |
+| `../input.rs` | Native exact-execution input transport. Binds lazily for commands/corrections and reports command receipts independently of bus output. |
 | `watch_replay.rs` | Watch history/live handoff: exact complete native replay; incomplete replay displays a persisted tail and all original native frames without deduplication, then follows the original subscription. |
-| `protocol.rs` | Shared wire selectors and stage_run_id identities. `observed_binding()` allows read-only streams; `binding()` additionally requires correction capability. |
+| `protocol.rs` | Shared bus selectors and exact stage_run_id identities. Selection is independent of native input binding. |
 | `commands.rs` | Slash-command dispatch. Returns `CommandResult` — the event loop handles each variant. |
 | `editor.rs` | Stub wired to `Ctrl+G`. Appends placeholder to transcript. |
 
@@ -42,10 +42,10 @@ run()
       │    5. log_rx       — log-follow lines (dedicated connections)
       │    6. result_rx    — socket-op results
       │    7. chat_rx      — home chat events with turn/stage_run_id identity
-      │    8. attach_rx    — selected stage's AttachmentFrame stream
+      │    8. selected bus stream — replay/live invocation output
       │    9. delivery_rx  — correction delivery receipts
       │   10. reset_rx / model_rx — session reset and model-query results
-      └─ Exit: commit in-flight turn to history, close attachment/log tasks, client.shutdown()
+      └─ Exit: commit in-flight turn to history, release local input/log tasks, client.shutdown()
 
 On a fatal `run_app()` error after the stderr redirect, `run()` restores the
 terminal and the saved stderr, writes the `gremlins: `-prefixed error to
@@ -68,7 +68,7 @@ returns `RunError::Reported` so the CLI exits nonzero without printing it again.
 - **Run follow is passive watch.** `follow_run()` / `follow_watch()` send `{"op":"watch","scope":"run",...,"replay":true}` on an auxiliary session socket. The strict `watched` ack must match scope, run id, replay, and both optional selectors (`stage` / `stage_run_id`, explicitly null when absent). Buffered and subsequent native frames are forwarded unchanged. Watch never attaches for control or sends pause/message commands.
 - **Watch replay uses an atomic native cut, not content deduplication.** `watch_replay::replay_and_dedup()` collects at most 65,536 native snapshot frames through `replay_checkpoint`; `follow_run` has a bounded 256-frame socket queue. `history_gap` or an incomplete checkpoint triggers a one-shot persisted tail (500 lines), with a visible discontinuity/possible overlap warning, while preserving the same live subscription. Failed watch also uses disk-only persisted history, including after daemon restart; it never opens a replacement live log follow. Despite the helper name, this inline replay path performs no deduplication, sequence suppression, content matching, frozen anchor, occurrence budget, or replacement watch. Identical disk/native/live records remain visible. Replay completeness comes from `replay_checkpoint`, not an attach capability; native live frames carry emission sequences. Exec `.events` sidecars are ignored/not written and raw log metadata remains visible. Bounded disk tails assert no coverage; ordinary full log follow's persisted log-line cut remains separate. Agent stage history may include other executions; exact execution-scoped merging is deferred. See `docs/attachment-protocol.md` for journal limits and watermarks.
 - **Log follow uses a dedicated socket.** The `log` op with `follow:true` monopolizes its connection, so it gets its own (`client::follow_log`).
-- **Client owns transport; UI owns selection.** Watch Enter uses `select_passive_watch()` and an auxiliary watch socket, never `start_attachment()`. Bus identity (`run_id`/`id`, `correlation_stage`/`stage`, `stage_run_id`) routes frames to exact invocation transcripts and matching run/stage selectors without requiring a start frame, stage type, or nonce; per-target sequences suppress duplicate delivery using sorted merged inclusive ranges retained across close/reopen (storage scales with gaps, not frame count). `/debug <id>` alone uses debugger attachment transport in `client/attachment.rs`, with execution/nonce pinning and UI target/generation checks. Dropping either forwarding task aborts transport, not execution.
+- **Client owns transport; UI owns selection.** Watch Enter, `/attach`, and `/debug` select bus output without pausing execution or opening an input connection. Bus identity (`run_id`/`id`, `correlation_stage`/`stage`, `stage_run_id`) routes frames to exact invocation transcripts and matching run/stage selectors without requiring a start frame or nonce; per-target sequences suppress duplicate delivery using sorted merged inclusive ranges retained across close/reopen. `/debug <stage_run_id>` or `/debug <run> <stage_run_id>` resolves a concrete invocation; `/attach <run> <stage_run_id>` also selects one. Native input is separate and binds lazily on submission. Releasing local transports does not control execution.
 - **Request/response ordering is FIFO.** `DaemonClient::send_request` holds a write lock across enqueue + write so concurrent callers can't interleave.
 
 ## Event Loop Patterns
@@ -81,7 +81,8 @@ returns `RunError::Reported` so the CLI exits nonzero without printing it again.
 - `Quit` → break loop
 - `ShowHistory` / `TruncateHistory` → operate on `app.conversation_history`
 - `ShowRuns` → enter `Screen::Runs`
-- `Debug(id)` → `attachment_target()` + `select_debugger_attachment(...)` in `Screen::Chat`
+- `Debug(selector)` → resolve the joined one- or two-argument concrete invocation selector in `mod.rs`, then select its bus conversation in `Screen::Chat`
+- Selected execution controls are intercepted by `mod.rs` before ordinary dispatch; `commands.rs` does not resolve execution identities.
 
 ### Home chat flow
 Session creation/recreation returns a registry-reserved `home_run_id`, distinct from
@@ -112,11 +113,13 @@ These steps apply to a new prompt on `Target::Home`; selected-stage text uses th
 - `Bail` → log only
 
 ### Selected stage conversations
-- Watch Enter opens a passive run/stage selector or exact invocation viewer. All remain read-only, including interactive agents; observation never grants a correction address or debugger controls. Exact-invocation debugging is unsupported.
-- `/debug <id>` uses pause-on-entry for an interactive agent only; exec stages remain read-only. Composer text becomes a correction only for an authorized attached execution (`Submission::Correction` → `deliver_correction()` → `delivery_rx`), resuming that execution rather than creating a chat or replacement run.
-- `AttachmentFrame` arrives on `attach_rx`; `apply_attachment_frame()` routes response, reasoning, tool output/results, operator messages, and terminal frames into the target's shared transcript via `with_target_transcript()`.
-- Passive frames route by bus identity, reject sibling invocations, and never authorize corrections. Debugger attachments pin stage_run_id and nonce; generation/target checks reject stale frames. Only a validated `attached` acknowledgment advertising `message` grants a correction address. Read-only stages still stream.
-- `done` / `ended` / `detached` clear the correction address and finish the target's turn. Detaching or switching away does not cancel execution. Home bus events always update `Target::Home`, even while another target is displayed.
+- Watch Enter and slash selectors observe bus output without pause-on-entry. Run/stage selectors and exact invocation viewers share the chat scene; exec stages remain read-only.
+- Matching tagged agent events identify an exact agent execution and enable its composer. No debugger-ready frame or legacy attachment capability is required. A selector alone is not an input handle.
+- Ordinary selected-agent text corrects that exact execution, never home chat or a replacement run. Native input binds lazily when a correction or control is submitted; queued prompts are busy, not input handles.
+- Bus output routes by identity and rejects sibling invocations. Home bus events always update `Target::Home`, even while another target is displayed.
+- Command receipts are separate from bus output. Track delivery against the submitted execution; stale receipts must not clear a successor execution's draft.
+- `/pause` pauses; `/step` and `/continue` single-step one turn. Bare `/resume-execution` resumes the selected execution autonomously. Selected `/quit` also resumes; `/quit <reason>` and `/bail <reason>` bail with that reason.
+- `/exit` and `/attach home` return home and release local input/selection without sending pause, resume, cancel, or other execution controls. Switching away does not cancel execution. Outside a selected execution, `/quit` exits the TUI.
 Matching tagged agent events identify the exact input execution without requiring a
 start frame or capability announcement. Queued prompts are busy, not input handles;
 corrections use exact input and never fall back to chat. Command receipts are distinct

@@ -616,7 +616,8 @@ impl<B: Backend> LiveArea<B> {
             Ok(()) if receipt.target.is_home() => {
                 format!("correction delivered: {}", receipt.text)
             }
-            Ok(()) => return,
+            // Bus operator-message events remain authoritative for the message body.
+            Ok(()) => "correction delivered".to_owned(),
             Err(reason) => format!("correction: {}\n{reason}", receipt.text),
         };
         self.with_target_transcript(&receipt.target, |transcript, _| {
@@ -2273,6 +2274,138 @@ mod tests {
     /// Create a LiveArea<TestBackend> with the given dimensions.
     fn new_live(cols: u16, rows: u16) -> LiveArea<TestBackend> {
         LiveArea::with_backend(TestBackend::new(cols, rows), cols, rows)
+    }
+
+    #[test]
+    fn visible_nonhome_receipt_confirms_delivery_without_repeating_the_body() {
+        use crate::tui::app::{Receipt, Target};
+
+        for target in [
+            Target::StageExecution {
+                run_id: "run".into(),
+                stage: "review".into(),
+            },
+            Target::Invocation {
+                run_id: "run".into(),
+                stage: "review".into(),
+                stage_run_id: "original".into(),
+            },
+        ] {
+            for bus_first in [true, false] {
+                let mut live = new_live(100, 24);
+                let mut app = App::new();
+                live.select_conversation(&mut app, target.clone());
+                let bus_output = |live: &mut LiveArea<TestBackend>| {
+                    live.with_target_transcript(&target, |transcript, _| {
+                        transcript.push_transcript_block(vec!["unique operator message".into()]);
+                        transcript.push_response("unique model response");
+                        transcript.finish_turn();
+                    });
+                };
+                if bus_first {
+                    bus_output(&mut live);
+                }
+                live.show_receipt(Receipt {
+                    target: target.clone(),
+                    text: "unique operator message [execution run/original]".into(),
+                    clear_draft: false,
+                    result: Ok(()),
+                });
+                live.compose(&app).unwrap();
+                let rendered = dump_buffer(live.backend().buffer());
+                assert_eq!(
+                    rendered.matches("correction delivered").count(),
+                    1,
+                    "{rendered}"
+                );
+                assert!(!rendered.contains("correction delivered:"), "{rendered}");
+                assert!(!rendered.contains("[execution"), "{rendered}");
+                if !bus_first {
+                    assert!(!rendered.contains("unique operator message"), "{rendered}");
+                    bus_output(&mut live);
+                }
+                live.compose(&app).unwrap();
+                let rendered = dump_buffer(live.backend().buffer());
+                for text in [
+                    "correction delivered",
+                    "unique operator message",
+                    "unique model response",
+                ] {
+                    assert_eq!(rendered.matches(text).count(), 1, "{rendered}");
+                }
+                live.select_conversation(&mut app, Target::Home);
+                live.compose(&app).unwrap();
+                assert!(!dump_buffer(live.backend().buffer()).contains("correction delivered"));
+            }
+        }
+    }
+
+    #[test]
+    fn background_receipt_confirms_only_origin_without_repeating_bus_or_model_text() {
+        use crate::tui::app::{Receipt, Target};
+
+        for bus_first in [true, false] {
+            let mut live = new_live(100, 24);
+            let mut app = App::new();
+            let origin = Target::Invocation {
+                run_id: "run".into(),
+                stage: "review".into(),
+                stage_run_id: "original".into(),
+            };
+            let successor = Target::Invocation {
+                run_id: "run".into(),
+                stage: "review".into(),
+                stage_run_id: "successor".into(),
+            };
+            live.select_conversation(&mut app, origin.clone());
+            app.replace_input("new originating draft");
+            app.reset_cursor_to_end();
+            live.select_conversation(&mut app, successor.clone());
+            app.replace_input("successor draft");
+            app.reset_cursor_to_end();
+            let bus_output = |live: &mut LiveArea<TestBackend>| {
+                live.with_target_transcript(&origin, |transcript, _| {
+                    transcript.push_transcript_block(vec!["unique operator message".into()]);
+                    transcript.push_response("unique model response");
+                    transcript.finish_turn();
+                });
+            };
+            if bus_first {
+                bus_output(&mut live);
+            }
+            live.show_receipt(Receipt {
+                target: origin.clone(),
+                text: "unique operator message [execution run/original]".into(),
+                clear_draft: false,
+                result: Ok(()),
+            });
+            if !bus_first {
+                bus_output(&mut live);
+            }
+            live.compose(&app).unwrap();
+            let visible = dump_buffer(live.backend().buffer());
+            assert!(!visible.contains("correction delivered"));
+            assert!(!visible.contains("unique operator message"));
+            assert_eq!(app.input.text(), "successor draft");
+
+            live.select_conversation(&mut app, Target::Home);
+            live.compose(&app).unwrap();
+            assert!(!dump_buffer(live.backend().buffer()).contains("correction delivered"));
+            live.select_conversation(&mut app, origin);
+            assert_eq!(app.input.text(), "new originating draft");
+            live.compose(&app).unwrap();
+            let rendered = dump_buffer(live.backend().buffer());
+            for text in [
+                "correction delivered",
+                "unique operator message",
+                "unique model response",
+            ] {
+                assert_eq!(rendered.matches(text).count(), 1, "{rendered}");
+            }
+            assert!(!rendered.contains("[execution"));
+            live.select_conversation(&mut app, successor);
+            assert_eq!(app.input.text(), "successor draft");
+        }
     }
 
     #[test]
