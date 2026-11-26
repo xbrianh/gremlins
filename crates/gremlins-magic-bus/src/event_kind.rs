@@ -69,8 +69,6 @@ pub enum EventKind {
     // ── From InteractiveEvent ─────────────────────────────────────────
     #[serde(rename = "turn_started")]
     TurnStarted { stage_run_id: String },
-    #[serde(rename = "ready")]
-    Ready { turn: usize },
     #[serde(rename = "turn_complete")]
     TurnComplete {
         turn: usize,
@@ -226,8 +224,8 @@ impl EventKind {
     /// Exec output events are intentionally excluded so the TUI receives them
     /// via the control socket for stage-specific transcript routing.
     ///
-    /// When adding a variant here, also update `conversation_display_event` in
-    /// `crate::executor::supervisor::attachment` and the debug event match.
+    /// When adding a variant here, also update `run_display_kind` in
+    /// `gremlins::executor::supervisor::attachment` and the supervisor watch framing tests.
     pub fn is_stream_event(&self) -> bool {
         matches!(
             self,
@@ -239,7 +237,6 @@ impl EventKind {
                 | EventKind::TurnComplete { .. }
                 | EventKind::Done { .. }
                 | EventKind::StreamReset
-                | EventKind::Ready { .. }
                 | EventKind::Ended { .. }
                 | EventKind::PromptRequest { .. }
                 | EventKind::SkillLoaded { .. }
@@ -254,6 +251,32 @@ impl EventKind {
 mod tests {
     use super::EventKind;
     use crate::ModelCallUsage;
+
+    #[test]
+    fn active_producer_events_round_trip_with_stream_classification() {
+        // Retries and execution endings still publish these events.
+        let fixtures = [
+            (serde_json::json!({"type": "stream_reset"}), false),
+            (
+                serde_json::json!({"type": "ended", "reason": "bailed"}),
+                true,
+            ),
+        ];
+        for (wire, chat) in fixtures {
+            let event: EventKind = serde_json::from_value(wire.clone()).unwrap();
+            assert_eq!(serde_json::to_value(&event).unwrap(), wire);
+            assert!(event.is_stream_event());
+            assert_eq!(event.is_chat_event(), chat);
+        }
+    }
+
+    #[test]
+    fn obsolete_ready_frame_is_rejected() {
+        assert!(serde_json::from_value::<EventKind>(
+            serde_json::json!({"type": "ready", "turn": 3})
+        )
+        .is_err());
+    }
 
     #[test]
     fn model_call_usage_round_trips_nested_accounting_payload() {

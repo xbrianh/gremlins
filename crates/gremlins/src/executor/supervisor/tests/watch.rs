@@ -169,7 +169,7 @@ fn boundary(id: &str, stage: &str, execution: &str, kind: &str) -> EventKind {
 
 fn assert_wire(frame: &Value, identity: &CorrId, kind: &EventKind) -> u64 {
     let mut expected = serde_json::to_value(kind).unwrap();
-    // Run lifecycle frames use the attachment schema (not the daemon schema).
+    // Watch lifecycle frames retain their schema (not the daemon schema).
     if matches!(kind, EventKind::RunStopped { .. }) {
         expected = json!({"type":"run_stopped", "id":identity.run().unwrap()});
     }
@@ -539,6 +539,30 @@ async fn malformed_filters_and_retired_keys_reject_before_registration() {
             assert_eq!(peer.frame().await["type"], "error", "{filter}");
             peer.closed().await;
         }
+        for request in [
+            json!({"op":"attach", "scope":"run"}),
+            json!({"op":"attach", "scope":"run", "mode":"passive"}),
+            json!({"op":"attach", "scope":"run", "mode":"control"}),
+            json!({"op":"attach", "scope":"run", "mode":"debugger"}),
+            json!({"op":"attach", "scope":"conversation", "mode":"debugger"}),
+            json!({"op":"watch", "mode":"passive"}),
+            json!({"op":"watch", "mode":"control"}),
+            json!({"op":"watch", "mode":"debugger"}),
+            json!({"op":"input", "mode":"debugger", "stage_run_id":"old", "req_id":"bind"}),
+            json!({"op":"input", "scope":"conversation", "stage_run_id":"old", "req_id":"bind"}),
+        ] {
+            let mut full = json!({"id":"watch-not-registered", "session_id":SESSION});
+            full.as_object_mut()
+                .unwrap()
+                .extend(request.as_object().unwrap().clone());
+            let mut peer = Peer::open(&registry, aux, full).await;
+            let error = peer.frame().await;
+            assert_eq!(error["type"], "error", "{error}");
+            assert!(!error.to_string().contains("not live"), "{error}");
+            assert!(!error.to_string().contains("not running"), "{error}");
+            peer.closed().await;
+        }
+        // Retired aliases must fail even beside a valid replacement selector.
         for key in ["stage_id", "execution_id"] {
             for nested in [false, true] {
                 for replacement in [false, true] {
@@ -580,7 +604,7 @@ async fn malformed_filters_and_retired_keys_reject_before_registration() {
 async fn live_only_watch_commands_disconnect_without_input_or_pausing_other_viewers() {
     let id = "watch-readonly";
     let (registry, mut gremlin, _dir) = live(id).await;
-    let mut session = gremlin.next_interactive_session();
+    let session = gremlin.next_interactive_session();
     let identity = corr(id, "agent", "live-execution");
     emit_corr_event(
         &identity,
@@ -590,25 +614,37 @@ async fn live_only_watch_commands_disconnect_without_input_or_pausing_other_view
     );
     let mut survivor = Peer::watch(&registry, true, id, json!({})).await;
     for aux in [false, true] {
-        let mut viewer = Peer::watch(&registry, aux, id, json!({})).await;
-        viewer
-            .send(json!({"op":"message", "text":"must not deliver", "req_id":"forbidden"}))
+        // Neither retired attachment commands nor exact-input commands can
+        // turn a watch into a controller, even with an exact selector.
+        for command in [
+            json!({"op":"message", "text":"must not deliver", "req_id":"forbidden"}),
+            json!({"cmd":"message", "text":"must not deliver", "req_id":"forbidden"}),
+            json!({"cmd":"pause", "req_id":"forbidden"}),
+            json!({"cmd":"step", "req_id":"forbidden"}),
+            json!({"cmd":"resume", "req_id":"forbidden"}),
+            json!({"cmd":"bail", "req_id":"forbidden"}),
+        ] {
+            let mut viewer = Peer::watch(
+                &registry,
+                aux,
+                id,
+                json!({"stage":"agent", "stage_run_id":"live-execution"}),
+            )
             .await;
-        let error = viewer.frame().await;
-        assert_eq!(error["type"], "error");
-        assert!(error.to_string().contains("read-only"));
-        viewer.closed().await;
-        assert!(!session.accept_pause());
-        assert!(timeout(LIMIT, session.next_command())
-            .await
-            .unwrap()
-            .is_none());
-        let kind = EventKind::StreamChunk {
-            text: format!("survivor after {aux}"),
-        };
-        emit_corr_event(&identity, kind.clone());
-        // Neither old history nor a replay checkpoint may precede live output.
-        assert_wire(&survivor.frame().await, &identity, &kind);
+            viewer.send(command.clone()).await;
+            let error = viewer.frame().await;
+            assert_eq!(error["type"], "error", "{command}");
+            assert!(error.to_string().contains("read-only"), "{error}");
+            viewer.closed().await;
+            assert!(!session.input_pending());
+            assert!(!session.snapshot().end_signal().is_ended());
+            let kind = EventKind::StreamChunk {
+                text: format!("survivor after {aux}: {command}"),
+            };
+            emit_corr_event(&identity, kind.clone());
+            // Neither old history nor a replay checkpoint may precede live output.
+            assert_wire(&survivor.frame().await, &identity, &kind);
+        }
     }
     let terminal = EventKind::RunStopped { id: id.into() };
     emit_corr_event(&identity, terminal.clone());

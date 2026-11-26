@@ -277,54 +277,34 @@ async fn second_prompt_is_gated_and_each_start_matches_live_snapshot_then_become
         second_started.corr_id().stage(),
         Some(actual.stage_name.as_str())
     );
-    let debugger_target = interactive.target();
-    let debugger_stage = debugger_target
-        .stage_run_id()
-        .expect("live debugger execution");
-    // Debugger attachment uses its own target; bus starts name the actual stage input.
-    for (nonce, stage_run_id, expected) in [
+    // Exact input binding rejects stale identities without affecting the live inbox.
+    for (nonce, stage_run_id, accepted) in [
         (
             second["nonce"].as_u64().unwrap() + 1,
             second["stage_run_id"].as_str().unwrap(),
-            "error",
+            false,
         ),
         (
             second["nonce"].as_u64().unwrap(),
             first["stage_run_id"].as_str().unwrap(),
-            "error",
+            false,
         ),
         (
             second["nonce"].as_u64().unwrap(),
-            debugger_stage,
-            "attached",
+            second["stage_run_id"].as_str().unwrap(),
+            true,
         ),
     ] {
-        // The real listener supplies the verified session owner; the unowned
-        // aux entry point rejects even a valid conversation target.
-        let client = UnixStream::connect(&socket_path).await.unwrap();
-        let mut client = BufReader::new(client);
-        socket::write_json_line(
-            client.get_mut(),
-            &json!({
-                "op": "attach", "scope": "conversation", "session_id": write.1,
-                "id": second["id"], "nonce": nonce, "stage_run_id": stage_run_id,
-            }),
-        )
-        .await
-        .unwrap();
-        let response =
-            tokio::time::timeout(Duration::from_secs(10), socket::read_json_line(&mut client))
-                .await
-                .expect("auxiliary attach response timed out")
-                .unwrap()
-                .unwrap();
-        assert_eq!(response["type"], expected, "{response}");
-        if expected == "attached" {
-            assert_eq!(response["nonce"], second["nonce"]);
-            assert_eq!(response["stage_run_id"], debugger_stage);
-            assert_new_identity_only(&response);
+        let target = json!({
+            "id": second["id"], "nonce": nonce, "stage_run_id": stage_run_id,
+        });
+        let bound = super::super::input::bind(&target, &registry, Some(&session)).await;
+        assert_eq!(bound.is_ok(), accepted, "target: {target}");
+        if let Ok(bound) = bound {
+            assert_eq!(bound.identity.stage_run_id, stage_run_id);
+            assert!(!bound.sender.is_closed());
         }
-        drop(client);
+        assert!(!interactive.target().end_signal().is_ended());
     }
     assert_eq!(
         assert_start_snapshot(&registry, &session, &second_started, "second").await,
@@ -393,7 +373,7 @@ async fn reregistered_same_nonce_rejects_old_execution_and_invalid_targets_witho
     let mut replacement = registry
         .register_chat_gremlin(id.into(), make(), CancelToken::new())
         .await;
-    let mut execution = replacement.next_interactive_session();
+    let execution = replacement.next_interactive_session();
     let (interactive, _, _) = registry.get_run_interactive(id).await.unwrap();
     let live = interactive.target();
     assert_eq!(old_target.nonce(), live.nonce());
@@ -432,18 +412,21 @@ async fn reregistered_same_nonce_rejects_old_execution_and_invalid_targets_witho
                 || (expected == "stale" && response.to_string().contains("stage_run_id mismatch")),
             "{response}"
         );
+        assert!(!execution.execution_ended(), "rejection ended execution");
         assert!(
-            !execution.accept_pause(),
-            "rejection acquired the execution"
+            matches!(
+                inbox.try_recv(),
+                Err(tokio::sync::mpsc::error::TryRecvError::Empty)
+            ),
+            "rejected target changed the input inbox"
         );
-        assert!(inbox.try_recv().is_err(), "rejected target enqueued input");
         assert!(session.get_current_turn().await.is_none());
         assert!(session.get_chat_handle().await.is_none());
         assert!(session.get_chat_gremlin_keys().await.is_empty());
     }
     drop(inbox);
     drop(execution);
-    let mut readonly = replacement
+    let readonly = replacement
         .next_interactive_session_with_commands(false)
         .unwrap();
     let target = interactive.target();
@@ -456,7 +439,8 @@ async fn reregistered_same_nonce_rejects_old_execution_and_invalid_targets_witho
     .await;
     let response = frame(&mut reader).await;
     assert_eq!(response["type"], "error", "{response}");
-    assert!(!readonly.accept_pause());
+    assert!(!readonly.input_pending());
+    assert!(!readonly.execution_ended());
     assert!(session.get_current_turn().await.is_none());
     assert!(session.get_chat_handle().await.is_none());
     assert!(session.get_chat_gremlin_keys().await.is_empty());
@@ -488,13 +472,22 @@ async fn retired_target_keys_are_rejected_before_resolution_without_delivery() {
     let mut gremlin = registry
         .register_chat_gremlin(id.into(), gremlin, CancelToken::new())
         .await;
-    let mut execution = gremlin.next_interactive_session();
+    let execution = gremlin.next_interactive_session();
     let (interactive, _, _) = registry.get_run_interactive(id).await.unwrap();
     let live = interactive.target();
+    let (mut inbox, _revoker) = gremlin.execution_inputs.register_with_nonce(
+        crate::clients::execution_input::ExecutionIdentity {
+            run_id: id.into(),
+            stage_name: "build".into(),
+            stage_run_id: live.stage_run_id().unwrap().into(),
+        },
+        Some(live.nonce()),
+        |_| {},
+    );
     for key in ["execution_id", "stage_id"] {
         for with_new_key in [false, true] {
             // The missing run proves retired-key validation precedes resolution;
-            // the live run proves rejection never acquires a pause or command.
+            // the live run proves rejection never enqueues input or ends execution.
             for target_id in ["missing-retired-target", id] {
                 for retired_value in [json!(live.stage_run_id()), Value::Null] {
                     let mut target = json!({"id": target_id, "nonce": live.nonce()});
@@ -514,17 +507,11 @@ async fn retired_target_keys_are_rejected_before_resolution_without_delivery() {
                         format!("target.{key} is retired; use target.stage_run_id"),
                         "{response}"
                     );
-                    assert!(!execution.accept_pause(), "retired target acquired a pause");
-                    assert!(!execution.is_attached());
-                    let mut command = std::pin::pin!(execution.next_command());
-                    std::future::poll_fn(|cx| {
-                        assert!(
-                            !matches!(command.as_mut().poll(cx), Poll::Ready(Some(_))),
-                            "unexpected delivery"
-                        );
-                        Poll::Ready(())
-                    })
-                    .await;
+                    assert!(matches!(
+                        inbox.try_recv(),
+                        Err(tokio::sync::mpsc::error::TryRecvError::Empty)
+                    ));
+                    assert!(!execution.execution_ended());
                     assert_no_frame(&mut reader).await;
                     assert!(session.get_current_turn().await.is_none());
                     assert!(session.get_chat_handle().await.is_none());
@@ -551,8 +538,10 @@ async fn retired_target_keys_are_rejected_before_resolution_without_delivery() {
                     response["message"],
                     "top-level stage-run selectors are not supported; use target with id, nonce, and stage_run_id"
                 );
-                assert!(!execution.accept_pause());
-                assert!(!execution.is_attached());
+                assert!(matches!(
+                    inbox.try_recv(),
+                    Err(tokio::sync::mpsc::error::TryRecvError::Empty)
+                ));
                 assert!(!execution.execution_ended());
                 assert_no_frame(&mut reader).await;
                 assert!(session.get_current_turn().await.is_none());
@@ -663,8 +652,8 @@ async fn correction_rejects_malformed_targets_without_starting_chat() {
     teardown_session(&owner).await;
 }
 
-// The debugger descriptor supplies compatibility identity only. Corrections use
-// an independent execution inbox, without a readiness handshake or debug lease.
+// The execution snapshot supplies compatibility identity only. Corrections use
+// an independent execution inbox, without a readiness handshake.
 struct CorrectionPipeline {
     gremlin: crate::executor::gremlin::Gremlin,
     execution: crate::clients::interactive::InteractiveSession,
@@ -869,8 +858,8 @@ async fn held_correction_releases_claim_and_keeps_main_dispatcher_responsive() {
     assert!(session.get_current_turn().await.is_none());
     assert!(session.get_chat_handle().await.is_none());
     assert!(session.get_chat_ids().await.is_empty());
-    assert!(!pipeline.execution.accept_pause());
-    assert!(!pipeline.execution.is_attached());
+    assert!(!pipeline.receiver.pending());
+    assert!(!pipeline.execution.execution_ended());
     assert_no_frame(&mut reader).await;
 
     // Complete out of order: each receipt retains its own framing identity.
@@ -917,7 +906,7 @@ async fn revoked_correction_does_not_retarget(polled: bool) {
         };
         pipeline.revoker.revoke();
         drop(pipeline.execution);
-        let mut successor = pipeline.gremlin.next_interactive_session();
+        let successor = pipeline.gremlin.next_interactive_session();
         let (interactive, _, _) = registry.get_run_interactive(id).await.unwrap();
         let next_target = interactive.target();
         assert_ne!(next_target.stage_run_id(), pipeline.target.stage_run_id());
@@ -944,8 +933,8 @@ async fn revoked_correction_does_not_retarget(polled: bool) {
                 next_receiver.try_recv(),
                 Err(tokio::sync::mpsc::error::TryRecvError::Empty)
             ));
-            assert!(!successor.accept_pause());
-            assert!(!successor.is_attached());
+            assert!(!next_receiver.pending());
+            assert!(!successor.execution_ended());
         }
         assert_no_frame(&mut reader).await;
         send_chat(&mut write, json!({"op": "close_session"})).await;
@@ -1048,8 +1037,8 @@ async fn close_session_with_held_correction_leaves_independent_target_bindable()
             .await
             .expect("MAIN close retained input controller claim");
         drop(bound);
-        assert!(!pipeline.execution.accept_pause());
-        assert!(!pipeline.execution.is_attached());
+        assert!(!pipeline.receiver.pending());
+        assert!(!pipeline.execution.execution_ended());
 
         drop(held);
         pipeline.revoker.revoke();
@@ -1087,8 +1076,8 @@ async fn main_socket_eof_with_held_correction_leaves_independent_target_bindable
             .await
             .expect("MAIN EOF retained input controller claim");
         drop(bound);
-        assert!(!pipeline.execution.accept_pause());
-        assert!(!pipeline.execution.is_attached());
+        assert!(!pipeline.receiver.pending());
+        assert!(!pipeline.execution.execution_ended());
         // A spawned receipt waiter may survive EOF. Do not require delivery to
         // have been invalidated; only MAIN exit and independent input matter.
         drop(held);

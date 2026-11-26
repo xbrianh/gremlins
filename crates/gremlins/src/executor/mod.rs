@@ -74,7 +74,6 @@ pub enum RunError {
 }
 
 pub mod accounting;
-mod active_leaf;
 pub mod agent_runner;
 pub mod blob_io;
 pub mod bootstrap;

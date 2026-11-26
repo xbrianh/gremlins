@@ -134,7 +134,8 @@ mod tests {
             "`--stage NAME` filters by stage name and `--stage-run-id ID` by exact invocation; these filters can be combined",
             "Without `--snapshot`, it follows live output",
             "`--snapshot` reads retained replay and exits at `replay_checkpoint`, even when the run stays live",
-            "Actual frames include `watched`, `run_started`, `stage_boundary`, `stage_transition`, display/output events, and `run_completed`, `run_failed`, `run_stopped`",
+            "Actual frames include `watched`, `run_started`, `stage_boundary`, `stage_transition`, `stream_chunk`, `reasoning_chunk`, `tool_output_chunk`, `tool_result`, `exec_output`, and `run_completed`, `run_failed`, `run_stopped`",
+            "Display/lifecycle frames describe output and identity, not input readiness or a writable capability",
             "Event frames carry `sequence` and `run_id`, with `stage_run_id` and stage metadata when available",
             "A `stage_boundary` has `stage`, `stage_type`, and `active`",
             "`history_gap` with reason `history_incomplete` and `replay_checkpoint` with `complete: false` mean incomplete retained history, not an empty run or stage",
@@ -238,6 +239,7 @@ mod tests {
             "/log",
             "/watch",
             "/debug",
+            "/attach",
             "/model",
             "/chat",
             "/clear",
@@ -274,6 +276,7 @@ mod tests {
 
         for row in [
             "| `/artifact <id> --list` / `/artifact <id> <uri>` | none — TUI-only |",
+            "| `/attach` / `/debug` | none — TUI-only selectors; CLI `gremlins debug SOURCE INVOCATION` sends input, not selection |",
             "| `/model` | none — TUI-only |",
             "| `/chat` | none — TUI-only |",
             "| `/clear` / `/new` | none — TUI-only |",
@@ -314,9 +317,34 @@ mod tests {
             "home interruption must be soft first, escalating to hard cancel only on a timely repeat"
         );
         let interaction = prompt.split_whitespace().collect::<Vec<_>>().join(" ");
-        assert!(
-            interaction.contains("`/attach home` or switching away detaches, not cancels; home keeps streaming in the background while a stage is selected"),
-            "leaving a selected stage must detach rather than cancel, without stopping the home stream"
-        );
+        for required in [
+            "`/watch` Enter, `/attach`, and `/debug` select bus output without pausing execution or opening an input connection",
+            "Native input binds lazily on submission; command receipts report delivery separately from bus output",
+            "Selection is not input authority",
+            "Selected-execution controls are `/pause` to pause, `/step` or `/continue` to single-step one turn",
+            "bare `/resume-execution` or `/quit` to resume autonomously",
+            "`/quit <reason>` or `/bail <reason>` bails the selected execution",
+            "CLI `/continue` resumes autonomously and CLI `/quit [reason]` always bails",
+            "`/exit`, `/attach home`, or switching away releases local selection without sending execution controls; home keeps streaming in the background while a stage is selected",
+            "`/attach` is a TUI selector, not a wire attachment operation",
+        ] {
+            assert!(
+                interaction.contains(required),
+                "chat prompt must document passive selection and exact input: {required}"
+            );
+        }
+        for obsolete in [
+            "interactive_ready",
+            "input_ready",
+            "debug_ready",
+            "attachment_ready",
+            "ordinary text corrects the same execution and resumes it",
+            "display/output events",
+        ] {
+            assert!(
+                !interaction.contains(obsolete),
+                "chat prompt must not advertise obsolete readiness/display behavior: {obsolete}"
+            );
+        }
     }
 }

@@ -108,117 +108,15 @@ mod attribution_tests {
 
     #[cfg(unix)]
     #[tokio::test]
-    async fn pipeline_route_survives_retry_reap_and_changed_current_target() {
-        use crate::clients::interactive::InteractiveSessionFactory;
-
-        let run_id = "cmd.pipeline-route.retry";
-        let route = CorrId::new()
-            .with_run(run_id)
-            .with_stage("implement")
-            .with_stage_run_id("pipeline-stage")
-            .with_attempt(3);
-        let (sub, mut events) = gremlins_magic_bus::subscribe_run(run_id);
-        let _guard = gremlins_magic_bus::connection::BusSubGuard::new(sub);
-        let (_dir, backend) = scripted_backend(
-            r#"prompt=$(cat)
-case "$prompt" in
-  prompt) session=retry-session ;;
-  'other prompt') session=other-session ;;
-  *) exit 10 ;;
-esac
-printf '%s\n' "{\"type\":\"system\",\"subtype\":\"init\",\"session_id\":\"$session\",\"model\":\"fake\",\"cwd\":\"/tmp\"}"
-case "$*" in
-  *--resume*)
-    [ "$prompt" = prompt ] && [ "$session" = retry-session ] || exit 11
-    case "$*" in *'--resume retry-session'*) ;; *) exit 12 ;; esac
-    printf '%s\n' '{"type":"assistant","message":{"content":[{"type":"text","text":"retry output"}]}}'
-    printf '%s\n' '{"type":"result","subtype":"success","result":"done","total_cost_usd":0.25,"num_turns":2}'
-    printf '%s\n' '{"type":"assistant","message":{"content":[{"type":"text","text":"late output"}]}}'
-    ;;
-  *) printf '%s\n' '{"type":"result","subtype":"error","is_error":true,"api_error_status":503}' ;;
-esac
-"#,
-        );
-        let (mut factory, handle) = InteractiveSessionFactory::for_pipeline();
-        let session = factory.next_session_with_commands(false, None).unwrap();
-        let mut params = RunParams::empty();
-        params.prompt = "prompt".into();
-        params.gremlin_id = Some(run_id.into());
-        params.label = "worker".into();
-        params.output_corr_id = Some(route.clone());
-        params.capture_events = true;
-        assert!(matches!(
-            backend.run(params, session).await,
-            Err(ClientError::ApiServerError { .. })
-        ));
-        assert!(next_log(&mut events, &route, run_id)
-            .await
-            .contains("using client"));
-        assert!(next_log(&mut events, &route, run_id)
-            .await
-            .contains("final:"));
-
-        backend.reap_all(run_id);
-        let successor = factory.next_session_with_commands(false, None).unwrap();
-        assert_ne!(handle.target().stage_run_id(), route.stage_run_id());
-        let mut other = RunParams::empty();
-        let other_route = route.clone().with_stage_run_id("other-stage-execution");
-        other.gremlin_id = Some(run_id.into());
-        other.output_corr_id = Some(other_route.clone());
-        other.prompt = "other prompt".into();
-        other.label = "other worker".into();
-        assert!(matches!(
-            backend.run(other, successor).await,
-            Err(ClientError::ApiServerError { .. })
-        ));
-        assert_eq!(
-            backend.last_route.lock().unwrap().as_ref(),
-            Some(&other_route)
-        );
-        for expected in ["using client", "final:"] {
-            assert!(next_log(&mut events, &other_route, run_id)
-                .await
-                .contains(expected));
-        }
-        let api: &dyn Backend = &backend;
-        let unknown_route = route.clone().with_stage_run_id("unknown-invocation");
-        assert!(matches!(
-            api.resume_for(&unknown_route).await,
-            Err(ClientError::Runtime { message }) if message.contains("no context")
-        ));
-        let completed = api.resume_for(&route).await.unwrap();
-        assert_eq!(completed.text_result.as_deref(), Some("done"));
-        assert_eq!(completed.cost_usd, Some(0.25));
-        assert_eq!(completed.events.as_ref().unwrap().len(), 4);
-        for expected in [
-            "using client",
-            "retry output",
-            "final: subtype=success turns=2 cost=0.25",
-            "late output",
-        ] {
-            let line = next_log(&mut events, &route, run_id).await;
-            assert!(
-                line.contains(expected),
-                "{line:?} did not contain {expected:?}"
-            );
-            assert!(
-                line.starts_with("[worker] "),
-                "retry lost A's label: {line}"
-            );
-        }
-        assert!(events.try_recv().is_err());
-    }
-
-    #[cfg(unix)]
-    #[tokio::test]
     async fn nonpipeline_logs_keep_snapshot_execution_in_actual_envelopes() {
         use crate::clients::interactive::InteractiveSessionFactory;
 
         let run_id = "cmd.nonpipeline-route";
         let (sub, mut events) = gremlins_magic_bus::subscribe_run(run_id);
         let _guard = gremlins_magic_bus::connection::BusSubGuard::new(sub);
-        let (_dir, backend) = scripted_backend(
+        let (dir, backend) = scripted_backend(
             r#"cat >/dev/null
+printf '%s\n' '{"type":"system","subtype":"init","session_id":"unused-session","model":"fake","cwd":"/tmp"}'
 printf '%s\n' '{"type":"result","subtype":"success","result":"done","cost_usd":0.5}'
 "#,
         );
@@ -229,191 +127,27 @@ printf '%s\n' '{"type":"result","subtype":"success","result":"done","cost_usd":0
             .with_stage_run_id(session.snapshot().stage_run_id().unwrap());
         let mut params = RunParams::empty();
         params.gremlin_id = Some(run_id.into());
+        params.capture_events = true;
+        let raw_path = dir.path().join("raw.jsonl");
+        params.raw_path = Some(raw_path.clone());
         let completed = backend.run(params, session).await.unwrap();
         assert_eq!(completed.cost_usd, Some(0.5));
+        let captured = completed.events.as_ref().unwrap();
+        assert_eq!(captured.len(), 2);
+        assert_eq!(captured[0]["subtype"], "init");
+        assert_eq!(captured[0]["session_id"], "unused-session");
+        let raw = std::fs::read_to_string(raw_path).unwrap();
+        let raw_events: Vec<serde_json::Value> = raw
+            .lines()
+            .map(|line| serde_json::from_str(line).unwrap())
+            .collect();
+        assert_eq!(&raw_events, captured);
+        assert!(next_log(&mut events, &route, run_id)
+            .await
+            .contains("using client"));
         assert!(next_log(&mut events, &route, run_id)
             .await
             .contains("cost=0.5"));
-    }
-
-    #[cfg(unix)]
-    fn invocation_params(run_id: &str, execution: &str) -> (RunParams, CorrId) {
-        let route = CorrId::new()
-            .with_run(run_id)
-            .with_stage_run_id(execution);
-        let mut params = RunParams::empty();
-        params.gremlin_id = Some(run_id.into());
-        params.output_corr_id = Some(route.clone());
-        params.prompt = "original prompt".into();
-        (params, route)
-    }
-
-    #[cfg(unix)]
-    #[tokio::test]
-    async fn invocation_is_registered_before_first_run_await_is_cancelled() {
-        use crate::clients::interactive::InteractiveSessionFactory;
-        use std::future::Future;
-
-        let run_id = "cmd.cancel-before-init";
-        let (_dir, backend) = scripted_backend("cat >/dev/null\nexec sleep 30\n");
-        let (params, route) = invocation_params(run_id, "cancelled");
-        let (mut factory, _handle) = InteractiveSessionFactory::for_pipeline();
-        let session = factory.next_session_with_commands(false, None).unwrap();
-        let mut run = Box::pin(backend.run(params, session));
-        std::future::poll_fn(|cx| {
-            assert!(run.as_mut().poll(cx).is_pending());
-            std::task::Poll::Ready(())
-        })
-        .await;
-        drop(run);
-        let saved = backend.retry_context(&route);
-        backend.reap_all(run_id);
-        let saved = saved.expect("cancellation lost invocation context");
-        assert_eq!(saved.prompt, "original prompt");
-        assert_eq!(saved.last_session_id, None);
-        assert!(!saved.completed);
-        assert_eq!(backend.last_route.lock().unwrap().as_ref(), Some(&route));
-    }
-
-    #[cfg(unix)]
-    #[tokio::test]
-    async fn init_session_is_saved_before_cancellation_and_used_by_resume_for() {
-        use crate::clients::interactive::InteractiveSessionFactory;
-
-        let run_id = "cmd.cancel-after-init";
-        let (_dir, backend) = scripted_backend(
-            r#"prompt=$(cat)
-[ "$prompt" = 'original prompt' ] || exit 10
-case "$*" in
-  *'--resume saved-session'*)
-    printf '%s\n' '{"type":"result","subtype":"success","result":"resumed"}' ;;
-  *--resume*) exit 11 ;;
-  *)
-    printf '%s\n' '{"type":"system","subtype":"init","session_id":"saved-session"}'
-    exec sleep 30 ;;
-esac
-"#,
-        );
-        let (params, route) = invocation_params(run_id, "cancelled");
-        let (mut factory, _handle) = InteractiveSessionFactory::for_pipeline();
-        let session = factory.next_session_with_commands(false, None).unwrap();
-        let observed = {
-            let run = backend.run(params, session);
-            tokio::pin!(run);
-            tokio::select! {
-                result = &mut run => panic!("run finished before cancellation: {result:?}"),
-                observed = tokio::time::timeout(Duration::from_secs(5), async {
-                    loop {
-                        if backend.retry_context(&route).ok().and_then(|ctx| ctx.last_session_id)
-                            == Some("saved-session".into())
-                        {
-                            break;
-                        }
-                        tokio::time::sleep(Duration::from_millis(5)).await;
-                    }
-                }) => observed,
-            }
-        };
-        backend.reap_all(run_id);
-        observed.expect("init session was not persisted while run was pending");
-        assert!(!backend.retry_context(&route).unwrap().completed);
-        let completed = tokio::time::timeout(Duration::from_secs(5), backend.resume_for(&route))
-            .await
-            .expect("resume hung")
-            .unwrap();
-        assert_eq!(completed.text_result.as_deref(), Some("resumed"));
-    }
-
-    #[cfg(unix)]
-    #[tokio::test]
-    async fn failed_retry_init_does_not_replace_established_session() {
-        use crate::clients::interactive::InteractiveSessionFactory;
-
-        let (_dir, backend) = scripted_backend(
-            r#"cat >/dev/null
-case "$*" in
-  *'--resume established-session'*) session=different-session ;;
-  *--resume*) exit 11 ;;
-  *) session=established-session ;;
-esac
-printf '%s\n' "{\"type\":\"system\",\"subtype\":\"init\",\"session_id\":\"$session\"}"
-printf '%s\n' '{"type":"result","subtype":"error","is_error":true,"api_error_status":503}'
-"#,
-        );
-        let (params, route) = invocation_params("cmd.failed-retry-init", "failed");
-        let (mut factory, _handle) = InteractiveSessionFactory::for_pipeline();
-        let session = factory.next_session_with_commands(false, None).unwrap();
-        assert!(matches!(
-            backend.run(params, session).await,
-            Err(ClientError::ApiServerError { .. })
-        ));
-        for _ in 0..2 {
-            assert!(matches!(
-                backend.resume_for(&route).await,
-                Err(ClientError::ApiServerError { .. })
-            ));
-            let saved = backend.retry_context(&route).unwrap();
-            assert_eq!(saved.last_session_id.as_deref(), Some("established-session"));
-            assert!(!saved.completed);
-        }
-    }
-
-    #[cfg(unix)]
-    #[tokio::test]
-    async fn completed_contexts_are_bounded_but_old_failures_survive_until_completed() {
-        use crate::clients::interactive::InteractiveSessionFactory;
-
-        let (_dir, backend) = scripted_backend(
-            r#"prompt=$(cat)
-case "$prompt:$*" in
-  fail:*--resume*) ;;
-  fail:*)
-    printf '%s\n' '{"type":"system","subtype":"init","session_id":"failed-session"}'
-    printf '%s\n' '{"type":"result","subtype":"error","is_error":true,"api_error_status":503}'
-    exit 0 ;;
-esac
-printf '%s\n' '{"type":"result","subtype":"success","result":"done"}'
-"#,
-        );
-        let run_id = "cmd.context-retention";
-        let (mut factory, _handle) = InteractiveSessionFactory::for_pipeline();
-        let (mut failed, failed_route) = invocation_params(run_id, "failed");
-        failed.prompt = "fail".into();
-        let session = factory.next_session_with_commands(false, None).unwrap();
-        assert!(matches!(
-            backend.run(failed, session).await,
-            Err(ClientError::ApiServerError { .. })
-        ));
-        let mut latest_route = None;
-        for invocation in 0..8 {
-            let (params, route) = invocation_params(run_id, &format!("success-{invocation}"));
-            let session = factory.next_session_with_commands(false, None).unwrap();
-            backend.run(params, session).await.unwrap();
-            let contexts = backend.ctx.lock().unwrap();
-            assert_eq!(contexts.len(), 2);
-            assert!(!contexts[&failed_route].completed);
-            assert!(contexts[&route].completed);
-            assert_eq!(contexts.values().filter(|ctx| ctx.completed).count(), 1);
-            if let Some(previous) = latest_route.replace(route) {
-                assert!(!contexts.contains_key(&previous));
-            }
-        }
-        backend.reap_all(run_id);
-        assert!(backend.retry_context(&failed_route).is_ok());
-        backend.resume_for(&failed_route).await.unwrap();
-        assert!(backend.retry_context(&failed_route).is_err());
-        {
-            let contexts = backend.ctx.lock().unwrap();
-            assert_eq!(contexts.len(), 1);
-            assert!(contexts[latest_route.as_ref().unwrap()].completed);
-        }
-
-        let mut failed = RunParams::empty();
-        failed.prompt = "fail".into();
-        failed.output_corr_id = Some(failed_route.clone());
-        assert!(backend.run(failed, InteractiveSession::unattached()).await.is_err());
-        backend.release_invocation(&failed_route);
-        assert!(backend.retry_context(&failed_route).unwrap().completed);
     }
 
     #[test]
@@ -438,30 +172,20 @@ pub struct CmdBackend {
     stream_json: bool,
     footer_re: Option<Regex>,
     pids: Mutex<HashMap<String, Vec<u32>>>,
-    /// Invocation-owned retry state; stages in the same run have distinct routes.
-    ctx: Mutex<HashMap<CorrId, CmdContext>>,
-    /// Legacy latest-run selection for `resume`; invocation-owned retries
-    /// use `resume_for` instead.
-    last_route: Mutex<Option<CorrId>>,
 }
 
 #[derive(Debug, Clone)]
 struct CmdContext {
-    prompt: String,
-    label: String,
     model: Option<String>,
     raw_path: Option<PathBuf>,
     capture_events: bool,
-    on_timeout_prompt: Option<String>,
     cwd: Option<PathBuf>,
     idle_timeout: f64,
     extra_env: Option<HashMap<String, String>>,
     prefix: String,
-    last_session_id: Option<String>,
     artifact_dir: Option<PathBuf>,
     gremlin_id: String,
     corr_id: CorrId,
-    completed: bool,
 }
 
 impl CmdBackend {
@@ -498,53 +222,7 @@ impl CmdBackend {
             stream_json,
             footer_re,
             pids: Mutex::new(HashMap::new()),
-            ctx: Mutex::new(HashMap::new()),
-            last_route: Mutex::new(None),
         })
-    }
-
-    /// Capture the retry before yielding: later backend use must not select
-    /// another invocation's prompt, session, label, or output route.
-    fn retry_context(&self, route: &CorrId) -> Result<CmdContext, ClientError> {
-        self.ctx
-            .lock()
-            .unwrap()
-            .get(route)
-            .cloned()
-            .ok_or_else(|| ClientError::Runtime {
-                message: format!("resume(): no context for invocation {route:?}"),
-            })
-    }
-
-    async fn resume_context(&self, mut ctx: CmdContext) -> Result<CompletedRun, ClientError> {
-        let prompt = ctx
-            .on_timeout_prompt
-            .clone()
-            .unwrap_or_else(|| ctx.prompt.clone());
-        let session_id = ctx.last_session_id.clone();
-        let run = self.attempt(&prompt, session_id.as_deref(), &mut ctx).await?;
-        if run.exit_code != 0 {
-            return Err(ClientError::Runtime {
-                message: format!(
-                    "{} (label={}) exited {}",
-                    self.command[0], ctx.label, run.exit_code
-                ),
-            });
-        }
-        self.complete_context(&ctx);
-        Ok(run)
-    }
-
-    fn complete_context(&self, context: &CmdContext) {
-        let latest = self.last_route.lock().unwrap();
-        let mut contexts = self.ctx.lock().unwrap();
-        if latest.as_ref() == Some(&context.corr_id) {
-            let mut context = context.clone();
-            context.completed = true;
-            contexts.insert(context.corr_id.clone(), context);
-        } else {
-            contexts.remove(&context.corr_id);
-        }
     }
 
     fn track_pid(&self, gremlin_id: &str, pid: u32) {
@@ -564,23 +242,12 @@ impl CmdBackend {
         }
     }
 
-    fn build_argv(
-        &self,
-        model: Option<&str>,
-        session_id: Option<&str>,
-        artifact_dir: Option<&PathBuf>,
-    ) -> Vec<String> {
+    fn build_argv(&self, model: Option<&str>, artifact_dir: Option<&PathBuf>) -> Vec<String> {
         let mut argv = self.command.clone();
         if let Some(m) = model {
             if !argv.iter().any(|a| a == "--model") {
                 argv.push("--model".into());
                 argv.push(m.into());
-            }
-        }
-        if let Some(sid) = session_id {
-            if !argv.iter().any(|a| a == "--resume") {
-                argv.push("--resume".into());
-                argv.push(sid.into());
             }
         }
         if let Some(dir) = artifact_dir {
@@ -651,16 +318,7 @@ impl CmdBackend {
         capture_events: bool,
         idle_timeout: f64,
         on_log: Option<&(dyn Fn(String) + Send + Sync)>,
-        on_session: &(dyn Fn(&str) + Send + Sync),
-    ) -> Result<
-        (
-            StreamState,
-            Option<Vec<serde_json::Value>>,
-            bool,
-            Option<String>,
-        ),
-        ClientError,
-    > {
+    ) -> Result<(StreamState, Option<Vec<serde_json::Value>>, bool), ClientError> {
         let stdout = child.stdout.take().ok_or_else(|| ClientError::Runtime {
             message: "no stdout".into(),
         })?;
@@ -672,7 +330,6 @@ impl CmdBackend {
             None
         };
         let mut timed_out = false;
-        let mut session_id: Option<String> = None;
         let mut raw = raw_path
             .map(|p| {
                 std::fs::OpenOptions::new()
@@ -723,17 +380,6 @@ impl CmdBackend {
             }
 
             if let Some(evt) = stream_json::decode_line(line_bytes) {
-                if evt.get("type").and_then(|v| v.as_str()) == Some("system")
-                    && evt.get("subtype").and_then(|v| v.as_str()) == Some("init")
-                {
-                    session_id = evt
-                        .get("session_id")
-                        .and_then(|v| v.as_str())
-                        .map(|s| s.to_string());
-                    if let Some(id) = &session_id {
-                        on_session(id);
-                    }
-                }
                 stream_json::extract_state(&evt, &mut state);
                 if let Some(ref mut evts) = events {
                     evts.push(evt.clone());
@@ -742,7 +388,7 @@ impl CmdBackend {
             }
         }
 
-        Ok((state, events, timed_out, session_id))
+        Ok((state, events, timed_out))
     }
 
     async fn read_plain(
@@ -816,7 +462,6 @@ impl CmdBackend {
     async fn attempt(
         &self,
         prompt: &str,
-        session_id: Option<&str>,
         ctx: &mut CmdContext,
     ) -> Result<CompletedRun, ClientError> {
         let gremlin_id = ctx.gremlin_id.clone();
@@ -844,7 +489,7 @@ impl CmdBackend {
             )
         };
 
-        let argv = self.build_argv(model.as_deref(), session_id, artifact_dir.as_ref());
+        let argv = self.build_argv(model.as_deref(), artifact_dir.as_ref());
         let mut child = self
             .spawn(&argv, prompt, cwd.as_ref(), extra_env.as_ref())
             .await?;
@@ -854,13 +499,6 @@ impl CmdBackend {
         }
 
         let result = if self.stream_json {
-            let session_route = corr_id.clone();
-            let on_session = |id: &str| {
-                if let Some(saved) = self.ctx.lock().unwrap().get_mut(&session_route) {
-                    // An established retry session must not be replaced by a failed retry.
-                    saved.last_session_id.get_or_insert_with(|| id.to_owned());
-                }
-            };
             let gid = gremlin_id.to_string();
             let on_log: &(dyn Fn(String) + Send + Sync) = &move |msg: String| {
                 emit_corr_event(
@@ -871,20 +509,15 @@ impl CmdBackend {
                     },
                 );
             };
-            let (state, events, timed_out, sid) = Self::read_stream_json(
+            let (state, events, timed_out) = Self::read_stream_json(
                 &mut child,
                 &prefix,
                 raw_path.as_ref(),
                 capture_events,
                 idle_timeout,
                 Some(on_log),
-                &on_session,
             )
             .await?;
-
-            if let Some(sid) = sid {
-                ctx.last_session_id = Some(sid);
-            }
 
             let status = child.wait().await.map_err(|e| ClientError::Runtime {
                 message: format!("wait error: {e}"),
@@ -988,33 +621,18 @@ impl Backend for CmdBackend {
             snapshot.stage_run_id(),
         );
         let mut context = CmdContext {
-            prompt: effective_prompt.clone(),
-            label: params.label.clone(),
             model: params.model.clone(),
             raw_path: params.raw_path.clone(),
             capture_events: params.capture_events,
-            on_timeout_prompt: params.on_timeout_prompt.clone(),
             cwd: params.cwd.clone(),
             idle_timeout,
             extra_env: params.extra_env.clone(),
             prefix: prefix.clone(),
-            last_session_id: None,
             artifact_dir: params.artifact_dir.clone(),
             gremlin_id: gremlin_id.clone(),
             corr_id: corr_id.clone(),
-            completed: false,
         };
-        {
-            let mut latest = self.last_route.lock().unwrap();
-            let mut contexts = self.ctx.lock().unwrap();
-            contexts.retain(|_, context| !context.completed);
-            contexts.insert(corr_id.clone(), context.clone());
-            *latest = Some(corr_id);
-        }
-        let result = self.attempt(&effective_prompt, None, &mut context).await;
-        if result.as_ref().is_ok_and(|run| run.exit_code == 0) {
-            self.complete_context(&context);
-        }
+        let result = self.attempt(&effective_prompt, &mut context).await;
 
         match result {
             Ok(r) => {
@@ -1032,34 +650,8 @@ impl Backend for CmdBackend {
         }
     }
 
-    fn last_run_params(&self) -> Result<RunParams, ClientError> {
-        // CmdBackend resumes saved command sessions rather than replaying params.
-        Err(ClientError::Runtime {
-            message: "CmdBackend does not expose last_run_params; use resume_for()".into(),
-        })
-    }
-
-    async fn resume(&self) -> Result<CompletedRun, ClientError> {
-        let route = self
-            .last_route
-            .lock()
-            .unwrap()
-            .clone()
-            .ok_or_else(|| ClientError::Runtime {
-                message: "resume() called before run()".into(),
-            })?;
-        self.resume_for(&route).await
-    }
-
-    async fn resume_for(&self, route: &CorrId) -> Result<CompletedRun, ClientError> {
-        let context = self.retry_context(route)?;
-        self.resume_context(context).await
-    }
-
-    fn release_invocation(&self, route: &CorrId) {
-        if let Ok(context) = self.retry_context(route) {
-            self.complete_context(&context);
-        }
+    fn accepts_commands(&self) -> bool {
+        false
     }
 
     fn reap_all(&self, gremlin_id: &str) {
@@ -1092,10 +684,6 @@ impl Backend for CmdBackend {
 
     fn name(&self) -> &'static str {
         "cmd"
-    }
-
-    fn accepts_interactive_commands(&self) -> bool {
-        false
     }
 
     fn build_model(&self, _spec: &str) -> Option<DynModel<Completion>> {

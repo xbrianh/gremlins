@@ -55,7 +55,26 @@ pub(crate) async fn bind(
             .unwrap_or("retired target field")
             .into());
     }
+    let fields = request
+        .as_object()
+        .ok_or("input request must be an object")?;
+    for key in fields.keys() {
+        if !matches!(
+            key.as_str(),
+            "op" | "session_id" | "req_id" | "target" | "id" | "stage" | "stage_run_id" | "nonce"
+        ) && !(key == "text" && request["op"] == "chat")
+        {
+            return Err(format!("unsupported input field '{key}'"));
+        }
+    }
     let target = descriptor(request)?;
+    if request.get("target").is_some() {
+        for key in target.as_object().expect("validated descriptor").keys() {
+            if !matches!(key.as_str(), "id" | "stage" | "stage_run_id" | "nonce") {
+                return Err(format!("unsupported input target field '{key}'"));
+            }
+        }
+    }
     let nonce = target
         .get("nonce")
         .map(|value| {
@@ -336,6 +355,29 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn inline_text_is_only_allowed_on_chat_envelopes() {
+        let registry = registry();
+        for op in ["input", "chat"] {
+            let error = bind(
+                &json!({"op":op, "id":"run", "stage_run_id":"nonce", "text":"correction"}),
+                &registry,
+                None,
+            )
+            .await
+            .err()
+            .unwrap();
+            assert!(
+                error.contains(if op == "input" {
+                    "unsupported input field 'text'"
+                } else {
+                    "not live"
+                }),
+                "{error}"
+            );
+        }
+    }
+
+    #[tokio::test]
     async fn bind_rejections_echo_request_id_and_require_it() {
         let registry = registry();
         for req_id in [
@@ -364,7 +406,7 @@ mod tests {
                 "req_id"
             }));
         }
-        // The shared lookup also serves legacy chat, whose req_id is optional.
+        // Internal lookup does not require a wire request identifier.
         assert!(bind(
             &json!({"id":"run", "stage_run_id":"nonce"}),
             &registry,
@@ -695,13 +737,13 @@ mod tests {
         let (_, writer) = server.into_split();
         let writer = SharedWriter::new(writer);
         let mut client = BufReader::new(client);
-        for descriptor in [nested, {
+        for (descriptor, expected_error) in [(nested, "flat descriptor"), {
             let mut stale = target.clone();
             stale["nonce"] = json!(41);
-            stale
+            (stale, "stale")
         }] {
             super::super::chat::handle_chat(
-                &json!({"text":"fix", "target":descriptor}),
+                &json!({"op":"chat", "text":"fix", "target":descriptor}),
                 &writer,
                 &registry,
                 &session,
@@ -712,10 +754,17 @@ mod tests {
                 .unwrap()
                 .unwrap();
             assert_eq!(response["type"], "error");
+            assert!(
+                response["message"]
+                    .as_str()
+                    .unwrap()
+                    .contains(expected_error),
+                "{response}"
+            );
             assert!(receiver.try_recv().is_err());
         }
         super::super::chat::handle_chat(
-            &json!({"text":"fix", "target":target}),
+            &json!({"op":"chat", "text":"fix", "target":target}),
             &writer,
             &registry,
             &session,

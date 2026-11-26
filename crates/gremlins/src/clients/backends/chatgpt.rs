@@ -121,7 +121,7 @@ impl Backend for ChatGptBackend {
         interactive: InteractiveSession,
     ) -> Result<CompletedRun, ClientError> {
         let native = &self.state.native;
-        let ctx = native.prepare_context(params.clone());
+        let ctx = crate::clients::agent::agent_loop::RunContext::from_params(params.clone());
         let cancel = params.cancel_token.unwrap_or_else(CancelToken::new);
         let model_name = native.effective_model(ctx.params.model.as_deref());
         native

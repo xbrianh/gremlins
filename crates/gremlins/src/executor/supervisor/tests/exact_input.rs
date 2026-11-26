@@ -209,8 +209,9 @@ fn incorporate(command: InputCommand, req: &str) {
 #[tokio::test]
 async fn sibling_exact_lookup_routes_independently_of_snapshot_and_receipts() {
     let mut f = Fixture::new(false).await;
-    let mut snapshot = f._gremlin.next_interactive_session();
-    assert!(!snapshot.accept_pause());
+    let snapshot = f._gremlin.next_interactive_session();
+    let before = snapshot.snapshot();
+    assert!(!snapshot.inbox_paused());
     let (mut a, _ra) = f.inbox("left", "left-1");
     let (mut b, _rb) = f.inbox("right", "right-1");
     let session = Session::new(&f.registry).await;
@@ -247,8 +248,11 @@ async fn sibling_exact_lookup_routes_independently_of_snapshot_and_receipts() {
     }
     assert!(!a.pending());
     assert!(!b.pending());
-    assert!(!snapshot.accept_pause());
-    assert!(!snapshot.is_attached());
+    assert!(!snapshot.inbox_paused());
+    assert!(!snapshot.input_pending());
+    assert!(!snapshot.execution_ended());
+    assert_eq!(snapshot.snapshot().nonce(), before.nonce());
+    assert_eq!(snapshot.snapshot().stage_run_id(), before.stage_run_id());
     left.detach().await;
     right.send(json!({"cmd":"detach"})).await;
     session.close().await;
@@ -339,9 +343,9 @@ async fn chat_requires_trusted_owning_session_not_request_session_id() {
 }
 
 #[tokio::test]
-async fn global_and_session_contention_cannot_be_bypassed_by_legacy_or_chat() {
+async fn no_watch_global_and_session_contention_cannot_be_bypassed_by_chat() {
     let mut f = Fixture::new(false).await;
-    let mut execution = f._gremlin.next_interactive_session();
+    let execution = f._gremlin.next_interactive_session();
     let (interactive, _, _) = f.registry.get_run_interactive("exact-wire").await.unwrap();
     let target = interactive.target();
     let execution_id = target.stage_run_id().unwrap();
@@ -367,11 +371,6 @@ async fn global_and_session_contention_cannot_be_bypassed_by_legacy_or_chat() {
         assert_eq!(busy["type"], "error", "{busy}");
         assert_eq!(busy["message"], "controller_busy", "{busy}");
         assert_eq!(busy["req_id"], "bind", "{busy}");
-        let mut legacy = Peer::global(&f.registry, json!({"op":"attach","id":"exact-wire","nonce":target.nonce(),"scope":"conversation","stage_run_id":execution_id,"mode":"control","req_id":"legacy"})).await;
-        let busy = legacy.frame().await;
-        assert_eq!(busy["type"], "error", "{busy}");
-        assert_eq!(busy["message"], "controller_busy", "{busy}");
-        assert_eq!(busy["req_id"], "legacy", "{busy}");
         socket::write_json_line(session._main.get_mut(), &json!({"op":"chat","session_id":session.id,"text":"bypass","req_id":"chat","target":{"id":"exact-wire","nonce":target.nonce(),"stage":"build","stage_run_id":execution_id}})).await.unwrap();
         // Read the main response without consuming any execution events.
         let response = timeout(LIMIT, socket::read_json_line(&mut session._main))
@@ -383,23 +382,33 @@ async fn global_and_session_contention_cannot_be_bypassed_by_legacy_or_chat() {
         assert_eq!(response["message"], "controller_busy", "{response}");
         assert_eq!(response["req_id"], "chat", "{response}");
         assert!(!inbox.pending());
-        assert!(!execution.accept_pause());
-        assert!(!execution.is_attached());
-        assert!(
-            !matches!(
-                timeout(Duration::from_millis(30), execution.next_command()).await,
-                Ok(Some(_))
-            ),
-            "contention synthesized a debugger command"
-        );
-        owner.send(json!({"cmd":"detach"})).await;
+        assert!(!execution.inbox_paused());
+        assert!(!execution.input_pending());
+        assert!(!execution.execution_ended());
+        assert_eq!(execution.snapshot().nonce(), target.nonce());
+        assert_eq!(execution.snapshot().stage_run_id(), Some(execution_id));
+        if global_owner {
+            owner.send(json!({"cmd":"detach"})).await;
+        } else {
+            use tokio::io::AsyncWriteExt;
+            owner.io.get_mut().shutdown().await.unwrap();
+        }
         // An EOF frame is a deterministic barrier for claim release on aux too.
         assert!(timeout(LIMIT, socket::read_json_line(&mut owner.io))
             .await
             .unwrap()
             .unwrap()
             .is_none());
+        assert!(!inbox.pending());
+        assert!(!execution.inbox_paused());
+        assert!(!execution.input_pending());
+        assert!(!execution.execution_ended());
+        assert_eq!(execution.snapshot().nonce(), target.nonce());
     }
+    let mut reacquired = Peer::global(&f.registry, request("build", execution_id)).await;
+    bound(&mut reacquired, "build", execution_id).await;
+    assert!(!inbox.pending());
+    reacquired.detach().await;
     session.close().await;
     f.stop().await;
 }
@@ -476,23 +485,44 @@ async fn racing_global_and_session_binds_have_one_winner_and_no_automatic_handof
 }
 
 #[tokio::test]
-async fn two_watchers_keep_output_while_exact_controllers_hold_sibling_executions() {
+async fn parent_and_review_watches_survive_writer_contention_and_reacquisition() {
     use gremlins_magic_bus::{emit_corr_event, CorrId, EventKind};
 
-    let f = Fixture::new(false).await;
-    let (mut a, _ra) = f.inbox("left", "watch-a");
-    let (mut b, _rb) = f.inbox("right", "watch-b");
+    let mut f = Fixture::new(false).await;
+    let mut execution = f._gremlin.next_interactive_session();
+    execution.bind_input(&f.inputs, identity("review", "watch-a"), true, None);
+    let before = execution.snapshot();
+    let (mut b, _rb) = f.inbox("build", "watch-b");
     let session = Session::new(&f.registry).await;
-    let watch = json!({"op":"watch","id":"exact-wire","stage_run_id":"watch-a"});
+    let watch = json!({"op":"watch","id":"exact-wire","stage":"review","stage_run_id":"watch-a"});
     let mut first = Peer::global(&f.registry, watch.clone()).await;
     let mut second = session.open(watch).await;
     assert_eq!(first.frame().await["type"], "watched");
     assert_eq!(second.frame().await["type"], "watched");
-    let mut left = Peer::global(&f.registry, request("left", "watch-a")).await;
-    let mut right = session.open(request("right", "watch-b")).await;
-    bound(&mut left, "left", "watch-a").await;
-    bound(&mut right, "right", "watch-b").await;
-    for text in ["controllers held", "sibling delivered"] {
+    let mut parent = Peer::global(&f.registry, json!({"op":"watch","id":"exact-wire"})).await;
+    assert_eq!(parent.frame().await["type"], "watched");
+    assert!(!execution.inbox_paused());
+    assert!(!execution.input_pending());
+    let mut left = Peer::global(&f.registry, request("review", "watch-a")).await;
+    let mut right = session.open(request("build", "watch-b")).await;
+    bound(&mut left, "review", "watch-a").await;
+    bound(&mut right, "build", "watch-b").await;
+    let mut contender = session.open(request("review", "watch-a")).await;
+    let busy = contender.frame().await;
+    assert_eq!(busy["type"], "error", "{busy}");
+    assert_eq!(busy["message"], "controller_busy", "{busy}");
+    assert_eq!(busy["req_id"], "bind", "{busy}");
+    assert!(timeout(LIMIT, socket::read_json_line(&mut contender.io))
+        .await
+        .unwrap()
+        .unwrap()
+        .is_none());
+    for text in ["competitor rejected", "competitor reacquired"] {
+        if text == "competitor reacquired" {
+            left.detach().await;
+            left = session.open(request("review", "watch-a")).await;
+            bound(&mut left, "review", "watch-a").await;
+        }
         left.send(json!({"cmd":"message","text":"revision","req_id":text}))
             .await;
         right
@@ -500,14 +530,21 @@ async fn two_watchers_keep_output_while_exact_controllers_hold_sibling_execution
             .await;
         left.expect("queued", text).await;
         right.expect("queued", text).await;
-        let held = receive(&mut a).await;
+        let held = timeout(LIMIT, execution.next_input())
+            .await
+            .unwrap()
+            .unwrap();
         incorporate(receive(&mut b).await, text);
         right.expect("delivered", text).await;
         left.quiet().await;
-        for (execution, output) in [("watch-b", "sibling only"), ("watch-a", text)] {
+        for (stage, execution, output) in [
+            ("build", "watch-b", "sibling only"),
+            ("review", "watch-a", text),
+        ] {
             emit_corr_event(
                 &CorrId::new()
                     .with_run("exact-wire")
+                    .with_stage(stage)
                     .with_stage_run_id(execution),
                 EventKind::StreamChunk {
                     text: output.into(),
@@ -519,12 +556,54 @@ async fn two_watchers_keep_output_while_exact_controllers_hold_sibling_execution
             assert_eq!(frame["text"], text, "{frame}");
             assert_eq!(frame["stage_run_id"], "watch-a");
         }
+        for (stage, invocation, output) in [
+            ("build", "watch-b", "sibling only"),
+            ("review", "watch-a", text),
+        ] {
+            let frame = loop {
+                let frame = parent.frame().await;
+                if frame["type"] == "stream_chunk" {
+                    break frame;
+                }
+            };
+            assert_eq!(frame["stage"], stage, "{frame}");
+            assert_eq!(frame["stage_run_id"], invocation, "{frame}");
+            assert_eq!(frame["text"], output, "{frame}");
+        }
         incorporate(held, text);
         left.expect("delivered", text).await;
     }
-    assert!(!a.pending());
+    assert!(!execution.input_pending());
     assert!(!b.pending());
-    left.detach().await;
+    first.quiet().await;
+    second.quiet().await;
+    parent.quiet().await;
+    assert!(!execution.inbox_paused());
+    assert!(!execution.input_pending());
+    assert!(!execution.execution_ended());
+    assert_eq!(execution.snapshot().nonce(), before.nonce());
+    assert_eq!(execution.snapshot().stage_run_id(), before.stage_run_id());
+    tokio::io::AsyncWriteExt::shutdown(first.io.get_mut())
+        .await
+        .unwrap();
+    timeout(LIMIT, &mut first.task).await.unwrap().unwrap();
+    assert!(!execution.inbox_paused());
+    assert!(!execution.input_pending());
+    assert!(!execution.execution_ended());
+    assert_eq!(execution.snapshot().nonce(), before.nonce());
+    assert_eq!(execution.snapshot().stage_run_id(), before.stage_run_id());
+    left.send(json!({"cmd":"message","text":"revision","req_id":"viewer disconnected"}))
+        .await;
+    left.expect("queued", "viewer disconnected").await;
+    incorporate(
+        timeout(LIMIT, execution.next_input())
+            .await
+            .unwrap()
+            .unwrap(),
+        "viewer disconnected",
+    );
+    left.expect("delivered", "viewer disconnected").await;
+    left.send(json!({"cmd":"detach"})).await;
     right.send(json!({"cmd":"detach"})).await;
     session.close().await;
     f.stop().await;
@@ -682,7 +761,7 @@ async fn rejection_matrix_is_reasoned_correlated_and_never_enqueues_on_either_ro
             assert!(!inbox.pending());
         }
         drop(preparing);
-        let mut unsupported = f
+        let unsupported = f
             ._gremlin
             .next_interactive_session_with_commands(false)
             .unwrap();
@@ -705,8 +784,10 @@ async fn rejection_matrix_is_reasoned_correlated_and_never_enqueues_on_either_ro
             "{error}"
         );
         assert!(!inbox.pending());
-        assert!(!unsupported.accept_pause());
-        assert!(!unsupported.is_attached());
+        assert!(!unsupported.accepts_commands());
+        assert!(!unsupported.inbox_paused());
+        assert!(!unsupported.input_pending());
+        assert!(!unsupported.execution_ended());
         session.close().await;
         f.stop().await;
     }
@@ -808,7 +889,9 @@ async fn idle_controller_does_not_block_own_or_sibling_progress_and_closes_befor
 
 #[tokio::test]
 async fn eof_releases_control_without_synthesizing_commands() {
-    let f = Fixture::new(false).await;
+    let mut f = Fixture::new(false).await;
+    let execution = f._gremlin.next_interactive_session();
+    let before = execution.snapshot();
     let (mut inbox, _r) = f.inbox("build", "disconnect");
     let mut peer = Peer::global(&f.registry, request("build", "disconnect")).await;
     bound(&mut peer, "build", "disconnect").await;
@@ -843,5 +926,10 @@ async fn eof_releases_control_without_synthesizing_commands() {
     replacement.expect("delivered", "resume").await;
     assert!(!inbox.pending());
     replacement.detach().await;
+    assert!(!execution.inbox_paused());
+    assert!(!execution.input_pending());
+    assert!(!execution.execution_ended());
+    assert_eq!(execution.snapshot().nonce(), before.nonce());
+    assert_eq!(execution.snapshot().stage_run_id(), before.stage_run_id());
     f.stop().await;
 }

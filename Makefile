@@ -9,7 +9,7 @@ RUSTC_WRAPPER =
 CARGO_TARGET_DIR = $(shell pwd)/target
 CARGO_HOME = $(shell pwd)/.cargo-home
 
-.PHONY: test test-cli check fmt fmt-check clippy build release autoformat test-overlay-tools
+.PHONY: test test-cli test-bus check fmt fmt-check clippy build release autoformat test-overlay-tools
 
 # --- Test ---
 
@@ -18,6 +18,9 @@ test:
 
 test-cli:
 	cargo test -q -p gremlins-cli
+
+test-bus:
+	cargo test -q -p gremlins-magic-bus
 
 # --- Check ---
 

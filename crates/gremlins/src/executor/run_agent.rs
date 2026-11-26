@@ -216,7 +216,7 @@ pub(crate) async fn run_agent(
             return Err(stage_failed(&agent.name, error));
         }
     };
-    let accepts_commands = backend.accepts_interactive_commands();
+    let accepts_commands = backend.accepts_commands();
     // Input and output share the actual invocation identity.
     let session =
         gremlin.next_pipeline_interactive_session(&invocation.stage_run_id, accepts_commands);
@@ -556,13 +556,8 @@ pub(crate) async fn run_agent(
         params.model.as_deref().unwrap_or("default")
     );
 
-    // Keep attachment outcomes behind the same persistence boundary as bus
-    // completion. An existing chat supervisor retains terminal ownership.
-    let debug_terminal = interactive.supervise_if_needed();
     let result = async {
         let run_result = client.run(params, interactive).await;
-        // Pipeline retries redispatch a fresh invocation via run_stage, not legacy resume().
-        client.release_invocation(&corr_id);
         let accounting_result = if let Some(collector) = &accounting {
             collector.flush().await
         } else {
@@ -764,12 +759,6 @@ pub(crate) async fn run_agent(
         Ok(())
     }
     .await;
-    if let Some(terminal) = debug_terminal {
-        match &result {
-            Ok(()) => terminal.end("agent completed"),
-            Err(error) => terminal.end(&error.to_string()),
-        }
-    }
     result
 }
 
@@ -2020,9 +2009,6 @@ mod tests {
         }
         fn name(&self) -> &'static str {
             "cmd"
-        }
-        fn accepts_interactive_commands(&self) -> bool {
-            false
         }
     }
 

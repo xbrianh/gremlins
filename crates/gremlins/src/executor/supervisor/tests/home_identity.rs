@@ -186,7 +186,7 @@ async fn home_frame(reader: &mut tokio::io::BufReader<tokio::net::UnixStream>) -
 }
 
 #[tokio::test]
-async fn announced_home_execution_resolves_input_and_shares_legacy_controller_claim() {
+async fn announced_home_execution_resolves_input_and_shares_exact_controller_claim() {
     use crate::executor::supervisor::test_provider::pending_request;
     use gremlins_magic_bus::{connection::BusSubGuard, subscribe_run, EventKind, Recv};
     use serde_json::json;
@@ -266,8 +266,8 @@ async fn announced_home_execution_resolves_input_and_shares_legacy_controller_cl
     assert_eq!(canonical, identity);
     assert!(!canonical_sender.is_closed());
     assert!(!sender.is_closed());
-    // Legacy attachment uses the debugger descriptor, which may alias the
-    // actual stage identity. Both must contend for the same controller claim.
+    // The observation descriptor may alias the invocation identity.
+    // Both exact selectors must contend for the same controller claim.
     let target = interactive.target();
     let legacy_stage_run_id = target.stage_run_id().expect("live debugger target");
     let (legacy_identity, _) = interactive
@@ -295,18 +295,18 @@ async fn announced_home_execution_resolves_input_and_shares_legacy_controller_cl
     assert_eq!(bound["stage_run_id"], identity.stage_run_id);
     assert_eq!(bound["stage"], identity.stage_name);
 
-    let mut legacy = BufReader::new(UnixStream::connect(&path).await.unwrap());
+    let mut contender = BufReader::new(UnixStream::connect(&path).await.unwrap());
     socket::write_json_line(
-        legacy.get_mut(),
-        &json!({"op":"attach", "session_id":created["session_id"],
-            "scope":"conversation", "mode":"control", "id":run_id,
-            "stage_run_id":legacy_stage_run_id, "nonce":nonce, "req_id":"legacy"}),
+        contender.get_mut(),
+        &json!({"op":"input", "session_id":created["session_id"],
+            "id":run_id, "stage":identity.stage_name,
+            "stage_run_id":legacy_stage_run_id, "req_id":"contender"}),
     )
     .await
     .unwrap();
-    let busy = home_frame(&mut legacy).await;
+    let busy = home_frame(&mut contender).await;
     assert_eq!(busy["type"], "error", "{busy}");
-    assert_eq!(busy["req_id"], "legacy");
+    assert_eq!(busy["req_id"], "contender");
     assert!(busy.to_string().contains("controller_busy"), "{busy}");
 
     socket::write_json_line(exact.get_mut(), &json!({"cmd":"detach"}))

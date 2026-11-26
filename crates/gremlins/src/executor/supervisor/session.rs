@@ -405,15 +405,15 @@ async fn handle_session_aux_owned(
         "log" => {
             handle_log(&request, &registry, reader, &writer).await;
         }
-        "attach" | "watch" => {
-            super::attachment::handle_attach_owned(
-                &request,
-                &registry,
-                owner.as_ref(),
-                reader,
-                &writer,
-            )
-            .await;
+        "attach" => {
+            let _ = writer
+                .write_json_line(&error_response(
+                    "attach is retired; use watch or exact execution input",
+                ))
+                .await;
+        }
+        "watch" => {
+            super::attachment::handle_watch(&request, &registry, reader, &writer).await;
         }
         "input" => {
             super::input::handle_input(&request, &registry, owner.as_ref(), reader, &writer).await;

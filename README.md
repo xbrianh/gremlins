@@ -140,8 +140,9 @@ invocation in the same chat, without pause-on-entry. Interactive agent stages
 accept input; exec stages are read-only. The TUI `/debug` selector is separate
 from the exact-ID, input-only CLI debug command below.
 
-Ordinary text in the selected chat corrects the **same execution** and resumes
-it; it does not launch a replacement or a separate chat turn. Explicit run
+Ordinary text in the selected chat corrects the **same execution** through exact
+input; it does not implicitly resume, launch a replacement, or start a separate
+chat turn. Explicit run
 controls remain `/stop <id>` and `/resume <id>` (or `s`/`r` in watch).
 `/attach home` returns home; `Ctrl+T` switches between home and the last stage,
 preserving drafts. Leaving a stage detaches, not cancels. The home conversation
@@ -181,8 +182,9 @@ For input, choose a `stage_boundary` with `active: true` and
 a later boundary with `active: false`). Copy that frame's exact `run_id` as
 `SOURCE` and `stage_run_id` as `INVOCATION`; do not substitute the requested
 parent run, a stage name, a run prefix, or an inferred current stage.
-Stage type is only a hint, not a guarantee of writable backend support or
-continued liveness.
+`stage_type` is descriptive metadata, not a writable capability, input
+authorization, or guarantee of backend support or continued liveness. There is no
+writable display flag: only an exact live input bind can establish input support.
 
 ```sh
 printf '%s\n' 'message' | gremlins debug SOURCE INVOCATION
@@ -211,6 +213,19 @@ The debug input commands are:
 On local close, debug waits for the final receipt for submitted input. A
 `queued` receipt means accepted into the queue, not delivered to the agent.
 These commands belong to CLI debug stdin, not agent tools or TUI slash commands.
+
+Input binding takes the supervisor's exclusive controller claim for that exact
+invocation. Competing input or targeted chat receives `controller_busy`; watchers
+never contend. Closing input releases only that claim, without resuming or
+cancelling the execution. A paused invocation stays paused. Targeted chat shares
+the same inbox and short-lived claim; untargeted session chat is a new prompt only
+while idle, and is rejected while a turn is in progress.
+
+The old daemon wire `attach` operation is rejected on both global and verified
+session auxiliary sockets. The TUI `/attach` command above only selects a view;
+it does not restore legacy debugger attachment. See the
+[protocol reference](docs/attachment-protocol.md) and
+[code-size/ownership audit](docs/plan11-code-audit.md).
 
 ## CLI subcommands
 

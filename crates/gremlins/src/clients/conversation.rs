@@ -175,10 +175,6 @@ pub(crate) trait Conversation: Send + Sync {
     /// the stream. With no text or replayable reasoning the prompt stays pending.
     fn record_interrupted_response(&mut self, text: String, reasoning: &[Reasoning]);
 
-    /// Drop the most recent assistant turn from history so the turn can be
-    /// re-executed cleanly.
-    fn pop_last_assistant_turn(&mut self);
-
     /// Build the outgoing request for the current turn.
     ///
     /// Returns an error when the assembled messages exceed the configured
@@ -383,7 +379,7 @@ impl std::fmt::Debug for dyn Conversation {
 /// Tracks flat message history so that agent-loop and tool-registry tests can
 /// run without depending on `crate::conversation`
 /// (which lives in a different package boundary). `record_turn`,
-/// `done_rejected`, `pop_last_assistant_turn`, and `fork` all mirror
+/// `done_rejected`, and `fork` all mirror
 /// `StandardConversation` — including the prompt-commit invariant — so the
 /// "no consecutive user messages" guard tests exercise the shipped semantics.
 #[cfg(test)]
@@ -470,21 +466,6 @@ impl Conversation for ConversationStub {
             reasoning,
             self.preserve_reasoning,
         );
-    }
-
-    fn pop_last_assistant_turn(&mut self) {
-        // Pop the assistant message.
-        if matches!(
-            self.history.last(),
-            Some(rig_core::completion::Message::Assistant(_))
-        ) {
-            self.history.pop();
-        }
-        // Pop the preceding user prompt and restore it as next_prompt.
-        if let Some(rig_core::completion::Message::User { .. }) = self.history.last() {
-            let prompt = self.history.pop().unwrap();
-            self.next_prompt = PendingPrompt::new(prompt);
-        }
     }
 
     async fn render_turn(

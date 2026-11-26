@@ -1,28 +1,21 @@
-# Fix Summary
+# Plan11 documentation reconciliation
 
-## Compile fixes
+Legacy attachment compile-fix notes and line-number references are obsolete.
+The inspected worktree uses:
 
-1. **`crates/gremlins/src/executor/supervisor/attachment.rs`, line 44** — Missing import
-   Added `use tokio::sync::watch;`. The `acquire_lease` and `dispatch_attach_command` functions reference `watch::Receiver<RunState>` but the import was absent, causing `cannot find module or crate 'watch'`.
+- Bus `watch` for display/lifecycle and descriptive stage type, with no writable
+  capability or input ownership.
+- Exact invocation input for message/pause/step/resume/bail, backed by the shared
+  execution inbox and final receipts.
+- Supervisor-exclusive controller claims; release never resumes or cancels.
+- Targeted chat through the same input bind/inbox; untargeted chat only for an
+  idle session's next prompt.
+- Rejection of old wire `attach` on global and verified session auxiliary sockets.
+  TUI `/attach` remains a selection command only.
 
-2. **`crates/gremlins/src/executor/supervisor/attachment.rs`, line 283** — Immutable binding
-   Changed `let Some((handle, store, run_state))` to `let Some((handle, store, mut run_state))`. The binding is passed as `&mut run_state` to `dispatch_attach_command`, which borrows it mutably to call `wait_for`.
-
-3. **`crates/gremlins/src/executor/supervisor/attachment.rs`, line 529** — Immutable binding
-   Changed `let delivery_task` to `let mut delivery_task`. The `JoinHandle` is polled via `&mut delivery_task` in the `tokio::select!` that awaits delivery confirmation.
-
-4. **`crates/gremlins/src/clients/interactive.rs`, line 134** — Missing `Debug` impl
-   Added a manual `impl std::fmt::Debug for PauseSlot`. `AtomicU64` (the `acquisition` field) does not implement `Debug`, so `#[derive(Debug)]` on `InteractiveSessionFactory` (which holds `Arc<PauseSlot>`) failed. The new impl composes only the debuggable fields (`state`, `nonce`, `stage_run_id`) and calls `finish_non_exhaustive()`.
-
-## Correctness fixes
-
-5. **`crates/gremlins/src/executor/supervisor/chat/mod.rs`, line 253** — Silent ready-failure path
-   The `if (&mut attachment.ready).await.is_err()` branch returned without writing any frame, leaving the targeted correction request unanswered. Added a `correction_dropped` JSON frame (with stage_run_id when available) before the `return`.
-
-6. **`crates/gremlins/src/executor/supervisor/chat/mod.rs`, line 211** — Missing stage_run_id validation
-   The targeted correction path validated only `nonce`, not the client-supplied stage_run_id. Added parsing of `target.stage_run_id` from the request and a mismatch check against `debug_target.stage_run_id()` before attaching. When the client supplies a stage_run_id that doesn't match the current target's, the handler responds with `"stage_run_id mismatch: target has been replaced"`.
-
-## Readability fix
-
-7. **`crates/gremlins/src/executor/supervisor/attachment.rs`, line 24** — Misleading doc comment
-   The `detach` row in the module header table said "Close this attachment, keep observing" but the impl emits `detached` and breaks the loop (closing the connection). Fixed to "Release the lease, close this attachment."
+See [the protocol](../../docs/attachment-protocol.md) for current behavior and
+[the audit](../../docs/plan11-code-audit.md) for separate production/test deltas
+against `45a8bd545`, including inline test modules and remaining duplicate owners.
+The audit distinguishes committed HEAD from uncommitted removal work. No Rust
+edits, Rust test execution, or operational rollout verification are claimed by
+this documentation update.

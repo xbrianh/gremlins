@@ -1,6 +1,6 @@
 use super::*;
 use crate::clients::execution_input::{Delivery, InputRejected, INPUT_CAPACITY};
-use tokio::sync::mpsc::error::TryRecvError;
+use tokio::sync::{mpsc::error::TryRecvError, oneshot};
 
 fn identity(stage: &str, stage_run: &str) -> ExecutionIdentity {
     ExecutionIdentity {
@@ -48,8 +48,8 @@ fn overlapping_factories_route_by_identity_without_debugger_or_event_consumption
         assert!(handle.input_sender(&c).is_none());
     }
 
-    // Deliberately use the other factory's handle: identity, not the latest
-    // published debugger target, selects the inbox. No event stream is polled.
+    // The other factory's handle still resolves by exact identity.
+    // No event stream is polled.
     let mut receipt_a = handle_b
         .input_sender(&a)
         .unwrap()
@@ -90,8 +90,6 @@ fn overlapping_factories_route_by_identity_without_debugger_or_event_consumption
         session_b.try_recv_input(),
         Err(TryRecvError::Empty)
     ));
-    assert!(!session_a.is_attached());
-    assert!(!session_b.is_attached());
 }
 
 #[test]
@@ -182,9 +180,7 @@ fn ended_execution_never_publishes_accepting_input() {
     handle.set_input_registry(registry.clone());
     let id = identity("A", "a-1");
     let mut session = factory.next_session_for_stage("a-1", true, None).unwrap();
-    session
-        .slot
-        .end_execution(session.nonce, &session.end_signal);
+    session.lifetime.end();
     session.bind_input(&registry, id.clone(), true, None);
     assert!(handle.input_sender(&id).is_none());
     assert!(matches!(
@@ -207,7 +203,7 @@ fn late_bind_after_factory_drop_never_publishes_accepting_input() {
         let mut session = factory.next_session_for_stage("a-1", true, None).unwrap();
         drop(factory);
 
-        assert!(session.end_signal.is_ended());
+        assert!(session.lifetime.end.is_ended());
         session.bind_input(&registry, id.clone(), true, None);
         assert!(handle.input_sender(&id).is_none());
         assert!(matches!(
@@ -346,6 +342,35 @@ async fn paused_next_input_ends(drop_factory: bool) {
         .await
         .expect("execution end remains latched");
     assert!(session.next_input().await.is_none());
+}
+
+#[tokio::test]
+async fn stream_wait_wakes_on_cancel_replacement_and_teardown() {
+    use std::time::Duration;
+
+    for ending in 0..3 {
+        let registry = InputRegistry::default();
+        let (mut factory, _) = InteractiveSessionFactory::for_pipeline();
+        let cancel = CancelToken::new();
+        let mut session = factory
+            .next_session_for_stage("a-1", true, Some(&cancel))
+            .unwrap();
+        session.bind_input(&registry, identity("A", "a-1"), true, Some(&cancel));
+        let wait = session.stream_interrupted();
+        tokio::pin!(wait);
+        assert!(futures::poll!(wait.as_mut()).is_pending());
+        match ending {
+            0 => cancel.cancel(),
+            1 => {
+                let _successor = factory.next_session_for_stage("a-2", true, None).unwrap();
+            }
+            _ => drop(factory),
+        }
+        assert!(!tokio::time::timeout(Duration::from_secs(1), wait)
+            .await
+            .expect("execution retirement must wake stream wait"));
+        assert!(session.execution_ended());
+    }
 }
 
 #[test]

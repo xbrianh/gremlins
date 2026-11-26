@@ -1857,7 +1857,6 @@ mod tests {
 
     use crate::executor::state::FileSystemStateStore;
     use crate::test_support::{EnvGuard, GitSandbox, Sandbox};
-    use futures::FutureExt;
 
     #[tokio::test]
     async fn aborting_prepared_chat_turn_ends_only_that_execution() {
@@ -1876,12 +1875,11 @@ mod tests {
         let stage_run_id = gremlin
             .prepare_interactive_session_with_commands(true)
             .unwrap();
-        let mut pending = handle.target().attach().unwrap();
+        let target = handle.target();
         assert_eq!(handle.target().stage_run_id(), Some(stage_run_id.as_str()));
 
         gremlin.discard_prepared_interactive_session();
-        assert!(handle.end_signal().unwrap().is_ended());
-        assert!((&mut pending.ready).now_or_never().unwrap().is_err());
+        assert!(target.end_signal().is_ended());
         assert_eq!(handle.target().stage_run_id(), Some(stage_run_id.as_str()));
     }
 

@@ -15,7 +15,6 @@ pub(crate) mod attachment;
 pub(crate) mod chat;
 pub(crate) mod chat_handle;
 pub(crate) mod chat_system_prompt;
-pub(crate) mod debug;
 pub(crate) mod input;
 pub(crate) mod lifecycle;
 pub(crate) mod log_handler;
@@ -253,12 +252,21 @@ async fn handle_connection(
             .to_string();
         log::debug!("supervisor: received op={op:?}");
 
+        if op == "attach" {
+            let _ = writer
+                .write_json_line(&error_response(
+                    "attach is retired; use watch or exact execution input",
+                ))
+                .await;
+            break None;
+        }
+
         if op == "log" {
             // The run-scoped log handler takes over after global forwarding stops.
             break Some((request, reader));
         }
 
-        if op == "attach" || op == "watch" || op == "input" {
+        if op == "watch" || op == "input" {
             // Stop the global event-forwarding task before handing
             // off to the scoped attachment handler.  If a prior
             // request already opened the event gate, unrelated
@@ -273,7 +281,7 @@ async fn handle_connection(
             if op == "input" {
                 input::handle_input(&request, &registry, None, reader, &writer).await;
             } else {
-                attachment::handle_attach(&request, &registry, reader, &writer).await;
+                attachment::handle_watch(&request, &registry, reader, &writer).await;
             }
             // The loop-scope teardown was already performed above;
             // return directly so we don't try to abort the already-

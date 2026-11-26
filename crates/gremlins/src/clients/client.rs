@@ -125,12 +125,6 @@ impl Client {
         backend.run(params, interactive).await
     }
 
-    pub(crate) fn release_invocation(&self, route: &gremlins_magic_bus::CorrId) {
-        if let Ok(backend) = self.get_or_build_backend() {
-            backend.release_invocation(route);
-        }
-    }
-
     /// Return the backend for this spec, looking it up in the module-level
     /// pool or constructing it on first use.
     ///

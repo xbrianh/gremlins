@@ -20,8 +20,8 @@ and re-exports. The `RunHandle`/`RunState` types live in `run_registry.rs`, and
 | `lifecycle.rs` | Child gremlin lifecycle: `setup_gremlin_channels`, `run_gremlin_task`, `spawn_log_writer`, `reap_client_for`, `terminate_and_reap`, and `LogRelay`. |
 | `run_registry.rs` | `RunHandle`/`RunState`/`LaunchResult` types plus the lock-protected `RunRegistry` owning the run map, connection counter, and chat-id sequence. |
 | `log_handler.rs` | Streaming log handler (`handle_log`) and `LogSource` enum. |
-| `attachment.rs` | Attachment handler (`handle_attach`): `run`-scope stage-boundary follow and `conversation`-scope observe/control. The only op that pins a pause and injects operator text. |
-| `debug.rs` | Shared attachment helpers: `check_agent_stage` (agent-leaf validation) and `send_debug_status` (progress frames). |
+| `attachment.rs` | Passive `handle_watch`: filtered run/stage/invocation bus display, lifecycle, and replay. No control ownership or pause-on-entry. |
+| `input.rs` | Exact execution input: resolve a live inbox, acquire a supervisor controller claim, and deliver commands/receipts independently of display. |
 | `session.rs` | Client session IO layer: `SessionOp` enum, `run_session_listener`/`run_session_dispatcher`, `handle_session_main`/`handle_session_op`/`handle_session_aux`, and `verify_session_id`. Uses `SessionTaskHandle` for session state and `RunRegistry` for run operations. |
 | `session_task.rs` | Per-session state owner: `SessionState`, `SessionTaskMsg`, `SessionTaskHandle`, `spawn_session_task`/`run_session_task`, and teardown. Owns parked chat gremlins, current turn, reserved home run id, listener and auxiliary tasks. |
 | `prompt_msg.rs` | `PromptMsg` shared by the session and chat turn loop. |
@@ -40,8 +40,8 @@ and re-exports. The `RunHandle`/`RunState` types live in `run_registry.rs`, and
 2. Each connection spawns `handle_connection`, which reads JSON-line
    requests, dispatches via `dispatch_op`, and writes JSON-line responses.
 3. Session-bearing connections (`handle_session_main`) additionally spawn
-   the session listener and dispatcher for sideline sockets (log, attach,
-   chat).
+   the session listener and dispatcher for sideline sockets (log, watch,
+   input).
 
 ### Run map
 
@@ -53,7 +53,7 @@ Each `RunHandle` carries:
 - The tokio task handle
 - A `watch::Sender<RunState>` for status broadcasts
 - A log flush handle for persisted-history handoff
-- An `InteractiveHandle` for attach/command injection
+- An `InteractiveHandle` for observation and exact execution inbox lookup
 - The gremlin's `StateStore`
 - A bus `Subscriber<EventKind>` for the lossless log writer
 
@@ -81,16 +81,18 @@ that terminal publication and cleanup.
 | `chat_model` | `handle_chat_model` | `ops/model.rs` |
 | `compact` | `handle_compact` | `ops/model.rs` |
 | `log` | `handle_log` | `log_handler.rs` |
-| `attach` | `handle_attach` | `attachment.rs` |
+| `watch` | `handle_watch` | `attachment.rs` (connection handoff) |
+| `input` | `handle_input` | `input.rs` (connection handoff) |
+| `attach` | Rejected as retired on global and session sockets | `mod.rs`, `session.rs` |
 | `chat` | `handle_chat` | `chat/mod.rs` |
 | `create_session` | `handle_create_session` | `ops/mod.rs` |
 | `session_stop` | `handle_session_stop` | `ops/control.rs` |
 
 ### Conservative run replay
 
-- Run-scope `attach` opts into history with `"replay": true`. Its `attached`
-  acknowledgment advertises `replay_checkpoint` alongside `observe` only when
-  replay is negotiated. Without that capability, do not assume a checkpoint.
+- Passive `watch` opts into history with `"replay": true`. Its `watched`
+  acknowledgment echoes the run and optional stage/invocation selectors;
+  replay sends a checkpoint before live delivery. No attachment capability is involved.
 - Replay atomically snapshots the bounded in-memory bus journal and registers
   live delivery. It sends `history_gap` when history is incomplete, retained
   display frames with their original `sequence`, then `replay_checkpoint`
@@ -123,13 +125,23 @@ that terminal publication and cleanup.
   the run themselves. Both paths publish terminal state and release log
   subscriptions.
 - **Session sockets are per-session.** Each TUI session gets a dedicated
-  Unix socket (`<session_id>.sock`) for sideline channels (log, attach,
-  chat). The session id uses a `sess-` prefix to never collide with gremlin
+  Unix socket (`<session_id>.sock`) for sideline channels (log, watch,
+  input). The session id uses a `sess-` prefix to never collide with gremlin
   ids.
 - **Chat gremlins are session-scoped.** A session owns its chat
   gremlins (in `session_task.rs::SessionState`); they are parked in
   `chat_gremlins` between turns. A turn
   removes its gremlin while running and re-inserts it when done.
+- **Display is not input authority.** Bus display/lifecycle frames carry identity
+  and descriptive `stage_type`, never a writable capability. Agent type does not
+  guarantee backend input support or continued liveness.
+- **Control is exclusive per exact execution.** `input::bind` resolves the live
+  inbox and claims canonical `(run_id, stage_run_id)` in `RunRegistry`; competing
+  global/session input and targeted chat receive `controller_busy`. The claim's
+  drop only releases ownership: disconnect never sends resume or other controls.
+- **Input commands are explicit.** A bound connection accepts only `message`,
+  `pause`, `step`, `resume`, and `bail`; it cannot retarget a successor execution.
+  Chat input requires the trusted owning session, not a request-supplied session id.
 - **The event bus is global.** `init_bus` creates a single `Bus<EventKind>`
   on first access. Subscribers filter by run id via `subscribe_run`.
 
@@ -142,6 +154,6 @@ that terminal publication and cleanup.
 | Change the event bus | `gremlins_magic_bus::concrete` (`init_bus`, `subscribe_run`, `emit_event`) |
 | Understand session lifecycle | `session.rs::run_session_listener` / `handle_session_main`; state in `session_task.rs::SessionState`, accessed through `SessionTaskHandle` |
 | Debug a chat turn | `chat/turn.rs::run_turn` + `chat_handle.rs::ChatGremlinHandle` / `prompt_msg.rs::PromptMsg` |
-| Understand the interactive attach flow | `attachment.rs::handle_conversation_attach` |
+| Understand passive watch / exact input | `attachment.rs::handle_watch`, `input.rs::bind` / `handle_input`, `run_registry.rs::ControllerClaim` |
 | Read gremlin state for a query | `state_view.rs::state_view_for_id` |
 | Change socket/lock protocol | `supervisor` delegates to `crate::executor::socket` |

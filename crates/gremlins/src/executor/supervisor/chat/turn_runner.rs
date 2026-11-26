@@ -113,10 +113,6 @@ impl TurnRunner {
         let (sub, mut rx) = subscribe_run(&self.id);
         let guard = BusSubGuard::new(sub);
         let turn_num = run_agent::chat_turn_from_stage_name(stage.name());
-        let debug_terminal = gremlin
-            .interactive_sessions
-            .as_mut()
-            .map(|sessions| sessions.supervise_next_turn());
         // Retain these outside the stage task: panic/abort drops its Gremlin.
         let accounting = Arc::clone(&gremlin.accounting);
         let store = gremlin.state.store_handle();
@@ -174,9 +170,6 @@ impl TurnRunner {
             super::super::lifecycle::record_run_error(&self.id, &store, &message);
             store.write_terminal_state(1);
             end = TurnEnd::Failed(message);
-        }
-        if let (Some(terminal), TurnEnd::Cancelled { reason, .. }) = (&debug_terminal, &end) {
-            terminal.end(reason);
         }
         let discard = match &end {
             TurnEnd::Complete => false,

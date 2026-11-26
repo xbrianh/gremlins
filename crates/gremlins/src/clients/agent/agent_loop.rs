@@ -14,9 +14,7 @@ use crate::clients::interactive::InteractiveSession;
 use gremlins_magic_bus::EventKind;
 
 use super::done_assess::DoneAssessment;
-use super::interactive::{
-    announce_live_disconnect, inbox_boundary, interactive_loop, InteractiveLoopResult,
-};
+use super::interactive::inbox_boundary;
 use crate::clients::cancel::{default_classify, is_retryable, CancelToken};
 use crate::clients::conversation::{Conversation, TurnScriptError};
 use crate::clients::error::ClientError;
@@ -69,20 +67,9 @@ pub(super) struct ToolJob {
     pub(super) over_cap: Option<String>,
 }
 
-/// Outcome of one concurrent tool batch dispatched by
-/// [`LoopState::dispatch_tool_jobs`].
-pub(super) enum ToolDispatchOutcome {
-    /// Every tool finished; outcomes are aligned with the job list order.
-    Completed(Vec<ToolOutcome>),
-    /// The operator entered debug mid-batch: the batch was abandoned, the
-    /// turn's history was unwound, and the caller should re-execute the turn.
-    ReexecuteTurn,
-}
-
 /// Mutable state threaded through one agent-loop run.
 pub(super) struct LoopState {
     pub(super) system_prompt: Option<String>,
-    pub(super) original_system_prompt: Option<String>,
     pub(super) conv: Box<dyn Conversation>,
     pub(super) turns: usize,
     pub(super) turn_num: usize,
@@ -99,7 +86,6 @@ pub(super) struct LoopState {
     pub(super) total_cached_tokens: Option<u64>,
     pub(super) total_cache_creation_tokens: Option<u64>,
     pub(super) total_reasoning_tokens: Option<u64>,
-    pending_run_one_turn: bool,
     pending_inbox_step: bool,
     pub(super) interactive: InteractiveSession,
     pub(super) remaining_turns: usize,
@@ -143,10 +129,8 @@ pub(super) enum StreamTurnOutcome {
     Break,
 }
 
-/// Decision from the interactive turn-boundary gate: either re-enter the
-/// interactive loop, or proceed to execute a normal turn.
+/// Authorization to execute a turn after the execution-input boundary.
 enum InteractiveBoundary {
-    ContinueLoop,
     RunTurn,
 }
 
@@ -181,8 +165,6 @@ impl LoopState {
         message_prefix: &str,
         corr_id: CorrId,
     ) -> Self {
-        let original_system_prompt = system_prompt.clone();
-
         let mut conv = prepopulated_conversation;
         // Always apply the stage prompt so chat continuations (built by
         // run.rs with an empty "" initial prompt) receive the stage
@@ -194,7 +176,6 @@ impl LoopState {
 
         Self {
             system_prompt,
-            original_system_prompt,
             conv,
             turns: 0,
             turn_num: 0,
@@ -211,7 +192,6 @@ impl LoopState {
             total_cached_tokens: None,
             total_cache_creation_tokens: None,
             total_reasoning_tokens: None,
-            pending_run_one_turn: false,
             pending_inbox_step: false,
             interactive,
             remaining_turns: max_turns,
@@ -411,15 +391,10 @@ impl LoopState {
         // Phase 1: collect + validate tool calls into owned jobs.
         let jobs = self.collect_tool_jobs(tool_calls, prefix, nested, raw, captured);
 
-        // Phase 2: concurrent execution (cancel/pause aware).
-        let outcomes = match self
+        // Phase 2: finish the batch before incorporating queued input.
+        let outcomes = self
             .dispatch_tool_jobs(&jobs, tool_ctx, prefix, cancel)
-            .await?
-        {
-            ToolDispatchOutcome::Completed(outcomes) => outcomes,
-            // Operator entered debug mid-batch; the turn is re-executed.
-            ToolDispatchOutcome::ReexecuteTurn => return Ok(()),
-        };
+            .await?;
 
         // Phase 3: emit results, extend history, roll the prompt forward.
         self.emit_tool_results(
@@ -488,8 +463,8 @@ impl LoopState {
 
     /// Execute a batch of tool jobs concurrently, capped by a semaphore so
     /// excess calls queue rather than being rejected (preserving result
-    /// order). A `tokio::select!` races the batch against cancel and the
-    /// operator pause token so a long batch stays interruptible.
+    /// order). Cancellation and execution retirement interrupt the batch.
+    /// Ordinary input waits for results: replaying a batch can repeat side effects.
     ///
     /// The fan-out cap is *not* re-checked here: it is a hard rejection
     /// applied in [`Self::collect_tool_jobs`] via each tool's
@@ -501,7 +476,7 @@ impl LoopState {
         tool_ctx: &AgentLoopRuntime,
         prefix: &str,
         cancel: &CancelToken,
-    ) -> Result<ToolDispatchOutcome, ClientError> {
+    ) -> Result<Vec<ToolOutcome>, ClientError> {
         let ctx = tool_ctx.clone();
         let sem = Arc::new(Semaphore::new(tools::MAX_CONCURRENT_TOOLS));
         // Borrow self.conv as &dyn Conversation so concurrent async blocks
@@ -534,28 +509,14 @@ impl LoopState {
                 self.hook_log(&format!("{prefix}exit: cancelled mid-tool"));
                 return Err(cancelled_error());
             }
-            paused = self.interactive.paused() => {
-                if !paused {
-                    self.hook_log(&format!("agent_loop: execution revoked mid-tool (label={})", prefix));
-                    self.hook_log(&format!("{prefix}exit: interactive execution revoked mid-tool"));
-                    return Err(cancelled_error());
-                }
-                // Operator triggered debug mid-tool — drop the join_all future
-                // (cancels pending tool futures). Completed tool side effects
-                // (files written, bash commands run) are not unwound.
-                self.hook_log(&format!("agent_loop: paused mid-tool (label={})", prefix));
-                self.hook_log(&format!("{prefix}pause: entering interactive mode (mid-tool)"));
-
-                // Pop the assistant turn so it can be re-executed
-                // cleanly without duplicate history entries.
-                self.conv.pop_last_assistant_turn();
-
-                self.pause_interrupted_turn(cancel, prefix).await?;
-                return Ok(ToolDispatchOutcome::ReexecuteTurn);
+            _ = self.interactive.wait_execution_end() => {
+                self.hook_log(&format!("agent_loop: execution revoked mid-tool (label={})", prefix));
+                self.hook_log(&format!("{prefix}exit: interactive execution revoked mid-tool"));
+                return Err(cancelled_error());
             }
         };
 
-        Ok(ToolDispatchOutcome::Completed(outcomes))
+        Ok(outcomes)
     }
 
     /// Emit tool results in request order, publish ToolResult events,
@@ -618,7 +579,7 @@ impl LoopState {
         Ok(())
     }
 
-    /// A step granted mid-stream or mid-tool runs once before stopping here again.
+    /// A step granted mid-stream runs once before stopping here again.
     async fn await_interactive_turn(
         &mut self,
         cancel: &CancelToken,
@@ -634,152 +595,43 @@ impl LoopState {
     async fn await_interactive_gates(
         &mut self,
         cancel: &CancelToken,
-        prefix: &str,
+        _prefix: &str,
     ) -> Result<InteractiveBoundary, ClientError> {
-        // Inbox pause is independent of debugger leases and must be checked
-        // before a legacy deferred turn can bypass the pause gate.
+        // Preserve a step granted while incorporating interrupted input.
         if self.interactive.input_pending() || self.interactive.inbox_paused() {
             let step = std::mem::take(&mut self.pending_inbox_step);
-            self.system_prompt = self.original_system_prompt.clone();
             self.pending_inbox_step = inbox_boundary(
                 cancel,
                 &mut *self.conv,
                 &mut self.interactive,
-                self.turn_num,
                 &self.message_prefix,
                 &self.corr_id,
                 step,
             )
             .await?;
-            // Input incorporation does not authorize the independent debugger gate.
         }
-        // A deferred step belongs to the debugger that granted it. Retire its
-        // inbox and prompt before looking for a successor at this boundary.
-        let retired = self.retire_revoked_debugger().await;
-        if !retired {
-            if self.interactive.deferred_debug_turns > 0 {
-                self.interactive.deferred_debug_turns -= 1;
-                self.pending_run_one_turn = false;
-                return Ok(InteractiveBoundary::RunTurn);
-            }
-            if std::mem::take(&mut self.pending_run_one_turn) {
-                return Ok(InteractiveBoundary::RunTurn);
-            }
-        }
-        // An inbox step authorizes only the inbox gate. Without a debugger
-        // the ordinary RunTurn path below consumes it; with one, retain it
-        // until that independent gate also authorizes a turn.
-        if !self.interactive.accepts_commands() {
-            return Ok(InteractiveBoundary::RunTurn);
-        }
-        if !self.interactive.is_attached() && !self.interactive.accept_pause() {
-            return Ok(InteractiveBoundary::RunTurn);
-        }
-        let boundary = match self.enter_interactive_mode(cancel, prefix).await? {
-            InteractiveLoopResult::Resumed | InteractiveLoopResult::InputPending => {
-                InteractiveBoundary::ContinueLoop
-            }
-            InteractiveLoopResult::RunOneTurn | InteractiveLoopResult::MessageDelivered => {
-                InteractiveBoundary::RunTurn
-            }
-        };
-        Ok(boundary)
+        Ok(InteractiveBoundary::RunTurn)
     }
 
-    /// Retire local debugger state before any path can accept its successor.
-    async fn retire_revoked_debugger(&mut self) -> bool {
-        if !self.interactive.detach_revoked_debugger() {
-            return false;
-        }
-        self.pending_run_one_turn = false;
-        self.system_prompt = self.original_system_prompt.clone();
-        announce_live_disconnect(&self.interactive, &self.message_prefix, &self.corr_id).await;
-        true
-    }
-
-    /// History has already been committed (mid-stream) or rolled back (mid-tool).
+    /// Partial stream history has already been committed.
     /// Only now acknowledge the pause and accept the next operator command.
     async fn pause_interrupted_turn(
         &mut self,
         cancel: &CancelToken,
-        prefix: &str,
+        _prefix: &str,
     ) -> Result<(), ClientError> {
         if self.interactive.input_pending() || self.interactive.inbox_paused() {
-            self.system_prompt = self.original_system_prompt.clone();
             self.pending_inbox_step = inbox_boundary(
                 cancel,
                 &mut *self.conv,
                 &mut self.interactive,
-                self.turn_num,
                 &self.message_prefix,
                 &self.corr_id,
                 std::mem::take(&mut self.pending_inbox_step),
             )
             .await?;
-            self.pending_run_one_turn = false;
-            return Ok(());
         }
-        if !self.interactive.accepts_commands() {
-            return Ok(());
-        }
-        // `paused` may wake to retire a withdrawn single-step owner rather
-        // than to report a newly accepted request. Restore its prompt and
-        // announce disconnect before accepting a successor's inbox.
-        if self.retire_revoked_debugger().await && !self.interactive.accept_pause() {
-            return Ok(());
-        }
-        self.pending_run_one_turn = matches!(
-            self.enter_interactive_mode(cancel, prefix).await?,
-            InteractiveLoopResult::RunOneTurn | InteractiveLoopResult::MessageDelivered
-        );
         Ok(())
-    }
-
-    /// Enter interactive mode.  The debug system prompt note is only amended
-    /// when the operator requests a single step (RunOneTurn).  Resuming after a
-    /// Message, Quit, Bail, or disconnect keeps the original system prompt.
-    async fn enter_interactive_mode(
-        &mut self,
-        cancel: &CancelToken,
-        prefix: &str,
-    ) -> Result<InteractiveLoopResult, ClientError> {
-        if !self.interactive.accepts_commands() {
-            return Ok(InteractiveLoopResult::Resumed);
-        }
-        match interactive_loop(
-            cancel,
-            &mut *self.conv,
-            &mut self.interactive,
-            self.turn_num,
-            &self.message_prefix,
-            &self.corr_id,
-        )
-        .await
-        {
-            Ok(InteractiveLoopResult::InputPending) => Ok(InteractiveLoopResult::InputPending),
-            Ok(InteractiveLoopResult::MessageDelivered) => {
-                // Delivery may retain the debugger lease; restore the original prompt.
-                self.system_prompt = self.original_system_prompt.clone();
-                Ok(InteractiveLoopResult::MessageDelivered)
-            }
-            Ok(InteractiveLoopResult::Resumed) => {
-                self.system_prompt = self.original_system_prompt.clone();
-                Ok(InteractiveLoopResult::Resumed)
-            }
-            Ok(InteractiveLoopResult::RunOneTurn) => {
-                let debug_note = "\n\nThe operator has connected in debug mode. Messages prefixed with\n[operator]: are direct instructions from the operator. Treat them as\nauthoritative. When the operator disconnects, continue with your\noriginal task.";
-                let amended_system = match &self.original_system_prompt {
-                    Some(sp) => format!("{sp}{debug_note}"),
-                    None => debug_note.trim_start().to_string(),
-                };
-                self.system_prompt = Some(amended_system);
-                Ok(InteractiveLoopResult::RunOneTurn)
-            }
-            Err(e) => {
-                self.hook_log(&format!("{prefix}exit: {e}"));
-                Err(e)
-            }
-        }
     }
 
     /// Fold this turn's provider usage into the running totals and return the
@@ -1070,7 +922,7 @@ pub(crate) async fn run_agent_loop(
     ctx: RunContext,
     cancel: Arc<CancelToken>,
     opts: LoopOpts<'_>,
-    mut interactive: InteractiveSession,
+    interactive: InteractiveSession,
 ) -> Result<CompletedRun, ClientError> {
     let cwd = ctx.params.cwd.clone();
     let extra_env = ctx.params.extra_env.clone();
@@ -1196,7 +1048,6 @@ pub(crate) async fn run_agent_loop(
         .done
         .clone()
         .or_else(|| DoneAssessment::from_paths(&ctx.expected_artifact_paths));
-    let terminal = interactive.supervise_if_needed();
     let result = run_agent_loop_core(
         ctx.params.defer_done,
         ctx.params.usage_baseline.clone(),
@@ -1225,12 +1076,6 @@ pub(crate) async fn run_agent_loop(
         "",
     )
     .await;
-    if let Some(terminal) = terminal {
-        match &result {
-            Ok(_) => terminal.end("agent completed"),
-            Err(e) => terminal.end(&e.to_string()),
-        }
-    }
     result
 }
 
@@ -1493,7 +1338,6 @@ pub(crate) async fn run_agent_loop_core(
         }
 
         match state.await_interactive_turn(cancel, prefix).await? {
-            InteractiveBoundary::ContinueLoop => continue,
             InteractiveBoundary::RunTurn => {}
         }
 
@@ -1534,12 +1378,7 @@ pub(crate) async fn run_agent_loop_core(
                 state.pause_interrupted_turn(cancel, prefix).await?;
                 continue;
             }
-            StreamTurnOutcome::RetryModelError => {
-                if state.interactive.is_attached() {
-                    state.pending_run_one_turn = true;
-                }
-                continue;
-            }
+            StreamTurnOutcome::RetryModelError => continue,
             StreamTurnOutcome::RetryTimeout => continue,
             StreamTurnOutcome::Break => break,
             StreamTurnOutcome::Output(out) => *out,
@@ -1927,7 +1766,7 @@ mod tests {
     use super::*;
     use crate::clients::conversation::ConversationStub;
     use crate::clients::format::{assistant_tool_message, key_arg};
-    use crate::clients::interactive::{InteractiveCommand, InteractiveSessionFactory};
+    use crate::clients::interactive::InteractiveSessionFactory;
     use gremlins_magic_bus::{self, Recv};
     use http::StatusCode;
     use rig_core::completion::message::AssistantContent;
@@ -4891,9 +4730,6 @@ mod tests {
         fn record_interrupted_response(&mut self, text: String, reasoning: &[Reasoning]) {
             self.inner.record_interrupted_response(text, reasoning);
         }
-        fn pop_last_assistant_turn(&mut self) {
-            self.inner.pop_last_assistant_turn();
-        }
         async fn render_turn(
             &mut self,
             nested: bool,
@@ -5499,603 +5335,6 @@ mod tests {
                 "nested task turn must not set temperature"
             );
         }
-    }
-
-    // ── Interactive session tests ───────────────────────────────────────
-
-    #[tokio::test]
-    async fn debugger_disconnect_after_step_restores_prompt_and_honors_pending_request() {
-        for deferred in [false, true] {
-            for successor in [false, true] {
-                for interrupted in [false, true] {
-                    tokio::time::timeout(
-                        Duration::from_secs(5),
-                        check_debugger_disconnect_boundary(deferred, successor, interrupted),
-                    )
-                    .await
-                    .expect("interactive boundary stalled");
-                }
-            }
-        }
-    }
-
-    async fn check_debugger_disconnect_boundary(
-        deferred: bool,
-        successor: bool,
-        interrupted: bool,
-    ) {
-        let prefix = format!("debugger-disconnect-boundary-{deferred}-{successor}-{interrupted}");
-        let (_sub, mut events) = subscribe_log(&prefix);
-        let (mut sessions, handle) = InteractiveSessionFactory::for_chat();
-        let terminal = sessions.supervise_next_turn();
-        let interactive = sessions.next_session();
-        let corr_id = super::super::run_context::execution_corr_id(&prefix, &interactive);
-        let mut state = LoopState::new(
-            Some("original prompt".into()),
-            "hello",
-            Box::new(ConversationStub::new("hello")),
-            0,
-            0,
-            false,
-            interactive,
-            5,
-            false,
-            &prefix,
-            corr_id,
-        );
-
-        let mut debugger = handle.target().attach_debugger().unwrap();
-        assert!(state.interactive.accept_pause());
-        let step = async {
-            (&mut debugger.ready).await.unwrap();
-            debugger.try_send(InteractiveCommand::RunTurn).unwrap();
-        };
-        let cancel = CancelToken::new();
-        if deferred {
-            let entering = state.pause_interrupted_turn(&cancel, &prefix);
-            let (result, ()) = tokio::join!(entering, step);
-            result.unwrap();
-            assert!(state.pending_run_one_turn);
-        } else {
-            let entering = state.await_interactive_turn(&cancel, &prefix);
-            let (result, ()) = tokio::join!(entering, step);
-            assert!(matches!(result.unwrap(), InteractiveBoundary::RunTurn));
-        }
-        assert!(state.system_prompt.as_ref().unwrap().contains("debug mode"));
-        drop(debugger);
-
-        let replacement = successor.then(|| handle.target().attach_debugger().unwrap());
-        if interrupted {
-            // This is the shared mid-stream/mid-tool wakeup path. In
-            // particular B must not replace A's local inbox in `paused`.
-            assert!(state.interactive.paused().await);
-            assert!(state.interactive.has_revoked_debugger());
-            {
-                let boundary = state.pause_interrupted_turn(&cancel, &prefix);
-                tokio::pin!(boundary);
-                if let Some(replacement) = &replacement {
-                    assert!(futures::poll!(&mut boundary).is_pending());
-                    replacement.try_send(InteractiveCommand::Quit).unwrap();
-                }
-                boundary.await.unwrap();
-            }
-            assert_eq!(state.system_prompt.as_deref(), Some("original prompt"));
-        } else {
-            let boundary = state.await_interactive_turn(&cancel, &prefix);
-            tokio::pin!(boundary);
-            if let Some(replacement) = &replacement {
-                assert!(futures::poll!(&mut boundary).is_pending());
-                replacement.try_send(InteractiveCommand::RunTurn).unwrap();
-            }
-            assert!(matches!(
-                boundary.await.unwrap(),
-                InteractiveBoundary::RunTurn
-            ));
-        }
-        assert!(!state.pending_run_one_turn);
-        if successor && !interrupted {
-            assert!(state.system_prompt.as_ref().unwrap().contains("debug mode"));
-        } else {
-            assert_eq!(state.system_prompt.as_deref(), Some("original prompt"));
-        }
-        let mut announcements = Vec::new();
-        while let Ok(event) = events.try_recv() {
-            match event.kind() {
-                EventKind::Ready { .. } => announcements.push("ready"),
-                EventKind::Ended { reason } if reason == "disconnect" => {
-                    announcements.push("disconnect")
-                }
-                _ => (),
-            }
-        }
-        let mut expected = vec!["ready", "disconnect"];
-        if successor {
-            expected.push("ready");
-        }
-        assert_eq!(announcements, expected);
-        terminal.end("test");
-    }
-
-    /// An attachment pauses the loop before the first API call.
-    #[tokio::test]
-    async fn interactive_pause_at_turn_boundary_broadcasts_ready() {
-        let run_id = "interactive_pause_at_turn_boundary_broadcasts_ready";
-        let (mut sessions, handle) = InteractiveSessionFactory::for_chat();
-        let session = sessions.next_session();
-        let commands = handle.attach().unwrap();
-
-        let tool_ctx = test_tool_ctx_with_prefix(run_id);
-        let tool_defs = vec![];
-        let cancel = CancelToken::new();
-        let opts = loop_opts(None);
-
-        // Spawn the agent loop — it will enter interactive mode and block.
-        let model = rig_core::test_utils::MockCompletionModel::from_stream_turns([[
-            rig_core::test_utils::MockStreamEvent::text("ok"),
-            rig_core::test_utils::MockStreamEvent::tool_call(
-                "done1",
-                "Done",
-                serde_json::json!({"summary": "done"}),
-            ),
-            rig_core::test_utils::MockStreamEvent::final_response_with_default_usage(),
-        ]]);
-        let dyn_model = model.erase();
-        let (_sub, mut evt_rx) = subscribe_log(run_id);
-        let agent = tokio::spawn(async move {
-            run_agent_loop_core(
-                false,
-                None,
-                &dyn_model,
-                "hi",
-                None,
-                &tool_ctx,
-                &tool_defs,
-                &cancel,
-                &opts,
-                "[t] ",
-                10,
-                5.0,
-                &mut None,
-                &mut None,
-                false,
-                None,
-                0,
-                0,
-                session,
-                Box::new(ConversationStub::new("hi")),
-                false,
-                "",
-                "",
-                "",
-                "",
-            )
-            .await
-        });
-
-        // Wait for Ready.
-        let ready = tokio::time::timeout(Duration::from_secs(2), async {
-            loop {
-                match evt_rx.recv().await {
-                    gremlins_magic_bus::Recv::Event(e)
-                        if matches!(e.kind(), EventKind::Ready { .. }) =>
-                    {
-                        return true;
-                    }
-                    gremlins_magic_bus::Recv::Closed => return false,
-                    gremlins_magic_bus::Recv::Lagged(_) => continue,
-                    _ => continue,
-                }
-            }
-        })
-        .await
-        .unwrap();
-        assert!(ready, "agent should broadcast Ready when paused");
-
-        // Send Quit to resume.
-        commands.send(InteractiveCommand::Quit).await.unwrap();
-
-        // Agent should complete normally.
-        let result = tokio::time::timeout(Duration::from_secs(2), agent)
-            .await
-            .unwrap()
-            .unwrap()
-            .unwrap();
-        assert_eq!(result.text_result.as_deref(), Some("ok"));
-    }
-
-    /// Inject a message during interactive mode, verify the agent processes
-    /// it, emits TurnComplete, then Quit resumes normal operation.
-    #[tokio::test]
-    async fn interactive_inject_then_run_turn_then_quit() {
-        let run_id = "interactive_inject_then_run_turn_then_quit";
-        let dir = std::env::temp_dir().join(format!(
-            "gremlins-oa-int-{}-{}",
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
-        ));
-        std::fs::create_dir_all(&dir).unwrap();
-
-        let (mut sessions, handle) = InteractiveSessionFactory::for_chat();
-        let session = sessions.next_session();
-        let commands = handle.attach().unwrap();
-
-        let mut tool_ctx = test_tool_ctx_with_prefix(run_id);
-        tool_ctx.sandbox = tools::SandboxMode::Roots(vec![dir.clone()]);
-        let tool_defs = tools::tool_definitions(None, false, ToolMode::Full);
-        let cancel = CancelToken::new();
-        let opts = loop_opts(None);
-
-        // Turn 1 (Inject): Write tool call so agent continues.
-        // Turn 2 (Quit): Done call to finish.
-        let target = dir.join("out.txt");
-        let model = rig_core::test_utils::MockCompletionModel::from_stream_turns([
-            vec![
-                rig_core::test_utils::MockStreamEvent::text("got it"),
-                rig_core::test_utils::MockStreamEvent::tool_call(
-                    "c1",
-                    "Write",
-                    serde_json::json!({
-                        "file_path": target.to_str().unwrap(),
-                        "content": "hello"
-                    }),
-                ),
-                rig_core::test_utils::MockStreamEvent::final_response_with_default_usage(),
-            ],
-            vec![
-                rig_core::test_utils::MockStreamEvent::text("all done"),
-                rig_core::test_utils::MockStreamEvent::tool_call(
-                    "done1",
-                    "Done",
-                    serde_json::json!({"summary": "done"}),
-                ),
-                rig_core::test_utils::MockStreamEvent::final_response_with_default_usage(),
-            ],
-        ]);
-        let dyn_model = model.erase();
-        let (_sub, mut evt_rx) = subscribe_log(run_id);
-        let agent = tokio::spawn(async move {
-            run_agent_loop_core(
-                false,
-                None,
-                &dyn_model,
-                "hi",
-                None,
-                &tool_ctx,
-                &tool_defs,
-                &cancel,
-                &opts,
-                "[t] ",
-                10,
-                5.0,
-                &mut None,
-                &mut None,
-                false,
-                None,
-                0,
-                0,
-                session,
-                Box::new(ConversationStub::new("hi")),
-                true,
-                "",
-                "",
-                "",
-                "",
-            )
-            .await
-        });
-
-        // Wait for Ready.
-        let ready = tokio::time::timeout(Duration::from_secs(2), async {
-            loop {
-                match evt_rx.recv().await {
-                    Recv::Event(e) if matches!(e.kind(), EventKind::Ready { .. }) => return true,
-                    Recv::Closed => return false,
-                    Recv::Lagged(_) => continue,
-                    _ => continue,
-                }
-            }
-        })
-        .await
-        .unwrap();
-        assert!(ready);
-
-        // Inject a message.
-        commands
-            .send(InteractiveCommand::Inject("look at this".into()))
-            .await
-            .unwrap();
-
-        // Wait for TurnComplete.
-        let tc = tokio::time::timeout(Duration::from_secs(2), async {
-            loop {
-                match evt_rx.recv().await {
-                    Recv::Event(e) if matches!(e.kind(), EventKind::TurnComplete { .. }) => {
-                        return true
-                    }
-                    Recv::Closed => return false,
-                    Recv::Lagged(_) => continue,
-                    _ => continue,
-                }
-            }
-        })
-        .await
-        .unwrap();
-        assert!(tc, "should get TurnComplete after Inject");
-
-        // Quit — agent resumes normal operation and completes.
-        commands.send(InteractiveCommand::Quit).await.unwrap();
-
-        let result = tokio::time::timeout(Duration::from_secs(2), agent)
-            .await
-            .unwrap()
-            .unwrap()
-            .unwrap();
-        assert_eq!(result.text_result.as_deref(), Some("all done"));
-    }
-
-    /// Bail during interactive mode terminates the agent loop.
-    #[tokio::test]
-    async fn interactive_bail_terminates_agent() {
-        let run_id = "interactive_bail_terminates_agent";
-        let (mut sessions, handle) = InteractiveSessionFactory::for_chat();
-        let session = sessions.next_session();
-        let commands = handle.attach().unwrap();
-
-        let tool_ctx = test_tool_ctx_with_prefix(run_id);
-        let tool_defs = vec![];
-        let cancel = CancelToken::new();
-        let opts = loop_opts(None);
-
-        let model = rig_core::test_utils::MockCompletionModel::from_stream_turns([[
-            rig_core::test_utils::MockStreamEvent::text("ok"),
-            rig_core::test_utils::MockStreamEvent::tool_call(
-                "done1",
-                "Done",
-                serde_json::json!({"summary": "done"}),
-            ),
-            rig_core::test_utils::MockStreamEvent::final_response_with_default_usage(),
-        ]]);
-        let dyn_model = model.erase();
-        let (_sub, mut evt_rx) = subscribe_log(run_id);
-        let agent = tokio::spawn(async move {
-            run_agent_loop_core(
-                false,
-                None,
-                &dyn_model,
-                "hi",
-                None,
-                &tool_ctx,
-                &tool_defs,
-                &cancel,
-                &opts,
-                "[t] ",
-                10,
-                5.0,
-                &mut None,
-                &mut None,
-                false,
-                None,
-                0,
-                0,
-                session,
-                Box::new(ConversationStub::new("hi")),
-                false,
-                "",
-                "",
-                "",
-                "",
-            )
-            .await
-        });
-
-        // Wait for Ready.
-        let ready = tokio::time::timeout(Duration::from_secs(2), async {
-            loop {
-                match evt_rx.recv().await {
-                    Recv::Event(e) if matches!(e.kind(), EventKind::Ready { .. }) => return true,
-                    Recv::Closed => return false,
-                    Recv::Lagged(_) => continue,
-                    _ => continue,
-                }
-            }
-        })
-        .await
-        .unwrap();
-        assert!(ready);
-
-        // Bail.
-        commands
-            .send(InteractiveCommand::Bail("test bail".into()))
-            .await
-            .unwrap();
-
-        let result = tokio::time::timeout(Duration::from_secs(2), agent)
-            .await
-            .unwrap()
-            .unwrap();
-        match result {
-            Err(ClientError::Bail { reason }) => {
-                assert!(reason.contains("test bail"));
-            }
-            other => panic!("expected Bail, got {other:?}"),
-        }
-    }
-
-    /// Dropping the attachment resumes the loop without an operator command.
-    #[tokio::test]
-    async fn interactive_attachment_drop_resumes_gracefully() {
-        let run_id = "interactive_attachment_drop_resumes_gracefully";
-        let (mut sessions, handle) = InteractiveSessionFactory::for_chat();
-        let session = sessions.next_session();
-        let commands = handle.attach().unwrap();
-
-        let tool_ctx = test_tool_ctx_with_prefix(run_id);
-        let tool_defs = vec![];
-        let cancel = CancelToken::new();
-        let opts = loop_opts(None);
-
-        let model = rig_core::test_utils::MockCompletionModel::from_stream_turns([[
-            rig_core::test_utils::MockStreamEvent::text("ok"),
-            rig_core::test_utils::MockStreamEvent::tool_call(
-                "done1",
-                "Done",
-                serde_json::json!({"summary": "done"}),
-            ),
-            rig_core::test_utils::MockStreamEvent::final_response_with_default_usage(),
-        ]]);
-        let dyn_model = model.erase();
-        let (_sub, mut evt_rx) = subscribe_log(run_id);
-        let agent = tokio::spawn(async move {
-            run_agent_loop_core(
-                false,
-                None,
-                &dyn_model,
-                "hi",
-                None,
-                &tool_ctx,
-                &tool_defs,
-                &cancel,
-                &opts,
-                "[t] ",
-                10,
-                5.0,
-                &mut None,
-                &mut None,
-                false,
-                None,
-                0,
-                0,
-                session,
-                Box::new(ConversationStub::new("hi")),
-                false,
-                "",
-                "",
-                "",
-                "",
-            )
-            .await
-        });
-
-        // Wait for Ready.
-        let ready = tokio::time::timeout(Duration::from_secs(2), async {
-            loop {
-                match evt_rx.recv().await {
-                    Recv::Event(e) if matches!(e.kind(), EventKind::Ready { .. }) => return true,
-                    Recv::Closed => return false,
-                    Recv::Lagged(_) => continue,
-                    _ => continue,
-                }
-            }
-        })
-        .await
-        .unwrap();
-        assert!(ready);
-
-        drop(commands);
-
-        let ended = tokio::time::timeout(Duration::from_secs(2), async {
-            loop {
-                match evt_rx.recv().await {
-                    Recv::Event(event)
-                        if matches!(event.kind(), EventKind::Ended { reason } if reason == "disconnect") =>
-                    {
-                        return true;
-                    }
-                    Recv::Closed => return false,
-                    Recv::Lagged(_) => continue,
-                    _ => continue,
-                }
-            }
-        })
-        .await
-        .unwrap();
-        assert!(ended, "live detach must announce disconnect");
-
-        // Agent should resume and complete normally.
-        let result = tokio::time::timeout(Duration::from_secs(2), agent)
-            .await
-            .unwrap()
-            .unwrap()
-            .unwrap();
-        assert_eq!(result.text_result.as_deref(), Some("ok"));
-    }
-
-    /// Covers the `run_agent_loop` wrapper path (not just `run_agent_loop_core`).
-    /// Regression: the original class of bug — dropping the session while
-    /// forwarding/cloning context — would pass the suite because every
-    /// `run_agent_loop` test passed `None` and interactive tests called
-    /// `run_agent_loop_core` directly.
-    #[tokio::test]
-    async fn run_agent_loop_with_interactive_session_broadcasts_ready() {
-        let run_id = "run_agent_loop_with_interactive_session_broadcasts_ready";
-        let dir = std::env::temp_dir().join(format!(
-            "gremlins-oa-ral-int-{}-{}",
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
-        ));
-        std::fs::create_dir_all(&dir).unwrap();
-
-        let (mut sessions, handle) = InteractiveSessionFactory::for_chat();
-        let session = sessions.next_session();
-        let commands = handle.attach().unwrap();
-
-        let (_sub, mut evt_rx) = subscribe_log(run_id);
-
-        let model = rig_core::test_utils::MockCompletionModel::from_stream_turns([[
-            rig_core::test_utils::MockStreamEvent::text("ok"),
-            rig_core::test_utils::MockStreamEvent::tool_call(
-                "done1",
-                "Done",
-                serde_json::json!({"summary": "done"}),
-            ),
-            rig_core::test_utils::MockStreamEvent::final_response_with_default_usage(),
-        ]]);
-        let mut ctx = test_ctx(Some(dir.clone()), None);
-        ctx.params.gremlin_id = Some(run_id.into());
-        ctx.idle_timeout = 5.0;
-        ctx.params.idle_timeout = Some(5.0);
-        let cancel = CancelToken::new();
-
-        let agent = tokio::spawn(async move {
-            run_agent_loop(model.erase(), "hi", ctx, cancel, loop_opts(None), session).await
-        });
-
-        // Wait for Ready.
-        let ready = tokio::time::timeout(Duration::from_secs(2), async {
-            loop {
-                match evt_rx.recv().await {
-                    Recv::Event(e) if matches!(e.kind(), EventKind::Ready { .. }) => {
-                        return true;
-                    }
-                    Recv::Closed => return false,
-                    Recv::Lagged(_) => continue,
-                    _ => continue,
-                }
-            }
-        })
-        .await
-        .unwrap();
-        assert!(
-            ready,
-            "agent should broadcast Ready when paused via run_agent_loop"
-        );
-
-        // Send Quit to resume.
-        commands.send(InteractiveCommand::Quit).await.unwrap();
-
-        // Agent should complete normally.
-        let result = tokio::time::timeout(Duration::from_secs(2), agent)
-            .await
-            .unwrap()
-            .unwrap()
-            .unwrap();
-        assert_eq!(result.text_result.as_deref(), Some("ok"));
     }
 
     #[tokio::test]

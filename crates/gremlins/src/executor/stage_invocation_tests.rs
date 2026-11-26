@@ -707,13 +707,13 @@ impl Backend for FailingBackend {
     fn model(&self) -> &str {
         "invocation-tests"
     }
-    fn accepts_interactive_commands(&self) -> bool {
+    fn accepts_commands(&self) -> bool {
         !self.readonly
     }
 }
 
 async fn backend_case(cancel: bool, abort: bool, readonly: bool) {
-    let spec = format!("cmd/invocation-{}", state::token_hex(8));
+    let spec = format!("model://anthropic/invocation-{}", state::token_hex(8));
     install_test_backend(
         &spec,
         Arc::new(FailingBackend {
@@ -756,9 +756,6 @@ async fn backend_case(cancel: bool, abort: bool, readonly: bool) {
             target.stage_run_id(),
             events.last().unwrap().corr_id().stage_run_id()
         );
-        if readonly {
-            assert!(target.attach().is_err());
-        }
     }
     if abort {
         task.abort();
@@ -814,7 +811,7 @@ async fn task_abort_drops_nested_invocations_and_closes_both_pairs() {
 }
 
 #[tokio::test]
-async fn readonly_backend_receives_the_stage_run_target_identity() {
+async fn readonly_backend_under_native_provider_disables_execution_commands() {
     backend_case(true, false, true).await;
 }
 
@@ -870,17 +867,13 @@ impl Backend for ChatBackend {
     fn model(&self) -> &str {
         "invocation-chat-test"
     }
-
-    fn accepts_interactive_commands(&self) -> bool {
-        true
-    }
 }
 
 #[tokio::test]
 async fn chat_input_and_output_use_invocation_identity() {
     // Repeat the same turn name, including on failure, to catch identity reuse.
     for mode in ["success", "failure", "cancel", "abort"] {
-        let spec = format!("cmd/chat-invocation-{}", state::token_hex(8));
+        let spec = format!("model://anthropic/chat-invocation-{}", state::token_hex(8));
         let release = Arc::new(tokio::sync::Notify::new());
         install_test_backend(
             &spec,
@@ -1082,7 +1075,6 @@ async fn incompatible_prepared_identity_is_rejected_and_cleared_by_run_agent() {
     assert!(!events.iter().any(|event| matches!(event.kind(),
         EventKind::StreamChunk { text } if text == "CHAT_MARKER")));
     assert!(execution_end.is_ended());
-    assert!(target.attach().is_err());
     assert!(handle.resolve_input(&id, &prepared_id, None).is_none());
     assert!(handle.resolve_input(&id, invocation_id, None).is_none());
     assert!(handle.target().end_signal().is_ended());

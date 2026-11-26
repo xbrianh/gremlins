@@ -12,14 +12,13 @@
 //! a dedicated passive bus watch supplies display events. Each request socket
 //! owns its own response FIFO and background reader.
 
-pub(crate) mod attachment;
 mod home;
 
 use std::collections::{HashMap, VecDeque};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex as StdMutex};
 
-use super::protocol::{Execution, Selector};
+use super::protocol::Execution;
 use gremlins::executor::socket;
 use gremlins_magic_bus::EventKind;
 use serde_json::{json, Value};

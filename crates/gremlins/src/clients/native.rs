@@ -6,13 +6,13 @@
 //! passing the future that builds the per-attempt model.
 
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 
 use rig_core::driver::DynModel;
 use rig_core::operation::Completion;
 
 use crate::clients::agent::agent_loop::{run_agent_loop, LoopOpts, RunContext};
-use crate::clients::backend::{ClientError, RunParams};
+use crate::clients::backend::ClientError;
 use crate::clients::cancel::{default_classify, CancelToken, ErrorClassifier};
 use crate::clients::cancels::CancelsMap;
 use crate::clients::interactive::InteractiveSession;
@@ -49,7 +49,6 @@ pub(crate) struct NativeRunState<C> {
     pub(crate) model: String,
     tool_filter: Option<Vec<String>>,
     pub(crate) resolved: ResolvedParams,
-    last_ctx: Mutex<Option<RunContext>>,
     pub(crate) cancels: CancelsMap,
     next_id: AtomicU64,
     log_label: &'static str,
@@ -68,7 +67,6 @@ impl<C> NativeRunState<C> {
             model,
             tool_filter,
             resolved,
-            last_ctx: Mutex::new(None),
             cancels: CancelsMap::default(),
             next_id: AtomicU64::new(1),
             log_label,
@@ -87,24 +85,6 @@ impl<C> NativeRunState<C> {
             Some(m) if !m.is_empty() => m.to_string(),
             _ => self.model.clone(),
         }
-    }
-
-    /// Build a [`RunContext`] from [`RunParams`] and stash it in `last_ctx`
-    /// so a later [`last_run_params`](Self::last_run_params) can resume it.
-    pub(crate) fn prepare_context(&self, params: RunParams) -> RunContext {
-        let ctx = RunContext::from_params(params);
-        *self.last_ctx.lock().unwrap() = Some(ctx.clone());
-        ctx
-    }
-
-    /// The [`RunParams`] from the most recent [`prepare_context`](Self::prepare_context)
-    /// call, or an error when no run has happened yet.
-    pub(crate) fn last_run_params(&self) -> Result<RunParams, ClientError> {
-        let guard = self.last_ctx.lock().unwrap();
-        let ctx = guard.as_ref().ok_or_else(|| ClientError::Runtime {
-            message: "resume() called before run()".into(),
-        })?;
-        Ok(ctx.params.clone())
     }
 
     /// Cancel every in-flight token for `gremlin_id`.

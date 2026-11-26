@@ -728,7 +728,7 @@ impl App {
 
     fn observe_pipeline_frame_from(&mut self, source: PipelineSource, frame: &serde_json::Value) {
         let kind = frame["type"].as_str().unwrap_or_default();
-        if matches!(kind, "watched" | "attached") && frame["replay"] == true {
+        if kind == "watched" && frame["replay"] == true {
             let incomplete = self
                 .replay_executions
                 .get(&source)

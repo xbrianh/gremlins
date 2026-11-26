@@ -334,19 +334,6 @@ impl Conversation for StandardConversation {
         );
     }
 
-    fn pop_last_assistant_turn(&mut self) {
-        // Pop the assistant message.
-        if matches!(self.history.last(), Some(Message::Assistant(_))) {
-            self.history.pop();
-        }
-        // Pop the preceding user prompt (the one committed by record_turn)
-        // and restore it as next_prompt for clean turn re-execution.
-        if let Some(Message::User { .. }) = self.history.last() {
-            let prompt = self.history.pop().unwrap();
-            self.next_prompt = PendingPrompt::new(prompt);
-        }
-    }
-
     async fn render_turn(
         &mut self,
         _nested: bool,

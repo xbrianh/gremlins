@@ -48,10 +48,13 @@ These principles govern every use of the bus in the gremlins codebase:
    The sender should never batch, debounce, or collect events for a
    specific consumer — that is the subscriber's responsibility.
 
-   For example, the chat supervisor subscribes per-run with
-   `subscribe_run_backpressured` and independently drains stream chunks,
-   tool results, turn completions, and Done events into its own forwarding
-   loop. The agent loop has no knowledge that a chat subscriber exists.
+   Internal event consumers subscribe and drain events independently of
+   viewer watches. `subscribe_run_backpressured` provides bounded delivery
+   for internal consumers; it is not a chat-supervisor front-end forwarding
+   contract. Each viewer watch uses independent lag-tolerant delivery: a
+   stalled viewer lags rather than backpressuring the producer. Front-end
+   delivery is not guaranteed lossless. The agent loop has no knowledge
+   that a viewer exists.
 
 These principles drove the streaming refactor in #2273 (the
 `gremlins-magic-bus` crate extraction). Before the refactor, the agent
@@ -179,6 +182,17 @@ Bounded and lag-tolerant channels require a non-zero capacity
   (broadcast may report skipped entries on overflow).
 - Concrete emitters initialize the global bus, retaining early run events. If first
   initialization occurs outside Tokio, the optional log-forwarding task is skipped.
+
+## Display and input boundary
+
+- The bus carries display and lifecycle events, not execution input or controller
+  ownership. `StageBoundary` identifies an invocation and its active lifetime;
+  envelopes/watch frames retain descriptive `stage_type` metadata.
+- `stage_type: "agent"` is not a writable capability or a liveness guarantee.
+  Bus events do not advertise writable/debugger-ready attachment capabilities.
+- Passive `watch` consumes this output. Exact input is resolved separately by
+  `gremlins::executor::supervisor::input`, which claims the live execution inbox;
+  neither bus subscription nor replay authorizes input.
 
 ## Invariants
 

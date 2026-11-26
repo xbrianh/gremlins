@@ -902,11 +902,18 @@ selection left to follow.
 
 #### 8.4.5 Selected conversation
 
-`Enter` in watch selects the run's conversation without pausing: it keeps
-running unaided. `/attach <id> [stage]` selects it directly. `/debug <id>`
-selects the same chat with pause-on-entry for interactive agent stages only;
-there is no separate debug screen. Ordinary text supplies a correction to the
-same execution and resumes it. Exec stages remain read-only.
+`Enter` in watch selects the run's bus output without pausing or opening an
+input connection. `/attach <id> [stage]` selects output directly; its optional
+selector can identify an exact invocation. `/debug <stage_run_id>` or
+`/debug <run> <stage_run_id>` selects a concrete invocation in the same chat
+scene, not a separate debug screen. Neither command pauses on entry. `/attach`
+is a TUI selection command, not wire `op: "attach"`, which is retired.
+
+Tagged agent events enable the composer as a UI hint. Submission lazily binds
+separate exact execution input; stale targets, unsupported backends, or another
+controller can still reject it. Ordinary text corrects that execution through
+its inbox. Exec stages remain read-only. Display `stage_type` describes the
+invocation; it is not a writable capability.
 
 Explicit run controls retain their names: `/stop <id>` and `/resume <id>`
 (or `s`/`r` in watch). `/attach home` returns home; `Ctrl+T` switches between
@@ -978,10 +985,10 @@ their own controls (or none). Key routing rules:
 
 | Screen / state | Input bar behavior |
 |----------------|--------------------|
-| Chat, idle (no active turn) | Accepts chat text and slash commands |
-| Chat, active turn (streaming) | Accepts a correction to the same execution |
+| Chat, idle (no active turn) | Accepts a new untargeted chat prompt and slash commands |
+| Chat, active turn (streaming) | Corrections use separate exact execution input, not an untargeted prompt |
 | Runs screen | No chat input; `Up`/`Down` move selection, `Ctrl+O` toggles the log pane |
-| Selected interactive agent | Same chat input; ordinary text corrects and resumes the execution |
+| Selected agent invocation | Composer submits through lazy exact input; display alone does not authorize control |
 | Selected exec stage | Read-only observation |
 
 `Esc` in order of priority:
@@ -1061,8 +1068,9 @@ The bus carries `EventKind` variants that fall into three categories:
   `TaskProgress`. These are the live, real-time events that the chat
   supervisor and TUI consume to render streaming turns.
 
-- **Lifecycle events** — `Ready`, `Bail`. These signal stage state
-  transitions that the TUI and interactive debug session consume.
+- **Lifecycle events** — stage boundaries/transitions and run start/terminal
+  events identify execution lifetimes for observers. Display and lifecycle
+  frames can carry descriptive `stage_type`, never a writable capability.
 
 - **Telemetry events** — `LogLine`, `TokenUsage`, `PromptRequest`,
   `TurnStats`. These are fire-and-forget records consumed by the log
@@ -1075,15 +1083,14 @@ Subscribers declare their tolerance for lag at subscription time:
 | Policy | Channel | Producer behavior | Use case |
 |---|---|---|---|
 | `Lossless` | unbounded `mpsc` | never blocks, never drops | Log lines, token accounting |
-| `Backpressured { bound }` | bounded `mpsc` | `emit` drops when full; `emit_async` awaits capacity | Chat stream events |
-| `LagTolerant { capacity }` | `broadcast` | drops on `Lagged`; receiver resyncs from folded state | Run-map status folding |
+| `Backpressured { bound }` | bounded `mpsc` | `emit` drops when full; `emit_async` awaits capacity | Internal consumers requiring bounded delivery |
+| `LagTolerant { capacity }` | `broadcast` | drops on `Lagged`; receiver resyncs from folded state | Viewer watches, run-map status folding |
 
-Chat stream events use backpressured delivery: a bounded channel prevents
-unbounded memory growth, and `emit_async` awaits capacity rather than
-dropping, so a slow front-end slows the agent loop rather than losing
-streaming content. Cancellation (`Esc`/`stop`) is raced against every
-`emit_async` await point, so cancellation still unwinds promptly even when
-the channel is full.
+Internal event delivery is distinct from independent viewer watches. An
+internal backpressured subscriber can make `emit_async` await capacity, but
+viewer watches use lag-tolerant delivery. A stalled viewer lags and receives
+explicit `lagged` records; it does not backpressure the producer. There is
+no lossless front-end delivery guarantee.
 
 ### 9.4 Correlation ids
 
@@ -1111,24 +1118,31 @@ gremlins `EventKind`:
 - `emit_event(EventKind)` — wraps run-bearing event kinds onto a
   run-scoped `CorrId`. Non-run-bearing kinds use the empty `CorrId`.
 - `emit_run_event_async(prefix, EventKind)` — async emit with run prefix.
-- `subscribe_run_backpressured(id, bound)` — the chat supervisor's
-  per-run subscription for live stream forwarding.
+- `subscribe_run_backpressured(id, bound)` — a bounded per-run subscription
+  for internal consumers, not the viewer-watch forwarding contract.
+- Viewer watches subscribe independently with lag-tolerant delivery; a stalled
+  viewer does not backpressure the producer.
 
-### 9.6 Passive run attachment and watch replay
+### 9.6 Passive watch, replay, and separate execution input
 
-Watch uses `attach` with `scope: run` on a dedicated connection. After an
-`attached` acknowledgment, the server forwards native display records alongside
-stage boundaries/transitions and run-terminal lifecycle frames. Agent display,
-exec output, and log lines share this path. Run attachment is passive and
-lag-tolerant: gaps are explicit `lagged` records, not producer backpressure.
-Although bus subscriptions include descendant runs, attachment filters both
-correlation and payload ids to the exact selected run.
+Watch uses `op: "watch"` on a dedicated connection and receives `watched`.
+The optional `stage` and `stage_run_id` selectors filter native display and
+stage lifecycle records; parent run-terminal events still close a selected
+watch. Agent display, exec output, and log lines share this read-only path.
+Watch is lag-tolerant: gaps are explicit `lagged` records, not producer
+backpressure. Correlation and payload run ids are checked, and sibling output
+does not consume a filtered watch's mailbox capacity. Watch never claims input
+or pauses execution. Commands on a watch connection are rejected.
+
+Wire `attach` is rejected on both global and verified session auxiliary routes,
+including its old run/conversation scopes and debugger mode. Display does not
+publish a writable flag or an attachment nonce. Descriptive `stage_type` and
+invocation identity do not authorize input.
 
 The server `stage_stream` operation/module and CLI legacy stage-stream client
 are retired. The producer-side `executor/stage_boundary.rs` remains. The CLI
-`follow_run` requests replay and requires the negotiated `replay_checkpoint`
-acknowledgment capability, then receives an exact atomic native snapshot/live
-cut ending in `replay_checkpoint`. Historical and live native frames carry
+`follow_run` requests watch replay, validates `watched`, then receives an atomic
+native snapshot/live cut ending in `replay_checkpoint`. Historical and live native frames carry
 process-local emission sequences, not durable cross-restart cursors. The journal
 holds at most 16,384 records per exact run and 65,536 globally; prompt requests are not
 retained. Eviction/omission produces explicit `history_gap` and conservative
@@ -1137,7 +1151,7 @@ The CLI bounds snapshot collection to 65,536 frames and its socket queue to 256.
 Incomplete/unavailable replay falls back to a persisted 500-line tail, preserving
 restart replay. Active fallback keeps the original live subscription and warns
 of discontinuity/possible overlap. There is no content matching or duplicate
-suppression, no replacement attachment, and no second live log follow. Every
+suppression, no replacement watch, and no second live log follow. Every
 collected original native frame is preserved alongside disk history. Stage
 transcripts may contain other executions: exact execution-scoped agent merging
 is deferred, and incomplete fallback is not an exact merge.
@@ -1150,12 +1164,24 @@ cut, a separate contract not applied to watch tails. Bus journal insertion and
 snapshot/subscription registration are atomic under its mutex, but persistence
 callbacks and disk reads run outside it; no disk I/O is performed under that lock.
 
-The standalone debug CLI already uses conversation-scope attachment in
-`debugger` mode; it is not a run-watch client. See the
-[protocol reference](docs/attachment-protocol.md) and
-[actor-removal tracker](docs/actor-removal.md) for details, targeted test scope,
-and deferred work. No full-suite results, completed rollout, or manual
-watch/debug verification are claimed.
+Control uses separate `op: "input"`, resolving a live inbox once by run id and
+`stage_run_id` (with optional stage validation). It acquires a supervisor-owned
+exclusive claim on the canonical execution and acknowledges `input_bound`.
+Only `message`, `pause`, `step`, `resume`, and `bail` enter the execution inbox;
+`detach` only closes the transport. The binding cannot retarget a successor.
+Dropping it releases the claim without synthesizing resume or any other command.
+Receipts distinguish `queued` from `delivered`/`dropped`; a full or revoked inbox
+rejects rather than silently redirecting input.
+
+Targeted `chat` is a one-shot correction through the same exact inbox and
+controller claim, not a debugger attachment or persistent prompt queue. Its
+target nonce is a registration freshness check, not an attachment lease; the
+claim is released after enqueue. Chat-gremlin input requires the verified owning
+session, never a request-supplied ownership assertion. Untargeted `chat` is only
+an idle new-turn prompt and is rejected while a turn is active or preparing.
+
+See the [protocol reference](docs/attachment-protocol.md) for wire details.
+These design notes make no test-suite or manual watch/debug verification claims.
 
 ### 9.7 Relationship to the chat backend
 
@@ -1178,11 +1204,11 @@ back out.
 ### 9.1 A chat is a gremlin owned by a session
 
 A chat gremlin lives in the run map alongside pipeline gremlins, appears in
-`gremlins ls`, and supports every daemon op a normal gremlin does — `stop`,
-`debug`, `info`, `log`. The gremlin id is an internal daemon detail, however:
-front-ends never address it directly. They address the **session** that owns
-the gremlin, and the session dies (reaping the gremlin) when the front-end
-disconnects or closes the session.
+`gremlins ls`, and supports inspection and lifecycle operations such as `stop`,
+`info`, and `log`. New prompts address the **session** that owns the gremlin;
+active corrections instead name its exact execution and require that owning
+session. The session dies (reaping the gremlin) when the front-end disconnects
+or closes the session.
 
 A chat gremlin's definition is built programmatically at creation time and
 grows with every user message — each turn appends a new Agent stage to the
@@ -1197,17 +1223,19 @@ The TUI (or any front-end) first creates a session:
 {"op": "create_session"}
 ```
 
-The daemon replies with a session id and a session socket name. Conversation
-turns are then sent on that session socket:
+The daemon replies with a session id, session socket name, and reserved
+`home_run_id`. New conversation prompts are sent on that session socket only
+when idle:
 
 ```json
 {"op": "chat", "session_id": "sess-…", "text": "<user message>"}
 ```
 
-No history, no transcript, no tool records, and no gremlin id — the
-front-end holds no conversation state beyond the session id. The daemon
-manages the entire context lifecycle internally. When a session dies, its chat
-gremlin dies with it.
+New prompts carry no history, transcript, or tool records. The daemon owns
+conversation context. The front-end uses `home_run_id` to observe bus output and
+exact invocation identity to submit active corrections through separate input.
+Untargeted prompts are not a correction path or a queue for a busy turn. When a
+session dies, its chat gremlin dies with it.
 
 This makes the chat backend front-end-agnostic: the TUI, a CLI one-shot
 (`gremlins chat <id> "message"`), a web dashboard, or an API all speak the
@@ -1255,11 +1283,10 @@ from the stable prefix (system prompt + history).
 
 ### 9.4 Pause between stages
 
-The gremlin pauses after each Agent stage completes, waiting for the next
-user message. This is the same mechanism the interactive debug protocol uses:
-the run loop finishes a stage, reaches the end of the (current) definition,
-and blocks on an external signal. When a new message arrives, the daemon
-appends a stage to the definition and resumes the run loop.
+The chat task waits after each Agent stage completes for the next idle prompt.
+When a new untargeted message arrives, the daemon appends a stage to the
+definition and runs it. This prompt queue is distinct from an active execution's
+input inbox; it is not an attachment or debugger pause mechanism.
 
 From the gremlin's perspective it is one continuous run — one `state.json`,
 one stage cursor, one artifact registry, one worktree. It simply has an
@@ -1281,9 +1308,11 @@ removed from the run map — rather than remaining inspectable.
 
 The TUI (§8) is one front-end for the chat backend. It creates a session,
 sends `{"op": "chat", "session_id": "sess-…", "text": "..."}` on that
-session socket, and renders stream events (reasoning chunks, tool results,
-response text, turn completion) as transcript widgets. The TUI holds no
-conversation history — the daemon is the authority.
+session socket when idle. It independently watches the announced home run's
+bus output and renders reasoning chunks, tool results, response text, and turn
+completion as transcript widgets. Active corrections lazily bind exact input
+instead of sending another untargeted prompt. The daemon remains the authority
+for conversation context; the TUI retains display state, not model history.
 
 ### 9.7 Stream delivery contract
 
@@ -1292,8 +1321,8 @@ uses a bounded mpsc channel for live stream events, but the bound limits
 memory rather than completeness: when the channel is full, the producer
 (agent loop / tool-output forwarder) awaits capacity instead of dropping.
 Live text deltas, reasoning deltas, and tool-output chunks therefore reach
-the front-end without gaps, while a slow front-end simply slows the agent
-loop. `run_chat_turn` remains the sole drainer of the chat stream channel,
-and each awaited send is raced against the turn's cancel token, so
-cancellation (`Esc`/`stop`) still unwinds promptly even when the channel is
-full.
+lossless internal subscribers without gaps, while a slow backpressured
+subscriber can slow the agent loop. Cancellation is raced against awaited
+producer sends so it can still unwind promptly. This internal delivery policy
+does not make the front-end's passive watch lossless: watch is independently
+lag-tolerant and reports gaps (§9.6).

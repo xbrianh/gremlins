@@ -5,13 +5,11 @@ use crate::clients::agent::agent_loop::{loop_opts, run_agent_loop, test_ctx};
 use crate::clients::backend::Backend;
 use crate::clients::client::install_test_backend;
 use crate::clients::execution_input::{Delivery, InputControl, InputRegistry};
-use crate::clients::interactive::{
-    DebugAttachment, DebugOutcome, InteractiveCommand, InteractiveHandle, InteractiveSessionFactory,
-};
+use crate::clients::interactive::{InteractiveHandle, InteractiveSessionFactory};
 use crate::clients::protocol::{CompletedRun, UsageStats};
 use crate::clients::InteractiveSession;
 use crate::executor::stage_boundary::StageInvocation;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 use tokio::sync::Notify;
 
 struct BailBackend {
@@ -19,7 +17,6 @@ struct BailBackend {
     inputs: InputRegistry,
     inbox: bool,
     fail_accounting: bool,
-    attachment: Mutex<Option<DebugAttachment>>,
     bailed: Notify,
     release: Notify,
 }
@@ -67,29 +64,29 @@ impl Backend for BailBackend {
                 },
             },
         );
-        let receipt = if self.inbox {
-            let (_, sender) = self
-                .inputs
-                .resolve(
-                    corr.run().unwrap(),
-                    corr.stage_run_id().unwrap(),
-                    corr.stage(),
-                )
-                .unwrap();
-            Some(
-                sender
-                    .try_control("operator-bail".into(), InputControl::Bail)
-                    .unwrap(),
+        // Both operator routing paths use the exact execution inbox, not an
+        // attachment command lease. Acceptance alone must not settle delivery.
+        let (_, sender) = if self.inbox {
+            self.inputs.resolve(
+                corr.run().unwrap(),
+                corr.stage_run_id().unwrap(),
+                corr.stage(),
             )
         } else {
-            let attachment = self.handle.attach().expect("live debugger target");
-            attachment
-                .send(InteractiveCommand::Bail("regression".into()))
-                .await
-                .unwrap();
-            *self.attachment.lock().unwrap() = Some(attachment);
-            None
-        };
+            self.handle.resolve_input(
+                corr.run().unwrap(),
+                corr.stage_run_id().unwrap(),
+                corr.stage(),
+            )
+        }
+        .expect("live execution input");
+        let mut receipt = sender
+            .try_control("operator-bail".into(), InputControl::Bail)
+            .unwrap();
+        assert!(matches!(
+            receipt.try_recv(),
+            Err(tokio::sync::oneshot::error::TryRecvError::Empty)
+        ));
         let prompt = params.prompt.clone();
         let mut ctx = test_ctx(params.cwd.clone(), None);
         ctx.prepopulated_conversation = params.prepopulated_conversation.clone();
@@ -112,9 +109,7 @@ impl Backend for BailBackend {
         assert!(
             matches!(&result, Err(ClientError::Bail { reason }) if reason.starts_with("operator bailed"))
         );
-        if let Some(receipt) = receipt {
-            assert_eq!(receipt.await.unwrap(), Delivery::Delivered);
-        }
+        assert_eq!(receipt.await.unwrap(), Delivery::Delivered);
         self.bailed.notify_one();
         self.release.notified().await;
         result
@@ -137,17 +132,18 @@ async fn assert_bail_boundary(inbox: bool, fail_accounting: bool, chat: bool) {
             serde_json::json!({"kind": "chat"}).as_object().unwrap(),
         );
     }
-    let (mut sessions, handle) = InteractiveSessionFactory::for_pipeline();
+    let (sessions, handle) = if chat {
+        InteractiveSessionFactory::for_chat()
+    } else {
+        InteractiveSessionFactory::for_pipeline()
+    };
     handle.set_input_registry(gremlin.execution_inputs.clone());
-    // Match chat's external terminal ownership without running its supervisor.
-    let chat_terminal = chat.then(|| sessions.supervise_next_turn());
     gremlin.interactive_sessions = Some(sessions);
     let backend = Arc::new(BailBackend {
         handle,
         inputs: gremlin.execution_inputs.clone(),
         inbox,
         fail_accounting,
-        attachment: Mutex::new(None),
         bailed: Notify::new(),
         release: Notify::new(),
     });
@@ -165,12 +161,6 @@ async fn assert_bail_boundary(inbox: bool, fail_accounting: bool, chat: bool) {
         backend.bailed.notified().await;
         // The real interactive function has returned Bail, but the executor
         // has not yet crossed its persistence/error boundary.
-        if let Some(attachment) = backend.attachment.lock().unwrap().as_mut() {
-            assert!(matches!(
-                attachment.ended.try_recv(),
-                Err(tokio::sync::oneshot::error::TryRecvError::Empty)
-            ));
-        }
         while let Ok(event) = rx.try_recv() {
             assert!(
                 !matches!(
@@ -245,30 +235,17 @@ async fn assert_bail_boundary(inbox: bool, fail_accounting: bool, chat: bool) {
         }
     }
     assert_eq!(ended, 0, "no duplicate or persistence-failure terminal");
-    if let Some(attachment) = backend.attachment.lock().unwrap().as_mut() {
-        if chat {
-            assert!(matches!(
-                attachment.ended.try_recv(),
-                Err(tokio::sync::oneshot::error::TryRecvError::Empty)
-            ));
-            chat_terminal
-                .as_ref()
-                .unwrap()
-                .end("chat supervisor classified bail");
-        }
-        assert!(
-            matches!(attachment.ended.try_recv(), Ok(DebugOutcome::Ended { reason }) if if chat { reason == "chat supervisor classified bail" } else { reason == error })
-        );
-    };
+    // Execution teardown is not terminal classification. Chat's supervisor
+    // owns that classification; without it, no terminal may be published.
 }
 
 #[tokio::test]
-async fn debugger_bail_waits_for_executor_accounting_and_error_boundary() {
+async fn handle_bail_waits_for_executor_accounting_and_error_boundary() {
     assert_bail_boundary(false, false, false).await;
 }
 
 #[tokio::test]
-async fn debugger_bail_accounting_failure_has_no_success_terminal() {
+async fn handle_bail_accounting_failure_has_no_success_terminal() {
     assert_bail_boundary(false, true, false).await;
 }
 
@@ -280,5 +257,8 @@ async fn inbox_bail_waits_for_accounting_and_accounting_failure_suppresses_ended
 
 #[tokio::test]
 async fn chat_bail_leaves_terminal_classification_to_supervisor() {
-    assert_bail_boundary(false, false, true).await;
+    for inbox in [false, true] {
+        assert_bail_boundary(inbox, false, true).await;
+        assert_bail_boundary(inbox, true, true).await;
+    }
 }

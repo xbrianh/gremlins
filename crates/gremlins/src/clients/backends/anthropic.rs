@@ -234,7 +234,7 @@ impl Backend for AnthropicBackend {
         params: RunParams,
         interactive: InteractiveSession,
     ) -> Result<CompletedRun, ClientError> {
-        let ctx = self.state.prepare_context(params.clone());
+        let ctx = crate::clients::agent::agent_loop::RunContext::from_params(params.clone());
         let cancel = params.cancel_token.clone().unwrap_or_else(CancelToken::new);
         let model_name = self.state.effective_model(ctx.params.model.as_deref());
 

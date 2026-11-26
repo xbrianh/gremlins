@@ -29,7 +29,6 @@ pub(crate) struct OpenAiRunState {
     pub(crate) model: String,
     pub(crate) tool_filter: Option<Vec<String>>,
     pub(crate) resolved: ResolvedParams,
-    pub(crate) last_ctx: Mutex<Option<RunContext>>,
     pub(crate) cancels: CancelsMap,
     pub(crate) next_id: AtomicU64,
     pub(crate) log_label: String,
@@ -48,7 +47,6 @@ impl OpenAiRunState {
             model,
             tool_filter,
             resolved,
-            last_ctx: Mutex::new(None),
             cancels: CancelsMap::default(),
             next_id: AtomicU64::new(1),
             log_label,
@@ -57,14 +55,6 @@ impl OpenAiRunState {
 
     pub(crate) fn extra_params(&self) -> Option<serde_json::Value> {
         self.resolved.additional_value()
-    }
-
-    pub(crate) fn last_run_params(&self) -> Result<RunParams, ClientError> {
-        let guard = self.last_ctx.lock().unwrap();
-        let ctx = guard.as_ref().ok_or_else(|| ClientError::Runtime {
-            message: "resume() called before run()".into(),
-        })?;
-        Ok(ctx.params.clone())
     }
 
     pub(crate) fn effective_model(&self, override_model: Option<&str>) -> String {
@@ -92,7 +82,6 @@ pub(crate) async fn run_openai_compat(
     _provider_name: &str, // kept for logging; unused after task-models moved to Backend trait
 ) -> Result<CompletedRun, ClientError> {
     let ctx = RunContext::from_params(params.clone());
-    *state.last_ctx.lock().unwrap() = Some(ctx.clone());
 
     // Use the supervisor's cancel token when available; otherwise create one.
     let cancel = params.cancel_token.clone().unwrap_or_else(CancelToken::new);

@@ -83,10 +83,6 @@ impl Conversation for NakedConversation {
         );
     }
 
-    fn pop_last_assistant_turn(&mut self) {
-        unreachable!("NakedConversation: pop_last_assistant_turn called in retry path")
-    }
-
     async fn render_turn(
         &mut self,
         _nested: bool,

@@ -23,10 +23,15 @@ A session's chat gremlin is owned by a single long-lived task
 `ChatGremlinHandle { id, prompt_tx, cancel, finished }` in its task-owned
 `session_task.rs::SessionState`, accessed through `SessionTaskHandle`:
 
-- `handle_chat` builds a `PromptMsg` (raw text, repo context, model, system
-  prompt, project root, env, requested + discovered skills, and caller turn token) and sends it onto the handle's bounded(1) `prompt_tx`.
-  A second prompt naturally blocks behind the in-flight turn, so turns
-  serialize with no extra locking.
+- Untargeted `handle_chat` accepts a new prompt only while the session is idle,
+  then builds a `PromptMsg` (raw text, repo context, model, system prompt,
+  project root, env, requested + discovered skills, and caller turn token) and
+  sends it onto the handle's bounded(1) `prompt_tx`. Busy sessions reject new
+  prompts; this queue is not a correction or execution-input handle.
+- Targeted `chat` uses `input::bind` and the same exact execution inbox and
+  canonical supervisor controller claim as `input`. It cannot bypass a held
+  controller claim or fall back to a fresh prompt. Its nonce is an input
+  freshness check, not an attachment lease or display capability.
 - `chat_gremlin_task` loops one `PromptMsg` at a time (racing the persistent
   cancel token). Between turns the gremlin is *parked* in the session; `run_turn`
   takes it out at turn start and the `TurnRunner` re-parks it on every exit path.
@@ -70,8 +75,8 @@ Two cancel tokens govern a chat gremlin:
 - A per-turn **child** token is installed on the run map for each turn (and held
   by `CurrentTurn`). Soft/hard cancel modes cancel that child token, which the
   turn's event loop races; soft marks `ChatDefinition::interrupted` and preserves
-  the per-turn artifact, hard clears both. If a debugger was attached, the
-  runner gives it the same terminal reason after the stage unwinds.
+  the per-turn artifact, hard clears both. Execution teardown revokes input;
+  terminal display remains on the event bus.
 
 ### Env resolution
 
@@ -88,10 +93,11 @@ process environment captured once at startup.
   through a `TurnRunner` method — don't re-insert, restore the run-map token, or
   signal done by hand.
 - **The persistent task is the only driver.** The gremlin is never driven
-  outside `chat_gremlin_task`; `handle_chat` only queues prompts.
+  outside `chat_gremlin_task`; untargeted `handle_chat` only queues idle prompts,
+  while targeted corrections go through exact execution input.
 - **Cancel is token-driven.** The active turn's token interrupts model streams,
-  tool batches, and debug command waits. Debugger disconnect resumes the run;
-  it does not cancel the chat turn.
+  tool batches, and execution-input waits. Dropping an input connection only
+  releases its controller claim; it neither resumes nor cancels the chat turn.
 
 ## Where to look for…
 

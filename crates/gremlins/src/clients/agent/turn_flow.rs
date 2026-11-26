@@ -21,7 +21,6 @@ use crate::clients::cancel::CancelToken;
 use crate::clients::conversation::Conversation;
 use crate::clients::error::ClientError;
 use crate::clients::format::{format_tool_call, trunc};
-use crate::clients::interactive::DebugOutcome;
 use crate::clients::protocol::{add_opt, CompletedRun, TurnStats, UsageStats};
 use crate::clients::tools::{self, AgentLoopRuntime};
 use gremlins_magic_bus::{emit_corr_event_async, EventKind};
@@ -206,13 +205,6 @@ pub(super) async fn handle_done_decision(
                         usage: Some(event_usage(state.usage_baseline.as_ref(), &usage)),
                     }) => {}
                 }
-                if state.interactive.is_attached() {
-                    state.interactive.finish_attachment(DebugOutcome::Done {
-                        text: result_text,
-                        summary: done_summary.clone(),
-                        usage: usage.clone(),
-                    });
-                }
             }
             let artifact =
                 state
@@ -249,7 +241,10 @@ pub(super) async fn handle_empty_turn(
     prefix: &str,
     cancel: &CancelToken,
 ) -> Result<EmptyTurnAction, ClientError> {
-    if state.interactive.is_attached() {
+    if state.interactive.inbox_paused() {
+        state
+            .conv
+            .record_turn(text, reasoning_items, &[], input_tokens, None);
         return Ok(EmptyTurnAction::ContinueLoop);
     }
 

@@ -175,42 +175,10 @@ pub trait Backend: Send + Sync {
         "unknown"
     }
 
-    /// Whether this backend accepts interactive operator commands.
-    /// Command backends cannot service debugger commands while running a process.
-    fn accepts_interactive_commands(&self) -> bool {
+    /// Whether a running execution can receive interactive commands.
+    fn accepts_commands(&self) -> bool {
         true
     }
-
-    /// Return the last `RunParams` that were used, for resume support.
-    fn last_run_params(&self) -> Result<RunParams, ClientError> {
-        Err(ClientError::Runtime {
-            message: "resume not supported".into(),
-        })
-    }
-
-    /// Resume the most recently used run. On a shared backend, use
-    /// [`Backend::resume_for`] to avoid selecting another invocation.
-    async fn resume(&self) -> Result<CompletedRun, ClientError> {
-        self.run(self.last_run_params()?, InteractiveSession::unattached())
-            .await
-    }
-
-    /// Resume a specific invocation, independent of later backend use.
-    /// Callers retain the invocation's output route, including its stage run ID.
-    /// A run ID alone cannot distinguish stages sharing a backend. Backends that
-    /// cannot select per-invocation state fail rather than resume another run.
-    async fn resume_for(
-        &self,
-        _route: &gremlins_magic_bus::CorrId,
-    ) -> Result<CompletedRun, ClientError> {
-        Err(ClientError::Runtime {
-            message: "invocation-specific resume not supported".into(),
-        })
-    }
-
-    /// Release invocation retry state when its owner will not resume it again.
-    /// Backends may retain the latest context for the legacy `resume` API.
-    fn release_invocation(&self, _route: &gremlins_magic_bus::CorrId) {}
 
     /// Reap all child processes for a given gremlin ID.
     fn reap_all(&self, _gremlin_id: &str) {}

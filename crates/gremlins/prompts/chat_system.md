@@ -57,15 +57,15 @@ this section — do not try to run them yourself.
 | `/resume <id>` | resume a gremlin |
 | `/log <id>` | show gremlin log |
 | `/watch` | show the running gremlins table; j/k/arrow keys select, Enter opens the selected gremlin's chat, s/r stop/resume, `Ctrl+O` toggles an inline live log |
-| `/attach <id> [stage]` / `/attach home` | select a stage conversation / detach and return home |
-| `/debug <stage_run_id>` / `/debug <run> <stage_run_id>` | select a concrete invocation in the same chat without pause-on-entry; interactive agent stages accept input, exec stages are read-only |
+| `/attach [run] [stage|stage_run_id]` / `/attach home` | select bus output / release local selection and return home |
+| `/debug <stage_run_id>` / `/debug <run> <stage_run_id>` | select a concrete invocation in the same chat without pause-on-entry; exact agent input binds on submission, exec stages are read-only |
 | `/skills` / `/skill <name>` | list / activate operator skills |
 | `/model` / `/model <spec>` / `/model clear` | show, set, or clear the TUI chat model (`model://provider/model` or `provider/model`) |
 | `/compact` | compact conversation history to reduce context usage |
 | `/chat` | chat is always active (type directly) |
 | `/clear` / `/new` | restart chat |
 | `/help` | show this help |
-| `/quit` | exit |
+| `/quit` | exit outside a selected execution; for a selected agent execution, resume autonomously |
 
 ### Keybindings
 
@@ -85,17 +85,27 @@ this section — do not try to run them yourself.
 ### Interaction model
 
 Chat is always active; `/chat` is not required. At idle home, plain text starts
-a chat turn. During a turn or in a selected interactive agent conversation,
-ordinary text corrects the same execution and resumes it, rather than starting
-a replacement execution. Exec stages are read-only. `/watch` Enter observes
-without pausing. `/debug <stage_run_id>` or `/debug <run> <stage_run_id>`
-selects a concrete invocation in the same chat, also without pause-on-entry.
+a chat turn. During a turn or in a selected agent conversation, ordinary text
+corrects the exact execution rather than starting a replacement execution.
+Exec stages are read-only. `/watch` Enter, `/attach`, and `/debug` select bus
+output without pausing execution or opening an input connection.
+`/debug <stage_run_id>` or `/debug <run> <stage_run_id>` selects a concrete
+invocation in the same chat. Native input binds lazily on submission; command
+receipts report delivery separately from bus output. An exact agent invocation
+enables the composer as a UI hint only: input can still reject a stale execution,
+an unsupported backend, or a competing controller. Selection is not input authority.
 This TUI-local selector is separate from the exact-ID, input-only CLI debug
 command and has no agent-executable CLI equivalent.
+Selected-execution controls are `/pause` to pause, `/step` or `/continue` to
+single-step one turn, and bare `/resume-execution` or `/quit` to resume
+autonomously. `/quit <reason>` or `/bail <reason>` bails the selected execution.
+These TUI controls differ from CLI debug stdin: CLI `/continue` resumes
+autonomously and CLI `/quit [reason]` always bails.
 Explicit run controls are `/stop <id>` and `/resume <id>` (watch: `s`/`r`).
-`/attach home` or switching away detaches, not cancels; home keeps streaming
-in the background while a stage is selected. Slash commands are handled locally
-by the TUI. Text composed in the external editor is
+`/exit`, `/attach home`, or switching away releases local selection without
+sending execution controls; home keeps streaming in the background while a
+stage is selected. `/attach` is a TUI selector, not a wire attachment operation.
+Slash commands are handled locally by the TUI. Text composed in the external editor is
 placed into the input bar for review and is only sent after the operator
 presses Enter.
 
@@ -115,6 +125,7 @@ to you. For run management, use the `gremlins` CLI through your Bash tool.
 | `/log <id>` | `gremlins log <id>` |
 | `/artifact <id> --list` / `/artifact <id> <uri>` | none — TUI-only |
 | `/watch` | `gremlins watch RUN` for read-only JSONL observation, not the TUI table |
+| `/attach` / `/debug` | none — TUI-only selectors; CLI `gremlins debug SOURCE INVOCATION` sends input, not selection |
 | `/model` | none — TUI-only |
 | `/compact` | none — TUI-only |
 | `/chat` | none — TUI-only |
@@ -141,8 +152,10 @@ Without `--snapshot`, it follows live output. `--snapshot` reads retained replay
 and exits at `replay_checkpoint`, even when the run stays live.
 
 Actual frames include `watched`, `run_started`, `stage_boundary`,
-`stage_transition`, display/output events, and `run_completed`, `run_failed`,
-`run_stopped`. Event frames carry `sequence` and `run_id`, with `stage_run_id`
+`stage_transition`, `stream_chunk`, `reasoning_chunk`, `tool_output_chunk`,
+`tool_result`, `exec_output`, and `run_completed`, `run_failed`, `run_stopped`.
+Display/lifecycle frames describe output and identity, not input readiness or
+a writable capability. Event frames carry `sequence` and `run_id`, with `stage_run_id`
 and stage metadata when available. A `stage_boundary` has `stage`, `stage_type`,
 and `active`. `history_gap` with reason `history_incomplete` and
 `replay_checkpoint` with `complete: false` mean incomplete retained history,

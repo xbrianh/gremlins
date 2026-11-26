@@ -18,7 +18,7 @@ themselves (`backends/`).
 | `agent_loop.rs` | `run_agent_loop` — the shared tool-calling loop used by every native agent backend (OpenAI, OpenRouter, xAI, Copilot, Anthropic, Azure OpenAI), plus `run_agent_loop_nested` for the `Task` tool. Streams model output, dispatches tool calls, classifies errors for retry (`ErrorClassifier`), and exposes `CancelToken` for `gremlins stop`. Reads its `turn-retry` and `timeout-retry` backoff schedules from `settings.yaml` via `crate::config`. |
 | `openai_protocol.rs` | Shared state and run/reap logic (`OpenAiRunState`, `run_openai_compat`, `reap_openai_compat`) for backends that speak the OpenAI completions protocol. |
 | `tools.rs` | Implements the seven native tools (`Bash`, `Edit`, `Read`, `Write`, `Grep`, `Glob`, `Landscape`) plus `Task`/`Done`, with sandboxing (`allowed_roots`) and the `AgentLoopRuntime` passed through the agent loop. |
-| `interactive.rs` | The published `InteractiveHandle` offers one debugger's pause to a leaf execution; chat registrations also hold a stable reservation slot for between-turn debugger requests. Each attachment owns its command channel and terminal result. Disconnect withdraws the request or wakes its receiver. Stream updates stay on the event bus. |
+| `interactive.rs` | Execution lifetime, immutable observation snapshots, and exact-identity input registration. Explicit controls own pause state; disconnect never resumes execution. Cancellation, replacement, session drop, and factory teardown revoke input and wake waiters. Stream updates stay on the event bus. |
 | `stream_json.rs` | Parses `stream-json` event lines (used by `cmd` backends) and extracts `StreamState` (cost, result text, error status). |
 | `log_util.rs` | `trunc` — single-purpose string truncation helper for log lines. |
 | `anthropic_bearer_http.rs` | `BearerHttpClient` — eager HTTP client wrapper that rewrites `x-api-key` → `Authorization: Bearer` for Azure's Anthropic-compatible API (cognitive services with Entra ID tokens). Used by `backends/anthropic.rs` for the per-attempt dynamic-auth path; the lazy variant used by `make_model` lives in `lazy_auth_http.rs`. |
@@ -34,7 +34,7 @@ themselves (`backends/`).
 | `backends/xai.rs` | `XaiBackend` — wraps `OpenAiRunState` for `api.x.ai`, default model `grok-4`. |
 | `backends/anthropic.rs` | `AnthropicBackend` — native Anthropic backend using rig's `Anthropic` provider with its own agent loop. Default model `claude-sonnet-4-6`. Supports direct API key/token auth, plus Azure Entra ID identity auth (client secret, CLI, managed identity, default chain); dynamic auth uses `anthropic_bearer_http.rs` per attempt and `lazy_auth_http.rs` for `make_model`. |
 | `backends/azure_openai.rs` | `AzureOpenAiBackend` — Azure OpenAI backend using rig's `OpenAI` provider with `AZURE` wire format and the Responses route (`POST /responses`). Has its own `AzureOpenAiRunState` (not `OpenAiRunState`) and calls `run_agent_loop` directly. Credentials come from env vars / `providers.yaml` (`azure-openai.*`); supports API key/token plus Entra ID identity auth via `token_provider.rs`, with `lazy_auth_http.rs` for `make_model` and `azure_openai_responses_http.rs` for Azure v1 routing. |
-| `backends/cmd.rs` | `CmdBackend` — drives an arbitrary external CLI (e.g. Claude Code) as a subprocess, parsing its `stream-json` output and tracking per-gremlin retry context. |
+| `backends/cmd.rs` | `CmdBackend` — drives an arbitrary external CLI (e.g. Claude Code) as a subprocess and parses its `stream-json` output. |
 
 ## Architecture
 
@@ -106,5 +106,5 @@ its own JSON event stream instead (`stream_json.rs`).
 | Change retry/backoff behavior | `crates/gremlins/src/config.rs` (`backoff:` schedules in `settings.yaml`) and `agent_loop.rs` (retry semantics), or a backend's `ErrorClassifier` |
 | Change the system prompt | `config.rs` |
 | Understand `task-models` overrides | `task.rs::TaskModelSelector` |
-| Understand supervisor pause/cancel/resume | `interactive.rs`, `agent_loop.rs::CancelToken` |
+| Understand execution input and pause/cancel/resume | `execution_input.rs`, `interactive.rs`, `agent/interactive.rs`, `cancel.rs` |
 | Add a field to a run's result | `protocol.rs::CompletedRun` / `UsageStats` |

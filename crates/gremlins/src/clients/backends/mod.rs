@@ -120,13 +120,6 @@ macro_rules! declare_openai_backend {
                 .await
             }
 
-            fn last_run_params(
-                &self,
-            ) -> Result<$crate::clients::backend::RunParams, $crate::clients::backend::ClientError>
-            {
-                self.state.last_run_params()
-            }
-
             fn reap_all(&self, gremlin_id: &str) {
                 $crate::clients::openai_protocol::reap_openai_compat(&self.state, gremlin_id);
             }
@@ -203,24 +196,17 @@ backends! {
 ///
 /// The `anthropic`, `azure-openai`, and `copilot` backends all store their
 /// shared run state in a [`NativeRunState`](crate::clients::native::NativeRunState)
-/// and expose the same four one-line methods — `last_run_params`, `reap_all`,
+/// and expose the same three one-line methods — `reap_all`,
 /// `total_cost_usd`, and `resolved_params`.  They differ only in the field
 /// path to that state, so the macro takes the path as a dotted identifier
 /// chain (`state` for the former two, `state.native` for copilot) and emits
-/// the four methods verbatim inside a `Backend` impl.
+/// the three methods verbatim inside a `Backend` impl.
 ///
 /// The `self` in the generated bodies refers to the enclosing method's
 /// receiver; the path argument is passed separately precisely so it is free
 /// of the `self` keyword (which cannot cross a macro boundary as an argument).
 macro_rules! delegate_native_run_state {
     ($($field:ident).+) => {
-        fn last_run_params(
-            &self,
-        ) -> Result<$crate::clients::backend::RunParams, $crate::clients::backend::ClientError>
-        {
-            self.$($field).+.last_run_params()
-        }
-
         fn reap_all(&self, gremlin_id: &str) {
             self.$($field).+.reap(gremlin_id)
         }

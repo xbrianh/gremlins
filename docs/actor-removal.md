@@ -1,76 +1,48 @@
-# Actor-removal tracker
+# Plan11 removal tracker
 
-## Run-attachment watch replay — conservative implementation
+The inspected worktree retires legacy debugger attachment ownership. This is a
+code/docs inventory, not a rollout claim. See the [protocol](attachment-protocol.md)
+and [production/test audit](plan11-code-audit.md). The audit explicitly separates
+committed HEAD from concurrent uncommitted removal changes.
 
-This tracks the run-watch retirement slice, not completion of actor removal or
-rollout. See [attachment protocol](attachment-protocol.md) for the wire contract.
+## Current ownership
 
-## Implemented behavior
+- Bus `watch` is passive display/lifecycle observation, including invocation
+  identity and descriptive `stage_type`, never a writable capability.
+- Exact execution input owns message/pause/step/resume/bail delivery through one
+  bounded inbox with final receipts. The supervisor exclusively claims an exact
+  invocation; releasing a claim does not resume or cancel it.
+- Targeted chat uses that same registration, inbox, and claim. Untargeted chat is
+  an idle-session prompt only. Session cancellation and persisted-run lifecycle
+  operations remain distinct.
+- Old wire `attach` is rejected on global and verified session auxiliary sockets.
+  There is no pause-on-entry debugger lease or successor fallback. TUI `/attach`
+  remains a selection command, not a daemon operation.
+- Producer stage boundaries remain; legacy stage-stream and debugger helpers do
+  not define the display/input path.
 
-- `stage_stream` is removed; producer-side stage boundaries remain.
-- Passive native run attachment filters exact correlation/payload run ids,
-  forwards agent/exec display and lifecycle records, and reports live lag without
-  producer backpressure. Conversation debugger attachment remains separate.
-- Complete native replay has an exact atomic snapshot/live cut. Replay requests
-  negotiate `replay_checkpoint` in the `attached` capabilities; the client rejects
-  missing capability instead of waiting indefinitely. Native historical and live
-  frames carry process-local emission sequences.
-- The journal retains at most 16,384 records per exact run and 65,536 globally,
-  with bounded retained-run bookkeeping. Prompt-request payloads are omitted.
-  Eviction/omission yields explicit gaps and conservative checkpoint completeness.
-- CLI snapshot collection is bounded to 65,536 frames; the socket-reader queue
-  is bounded to 256 frames.
-- Incomplete/unavailable replay reads a one-shot persisted tail of up to 500 lines,
-  including after daemon restart. Active fallback displays disk history and every
-  collected original native frame, then continues the original live subscription.
-  A visible discontinuity/possible-overlap warning explains that duplicates are
-  preserved. Disk read errors do not discard native frames or stop live following.
-- No replacement attachment, second live log follow, sequence suppression,
-  content matching, frozen anchor, or occurrence-budget deduplication is used.
-- Exec fallback reads raw logs with preamble/footer metadata preserved. Legacy
-  `.events` sidecars are ignored and new ones are not written: process-local
-  sequence IDs can collide across daemon epochs.
-- Bounded blob/log tails assert no sequence coverage. The compatibility replay-cut
-  helper returns zero, not a persisted watermark. Ordinary full log follow still
-  uses its persisted `through_sequence` cut for `log_line`; watch fallback does not.
-- Bus journal insertion, snapshot/subscription registration, and nonblocking
-  delivery are synchronized. Persistence callbacks and disk reads run outside
-  the bus mutex; persistence and publication are not an atomic transaction.
+## Replay guarantees and limits
 
-## Targeted validation scope
+Complete retained replay has an atomic native snapshot/live cut. History is
+bounded to 16,384 records per run and 65,536 globally, with explicit gaps and
+conservative completeness after omission/eviction. Live observation is bounded
+and lag-tolerant; an exact replay cut does not make slow live viewers lossless.
 
-Targeted tests in the tree cover the following behavior. This is a coverage
-inventory, not a fresh execution report; no tests were run for this docs-only
-update. Historical full-suite counts and blanket passing claims are not evidence
-for the current implementation.
+The TUI's one-shot 500-line persisted fallback preserves every native frame and
+warns of possible overlap. It does not deduplicate or open a replacement live
+subscription. Exec fallback ignores legacy sidecars and reads raw logs. Bounded
+tails assert no sequence coverage; disk persistence is not atomic with bus
+publication. Exact persisted invocation-scoped agent merging remains deferred.
+Record/line bounds are not payload-byte bounds; retained text can be sensitive.
+Sequences are process-local, not durable restart cursors.
 
-- `gremlins-magic-bus` history tests: eviction, bounded bookkeeping, omission,
-  completeness watermarks, and snapshot/live separation, including identical
-  payloads on either side. Bus tests also cover reentrant persistence callbacks.
-- Supervisor attachment tests: replay capability acknowledgment, checkpoint
-  framing, live sequences, exact run filtering, and lag-tolerant observation.
-- CLI client/watch replay tests: missing-capability rejection, bounded collection,
-  incomplete fallback retaining original frames and repeated output, visible
-  overlap warnings, disk-read failure handling, and original socket lifetime.
-- Executor blob/session tests: raw exec tails, ignored legacy/malformed sidecars,
-  retained raw metadata, bounded tails, and null coverage fields.
-- Standalone debug subprocess test: conversation-scope debugger routing.
+## Validation inventory
 
-Only targeted test results explicitly reported for a given change should be
-recorded as executed results. No full-suite, rollout-complete, or manual
-watch/debug/restart verification is claimed here.
-
-## Deferred work and limits
-
-- Exact execution-scoped agent history/live merging is **deferred**. A stage
-  transcript can contain other executions; disk fallback is not an exact merge.
-- Incomplete fallback intentionally permits overlap. It does not promise lossless
-  coverage across arbitrary gaps, concurrent persistence, or daemon restart.
-- Limits are records/lines, not a total payload-byte bound. Individual records can
-  be large and retained display text can be sensitive.
-- Completeness is conservative process-global after any eviction/omission. There
-  are no unbounded per-run tombstones or durable cross-restart sequence cursors.
-- Passive live observation remains lag-tolerant; an exact snapshot/live cut does
-  not guarantee subsequent live delivery to a slow viewer.
-- Broader actor-removal completion and operational/manual rollout validation
-  remain outside this slice.
+This docs-only update ran no Rust tests, full suite, or manual watch/debug/restart
+checks. Existing tests are coverage evidence only after their results are reported
+for the relevant code revision. Relevant current surfaces include bus filtered
+history/live routing, supervisor exact input/claims and socket watch, targeted
+corrections and idle chat, CLI exact debug receipts, and TUI watch replay/fallback.
+Obsolete conversation-attachment fixtures are not the current protocol contract.
+The audit records removed files and remaining validation/display ownership overlap;
+it does not infer equivalent replacement coverage from file deletion.

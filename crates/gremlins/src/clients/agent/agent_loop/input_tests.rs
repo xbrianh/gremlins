@@ -3,9 +3,7 @@ use crate::clients::cancel::CancelToken;
 use crate::clients::execution_input::{
     Delivery, ExecutionIdentity, InputControl, InputRegistry, InputRejected,
 };
-use crate::clients::interactive::{
-    InteractiveCommand, InteractiveSession, InteractiveSessionFactory,
-};
+use crate::clients::interactive::{InteractiveSession, InteractiveSessionFactory};
 use crate::conversation::new_blank_conversation;
 use futures::{stream, StreamExt};
 use rig_core::completion::{CompletionRequest, Message};
@@ -29,7 +27,7 @@ fn finish() -> Vec<Event> {
     ]
 }
 
-// Like interrupted_tests::HeldResponse: drain a prefix, then signal a pending tail.
+// Drain a prefix, then signal a pending tail.
 #[derive(Clone, Default)]
 struct Scripted {
     requests: Arc<Mutex<Vec<CompletionRequest>>>,
@@ -37,7 +35,7 @@ struct Scripted {
     release: Arc<Notify>,
     held: bool,
     write_after_hold: bool,
-    held_tool: bool,
+    held_tools: bool,
     // Additional nonterminal turns for queued-step regressions.
     extra_write_turns: usize,
 }
@@ -47,6 +45,24 @@ impl Transport<MockScript> for Scripted {
         let mut requests = self.requests.lock().unwrap();
         requests.push(request);
         let n = requests.len();
+        if self.held_tools && n == 1 {
+            let events = vec![
+                Event::tool_call(
+                    "effect",
+                    "Bash",
+                    json!({"command":"printf 'effect\\n' >> effects.txt", "timeout":10}),
+                ),
+                Event::tool_call(
+                    "held",
+                    "Bash",
+                    json!({"command":"printf 'started\\n' >> starts.txt; while [ ! -f release ]; do sleep 0.01; done; printf 'completed\\n'", "timeout":10}),
+                ),
+                Event::final_response_with_default_usage(),
+            ];
+            return Opening::ready(Opened::new(
+                stream::iter(events).map(MockFrame::Event).map(Ok),
+            ));
+        }
         if self.held && n == 1 {
             let stalled = self.stalled.clone();
             let release = self.release.clone();
@@ -65,22 +81,15 @@ impl Transport<MockScript> for Scripted {
             )]))));
         }
         let write_turn = if self.held { 2 } else { 1 };
-        let events = if (!self.held || self.write_after_hold)
+        let events = if !self.held_tools
+            && (!self.held || self.write_after_hold)
             && (write_turn..=write_turn + self.extra_write_turns).contains(&n)
         {
-            let tool = if self.held_tool {
-                Event::tool_call(
-                    "held-tool",
-                    "Bash",
-                    json!({"command": "touch tool-entered; for i in $(seq 1 1000); do if [ -f tool-release ]; then touch tool-finished; exit 0; fi; sleep 0.01; done; exit 1"}),
-                )
-            } else {
-                Event::tool_call(
-                    "write",
-                    "Write",
-                    json!({"file_path":"stepped.txt", "content":"one step"}),
-                )
-            };
+            let tool = Event::tool_call(
+                "write",
+                "Write",
+                json!({"file_path":"stepped.txt", "content":"one step"}),
+            );
             vec![tool, Event::final_response_with_default_usage()]
         } else {
             assert!(
@@ -124,6 +133,140 @@ fn session(
         .unwrap();
     session.bind_input(registry, id.clone(), true, Some(cancel));
     session
+}
+
+async fn wait_for_tool_batch(dir: &std::path::Path) {
+    timeout(WAIT, async {
+        while !dir.join("starts.txt").exists() || !dir.join("effects.txt").exists() {
+            sleep(Duration::from_millis(5)).await;
+        }
+    })
+    .await
+    .unwrap();
+}
+
+#[tokio::test]
+async fn held_tool_correction_waits_for_batch_without_repeating_side_effects() {
+    let dir = tempfile::tempdir().unwrap();
+    let registry = InputRegistry::default();
+    let (mut factory, handle) = InteractiveSessionFactory::for_pipeline();
+    handle.set_input_registry(registry.clone());
+    let id = identity("input-held-tool-correction", "first");
+    let cancel = CancelToken::new();
+    let session = session(&mut factory, &registry, &id, &cancel);
+    let transport = Scripted {
+        held_tools: true,
+        ..Default::default()
+    };
+    let mut agent = tokio::spawn(run_agent_loop(
+        Model::new(MockScript::default(), transport.clone()).erase(),
+        PROMPT,
+        context(dir.path(), &id.run_id),
+        cancel,
+        loop_opts(None),
+        session,
+    ));
+    wait_for_tool_batch(dir.path()).await;
+    let sender = handle.input_sender(&id).unwrap();
+    let mut receipt = sender
+        .try_send(
+            "correction".into(),
+            "Incorporate the completed tool results.".into(),
+        )
+        .unwrap();
+    drop(sender);
+    assert!(timeout(QUIET, &mut agent).await.is_err());
+    assert_eq!(transport.requests.lock().unwrap().len(), 1);
+    assert_eq!(
+        receipt.try_recv(),
+        Err(tokio::sync::oneshot::error::TryRecvError::Empty)
+    );
+    std::fs::write(dir.path().join("release"), "").unwrap();
+    timeout(WAIT, agent).await.unwrap().unwrap().unwrap();
+    assert_eq!(receipt.try_recv(), Ok(Delivery::Delivered));
+    assert_eq!(
+        std::fs::read_to_string(dir.path().join("effects.txt")).unwrap(),
+        "effect\n"
+    );
+    assert_eq!(
+        std::fs::read_to_string(dir.path().join("starts.txt")).unwrap(),
+        "started\n"
+    );
+    let requests = transport.requests.lock().unwrap();
+    assert_eq!(requests.len(), 2);
+    let history: Vec<_> = requests[1]
+        .chat_history
+        .iter()
+        .map(|m| m.as_ref().clone())
+        .collect();
+    let rendered = format!("{history:?}");
+    assert_eq!(
+        rendered
+            .matches("[operator]: Incorporate the completed tool results.")
+            .count(),
+        1
+    );
+    assert!(rendered.contains("completed"));
+    assert!(rendered.find("completed").unwrap() < rendered.find("[operator]:").unwrap());
+    assert!(rendered.contains("effect"));
+}
+
+#[tokio::test]
+async fn held_tool_cancellation_and_retirement_wake_with_queued_correction() {
+    for termination in ["cancel", "drop", "replace"] {
+        let dir = tempfile::tempdir().unwrap();
+        let registry = InputRegistry::default();
+        let (mut factory, handle) = InteractiveSessionFactory::for_pipeline();
+        handle.set_input_registry(registry.clone());
+        let id = identity(&format!("input-held-tool-{termination}"), "first");
+        let cancel = CancelToken::new();
+        let session = session(&mut factory, &registry, &id, &cancel);
+        let transport = Scripted {
+            held_tools: true,
+            ..Default::default()
+        };
+        let mut agent = tokio::spawn(run_agent_loop(
+            Model::new(MockScript::default(), transport.clone()).erase(),
+            PROMPT,
+            context(dir.path(), &id.run_id),
+            cancel.clone(),
+            loop_opts(None),
+            session,
+        ));
+        wait_for_tool_batch(dir.path()).await;
+        let sender = handle.input_sender(&id).unwrap();
+        let mut receipt = sender
+            .try_send("correction".into(), "Do not replay tools.".into())
+            .unwrap();
+        assert!(timeout(QUIET, &mut agent).await.is_err());
+        assert_eq!(
+            receipt.try_recv(),
+            Err(tokio::sync::oneshot::error::TryRecvError::Empty)
+        );
+        let _successor = match termination {
+            "cancel" => {
+                cancel.cancel();
+                None
+            }
+            "drop" => {
+                drop(factory);
+                None
+            }
+            _ => Some(
+                factory
+                    .next_session_for_stage("replacement", true, None)
+                    .unwrap(),
+            ),
+        };
+        assert!(matches!(
+            timeout(WAIT, agent).await.unwrap().unwrap(),
+            Err(crate::clients::error::ClientError::Cancelled)
+        ));
+        assert_eq!(cancel.is_cancelled(), termination == "cancel");
+        assert_eq!(transport.requests.lock().unwrap().len(), 1);
+        assert!(!dir.path().join("release").exists());
+        assert!(handle.input_sender(&id).is_none());
+    }
 }
 
 #[tokio::test]
@@ -422,448 +565,6 @@ async fn queued_then_cancelled_before_poll_never_reaches_same_named_successor() 
     let requests = transport.requests.lock().unwrap();
     assert_eq!(requests.len(), 1);
     assert!(!format!("{:?}", requests[0]).contains("MUST NOT REACH MODEL"));
-}
-
-#[tokio::test]
-async fn legacy_pause_accepts_inbox_correction_and_bail_without_debugger_action() {
-    let dir = tempfile::tempdir().unwrap();
-    let registry = InputRegistry::default();
-    let (mut factory, handle) = InteractiveSessionFactory::for_pipeline();
-    handle.set_input_registry(registry.clone());
-    let id = identity("legacy-pause-inbox", "first");
-    let cancel = CancelToken::new();
-    let session = session(&mut factory, &registry, &id, &cancel);
-    let transport = Scripted {
-        held: true,
-        ..Default::default()
-    };
-    let mut agent = tokio::spawn(run_agent_loop(
-        Model::new(MockScript::default(), transport.clone()).erase(),
-        PROMPT,
-        context(dir.path(), &id.run_id),
-        cancel,
-        loop_opts(None),
-        session,
-    ));
-    timeout(WAIT, transport.stalled.notified()).await.unwrap();
-    let mut debugger = handle.target().attach_debugger().unwrap();
-    timeout(WAIT, &mut debugger.ready).await.unwrap().unwrap();
-    let sender = handle.input_sender(&id).unwrap();
-    let correction = sender
-        .try_send("correction".into(), "Keep waiting.".into())
-        .unwrap();
-    assert_eq!(
-        timeout(WAIT, correction).await.unwrap().unwrap(),
-        Delivery::Delivered
-    );
-    assert!(timeout(QUIET, &mut agent).await.is_err());
-    assert_eq!(transport.requests.lock().unwrap().len(), 1);
-    let bail = sender
-        .try_control("bail".into(), InputControl::Bail)
-        .unwrap();
-    assert_eq!(
-        timeout(WAIT, bail).await.unwrap().unwrap(),
-        Delivery::Delivered
-    );
-    assert!(matches!(timeout(WAIT, agent).await.unwrap().unwrap(),
-        Err(crate::clients::error::ClientError::Bail { reason }) if reason == "operator bailed"));
-    assert_eq!(transport.requests.lock().unwrap().len(), 1);
-}
-
-#[tokio::test]
-async fn inbox_pause_accepts_debugger_ready_but_legacy_commands_and_correction_do_not_release_it() {
-    let dir = tempfile::tempdir().unwrap();
-    let registry = InputRegistry::default();
-    let (mut factory, handle) = InteractiveSessionFactory::for_pipeline();
-    handle.set_input_registry(registry.clone());
-    let id = identity("inbox-pause-debugger", "first");
-    let cancel = CancelToken::new();
-    let session = session(&mut factory, &registry, &id, &cancel);
-    let transport = Scripted {
-        held: true,
-        ..Default::default()
-    };
-    let mut agent = tokio::spawn(run_agent_loop(
-        Model::new(MockScript::default(), transport.clone()).erase(),
-        PROMPT,
-        context(dir.path(), &id.run_id),
-        cancel,
-        loop_opts(None),
-        session,
-    ));
-    timeout(WAIT, transport.stalled.notified()).await.unwrap();
-    let sender = handle.input_sender(&id).unwrap();
-    let pause = sender
-        .try_control("pause".into(), InputControl::Pause)
-        .unwrap();
-    assert_eq!(
-        timeout(WAIT, pause).await.unwrap().unwrap(),
-        Delivery::Delivered
-    );
-    let mut debugger = handle.target().attach_debugger().unwrap();
-    timeout(WAIT, &mut debugger.ready).await.unwrap().unwrap();
-    debugger.send(InteractiveCommand::RunTurn).await.unwrap();
-    assert!(timeout(QUIET, &mut agent).await.is_err());
-    assert_eq!(transport.requests.lock().unwrap().len(), 1);
-    debugger.send(InteractiveCommand::Quit).await.unwrap();
-    assert!(timeout(QUIET, &mut agent).await.is_err());
-    assert_eq!(transport.requests.lock().unwrap().len(), 1);
-    let correction = sender
-        .try_send("correction".into(), "Still paused.".into())
-        .unwrap();
-    assert_eq!(
-        timeout(WAIT, correction).await.unwrap().unwrap(),
-        Delivery::Delivered
-    );
-    assert!(timeout(QUIET, &mut agent).await.is_err());
-    assert_eq!(transport.requests.lock().unwrap().len(), 1);
-    let resume = sender
-        .try_control("resume".into(), InputControl::Resume)
-        .unwrap();
-    assert_eq!(
-        timeout(WAIT, resume).await.unwrap().unwrap(),
-        Delivery::Delivered
-    );
-    timeout(WAIT, agent).await.unwrap().unwrap().unwrap();
-    let requests = transport.requests.lock().unwrap();
-    assert_eq!(requests.len(), 2);
-    assert!(requests[1]
-        .chat_history
-        .iter()
-        .any(|m| m.as_ref() == &Message::user("[operator]: Still paused.")));
-}
-
-#[tokio::test]
-async fn released_debugger_turn_cannot_bypass_successor_pause_on_inbox_resume() {
-    for quit in [true, false] {
-        let dir = tempfile::tempdir().unwrap();
-        let registry = InputRegistry::default();
-        let (mut factory, handle) = InteractiveSessionFactory::for_pipeline();
-        handle.set_input_registry(registry.clone());
-        let id = identity("inbox-resume-successor", "first");
-        let cancel = CancelToken::new();
-        let session = session(&mut factory, &registry, &id, &cancel);
-        let transport = Scripted {
-            held: true,
-            ..Default::default()
-        };
-        let mut agent = tokio::spawn(run_agent_loop(
-            Model::new(MockScript::default(), transport.clone()).erase(),
-            PROMPT,
-            context(dir.path(), &id.run_id),
-            cancel,
-            loop_opts(None),
-            session,
-        ));
-        timeout(WAIT, transport.stalled.notified()).await.unwrap();
-        let sender = handle.input_sender(&id).unwrap();
-        let pause = sender
-            .try_control("pause".into(), InputControl::Pause)
-            .unwrap();
-        assert_eq!(
-            timeout(WAIT, pause).await.unwrap().unwrap(),
-            Delivery::Delivered
-        );
-        let mut first = handle.target().attach_debugger().unwrap();
-        timeout(WAIT, &mut first.ready).await.unwrap().unwrap();
-        first.send(InteractiveCommand::RunTurn).await.unwrap();
-        // Let the turn grant reach the inbox gate before releasing its owner.
-        assert!(timeout(QUIET, &mut agent).await.is_err());
-        assert_eq!(transport.requests.lock().unwrap().len(), 1);
-        if quit {
-            first.send(InteractiveCommand::Quit).await.unwrap();
-            timeout(WAIT, &mut first.ended).await.unwrap().unwrap();
-        }
-        drop(first);
-        let mut successor = handle.target().attach_debugger().unwrap();
-        timeout(WAIT, &mut successor.ready).await.unwrap().unwrap();
-        let resume = sender
-            .try_control("resume".into(), InputControl::Resume)
-            .unwrap();
-        assert_eq!(
-            timeout(WAIT, resume).await.unwrap().unwrap(),
-            Delivery::Delivered
-        );
-        assert!(timeout(QUIET, &mut agent).await.is_err());
-        assert_eq!(transport.requests.lock().unwrap().len(), 1);
-
-        successor.send(InteractiveCommand::RunTurn).await.unwrap();
-        timeout(WAIT, agent).await.unwrap().unwrap().unwrap();
-        assert_eq!(transport.requests.lock().unwrap().len(), 2);
-    }
-}
-
-#[tokio::test]
-async fn correction_while_legacy_paused_preserves_pending_inbox_step() {
-    let dir = tempfile::tempdir().unwrap();
-    let registry = InputRegistry::default();
-    let (mut factory, handle) = InteractiveSessionFactory::for_pipeline();
-    handle.set_input_registry(registry.clone());
-    let id = identity("mixed-gates-pending-step", "first");
-    let cancel = CancelToken::new();
-    let session = session(&mut factory, &registry, &id, &cancel);
-    let transport = Scripted {
-        held: true,
-        write_after_hold: true,
-        ..Default::default()
-    };
-    let mut agent = tokio::spawn(run_agent_loop(
-        Model::new(MockScript::default(), transport.clone()).erase(),
-        PROMPT,
-        context(dir.path(), &id.run_id),
-        cancel,
-        loop_opts(None),
-        session,
-    ));
-    timeout(WAIT, transport.stalled.notified()).await.unwrap();
-    let sender = handle.input_sender(&id).unwrap();
-    let pause = sender
-        .try_control("pause".into(), InputControl::Pause)
-        .unwrap();
-    assert_eq!(
-        timeout(WAIT, pause).await.unwrap().unwrap(),
-        Delivery::Delivered
-    );
-    let mut debugger = handle.target().attach_debugger().unwrap();
-    timeout(WAIT, &mut debugger.ready).await.unwrap().unwrap();
-    let step = sender
-        .try_control("step".into(), InputControl::Step)
-        .unwrap();
-    assert_eq!(
-        timeout(WAIT, step).await.unwrap().unwrap(),
-        Delivery::Delivered
-    );
-    assert!(timeout(QUIET, &mut agent).await.is_err());
-    assert_eq!(transport.requests.lock().unwrap().len(), 1);
-    let correction = sender
-        .try_send("correction".into(), "Preserve the granted step.".into())
-        .unwrap();
-    assert_eq!(
-        timeout(WAIT, correction).await.unwrap().unwrap(),
-        Delivery::Delivered
-    );
-    assert!(timeout(QUIET, &mut agent).await.is_err());
-    assert_eq!(transport.requests.lock().unwrap().len(), 1);
-    assert!(!dir.path().join("stepped.txt").exists());
-
-    debugger.send(InteractiveCommand::RunTurn).await.unwrap();
-    timeout(WAIT, async {
-        while !dir.path().join("stepped.txt").exists() {
-            sleep(Duration::from_millis(5)).await;
-        }
-    })
-    .await
-    .unwrap();
-    assert!(timeout(QUIET, &mut agent).await.is_err());
-    {
-        let requests = transport.requests.lock().unwrap();
-        assert_eq!(requests.len(), 2);
-        assert!(requests[1]
-            .chat_history
-            .iter()
-            .any(|m| m.as_ref() == &Message::user("[operator]: Preserve the granted step.")));
-    }
-    assert_eq!(
-        std::fs::read_to_string(dir.path().join("stepped.txt")).unwrap(),
-        "one step"
-    );
-    let resume = sender
-        .try_control("resume".into(), InputControl::Resume)
-        .unwrap();
-    assert_eq!(
-        timeout(WAIT, resume).await.unwrap().unwrap(),
-        Delivery::Delivered
-    );
-    assert!(timeout(QUIET, &mut agent).await.is_err());
-    assert_eq!(transport.requests.lock().unwrap().len(), 2);
-    debugger.send(InteractiveCommand::Quit).await.unwrap();
-    timeout(WAIT, agent).await.unwrap().unwrap().unwrap();
-    assert_eq!(transport.requests.lock().unwrap().len(), 3);
-}
-
-#[tokio::test]
-async fn correction_after_legacy_step_does_not_authorize_next_request() {
-    let dir = tempfile::tempdir().unwrap();
-    let registry = InputRegistry::default();
-    let (mut factory, handle) = InteractiveSessionFactory::for_pipeline();
-    handle.set_input_registry(registry.clone());
-    let id = identity("legacy-step-late-correction", "first");
-    let cancel = CancelToken::new();
-    let session = session(&mut factory, &registry, &id, &cancel);
-    let transport = Scripted {
-        held: true,
-        write_after_hold: true,
-        ..Default::default()
-    };
-    let mut agent = tokio::spawn(run_agent_loop(
-        Model::new(MockScript::default(), transport.clone()).erase(),
-        PROMPT,
-        context(dir.path(), &id.run_id),
-        cancel,
-        loop_opts(None),
-        session,
-    ));
-    timeout(WAIT, transport.stalled.notified()).await.unwrap();
-    let mut debugger = handle.target().attach_debugger().unwrap();
-    timeout(WAIT, &mut debugger.ready).await.unwrap().unwrap();
-    debugger.send(InteractiveCommand::RunTurn).await.unwrap();
-    timeout(WAIT, async {
-        while !dir.path().join("stepped.txt").exists() {
-            sleep(Duration::from_millis(5)).await;
-        }
-    })
-    .await
-    .unwrap();
-    assert!(timeout(QUIET, &mut agent).await.is_err());
-    assert_eq!(transport.requests.lock().unwrap().len(), 2);
-    let sender = handle.input_sender(&id).unwrap();
-    let correction = sender
-        .try_send("late".into(), "For the next authorized turn.".into())
-        .unwrap();
-    assert_eq!(
-        timeout(WAIT, correction).await.unwrap().unwrap(),
-        Delivery::Delivered
-    );
-    assert!(timeout(QUIET, &mut agent).await.is_err());
-    assert_eq!(transport.requests.lock().unwrap().len(), 2);
-    debugger.send(InteractiveCommand::RunTurn).await.unwrap();
-    timeout(WAIT, agent).await.unwrap().unwrap().unwrap();
-    let requests = transport.requests.lock().unwrap();
-    assert_eq!(requests.len(), 3);
-    assert!(format!("{:?}", requests[2].chat_history)
-        .contains("[operator]: For the next authorized turn."));
-}
-
-#[tokio::test]
-async fn correction_during_legacy_step_tool_does_not_authorize_next_request() {
-    let dir = tempfile::tempdir().unwrap();
-    let registry = InputRegistry::default();
-    let (mut factory, handle) = InteractiveSessionFactory::for_pipeline();
-    handle.set_input_registry(registry.clone());
-    let id = identity("legacy-step-tool-correction", "first");
-    let cancel = CancelToken::new();
-    let session = session(&mut factory, &registry, &id, &cancel);
-    let transport = Scripted {
-        held: true,
-        write_after_hold: true,
-        held_tool: true,
-        ..Default::default()
-    };
-    let mut agent = tokio::spawn(run_agent_loop(
-        Model::new(MockScript::default(), transport.clone()).erase(),
-        PROMPT,
-        context(dir.path(), &id.run_id),
-        cancel,
-        loop_opts(None),
-        session,
-    ));
-    timeout(WAIT, transport.stalled.notified()).await.unwrap();
-    let mut debugger = handle.target().attach_debugger().unwrap();
-    timeout(WAIT, &mut debugger.ready).await.unwrap().unwrap();
-    debugger.send(InteractiveCommand::RunTurn).await.unwrap();
-    timeout(WAIT, async {
-        while !dir.path().join("tool-entered").exists() {
-            sleep(Duration::from_millis(5)).await;
-        }
-    })
-    .await
-    .unwrap();
-    assert_eq!(transport.requests.lock().unwrap().len(), 2);
-    assert!(!dir.path().join("tool-finished").exists());
-    let sender = handle.input_sender(&id).unwrap();
-    let correction = sender
-        .try_send(
-            "during-tool".into(),
-            "Correction while the tool is blocked.".into(),
-        )
-        .unwrap();
-    std::fs::write(dir.path().join("tool-release"), "").unwrap();
-    assert_eq!(
-        timeout(WAIT, correction).await.unwrap().unwrap(),
-        Delivery::Delivered
-    );
-    timeout(WAIT, async {
-        while !dir.path().join("tool-finished").exists() {
-            sleep(Duration::from_millis(5)).await;
-        }
-    })
-    .await
-    .unwrap();
-    assert!(timeout(QUIET, &mut agent).await.is_err());
-    assert_eq!(transport.requests.lock().unwrap().len(), 2);
-    debugger.send(InteractiveCommand::RunTurn).await.unwrap();
-    timeout(WAIT, agent).await.unwrap().unwrap().unwrap();
-    let requests = transport.requests.lock().unwrap();
-    assert_eq!(requests.len(), 3);
-    assert!(format!("{:?}", requests[2].chat_history)
-        .contains("[operator]: Correction while the tool is blocked."));
-}
-
-#[tokio::test]
-async fn two_legacy_run_turns_while_inbox_paused_survive_resume() {
-    let dir = tempfile::tempdir().unwrap();
-    let registry = InputRegistry::default();
-    let (mut factory, handle) = InteractiveSessionFactory::for_pipeline();
-    handle.set_input_registry(registry.clone());
-    let id = identity("inbox-paused-legacy-grants", "first");
-    let cancel = CancelToken::new();
-    let session = session(&mut factory, &registry, &id, &cancel);
-    let transport = Scripted {
-        held: true,
-        write_after_hold: true,
-        extra_write_turns: 1,
-        ..Default::default()
-    };
-    let mut agent = tokio::spawn(run_agent_loop(
-        Model::new(MockScript::default(), transport.clone()).erase(),
-        PROMPT,
-        context(dir.path(), &id.run_id),
-        cancel,
-        loop_opts(None),
-        session,
-    ));
-    timeout(WAIT, transport.stalled.notified()).await.unwrap();
-    let sender = handle.input_sender(&id).unwrap();
-    let pause = sender
-        .try_control("pause".into(), InputControl::Pause)
-        .unwrap();
-    assert_eq!(
-        timeout(WAIT, pause).await.unwrap().unwrap(),
-        Delivery::Delivered
-    );
-    let mut debugger = handle.target().attach_debugger().unwrap();
-    timeout(WAIT, &mut debugger.ready).await.unwrap().unwrap();
-    debugger.send(InteractiveCommand::RunTurn).await.unwrap();
-    debugger.send(InteractiveCommand::RunTurn).await.unwrap();
-    assert!(timeout(QUIET, &mut agent).await.is_err());
-    assert_eq!(transport.requests.lock().unwrap().len(), 1);
-    assert!(!dir.path().join("stepped.txt").exists());
-
-    let resume = sender
-        .try_control("resume".into(), InputControl::Resume)
-        .unwrap();
-    assert_eq!(
-        timeout(WAIT, resume).await.unwrap().unwrap(),
-        Delivery::Delivered
-    );
-    timeout(WAIT, async {
-        while transport.requests.lock().unwrap().len() < 3 {
-            sleep(Duration::from_millis(5)).await;
-        }
-    })
-    .await
-    .unwrap();
-    assert!(timeout(QUIET, &mut agent).await.is_err());
-    assert_eq!(transport.requests.lock().unwrap().len(), 3);
-    assert_eq!(
-        std::fs::read_to_string(dir.path().join("stepped.txt")).unwrap(),
-        "one step"
-    );
-
-    // Inbox resume must not release the debugger after its two grants are spent.
-    debugger.send(InteractiveCommand::RunTurn).await.unwrap();
-    timeout(WAIT, agent).await.unwrap().unwrap().unwrap();
-    assert_eq!(transport.requests.lock().unwrap().len(), 4);
 }
 
 #[tokio::test]

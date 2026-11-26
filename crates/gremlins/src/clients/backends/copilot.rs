@@ -643,7 +643,7 @@ impl Backend for CopilotBackend {
         params: RunParams,
         interactive: InteractiveSession,
     ) -> Result<CompletedRun, ClientError> {
-        let ctx = self.state.native.prepare_context(params.clone());
+        let ctx = crate::clients::agent::agent_loop::RunContext::from_params(params.clone());
         let cancel = params.cancel_token.clone().unwrap_or_else(CancelToken::new);
         let model_name = self
             .state

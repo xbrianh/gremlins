@@ -682,7 +682,7 @@ fn render_execution_frame<B: ratatui::backend::Backend>(
                     value.get("totals"),
                 ));
             }
-            "done" | "ended" | "detached" => {
+            "done" | "ended" => {
                 if !text.is_empty() {
                     live.reconcile_response(text);
                 }

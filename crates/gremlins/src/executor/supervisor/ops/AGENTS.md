@@ -22,7 +22,9 @@ the coordinating factory that creates a new TUI session.
 
 `supervisor/mod.rs::dispatch_op` routes by the JSON `"op"` field. Each
 handler receives the request JSON, the state root path, and optionally a
-socket reader/writer (for streaming ops like `log`, `attach`). Handlers
+socket reader/writer (for streaming ops like `log`, passive `watch`, and
+exact execution `input`). Wire `attach` is retired and rejected; watch/input
+connection handoff lives in `supervisor/mod.rs` and `session.rs`. Handlers
 return a JSON response value; streaming handlers write directly to the
 shared writer.
 
