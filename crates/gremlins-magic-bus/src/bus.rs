@@ -45,6 +45,20 @@ pub struct Bus<P> {
 }
 
 type InvocationMetadata<P> = Box<dyn Fn(&DispatchEvent<P>) -> Option<(String, bool)> + Send + Sync>;
+type EventPredicate<P> = Box<dyn Fn(&DispatchEvent<P>) -> bool + Send + Sync>;
+
+struct Subscription<P> {
+    id: u64,
+    prefix: CorrId,
+    mailbox: SubscriberMailbox<P>,
+    predicate: EventPredicate<P>,
+}
+
+impl<P> Subscription<P> {
+    fn matches(&self, event: &DispatchEvent<P>) -> bool {
+        event.corr_id().matches_prefix(&self.prefix) && (self.predicate)(event)
+    }
+}
 
 struct BusState<P> {
     // Separate from journal eviction: running invocations can outlive entries.
@@ -52,7 +66,7 @@ struct BusState<P> {
     stage_types: HashMap<(String, String, String), (String, u64)>,
     stage_type_lru: BTreeMap<u64, (String, String, String)>,
     stage_type_runs: HashMap<String, BTreeSet<u64>>,
-    subscribers: Vec<(u64, CorrId, SubscriberMailbox<P>)>,
+    subscribers: Vec<Subscription<P>>,
     journal: BTreeMap<u64, DispatchEvent<P>>,
     runs: HashMap<String, VecDeque<u64>>,
     per_run_limit: usize,
@@ -250,6 +264,19 @@ impl<P: Clone + Send + 'static> Bus<P> {
         &self,
         registration: SubscriberRegistration,
     ) -> Result<(Subscriber<P>, ReceiverHalf<P>), SubscriberError> {
+        self.subscribe_filtered(registration, |_| true)
+    }
+
+    /// Register one mailbox for events matching both the prefix and predicate.
+    ///
+    /// The predicate runs under the bus state mutex, after envelope stamping.
+    /// It must be cheap, nonblocking, and must not re-enter the bus. Direct
+    /// `Subscriber::send` calls bypass this filter.
+    pub fn subscribe_filtered(
+        &self,
+        registration: SubscriberRegistration,
+        predicate: impl Fn(&DispatchEvent<P>) -> bool + Send + Sync + 'static,
+    ) -> Result<(Subscriber<P>, ReceiverHalf<P>), SubscriberError> {
         let prefix = registration.prefix().clone();
         let policy = registration.policy();
         let (mailbox, receiver) = SubscriberMailbox::for_policy(policy)?;
@@ -260,7 +287,12 @@ impl<P: Clone + Send + 'static> Bus<P> {
             .lock()
             .expect("bus state poisoned")
             .subscribers
-            .push((id, prefix, mailbox));
+            .push(Subscription {
+                id,
+                prefix,
+                mailbox,
+                predicate: Box::new(predicate),
+            });
 
         Ok((subscriber, receiver))
     }
@@ -276,6 +308,21 @@ impl<P: Clone + Send + 'static> Bus<P> {
         &self,
         registration: SubscriberRegistration,
     ) -> Result<(Subscriber<P>, ReceiverHalf<P>, HistorySnapshot<P>), SubscriberError> {
+        self.subscribe_with_history_filtered(registration, |_| true)
+    }
+
+    /// Atomically snapshot and subscribe using the same prefix AND predicate.
+    ///
+    /// History remains separate from the single live mailbox, in emission order.
+    /// The predicate runs under the state mutex for history and live routing;
+    /// it must be cheap, nonblocking, and must not re-enter the bus.
+    /// Completeness and watermarks retain their bus-global semantics.
+    #[allow(clippy::type_complexity)]
+    pub fn subscribe_with_history_filtered(
+        &self,
+        registration: SubscriberRegistration,
+        predicate: impl Fn(&DispatchEvent<P>) -> bool + Send + Sync + 'static,
+    ) -> Result<(Subscriber<P>, ReceiverHalf<P>, HistorySnapshot<P>), SubscriberError> {
         let prefix = registration.prefix().clone();
         let (mailbox, receiver) = SubscriberMailbox::for_policy(registration.policy())?;
         let id = self.next_id.fetch_add(1, Ordering::Relaxed);
@@ -284,10 +331,15 @@ impl<P: Clone + Send + 'static> Bus<P> {
         let history = state
             .journal
             .values()
-            .filter(|event| event.corr_id().matches_prefix(&prefix))
+            .filter(|event| event.corr_id().matches_prefix(&prefix) && predicate(event))
             .cloned()
             .collect();
-        state.subscribers.push((id, prefix, mailbox));
+        state.subscribers.push(Subscription {
+            id,
+            prefix,
+            mailbox,
+            predicate: Box::new(predicate),
+        });
         Ok((
             subscriber,
             receiver,
@@ -311,7 +363,7 @@ impl<P: Clone + Send + 'static> Bus<P> {
             .lock()
             .expect("bus state poisoned")
             .subscribers
-            .retain(|(entry_id, _, _)| *entry_id != id);
+            .retain(|entry| entry.id != id);
     }
 
     /// Fan out synchronously. Never blocks; backpressured subscribers drop
@@ -341,9 +393,9 @@ impl<P: Clone + Send + 'static> Bus<P> {
         let mut state = self.state.lock().expect("bus state poisoned");
         state.classify(&mut event, boundary, retain);
         state.record(&mut event, retain);
-        for (_id, prefix, mailbox) in &state.subscribers {
-            if event.corr_id().matches_prefix(prefix) {
-                mailbox.try_send(event.clone());
+        for subscription in &state.subscribers {
+            if subscription.matches(&event) {
+                subscription.mailbox.try_send(event.clone());
             }
         }
         event
@@ -368,10 +420,11 @@ impl<P: Clone + Send + 'static> Bus<P> {
             let mut pending = Vec::new();
             let waker = futures::task::noop_waker();
             let mut cx = Context::from_waker(&waker);
-            for (_, prefix, mailbox) in &state.subscribers {
-                if !event.corr_id().matches_prefix(prefix) {
+            for subscription in &state.subscribers {
+                if !subscription.matches(&event) {
                     continue;
                 }
+                let mailbox = &subscription.mailbox;
                 if let SubscriberMailbox::Backpressured(tx) = mailbox {
                     let mut reservation = Box::pin(tx.clone().reserve_owned());
                     match reservation.as_mut().poll(&mut cx) {

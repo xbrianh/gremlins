@@ -151,20 +151,51 @@ The inline watch log pane remains separate: `Ctrl+W` (or `Ctrl+O`) toggles it
 inside `/watch`; `Ctrl+W` from chat enters watch. `Esc` closes the pane first,
 then returns to chat.
 
-## CLI debug input
+## CLI observation and debug input
 
-`gremlins debug <run-id> <stage-run-id>` requires both known exact IDs for an
-interactive agent stage. A stage name, run prefix, or inferred current stage is
-not a substitute. Do not guess IDs or assume a discovery command exists.
+Use Bash to inspect a run and discover concrete invocation IDs:
 
 ```sh
-printf '%s\n' 'message' | gremlins debug <run-id> <stage-run-id>
+gremlins info RUN
+gremlins watch RUN --snapshot
+```
+
+`watch` emits JSONL, not a TUI. It is live and read-only: it takes no input
+lease and accepts no input commands. `--stage NAME` filters by stage name;
+`--stage-run-id ID` filters by exact invocation (the filters can be combined).
+Without `--snapshot`, watch follows live output. With `--snapshot`, it replays
+retained history and exits at `replay_checkpoint`, even while the run stays live.
+
+The stream starts with `watched`. Retained event frames include `run_started`,
+`stage_boundary`, `stage_transition`, display/output events, and run lifecycle
+frames `run_completed`, `run_failed`, and `run_stopped`. Events carry `sequence`
+and `run_id`, plus `stage_run_id` and stage metadata when available. A
+`stage_boundary` carries `stage`, `stage_type`, and `active`.
+`history_gap` with reason `history_incomplete` and a checkpoint with
+`complete: false` mean replay is incomplete, **not that the run or stage is
+empty**. Check `through_sequence` and `evicted_through_sequence`; live lag is
+reported as `lagged` with `skipped`. Do not treat retained replay as a full transcript.
+
+For input, choose a `stage_boundary` with `active: true` and
+`stage_type: "agent"`, whose invocation is not known to have ended (for example,
+a later boundary with `active: false`). Copy that frame's exact `run_id` as
+`SOURCE` and `stage_run_id` as `INVOCATION`; do not substitute the requested
+parent run, a stage name, a run prefix, or an inferred current stage.
+Stage type is only a hint, not a guarantee of writable backend support or
+continued liveness.
+
+```sh
+printf '%s\n' 'message' | gremlins debug SOURCE INVOCATION
+gremlins watch SOURCE --stage-run-id INVOCATION
+# Optional bounded read:
+gremlins watch SOURCE --stage-run-id INVOCATION --snapshot
 ```
 
 Debug is input-only: it does not stream agent output or create an output
-subscription. Observe output separately through the bus-backed observation
-surface and hand off the exact run ID and stage-run ID when requesting input.
-Do not infer a discovery API from that handoff.
+subscription. Read output separately with `watch` as above. If input is rejected
+because the backend is unsupported or the invocation has ended, report the exact
+rejection. Never retry against a replacement invocation or launch a replacement
+execution to deliver the message.
 
 Each plain text line sends a message; it does not implicitly resume execution.
 The debug input commands are:
@@ -195,6 +226,9 @@ description lives in the CLI dispatch table.
 | `rm` | Delete a gremlin's state directory and worktree |
 | `close` | Mark a gremlin as closed (hidden from default view) |
 | `log` | Tail the gremlin's log file |
+| `info <run>` | Show run details |
+| `watch <run> [--stage NAME] [--stage-run-id ID] [--snapshot]` | Read-only JSONL observation; snapshot exits at replay checkpoint |
+| `debug <run-id> <stage-run-id>` | Send stdin input to an exact agent invocation |
 | `ack` | Acknowledge a gremlin waiting for human input |
 | `skip` | Skip a gremlin waiting for human input |
 | `queue` | Manage the gremlin launch queue |

@@ -29,6 +29,7 @@ mod display;
 mod input;
 mod spawn;
 mod tui;
+mod watch;
 
 #[derive(Parser)]
 #[command(name = "gremlins", about = "AI-backed gremlin definition runner", version = gremlins::VERSION)]
@@ -163,6 +164,24 @@ enum Cmds {
         /// Exact known stage invocation ID.
         #[arg(value_name = "STAGE_RUN_ID")]
         stage_run_id: String,
+    },
+    /// Observe native run events as JSONL without input or a TUI.
+    #[command(
+        after_long_help = "Workflow: gremlins watch PARENT_RUN_ID --snapshot\nInspect stage_boundary frames using their source run_id + stage_run_id.\nChoose an agent start (stage_type: \"agent\", active: true) whose invocation\nis not known to have ended; do not choose an exec boundary or an ended agent.\nIn a hierarchical run, SOURCE_RUN_ID may differ from the inspected PARENT_RUN_ID.\nCopy the discovered source run_id unchanged into both exact input and watch:\nSend once: printf '%s\\n' 'message' | gremlins debug SOURCE_RUN_ID STAGE_RUN_ID\nWatch the response: gremlins watch SOURCE_RUN_ID --stage-run-id STAGE_RUN_ID\nWatch does not determine input support, including for unknown-type invocations.\nEven an apparently active agent may reject exact input. Report any exact-target\nrejection; never retarget automatically.\nGaps mean history is incomplete, even when a snapshot exits successfully.\nSnapshot stops only at replay_checkpoint (not a replayed terminal event).\nLive mode follows until server EOF; --stage spans invocations until run end."
+    )]
+    Watch {
+        /// Known source run ID.
+        #[arg(value_name = "RUN_ID")]
+        id: String,
+        /// Filter by stage name (across invocations).
+        #[arg(long, value_name = "NAME")]
+        stage: Option<String>,
+        /// Filter by exact stage invocation ID.
+        #[arg(long, value_name = "ID")]
+        stage_run_id: Option<String>,
+        /// Print retained replay through its checkpoint, then exit.
+        #[arg(long)]
+        snapshot: bool,
     },
     /// Remove a gremlin's filesystem assets.
     Clean {
@@ -342,6 +361,12 @@ async fn run_cli(cli: Cli, scope: Option<std::ffi::OsString>) {
         }
         Some(Cmds::Log { id }) => log_gremlin(&id).await,
         Some(Cmds::Debug { id, stage_run_id }) => debug_gremlin(&id, &stage_run_id).await,
+        Some(Cmds::Watch {
+            id,
+            stage,
+            stage_run_id,
+            snapshot,
+        }) => watch::run(&id, stage.as_deref(), stage_run_id.as_deref(), snapshot).await,
         Some(Cmds::Clean { id, keep }) => clean(&id, keep).await,
         Some(Cmds::Rm { id, all, purge }) => {
             if all {
@@ -2653,6 +2678,50 @@ fn auth_copilot_logout() -> Result<(), String> {
 
 #[cfg(test)]
 mod tests {
+    fn watch_help() -> String {
+        match Cli::try_parse_from(["gremlins", "watch", "--help"]) {
+            Err(error) if error.kind() == clap::error::ErrorKind::DisplayHelp => error.to_string(),
+            Err(error) => panic!("expected watch help, got {error}"),
+            Ok(_) => panic!("expected DisplayHelp, but parsing succeeded"),
+        }
+    }
+
+    #[test]
+    fn watch_help_preserves_discovered_source_for_exact_input_and_follow() {
+        let help = watch_help();
+        let help = help.split_whitespace().collect::<Vec<_>>().join(" ");
+        for text in [
+            "gremlins watch PARENT_RUN_ID --snapshot",
+            "SOURCE_RUN_ID may differ from the inspected PARENT_RUN_ID",
+            "Copy the discovered source run_id unchanged into both exact input and watch",
+            "printf '%s\\n' 'message' | gremlins debug SOURCE_RUN_ID STAGE_RUN_ID",
+            "gremlins watch SOURCE_RUN_ID --stage-run-id STAGE_RUN_ID",
+            "Watch does not determine input support, including for unknown-type invocations",
+            "Even an apparently active agent may reject exact input",
+            "Report any exact-target rejection; never retarget automatically",
+            "Gaps mean history is incomplete",
+            "Snapshot stops only at replay_checkpoint",
+            "Live mode follows until server EOF; --stage spans invocations until run end",
+        ] {
+            assert!(help.contains(text), "missing {text:?} in {help}");
+        }
+        assert!(!help.contains("unknown-type invocations are not writable"));
+        assert!(!help.contains("debug PARENT_RUN_ID"));
+        assert!(!help.contains("watch PARENT_RUN_ID --stage-run-id"));
+    }
+
+    #[test]
+    fn watch_help_selects_an_agent_start_not_known_to_have_ended_before_sending() {
+        let help = watch_help();
+        let help = help.split_whitespace().collect::<Vec<_>>().join(" ");
+        let selection = "Choose an agent start (stage_type: \"agent\", active: true) whose invocation is not known to have ended; do not choose an exec boundary or an ended agent.";
+        let selection_position = help.find(selection).expect("agent selection guidance");
+        let copy_position = help.find("Copy the discovered source run_id").unwrap();
+        let send_position = help.find("Send once:").unwrap();
+        assert!(selection_position < copy_position);
+        assert!(copy_position < send_position);
+    }
+
     #[test]
     fn exists_reply_validation() {
         let uris: Vec<String> = ["artifact://a", "artifact://b", "artifact://a"]

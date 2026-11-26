@@ -170,7 +170,7 @@ async fn write_run_history(
 }
 
 /// Protocol policy only: delivery ordering and I/O are shared below. Watch
-/// terminal state is gated by its selector; run state includes invisible starts.
+/// display is selector-gated; parent lifecycle can end an invisible selection.
 #[derive(Clone, Copy)]
 enum PassiveStream<'a> {
     Run(&'a str),
@@ -185,18 +185,43 @@ impl PassiveStream<'_> {
         }
     }
 
-    fn terminal_update(self, dispatch: &DispatchEvent<EventKind>, displayed: bool) -> Option<bool> {
+    fn terminal_update(
+        self,
+        dispatch: &DispatchEvent<EventKind>,
+        _displayed: bool,
+    ) -> Option<bool> {
         let id = match self {
             Self::Run(id) => id,
-            Self::Watch(filter, _) if displayed => filter.run().expect("watch run"),
-            Self::Watch(..) => return None,
+            Self::Watch(filter, _) => filter.run().expect("watch run"),
         };
+        if let Self::Watch(filter, _) = self {
+            if let EventKind::StageBoundary {
+                stage,
+                stage_run_id,
+                active: false,
+                ..
+            } = dispatch.kind()
+            {
+                let corr = dispatch.corr_id();
+                if filter.stage_run_id() == Some(stage_run_id.as_str())
+                    && corr.matches_prefix(filter)
+                    && corr
+                        .run()
+                        .is_some_and(|run| event_run_id_matches(dispatch.kind(), run))
+                    && corr.stage() == Some(stage.as_str())
+                    && corr.stage_run_id() == Some(stage_run_id.as_str())
+                {
+                    return Some(true);
+                }
+            }
+        }
         if dispatch.corr_id().run() != Some(id) || !event_run_id_matches(dispatch.kind(), id) {
             return None;
         }
         match dispatch.kind() {
             EventKind::RunStarted { .. } => Some(false),
             _ if watch_parent_terminal(dispatch, id) => Some(true),
+
             _ => None,
         }
     }
@@ -229,11 +254,16 @@ async fn write_history(
             }))
             .await?;
     }
-    let mut terminal = false;
+    let mut run_terminal = false;
+    let mut invocation_terminal = false;
     for dispatch in history.events {
         let frame = stream.frame(&dispatch);
         if let Some(update) = stream.terminal_update(&dispatch, frame.is_some()) {
-            terminal = update;
+            if matches!(dispatch.kind(), EventKind::StageBoundary { .. }) {
+                invocation_terminal |= update;
+            } else {
+                run_terminal = update;
+            }
         }
         if let Some(value) = frame {
             writer.write_json_line(&value).await?;
@@ -244,7 +274,7 @@ async fn write_history(
     checkpoint["through_sequence"] = serde_json::json!(history.through_sequence);
     checkpoint["evicted_through_sequence"] = serde_json::json!(history.evicted_through_sequence);
     writer.write_json_line(&checkpoint).await?;
-    Ok(terminal)
+    Ok(run_terminal || invocation_terminal)
 }
 
 /// Returns true after a terminal event or closure; delivery failures propagate.
@@ -499,6 +529,19 @@ fn watch_frame(
     Some(frame)
 }
 
+fn watch_accepts(dispatch: &DispatchEvent<EventKind>, filter: &gremlins_magic_bus::CorrId) -> bool {
+    dispatch.corr_id().matches_prefix(filter)
+        || (dispatch.corr_id().run() == filter.run()
+            && event_run_id_matches(dispatch.kind(), filter.run().expect("watch run"))
+            && matches!(
+                dispatch.kind(),
+                EventKind::RunStarted { .. }
+                    | EventKind::RunCompleted { .. }
+                    | EventKind::RunFailed { .. }
+                    | EventKind::RunStopped { .. }
+            ))
+}
+
 fn watch_parent_terminal(dispatch: &DispatchEvent<EventKind>, id: &str) -> bool {
     dispatch.corr_id().run() == Some(id)
         && event_run_id_matches(dispatch.kind(), id)
@@ -551,16 +594,23 @@ pub(crate) async fn handle_watch(
         return;
     }
     let bus = gremlins_magic_bus::init_bus();
-    let registration =
-        gremlins_magic_bus::SubscriberRegistration::lag_tolerant(filter.clone(), 256);
+    let registration = gremlins_magic_bus::SubscriberRegistration::lag_tolerant(
+        gremlins_magic_bus::CorrId::new().with_run(id),
+        256,
+    );
+    // Keep selector events and parent lifecycle in one ordered mailbox: the
+    // latter can end an invisible selection, while sibling output must not
+    // consume its lag-tolerant capacity.
+    let selection = filter.clone();
+    let accepts = move |event: &DispatchEvent<EventKind>| watch_accepts(event, &selection);
     let (sub, mut rx, history) = if replay {
         let (sub, rx, history) = bus
-            .subscribe_with_history(registration)
+            .subscribe_with_history_filtered(registration, accepts)
             .expect("valid watch subscription");
         (sub, rx, Some(history))
     } else {
         let (sub, rx) = bus
-            .subscribe(registration)
+            .subscribe_filtered(registration, accepts)
             .expect("valid watch subscription");
         (sub, rx, None)
     };
@@ -1948,12 +1998,10 @@ mod routing_tests {
         let metadata = WatchMetadata::default();
         let watch = PassiveStream::Watch(&filter, &metadata);
         let run = PassiveStream::Run("parent");
-        // A stage watch must not close on a parent event outside its selector.
-        assert!(
-            !forward_passive(&writer, watch, Recv::Event(parent.clone()))
-                .await
-                .unwrap()
-        );
+        // Parent termination closes a stage watch without leaking the frame.
+        assert!(forward_passive(&writer, watch, Recv::Event(parent.clone()))
+            .await
+            .unwrap());
         // Nor may either protocol close on mismatched payload identity.
         let mismatched = stopped(filter.clone(), "other");
         for stream in [watch, run] {
@@ -2511,6 +2559,412 @@ mod routing_tests {
                 )
                 .unwrap();
             assert!(frame.get("stage_type").is_none());
+        }
+    }
+
+    #[tokio::test]
+    async fn watch_selector_queue_excludes_sibling_flood_and_orders_parent_lifecycle() {
+        use gremlins_magic_bus::{Bus, CorrId, SubscriberRegistration, TryRecvError};
+        for replay in [false, true] {
+            let bus = Bus::new();
+            let run = CorrId::new().with_run("selector-queue");
+            let filter = run.clone().with_stage("build").with_stage_run_id("chosen");
+            let selection = filter.clone();
+            let registration = SubscriberRegistration::lag_tolerant(run.clone(), 4);
+            let accepts = move |event: &DispatchEvent<EventKind>| watch_accepts(event, &selection);
+            let publish = || {
+                bus.emit(DispatchEvent::new(
+                    run.clone(),
+                    EventKind::RunStarted {
+                        id: "selector-queue".into(),
+                        definition: "test".into(),
+                        stage: "build".into(),
+                    },
+                ));
+                for _ in 0..1024 {
+                    bus.emit(DispatchEvent::new(
+                        run.clone().with_stage("other"),
+                        EventKind::StreamChunk {
+                            text: "sibling".into(),
+                        },
+                    ));
+                }
+                bus.emit(DispatchEvent::new(
+                    filter.clone(),
+                    EventKind::StreamChunk {
+                        text: "chosen".into(),
+                    },
+                ));
+                bus.emit(DispatchEvent::new(
+                    run.clone(),
+                    EventKind::RunStopped {
+                        id: "selector-queue".into(),
+                    },
+                ));
+            };
+            if replay {
+                publish();
+            }
+            let (_sub, mut rx, history) = bus
+                .subscribe_with_history_filtered(registration, accepts)
+                .unwrap();
+            let events = if replay {
+                assert!(matches!(rx.try_recv(), Err(TryRecvError::Empty)));
+                history.events
+            } else {
+                assert!(history.events.is_empty());
+                publish();
+                let mut events = Vec::new();
+                for _ in 0..3 {
+                    let Recv::Event(event) = rx.recv().await else {
+                        panic!("sibling flood caused lag");
+                    };
+                    events.push(event);
+                }
+                assert!(matches!(rx.try_recv(), Err(TryRecvError::Empty)));
+                events
+            };
+            assert_eq!(events.len(), 3);
+            assert!(matches!(events[0].kind(), EventKind::RunStarted { .. }));
+            assert!(
+                matches!(events[1].kind(), EventKind::StreamChunk { text } if text == "chosen")
+            );
+            assert!(matches!(events[2].kind(), EventKind::RunStopped { .. }));
+            assert!(events
+                .windows(2)
+                .all(|pair| pair[0].sequence() < pair[1].sequence()));
+        }
+    }
+
+    #[tokio::test]
+    async fn watch_replay_restart_clears_only_run_terminal() {
+        use gremlins_magic_bus::{Bus, CorrId, SubscriberRegistration};
+        for closed in [false, true] {
+            let bus = Bus::new();
+            let run = CorrId::new().with_run("restart-regression");
+            let filter = run.clone().with_stage("build").with_stage_run_id("chosen");
+            if closed {
+                bus.emit(DispatchEvent::new(
+                    filter.clone(),
+                    EventKind::StageBoundary {
+                        id: "restart-regression".into(),
+                        stage: "build".into(),
+                        stage_run_id: "chosen".into(),
+                        stage_type: "exec".into(),
+                        active: false,
+                    },
+                ));
+            }
+            bus.emit(DispatchEvent::new(
+                run.clone(),
+                EventKind::RunStopped {
+                    id: "restart-regression".into(),
+                },
+            ));
+            bus.emit(DispatchEvent::new(
+                run.clone(),
+                EventKind::RunStarted {
+                    id: "restart-regression".into(),
+                    definition: "test".into(),
+                    stage: "build".into(),
+                },
+            ));
+            let selection = filter.clone();
+            let (_, _, history) = bus
+                .subscribe_with_history_filtered(
+                    SubscriberRegistration::lag_tolerant(run, 4),
+                    move |event| watch_accepts(event, &selection),
+                )
+                .unwrap();
+            let (client, server) = tokio::net::UnixStream::pair().unwrap();
+            let (_, write) = server.into_split();
+            let writer = SharedWriter::new(write);
+            assert_eq!(
+                write_watch_history(&writer, &filter, history, &WatchMetadata::default())
+                    .await
+                    .unwrap(),
+                closed
+            );
+            drop(client);
+        }
+    }
+
+    #[tokio::test]
+    async fn watch_supervisor_parent_replay_preserves_distinct_child_sources() {
+        use gremlins_magic_bus::{emit_corr_event, CorrId};
+        tokio::time::timeout(std::time::Duration::from_secs(10), async {
+            let sandbox = tempfile::tempdir().unwrap();
+            let id = format!("watch-parent-{}", crate::executor::state::token_hex(8));
+            let gremlin = crate::executor::supervisor::chat::create_chat_gremlin(
+                &id,
+                &crate::prelude::ModelURI::parse("cmd/echo").unwrap(),
+                "helpful",
+                sandbox.path(),
+                &Default::default(),
+            )
+            .unwrap();
+            let registry = Arc::new(RunRegistry::new(tokio::sync::watch::channel(false).0));
+            registry
+                .register_chat_gremlin(
+                    id.clone(),
+                    gremlin,
+                    crate::clients::cancel::CancelToken::new(),
+                )
+                .await;
+            let children = [format!("{id}:left"), format!("{id}:right")];
+            for child in &children {
+                emit_corr_event(
+                    &CorrId::new()
+                        .with_run(child)
+                        .with_stage("build")
+                        .with_stage_run_id(format!("{child}-invocation")),
+                    EventKind::StreamChunk {
+                        text: child.clone(),
+                    },
+                );
+            }
+            let (client, server) = tokio::net::UnixStream::pair().unwrap();
+            let (read, write) = server.into_split();
+            let writer = SharedWriter::new(write);
+            let task = tokio::spawn(async move {
+                handle_watch(
+                    &serde_json::json!({"op":"watch", "id":id, "stage":"build", "replay":true}),
+                    &registry,
+                    BufReader::new(read),
+                    &writer,
+                )
+                .await;
+            });
+            let mut reader = BufReader::new(client);
+            assert_eq!(
+                socket::read_json_line(&mut reader).await.unwrap().unwrap()["type"],
+                "watched"
+            );
+            let mut sources = Vec::new();
+            let mut sequences = Vec::new();
+            loop {
+                let frame = socket::read_json_line(&mut reader).await.unwrap().unwrap();
+                if frame["type"] == "replay_checkpoint" {
+                    break;
+                }
+                if frame["type"] == "history_gap" {
+                    continue;
+                }
+                assert_eq!(frame["type"], "stream_chunk");
+                assert_eq!(frame["text"], frame["run_id"]);
+                assert_eq!(
+                    frame["stage_run_id"],
+                    format!("{}-invocation", frame["run_id"].as_str().unwrap())
+                );
+                sources.push(frame["run_id"].as_str().unwrap().to_owned());
+                sequences.push(frame["sequence"].as_u64().unwrap());
+            }
+            assert_eq!(sources, children);
+            assert!(sequences[0] < sequences[1]);
+            drop(reader);
+            task.await.unwrap();
+        })
+        .await
+        .unwrap();
+    }
+
+    #[test]
+    fn watch_terminal_identity_and_restart_rules() {
+        use gremlins_magic_bus::CorrId;
+        let stage = CorrId::new().with_run("parent").with_stage("build");
+        let exact = stage.clone().with_stage_run_id("chosen");
+        let metadata = WatchMetadata::default();
+        let stream = PassiveStream::Watch(&exact, &metadata);
+        for (run, invocation, payload_invocation, expected) in [
+            ("parent", "chosen", "chosen", Some(true)),
+            ("parent:child", "chosen", "chosen", Some(true)),
+            ("parent:childish", "other", "chosen", None),
+            ("foreign", "chosen", "chosen", None),
+            ("parent", "chosen", "other", None),
+        ] {
+            let dispatch = DispatchEvent::new(
+                CorrId::new()
+                    .with_run(run)
+                    .with_stage("build")
+                    .with_stage_run_id(invocation),
+                EventKind::StageBoundary {
+                    id: run.into(),
+                    stage: "build".into(),
+                    stage_run_id: payload_invocation.into(),
+                    stage_type: "agent".into(),
+                    active: false,
+                },
+            );
+            assert_eq!(stream.terminal_update(&dispatch, false), expected);
+            assert_eq!(
+                PassiveStream::Watch(&stage, &metadata).terminal_update(&dispatch, false),
+                None
+            );
+        }
+        let started = DispatchEvent::new(
+            CorrId::new().with_run("parent"),
+            EventKind::RunStarted {
+                id: "parent".into(),
+                definition: "test".into(),
+                stage: "build".into(),
+            },
+        );
+        assert_eq!(stream.terminal_update(&started, false), Some(false));
+        assert_eq!(
+            PassiveStream::Watch(&stage, &metadata).terminal_update(&started, false),
+            Some(false)
+        );
+    }
+
+    #[tokio::test]
+    async fn watch_run_wide_native_replay_and_live_termination() {
+        use gremlins_magic_bus::{Bus, CorrId, SubscriberRegistration};
+        use std::time::Duration;
+
+        // Exercise the native subscription, not a fabricated history snapshot.
+        // Both delivery paths must see lifecycle outside the display selector.
+        for replay in [false, true] {
+            for exact in [false, true] {
+                for terminal_kind in 0..3 {
+                    let bus = Bus::new();
+                    let run = CorrId::new().with_run("watch-lifecycle");
+                    let stage = run.clone().with_stage("build");
+                    let selected = stage.clone().with_stage_run_id("selected");
+                    let filter = if exact {
+                        selected.clone()
+                    } else {
+                        stage.clone()
+                    };
+                    let sibling = run.clone().with_stage("test").with_stage_run_id("sibling");
+                    let boundary = |corr, name: &str, invocation: &str| {
+                        DispatchEvent::new(
+                            corr,
+                            EventKind::StageBoundary {
+                                id: "watch-lifecycle".into(),
+                                stage: name.into(),
+                                stage_run_id: invocation.into(),
+                                stage_type: "agent".into(),
+                                active: false,
+                            },
+                        )
+                    };
+                    let mut events = vec![
+                        DispatchEvent::new(
+                            sibling.clone(),
+                            EventKind::StreamChunk {
+                                text: "never displayed".into(),
+                            },
+                        ),
+                        boundary(sibling, "test", "sibling"),
+                        DispatchEvent::new(
+                            selected.clone(),
+                            EventKind::StreamChunk {
+                                text: "selected output".into(),
+                            },
+                        ),
+                        boundary(selected, "build", "selected"),
+                    ];
+                    if !exact {
+                        events.push(DispatchEvent::new(
+                            stage.with_stage_run_id("next"),
+                            EventKind::StreamChunk {
+                                text: "after boundary".into(),
+                            },
+                        ));
+                        let terminal = match terminal_kind {
+                            0 => EventKind::RunStopped {
+                                id: "watch-lifecycle".into(),
+                            },
+                            1 => EventKind::RunCompleted {
+                                id: "watch-lifecycle".into(),
+                                exit_code: 0,
+                            },
+                            _ => EventKind::RunFailed {
+                                id: "watch-lifecycle".into(),
+                                exit_code: 1,
+                                error: None,
+                            },
+                        };
+                        events.push(DispatchEvent::new(run.clone(), terminal));
+                    }
+                    if replay {
+                        for event in &events {
+                            bus.emit(event.clone());
+                        }
+                    }
+                    let (_sub, mut rx, history) = bus
+                        .subscribe_with_history(SubscriberRegistration::lag_tolerant(run, 256))
+                        .unwrap();
+                    let (client, server) = tokio::net::UnixStream::pair().unwrap();
+                    let (_, write) = server.into_split();
+                    let writer = SharedWriter::new(write);
+                    let metadata = WatchMetadata::default();
+                    if replay {
+                        assert!(write_watch_history(&writer, &filter, history, &metadata)
+                            .await
+                            .unwrap());
+                    } else {
+                        assert!(!write_watch_history(&writer, &filter, history, &metadata)
+                            .await
+                            .unwrap());
+                        for (index, event) in events.iter().enumerate() {
+                            bus.emit_async(event.clone()).await;
+                            let ended = forward_passive(
+                                &writer,
+                                PassiveStream::Watch(&filter, &metadata),
+                                rx.recv().await,
+                            )
+                            .await
+                            .unwrap();
+                            assert_eq!(ended, index == events.len() - 1);
+                        }
+                    }
+                    drop(writer);
+                    let mut reader = BufReader::new(client);
+                    let frames = tokio::time::timeout(Duration::from_secs(5), async {
+                        let mut frames = Vec::new();
+                        while let Some(frame) = socket::read_json_line(&mut reader).await.unwrap() {
+                            frames.push(frame);
+                        }
+                        frames
+                    })
+                    .await
+                    .unwrap();
+                    let kinds: Vec<_> = frames
+                        .iter()
+                        .map(|frame| frame["type"].as_str().unwrap())
+                        .collect();
+                    let mut expected = vec!["stream_chunk", "stage_boundary"];
+                    if !exact {
+                        expected.push("stream_chunk");
+                    }
+                    if replay {
+                        expected.push("replay_checkpoint");
+                    } else {
+                        expected.insert(0, "replay_checkpoint");
+                    }
+                    // No writable/ready protocol frames or sibling/parent frames leak.
+                    assert_eq!(kinds, expected);
+                    assert_eq!(
+                        frames
+                            .iter()
+                            .filter(|f| f["text"] == "selected output")
+                            .count(),
+                        1
+                    );
+                    let checkpoint = frames
+                        .iter()
+                        .find(|f| f["type"] == "replay_checkpoint")
+                        .unwrap();
+                    assert_eq!(
+                        checkpoint["through_sequence"],
+                        if replay { events.len() } else { 0 }
+                    );
+                    if replay {
+                        assert_eq!(frames.last().unwrap()["type"], "replay_checkpoint");
+                    }
+                }
+            }
         }
     }
 

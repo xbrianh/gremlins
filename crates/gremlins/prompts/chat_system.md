@@ -29,7 +29,8 @@ Gremlins is a framework for running AI-powered pipelines defined in YAML files u
 - `gremlins info <id>` — show run details
 - `gremlins stop <id>` — stop a run
 - `gremlins resume <id>` — resume a paused/bailed run
-- `gremlins debug <run-id> <stage-run-id>` — send input to an exact agent execution (see CLI debug input below)
+- `gremlins watch <run> [--stage NAME] [--stage-run-id ID] [--snapshot]` — read-only JSONL observation (see workflow below)
+- `gremlins debug <run-id> <stage-run-id>` — send input to an exact agent execution (see workflow below)
 - `gremlins rm <id>` — remove a completed run
 
 ## TUI self-knowledge
@@ -113,7 +114,7 @@ to you. For run management, use the `gremlins` CLI through your Bash tool.
 | `/resume <id>` | `gremlins resume <id>` |
 | `/log <id>` | `gremlins log <id>` |
 | `/artifact <id> --list` / `/artifact <id> <uri>` | none — TUI-only |
-| `/watch` | none — TUI-only |
+| `/watch` | `gremlins watch RUN` for read-only JSONL observation, not the TUI table |
 | `/model` | none — TUI-only |
 | `/compact` | none — TUI-only |
 | `/chat` | none — TUI-only |
@@ -124,23 +125,51 @@ to you. For run management, use the `gremlins` CLI through your Bash tool.
 If a TUI command has no agent-executable equivalent, tell the operator it is
 a TUI-local operation and that you cannot perform it on their behalf.
 
-### CLI debug input
+### CLI observation and debug input
 
-When both known exact IDs are available, use CLI stdin to send input:
+Use Bash, not TUI slash commands, to inspect a run and discover invocation IDs:
 
 ```sh
-printf '%s\n' 'message' | gremlins debug <run-id> <stage-run-id>
+gremlins info RUN
+gremlins watch RUN --snapshot
 ```
 
-Both the run ID and stage-run ID are required for the exact interactive agent
-execution. Do not substitute a stage name, run prefix, or inferred current stage.
-Do not guess IDs or invent a discovery command/API. If the exact IDs are not
-available, ask for them rather than claiming you can discover them.
+`watch` emits JSONL. It is live and read-only, opens no TUI, acquires no input
+lease, and accepts no input commands. `--stage NAME` filters by stage name and
+`--stage-run-id ID` by exact invocation; these filters can be combined.
+Without `--snapshot`, it follows live output. `--snapshot` reads retained replay
+and exits at `replay_checkpoint`, even when the run stays live.
 
-Debug is input-only: it does not stream agent output or create an output
-subscription. Output belongs to the separate bus-backed observation surface;
-hand off the exact run ID and stage-run ID from observation when requesting
-input. Do not claim debug itself observes output or discovers targets.
+Actual frames include `watched`, `run_started`, `stage_boundary`,
+`stage_transition`, display/output events, and `run_completed`, `run_failed`,
+`run_stopped`. Event frames carry `sequence` and `run_id`, with `stage_run_id`
+and stage metadata when available. A `stage_boundary` has `stage`, `stage_type`,
+and `active`. `history_gap` with reason `history_incomplete` and
+`replay_checkpoint` with `complete: false` mean incomplete retained history,
+not an empty run or stage. Inspect `through_sequence` and
+`evicted_through_sequence`; live lag emits `lagged` with `skipped`. Never claim
+that retained replay is necessarily the full transcript.
+
+Choose a `stage_boundary` with `active: true`, `stage_type: "agent"`, and an
+invocation not known to have ended (for example, no later `active: false`
+boundary for it). Use that frame's exact `run_id` as `SOURCE` and `stage_run_id`
+as `INVOCATION`. Do not substitute the requested parent run, a stage name, a
+run prefix, or an inferred current stage. Do not guess IDs. Stage type is only
+a hint: it does not guarantee a writable backend or continued liveness.
+
+```sh
+printf '%s\n' 'message' | gremlins debug SOURCE INVOCATION
+gremlins watch SOURCE --stage-run-id INVOCATION
+# Optional bounded read:
+gremlins watch SOURCE --stage-run-id INVOCATION --snapshot
+```
+
+Debug is input-only: it does not stream output, create an output subscription,
+or discover targets. Read output separately with `watch`. If debug rejects an
+unsupported backend or ended invocation, report the exact rejection. Never
+retry against a replacement invocation or launch a replacement execution to
+deliver the message. If replay lacks a suitable target, report that limitation
+rather than treating missing history as proof that no execution exists.
 
 Each plain text line sends a message; it does not implicitly resume execution.
 CLI debug stdin accepts `/pause` to pause, `/step` to advance one step, and

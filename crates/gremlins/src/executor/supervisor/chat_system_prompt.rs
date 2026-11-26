@@ -85,21 +85,23 @@ mod tests {
         let prompt = chat_system_prompt();
         let normalized = prompt.split_whitespace().collect::<Vec<_>>().join(" ");
         for required in [
-            "printf '%s\\n' 'message' | gremlins debug <run-id> <stage-run-id>",
-            "Both the run ID and stage-run ID are required",
-            "Do not substitute a stage name, run prefix, or inferred current stage",
-            "Do not guess IDs or invent a discovery command/API",
-            "ask for them rather than claiming you can discover them",
-            "Debug is input-only: it does not stream agent output or create an output subscription",
-            "separate bus-backed observation surface",
-            "hand off the exact run ID and stage-run ID",
+            "printf '%s\\n' 'message' | gremlins debug SOURCE INVOCATION",
+            "Use that frame's exact `run_id` as `SOURCE` and `stage_run_id` as `INVOCATION`",
+            "Do not substitute the requested parent run, a stage name, a run prefix, or an inferred current stage",
+            "Do not guess IDs",
+            "Debug is input-only: it does not stream output, create an output subscription, or discover targets",
+            "Read output separately with `watch`",
+            "gremlins watch SOURCE --stage-run-id INVOCATION",
+            "gremlins watch SOURCE --stage-run-id INVOCATION --snapshot",
+            "If debug rejects an unsupported backend or ended invocation, report the exact rejection",
+            "Never retry against a replacement invocation or launch a replacement execution to deliver the message",
             "Each plain text line sends a message; it does not implicitly resume execution",
             "`/pause` to pause, `/step` to advance one step",
             "`/continue` to explicitly resume",
             "`/quit [reason]` bails with an optional reason",
             "`/exit` or EOF closes local input only; neither resumes nor bails",
             "debug waits for the final receipt for submitted input",
-            "`queued` receipt means accepted into the queue, not delivered to the agent",
+            "A `queued` receipt means accepted into the queue, not delivered to the agent",
             "CLI stdin commands, not agent tools or TUI slash commands",
         ] {
             assert!(
@@ -114,6 +116,38 @@ mod tests {
             assert!(
                 !prompt.contains(obsolete),
                 "chat prompt must not advertise obsolete debug behavior: {obsolete}"
+            );
+        }
+    }
+
+    #[test]
+    fn chat_system_prompt_documents_read_only_watch_and_target_discovery() {
+        let prompt = chat_system_prompt();
+        let normalized = prompt.split_whitespace().collect::<Vec<_>>().join(" ");
+        for required in [
+            "gremlins watch <run> [--stage NAME] [--stage-run-id ID] [--snapshot]",
+            "Use Bash, not TUI slash commands, to inspect a run and discover invocation IDs",
+            "gremlins info RUN",
+            "gremlins watch RUN --snapshot",
+            "`watch` emits JSONL",
+            "It is live and read-only, opens no TUI, acquires no input lease, and accepts no input commands",
+            "`--stage NAME` filters by stage name and `--stage-run-id ID` by exact invocation; these filters can be combined",
+            "Without `--snapshot`, it follows live output",
+            "`--snapshot` reads retained replay and exits at `replay_checkpoint`, even when the run stays live",
+            "Actual frames include `watched`, `run_started`, `stage_boundary`, `stage_transition`, display/output events, and `run_completed`, `run_failed`, `run_stopped`",
+            "Event frames carry `sequence` and `run_id`, with `stage_run_id` and stage metadata when available",
+            "A `stage_boundary` has `stage`, `stage_type`, and `active`",
+            "`history_gap` with reason `history_incomplete` and `replay_checkpoint` with `complete: false` mean incomplete retained history, not an empty run or stage",
+            "Inspect `through_sequence` and `evicted_through_sequence`; live lag emits `lagged` with `skipped`",
+            "Never claim that retained replay is necessarily the full transcript",
+            "Choose a `stage_boundary` with `active: true`, `stage_type: \"agent\"`, and an invocation not known to have ended",
+            "no later `active: false` boundary for it",
+            "Stage type is only a hint: it does not guarantee a writable backend or continued liveness",
+            "If replay lacks a suitable target, report that limitation rather than treating missing history as proof that no execution exists",
+        ] {
+            assert!(
+                normalized.contains(required),
+                "chat prompt must document watch observation and target discovery: {required}"
             );
         }
     }
@@ -227,6 +261,10 @@ mod tests {
             ("/stop <id>", "`gremlins stop <id>`"),
             ("/resume <id>", "`gremlins resume <id>`"),
             ("/log <id>", "`gremlins log <id>`"),
+            (
+                "/watch",
+                "`gremlins watch RUN` for read-only JSONL observation, not the TUI table",
+            ),
         ] {
             assert!(
                 prompt.contains(&format!("| `{cmd}` | {cli} |")),
@@ -236,7 +274,6 @@ mod tests {
 
         for row in [
             "| `/artifact <id> --list` / `/artifact <id> <uri>` | none — TUI-only |",
-            "| `/watch` | none — TUI-only |",
             "| `/model` | none — TUI-only |",
             "| `/chat` | none — TUI-only |",
             "| `/clear` / `/new` | none — TUI-only |",
