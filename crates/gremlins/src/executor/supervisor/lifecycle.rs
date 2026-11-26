@@ -2,6 +2,8 @@
 
 use std::sync::Arc;
 
+use futures::FutureExt;
+
 use crate::clients::client::Client;
 use crate::clients::interactive::{InteractiveHandle, InteractiveSessionFactory};
 use crate::executor::gremlin::Gremlin;
@@ -59,19 +61,51 @@ pub(crate) async fn run_gremlin_task(
     mut gremlin: Gremlin,
     resume_from: Option<&str>,
 ) -> (i32, Gremlin) {
-    let exit_code = match gremlin.run(resume_from).await {
-        Ok(ec) => ec,
-        Err(e) => {
-            log::error!("gremlin {}: {e}", gremlin.id.as_str());
-            emit_event(EventKind::LogLine {
-                id: gremlin.id.to_string(),
-                line: format!("error: {e}"),
-            });
-            gremlin.state.write_terminal_state(1);
+    // Catch unwinds while retaining the gremlin and its accounting collector.
+    let result = std::panic::AssertUnwindSafe(gremlin.run(resume_from))
+        .catch_unwind()
+        .await;
+    let mut exit_code = match result {
+        Ok(Ok(ec)) => ec,
+        Ok(Err(error)) => {
+            record_run_error(
+                gremlin.id.as_str(),
+                &gremlin.state.store_handle(),
+                &error.to_string(),
+            );
+            1
+        }
+        Err(_) => {
+            record_run_error(
+                gremlin.id.as_str(),
+                &gremlin.state.store_handle(),
+                "run task panicked",
+            );
             1
         }
     };
+    if let Err(error) = gremlin.flush_accounting().await {
+        record_run_error(
+            gremlin.id.as_str(),
+            &gremlin.state.store_handle(),
+            &format!("accounting flush failed: {error}"),
+        );
+        exit_code = 1;
+    }
+    if exit_code != 0 {
+        gremlin.state.write_terminal_state(exit_code);
+    }
     (exit_code, gremlin)
+}
+
+/// Persist and publish failures before the terminal state is exposed.
+pub(super) fn record_run_error(id: &str, store: &super::run_registry::StoreHandle, detail: &str) {
+    store.record_stage_error("other", detail);
+    log::error!("gremlin {id}: {detail}");
+    emit_event(EventKind::LogLine {
+        id: id.to_string(),
+        line: format!("error: {detail}"),
+    });
 }
 
 /// Spawn a task that reads log events from the bus and appends to the state

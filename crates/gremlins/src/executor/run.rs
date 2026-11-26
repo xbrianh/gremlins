@@ -152,6 +152,9 @@ async fn run_stage_scoped(
 
     let result = match stage {
         ExecutorStage::Agent { .. } => {
+            if resolve_model_spec(stage, gremlin, enc_model)?.provider() != "cmd" {
+                gremlin.ensure_accounting()?;
+            }
             crate::executor::run_agent::run_agent(
                 stage,
                 gremlin,
@@ -579,6 +582,9 @@ impl Gremlin {
     /// Drive every stage to the end, returning the exit code.
     /// `resume_from` names a stage to resume from (None = fresh start).
     pub async fn run(&mut self, resume_from: Option<&str>) -> Result<i32, RunError> {
+        // Replay an interrupted native projection even when this run only uses
+        // command/exec stages and never starts a native accounting collector.
+        self.state.store_handle().native_accounting(None)?;
         self.init_runtime(resume_from).await?;
 
         let bootstrap = self.definition.bootstrap();
@@ -595,7 +601,7 @@ impl Gremlin {
                     "other",
                     &truncate(&format!("bootstrap failed: {error}"), 200),
                 );
-                self.finish(1);
+                self.finish(1).await?;
                 return Ok(1);
             }
         }
@@ -626,7 +632,7 @@ impl Gremlin {
                         id: self.id.to_string(),
                         line: "cancelled".to_string(),
                     });
-                    self.finish(-1);
+                    self.finish(-1).await?;
                     return Ok(-1);
                 }
             }
@@ -681,7 +687,7 @@ impl Gremlin {
             }
         }
 
-        self.finish(exit_code);
+        self.finish(exit_code).await?;
         match failure {
             Some(error) => Err(error),
             None => Ok(exit_code),
@@ -689,7 +695,15 @@ impl Gremlin {
     }
 
     /// Reap clients, fold subprocess cost into total, write terminal state.
-    fn finish(&mut self, exit_code: i32) {
+    async fn finish(&mut self, exit_code: i32) -> Result<(), RunError> {
+        let accounting_result = self.flush_accounting().await;
+        let exit_code = if let Err(error) = &accounting_result {
+            self.state
+                .record_stage_error("other", &format!("accounting flush failed: {error}"));
+            1
+        } else {
+            exit_code
+        };
         let msg = format!("finished (exit_code={exit_code})");
         emit_event(EventKind::LogLine {
             id: self.id.to_string(),
@@ -741,6 +755,7 @@ impl Gremlin {
                 last_cached_input_tokens: None,
             });
         }
+        accounting_result.map_err(RunError::from)
     }
 }
 
@@ -868,8 +883,36 @@ mod tests {
             discovered_skills: None,
             extra_sandbox_roots: Vec::new(),
             native_definition: None,
+            accounting: Default::default(),
         };
         (sandbox, gremlin)
+    }
+
+    #[tokio::test]
+    async fn run_retains_one_collector_and_finish_surfaces_barrier_errors() {
+        let (_sandbox, mut gremlin) = test_gremlin(vec![], "cmd/true");
+        let collector = gremlin.ensure_accounting().unwrap();
+        let weak = std::sync::Arc::downgrade(&collector);
+        drop(collector);
+        let retained = weak
+            .upgrade()
+            .expect("run retains collector between stages");
+        assert!(std::sync::Arc::ptr_eq(
+            &retained,
+            &gremlin.ensure_accounting().unwrap()
+        ));
+        retained.register_execution("leaf", "stage").unwrap();
+        gremlin.flush_accounting().await.unwrap();
+        std::fs::write(
+            gremlin.state.state_dir().join("native_accounting.json"),
+            b"invalid journal",
+        )
+        .unwrap();
+        assert!(gremlin.finish(0).await.is_err());
+        assert!(
+            !gremlin.state.read_str("stage_error").is_empty()
+                || gremlin.state.stage_error().is_some()
+        );
     }
 
     /// Take the first stage from the gremlin's definition via `next_stage()`.
@@ -2105,6 +2148,74 @@ mod tests {
         assert!(!sandbox.path().join("first.marker").exists());
         assert!(sandbox.path().join("second.marker").exists());
         assert!(sandbox.path().join("third.marker").exists());
+    }
+
+    #[tokio::test]
+    async fn run_exec_only_resume_reconciles_interrupted_native_accounting() {
+        let stages = vec![ExecBuilder::new("resume")
+            .cmds(vec!["touch resumed.marker".to_string()])
+            .build()
+            .unwrap()];
+        let (sandbox, mut gremlin) = test_gremlin(stages, "cmd/true");
+        let state_dir = gremlin.state.state_dir();
+        let state_path = state_dir.join("state.json");
+        let rows_path = state_dir.join("token_usage.jsonl");
+        let original_state = std::fs::read(&state_path).unwrap();
+        let record = crate::executor::accounting::UsageRecord {
+            corr_id: gremlins_magic_bus::CorrId::new()
+                .with_run(gremlin.id.as_str())
+                .with_stage("agent")
+                .with_stage_run_id("interrupted-execution")
+                .with_turn(1),
+            stage_path: "pipeline/agent".into(),
+            usage: gremlins_magic_bus::ModelCallUsage {
+                request_id: "interrupted-request".into(),
+                provider: "test".into(),
+                model: "test".into(),
+                agent_id: "agent".into(),
+                request_kind: String::new(),
+                reported: true,
+                completed: true,
+                raw: serde_json::json!({}),
+                usage: gremlins_magic_bus::stats::UsageStats {
+                    prompt_tokens: Some(17),
+                    completion_tokens: Some(5),
+                    cached_input_tokens: None,
+                    cache_creation_input_tokens: None,
+                    reasoning_tokens: None,
+                    turns: 1,
+                },
+            },
+        };
+        gremlin
+            .state
+            .store_handle()
+            .native_accounting(Some(&record))
+            .unwrap();
+        // Simulate interruption after the journal commit but before either
+        // derived projection was written.
+        std::fs::write(&state_path, original_state).unwrap();
+        std::fs::remove_file(&rows_path).unwrap();
+
+        assert_eq!(gremlin.run(Some("resume")).await.unwrap(), 0);
+        assert!(sandbox.path().join("resumed.marker").exists());
+        assert!(gremlin.accounting.get().is_none());
+        let state: Value = serde_json::from_slice(&std::fs::read(&state_path).unwrap()).unwrap();
+        assert_eq!(
+            state["token_usage"],
+            serde_json::json!({"prompt_tokens": 17, "completion_tokens": 5, "turns": 1})
+        );
+        let rows = std::fs::read_to_string(rows_path).unwrap();
+        let rows: Vec<Value> = rows
+            .lines()
+            .map(|line| serde_json::from_str(line).unwrap())
+            .collect();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0]["stage"], "pipeline.agent");
+        assert_eq!(rows[0]["stage_run_id"], "interrupted-execution");
+        assert_eq!(rows[0]["prompt_tokens"], 17);
+        assert_eq!(rows[0]["completion_tokens"], 5);
+        assert_eq!(rows[0]["turns"], 1);
     }
 
     #[tokio::test]

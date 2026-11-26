@@ -9,12 +9,21 @@ use rig_core::completion::{CompletionRequest, Message, ToolDefinition};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
+/// Ephemeral request ownership; never persisted in provider request context.
+#[derive(Clone, Debug)]
+pub(crate) struct UsageAttribution {
+    pub corr_id: gremlins_magic_bus::CorrId,
+    pub agent_id: String,
+}
+
 /// The resolved inputs shared by normal completion and server compaction.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct ResolvedRequestContext {
     /// Empty for older artifacts; unknown providers cannot use server compaction.
     #[serde(default)]
     pub(crate) provider: String,
+    #[serde(skip)]
+    pub(crate) usage_attribution: Option<UsageAttribution>,
     pub(crate) model: String,
     pub(crate) system: Option<String>,
     pub(crate) tools: Vec<ToolDefinition>,
@@ -202,8 +211,22 @@ mod tests {
         })
     }
 
+    #[test]
+    fn usage_attribution_is_ephemeral() {
+        let mut request = context();
+        request.usage_attribution = Some(UsageAttribution {
+            corr_id: gremlins_magic_bus::CorrId::new().with_run("live-run"),
+            agent_id: "parent/child".into(),
+        });
+        let persisted = serde_json::to_value(&request).unwrap();
+        assert!(persisted.get("usage_attribution").is_none());
+        let restored: ResolvedRequestContext = serde_json::from_value(persisted).unwrap();
+        assert!(restored.usage_attribution.is_none());
+    }
+
     fn context() -> ResolvedRequestContext {
         ResolvedRequestContext {
+            usage_attribution: None,
             provider: "anthropic".into(),
             model: MODEL.into(),
             system: Some("system".into()),

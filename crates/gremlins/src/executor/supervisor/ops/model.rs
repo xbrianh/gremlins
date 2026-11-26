@@ -241,6 +241,7 @@ mod tests {
 
     fn context() -> ResolvedRequestContext {
         ResolvedRequestContext {
+            usage_attribution: None,
             provider: "anthropic".into(),
             model: "original-effective-model".into(),
             system: Some("original resolved system and workspace preamble".into()),

@@ -113,12 +113,6 @@ pub(super) async fn inbox_boundary(
                     InputControl::Bail => bail = true,
                 });
                 if bail {
-                    emit_corr_event(
-                        corr_id,
-                        EventKind::Ended {
-                            reason: "bailed".into(),
-                        },
-                    );
                     return Err(ClientError::Bail {
                         reason: "operator bailed".into(),
                     });
@@ -221,16 +215,6 @@ pub(super) async fn interactive_loop(
         }
         Some(InteractiveCommand::Bail(reason)) => {
             log::debug!("interactive_loop: Bail command (reason={reason:?}, turn={turn})");
-            emit_corr_event_async(
-                corr_id,
-                EventKind::Ended {
-                    reason: "bailed".to_string(),
-                },
-            )
-            .await;
-            session.finish_attachment(DebugOutcome::Ended {
-                reason: "bailed".into(),
-            });
             Err(ClientError::Bail {
                 reason: format!("operator bailed: {reason}"),
             })

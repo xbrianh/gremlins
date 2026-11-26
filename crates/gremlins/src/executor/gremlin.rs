@@ -332,9 +332,32 @@ pub struct Gremlin {
     /// A definition holding native (non-serializable) stage functions, kept
     /// alive in process until [`Gremlin::init_runtime`] installs it.
     pub(crate) native_definition: Option<StaticDefinition>,
+    /// Shared with the supervisor so abort cannot drop queued native usage.
+    pub(crate) accounting: Arc<std::sync::OnceLock<Arc<super::accounting::AccountingCollector>>>,
 }
 
 impl Gremlin {
+    pub(crate) fn ensure_accounting(
+        &self,
+    ) -> Result<Arc<super::accounting::AccountingCollector>, super::state::StateError> {
+        if let Some(collector) = self.accounting.get() {
+            return Ok(collector.clone());
+        }
+        let collector = super::accounting::AccountingCollector::start(
+            self.id.as_str(),
+            self.state.store_handle(),
+        )?;
+        let _ = self.accounting.set(collector.clone());
+        Ok(collector)
+    }
+
+    pub(crate) async fn flush_accounting(&self) -> Result<(), super::state::StateError> {
+        if let Some(collector) = self.accounting.get() {
+            collector.flush().await?;
+        }
+        Ok(())
+    }
+
     #[allow(dead_code)]
     pub(crate) fn next_interactive_session(&mut self) -> InteractiveSession {
         self.next_interactive_session_with_commands(true)
@@ -626,6 +649,7 @@ impl Gremlin {
             discovered_skills: None,
             extra_sandbox_roots: config.extra_sandbox_roots.clone(),
             native_definition: native_stage.map(|_| _definition.clone()),
+            accounting: Default::default(),
         };
 
         // 5. Create an empty log file.
@@ -780,6 +804,7 @@ impl Gremlin {
             discovered_skills: None,
             extra_sandbox_roots: Vec::new(),
             native_definition: None,
+            accounting: Default::default(),
         })
     }
 
@@ -1264,6 +1289,7 @@ impl Gremlin {
             discovered_skills: None,
             extra_sandbox_roots: self.extra_sandbox_roots.clone(),
             native_definition: None,
+            accounting: Default::default(),
         })
     }
 
@@ -2663,6 +2689,7 @@ mod tests {
             discovered_skills: None,
             extra_sandbox_roots: Vec::new(),
             native_definition: None,
+            accounting: Default::default(),
         }
     }
 

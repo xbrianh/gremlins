@@ -268,7 +268,7 @@ impl LoopState {
             _ = cancel.cancelled() => {
                 return Err(cancelled_error());
             }
-            b = self.prepare_stream_request(model, tool_defs, opts, nested) => b?,
+            b = self.prepare_stream_request(model, tool_defs, opts, nested, chain) => b?,
         };
 
         // Emit unconditionally — the executor-side subscriber owns the
@@ -286,9 +286,16 @@ impl LoopState {
 
         // Phase 2: launch the model stream, handling pre-stream errors and
         // retry inline (each path returns early).
+        let usage = crate::clients::request_usage::RequestUsage::new(
+            &self.corr_id,
+            self.conv.request_provider().unwrap_or_default(),
+            model.id().unwrap_or_default(),
+            chain,
+        );
         let response = match model.stream(builder) {
             Ok(s) => s,
             Err(e) => {
+                drop(usage);
                 // Retryable (429/5xx) error before streaming began — back off
                 // and re-execute this same turn with history intact.
                 if self.turn_retries < turn_retry_backoff.len()
@@ -317,7 +324,9 @@ impl LoopState {
             }
         };
 
-        super::stream_consume::consume_stream_events(
+        let response = crate::clients::request_usage::UsageStream::new(response, usage);
+        let final_usage = response.observation();
+        let outcome = super::stream_consume::consume_stream_events(
             self,
             response,
             cancel,
@@ -333,7 +342,16 @@ impl LoopState {
             timeout_retry_backoff,
             turn_retry_backoff,
         )
-        .await
+        .await;
+        if matches!(
+            outcome,
+            Ok(StreamTurnOutcome::RetryModelError | StreamTurnOutcome::RetryTimeout)
+        ) {
+            if let Some(usage) = final_usage.take() {
+                self.fold_turn_usage(Some(&usage));
+            }
+        }
+        outcome
     }
 
     /// Build the [`CompletionRequest`] for one model turn: assemble the request
@@ -345,9 +363,14 @@ impl LoopState {
         tool_defs: &[ToolDefinition],
         opts: &LoopOpts<'_>,
         nested: bool,
+        chain: &str,
     ) -> Result<CompletionRequest, ClientError> {
         let effective_system = self.system_prompt.clone().or_else(|| opts.preamble.clone());
         let mut context = crate::clients::compaction::ResolvedRequestContext {
+            usage_attribution: Some(crate::clients::compaction::UsageAttribution {
+                corr_id: self.corr_id.clone(),
+                agent_id: chain.to_owned(),
+            }),
             provider: self.conv.request_provider().unwrap_or_default().to_owned(),
             model: model.id().unwrap_or_default().to_string(),
             system: effective_system.clone(),
@@ -1555,7 +1578,7 @@ pub(crate) async fn run_agent_loop_core(
                 &state.corr_id,
                 EventKind::TokenUsage {
                     id: state.message_prefix.clone(),
-                    usage: totals.clone(),
+                    usage: super::turn_flow::event_usage(state.usage_baseline.as_ref(), &totals),
                     cost_usd: None,
                     last_prompt_tokens: last_prompt,
                     last_cached_input_tokens: last_cached,
@@ -1894,6 +1917,9 @@ pub(crate) fn test_tool_ctx_with_prefix(prefix: &str) -> crate::clients::tools::
 }
 
 #[cfg(test)]
+mod accounting_tests;
+
+#[cfg(test)]
 mod interrupted_tests;
 
 #[cfg(test)]
@@ -1961,10 +1987,16 @@ mod tests {
         opts.temperature = Some(0.5);
         opts.max_tokens = Some(1024);
         let request = state
-            .prepare_stream_request(&model, &[], &opts, false)
+            .prepare_stream_request(&model, &[], &opts, false, "context-test")
             .await
             .unwrap();
         let context = state.conv.request_context().expect("resolved context");
+        let attribution = context
+            .usage_attribution
+            .as_ref()
+            .expect("usage attribution");
+        assert_eq!(attribution.corr_id, state.corr_id);
+        assert_eq!(attribution.agent_id, "context-test");
         assert_eq!(context.model, "effective-model");
         assert_eq!(context.system.as_deref(), Some("system"));
         assert_eq!(context.extra, opts.extra);
@@ -3246,7 +3278,14 @@ mod tests {
                 "Done",
                 serde_json::json!({"summary": "separate summary"}),
             ),
-            E::final_response_with_default_usage(),
+            E::final_response(
+                Usage::new()
+                    .input_tokens(100)
+                    .output_tokens(20)
+                    .cached_input_tokens(30)
+                    .cache_creation_input_tokens(40)
+                    .reasoning_tokens(5),
+            ),
         ]]);
         let mut ctx = test_ctx(None, None);
         ctx.params.gremlin_id = Some(run);
@@ -3273,9 +3312,14 @@ mod tests {
         assert_eq!(completed.summary.as_deref(), Some("separate summary"));
         let local = completed.token_usage.unwrap();
         assert_eq!(local.turns, 1);
+        assert_eq!(local.prompt_tokens, Some(100));
+        assert_eq!(local.completion_tokens, Some(20));
+        assert_eq!(local.cached_input_tokens, Some(30));
+        assert_eq!(local.cache_creation_input_tokens, Some(40));
+        assert_eq!(local.reasoning_tokens, Some(5));
         let mut saw_done = false;
         let mut saw_turn = false;
-        let mut saw_local = false;
+        let mut saw_live = false;
         while let Ok(event) = rx.try_recv() {
             let usage = match event.kind() {
                 EventKind::Done {
@@ -3292,13 +3336,16 @@ mod tests {
                     saw_turn = true;
                     totals.as_ref().unwrap()
                 }
-                EventKind::TokenUsage { usage, .. } => {
-                    assert_eq!(
-                        serde_json::to_value(usage).unwrap(),
-                        serde_json::to_value(&local).unwrap()
-                    );
-                    saw_local = true;
-                    continue;
+                EventKind::TokenUsage {
+                    usage,
+                    last_prompt_tokens,
+                    last_cached_input_tokens,
+                    ..
+                } => {
+                    assert_eq!(*last_prompt_tokens, local.prompt_tokens);
+                    assert_eq!(*last_cached_input_tokens, local.cached_input_tokens);
+                    saw_live = true;
+                    usage
                 }
                 _ => continue,
             };
@@ -3324,7 +3371,7 @@ mod tests {
                 Some(5000 + local.reasoning_tokens.unwrap_or(0))
             );
         }
-        assert!(saw_done && saw_turn && saw_local);
+        assert!(saw_done && saw_turn && saw_live);
     }
 
     /// A cancel token set during the turn-level backoff must abandon the

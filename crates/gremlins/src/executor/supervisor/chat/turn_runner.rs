@@ -117,8 +117,21 @@ impl TurnRunner {
             .interactive_sessions
             .as_mut()
             .map(|sessions| sessions.supervise_next_turn());
+        // Retain these outside the stage task: panic/abort drops its Gremlin.
+        let accounting = Arc::clone(&gremlin.accounting);
+        let store = gremlin.state.store_handle();
+        let (producer_done, producer_rx) = tokio::sync::oneshot::channel();
+        if !self.registry.bind_run_producer(&self.id, producer_rx).await {
+            self.persistent.cancel();
+            self.abort(gremlin, "run stopped before stage started")
+                .await;
+            return;
+        }
         let mut task = tokio::spawn(async move {
             let result = run_chat_stage(&stage, &mut gremlin, invocation).await;
+            // Stop waits for this sender, not TurnRunner cleanup (which can
+            // itself call stop_run when the task loses its Gremlin).
+            drop(producer_done);
             (result, gremlin)
         });
         let mut saw_done = false;
@@ -146,7 +159,22 @@ impl TurnRunner {
                 .await;
         }
 
-        let (gremlin, end) = self.classify_task_result(result, saw_done);
+        // Joining stops every producer before the collector's final cut, even
+        // when the stage panicked and cannot return its Gremlin.
+        let accounting_error = if let Some(collector) = accounting.get() {
+            collector.flush().await.err()
+        } else {
+            None
+        };
+        let (gremlin, mut end) = self.classify_task_result(result, saw_done);
+        if let Some(error) = accounting_error {
+            let message = format!("accounting flush failed: {error}");
+            // Ordinary turn failures remain recoverable; only a failed
+            // accounting flush makes the whole run terminal.
+            super::super::lifecycle::record_run_error(&self.id, &store, &message);
+            store.write_terminal_state(1);
+            end = TurnEnd::Failed(message);
+        }
         if let (Some(terminal), TurnEnd::Cancelled { reason, .. }) = (&debug_terminal, &end) {
             terminal.end(reason);
         }
@@ -247,12 +275,25 @@ impl TurnRunner {
 
     pub(super) async fn abort(&self, mut gremlin: Gremlin, message: &str) {
         gremlin.discard_prepared_interactive_session();
+        let message = match gremlin.flush_accounting().await {
+            Ok(()) => message.to_string(),
+            Err(error) => {
+                let detail = format!("{message}; accounting flush failed: {error}");
+                super::super::lifecycle::record_run_error(
+                    &self.id,
+                    &gremlin.state.store_handle(),
+                    &detail,
+                );
+                gremlin.state.write_terminal_state(1);
+                detail
+            }
+        };
         self.reinsert(gremlin).await;
         let mut corr = CorrId::new().with_run(&self.id);
         if let Some(turn) = self.turn.as_deref().filter(|turn| !turn.is_empty()) {
             corr = corr.with_turn_token(turn);
         }
-        self.publish_failure(&corr, message.into());
+        self.publish_failure(&corr, message);
         self.clear_turn_and_signal().await;
     }
 

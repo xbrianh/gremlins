@@ -108,8 +108,6 @@ pub(crate) fn emit_stage_token_usage(
     stage_path: &str,
     usage: &HashMap<String, i64>,
 ) {
-    use std::io::Write;
-
     if usage.is_empty() {
         return;
     }
@@ -130,16 +128,319 @@ pub(crate) fn emit_stage_token_usage(
             return;
         }
     };
-    match store.open(TOKEN_USAGE_JSONL, BlobMode::Append) {
-        Ok(mut blob) => {
-            if let Err(e) = writeln!(blob, "{json}") {
-                log::warn!("emit_stage_token_usage: write error for {stage_path}: {e}");
+    if let Err(error) = store.append_stage_usage(&json) {
+        log::warn!("emit_stage_token_usage: append failed: {error}");
+    }
+}
+
+#[derive(Clone, serde::Serialize, serde::Deserialize)]
+struct NativeJournal {
+    baseline: std::collections::BTreeMap<String, u64>,
+    legacy_rows: String,
+    records: Vec<super::accounting::UsageRecord>,
+    #[serde(skip)]
+    index: HashMap<String, usize>,
+    #[serde(skip)]
+    totals: std::collections::BTreeMap<String, u64>,
+    #[serde(skip)]
+    stages: std::collections::BTreeMap<
+        (String, String),
+        (String, std::collections::BTreeMap<String, u64>),
+    >,
+}
+
+impl NativeJournal {
+    fn index_record(
+        &mut self,
+        record: &super::accounting::UsageRecord,
+    ) -> Result<bool, StateError> {
+        use super::accounting::{add, counters};
+        if let Some(index) = self.index.get(&record.usage.request_id) {
+            if serde_json::to_value(&self.records[*index])? != serde_json::to_value(record)? {
+                return Err(StateError::Other(
+                    "conflicting duplicate native usage request".into(),
+                ));
             }
+            return Ok(false);
         }
-        Err(e) => {
-            log::warn!("emit_stage_token_usage: failed to open {TOKEN_USAGE_JSONL}: {e}");
+        let values = counters(record)?;
+        let key = (
+            record.corr_id.run().unwrap_or_default().into(),
+            record.corr_id.stage_run_id().unwrap_or_default().into(),
+        );
+        let stage = self
+            .stages
+            .entry(key)
+            .or_insert_with(|| (record.stage_path.clone(), Default::default()));
+        if stage.0 != record.stage_path {
+            return Err(StateError::Other("inconsistent native stage path".into()));
+        }
+        add(&mut stage.1, values.clone())?;
+        add(&mut self.totals, values)?;
+        self.index
+            .insert(record.usage.request_id.clone(), self.records.len());
+        self.records.push(record.clone());
+        Ok(true)
+    }
+}
+
+#[derive(PartialEq, Eq)]
+struct NativeFileStamp {
+    len: u64,
+    inode: u64,
+    modified: (i64, i64),
+    changed: (i64, i64),
+}
+
+fn native_file_stamp(path: &Path) -> Result<Option<NativeFileStamp>, StateError> {
+    use std::os::unix::fs::MetadataExt;
+    match std::fs::metadata(path) {
+        Ok(meta) => Ok(Some(NativeFileStamp {
+            len: meta.len(),
+            inode: meta.ino(),
+            modified: (meta.mtime(), meta.mtime_nsec()),
+            changed: (meta.ctime(), meta.ctime_nsec()),
+        })),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(error) => Err(error.into()),
+    }
+}
+
+type NativeCache = HashMap<
+    PathBuf,
+    (
+        (Option<NativeFileStamp>, Option<NativeFileStamp>),
+        NativeJournal,
+    ),
+>;
+fn native_cache() -> &'static std::sync::Mutex<NativeCache> {
+    static CACHE: std::sync::OnceLock<std::sync::Mutex<NativeCache>> = std::sync::OnceLock::new();
+    CACHE.get_or_init(Default::default)
+}
+
+struct RemoveOnDrop(PathBuf);
+impl Drop for RemoveOnDrop {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_file(&self.0);
+    }
+}
+
+fn durable_replace(path: &Path, bytes: &[u8]) -> Result<(), StateError> {
+    use std::io::Write;
+    let tmp = path.with_extension(format!("{}.tmp", rand_hex(12)));
+    let _cleanup = RemoveOnDrop(tmp.clone());
+    let mut file = std::fs::OpenOptions::new()
+        .create_new(true)
+        .write(true)
+        .open(&tmp)?;
+    file.write_all(bytes)?;
+    file.sync_all()?;
+    std::fs::rename(&tmp, path)?;
+    File::open(path.parent().unwrap())?.sync_all()?;
+    Ok(())
+}
+
+// Called only while the state flock excludes all accounting writers.
+fn cleanup_accounting_temps(root: &Path) -> Result<(), StateError> {
+    for entry in std::fs::read_dir(root)? {
+        let entry = entry?;
+        let name = entry.file_name();
+        let name = name.to_string_lossy();
+        let owned = ["state.", "native_accounting.", "token_usage."]
+            .iter()
+            .any(|prefix| name.starts_with(prefix));
+        let random = name.rsplit('.').nth(1).unwrap_or_default();
+        if owned
+            && name.ends_with(".tmp")
+            && random.len() == 24
+            && random.bytes().all(|b| b.is_ascii_hexdigit())
+        {
+            std::fs::remove_file(entry.path())?;
         }
     }
+    Ok(())
+}
+
+fn persist_native_accounting(
+    sf: &Path,
+    record: Option<&super::accounting::UsageRecord>,
+) -> Result<(), StateError> {
+    use super::accounting::add;
+    use std::collections::BTreeMap;
+    let _lock = acquire_lock(sf)?;
+    let mut state = read_json_map(sf)?;
+    let root = sf.parent().unwrap();
+    cleanup_accounting_temps(root)?;
+    let journal_path = root.join("native_accounting.json");
+    let rows_path = root.join(TOKEN_USAGE_JSONL);
+    let wal_path = root.join("native_accounting.jsonl");
+    let stamp = (
+        native_file_stamp(&journal_path)?,
+        native_file_stamp(&wal_path)?,
+    );
+    let wal_len = stamp.1.as_ref().map_or(0, |meta| meta.len);
+    let mut cache = native_cache().lock().unwrap();
+    let cached = cache
+        .remove(sf)
+        .filter(|(cached_stamp, _)| *cached_stamp == stamp)
+        .map(|(_, journal)| journal);
+    drop(cache);
+    let numeric = |value: Option<&Value>| -> Result<BTreeMap<String, u64>, StateError> {
+        value
+            .map(|v| serde_json::from_value(v.clone()).map_err(StateError::from))
+            .unwrap_or_else(|| Ok(BTreeMap::new()))
+    };
+    let mut journal: NativeJournal = if let Some(journal) = cached {
+        journal
+    } else {
+        let mut journal: NativeJournal = match std::fs::read(&journal_path) {
+            Ok(bytes) => serde_json::from_slice(&bytes)?,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound && record.is_none() => return Ok(()),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => NativeJournal {
+                baseline: numeric(state.get("token_usage"))?,
+                legacy_rows: match std::fs::read_to_string(&rows_path) {
+                    Ok(rows) => rows,
+                    Err(e) if e.kind() == std::io::ErrorKind::NotFound => String::new(),
+                    Err(e) => return Err(e.into()),
+                },
+                records: Vec::new(),
+                index: Default::default(),
+                totals: Default::default(),
+                stages: Default::default(),
+            },
+            Err(e) => return Err(e.into()),
+        };
+        let records = std::mem::take(&mut journal.records);
+        for record in records {
+            journal.index_record(&record)?;
+        }
+        if wal_len > 0 {
+            let bytes = std::fs::read(&wal_path)?;
+            let complete = bytes.iter().rposition(|b| *b == b'\n').map_or(0, |i| i + 1);
+            for line in bytes[..complete]
+                .split(|b| *b == b'\n')
+                .filter(|line| !line.is_empty())
+            {
+                journal.index_record(&serde_json::from_slice(line)?)?;
+            }
+            if complete < bytes.len() {
+                let wal = std::fs::OpenOptions::new().write(true).open(&wal_path)?;
+                wal.set_len(complete as u64)?;
+                wal.sync_all()?;
+            }
+        }
+        journal
+    };
+    // Only journal-owned identities are projections. Imported native rows remain
+    // baseline data, even when their stage path or invocation ID matches locally.
+    match std::fs::read_to_string(&rows_path) {
+        Ok(rows) => {
+            let mut legacy = String::new();
+            for line in rows.split_inclusive('\n') {
+                let native = serde_json::from_str::<Value>(line).ok().is_some_and(|row| {
+                    let run = row.get("run_id").and_then(Value::as_str);
+                    let execution = row.get("stage_run_id").and_then(Value::as_str);
+                    run.is_some()
+                        && execution.is_some()
+                        && (journal.stages.contains_key(&(
+                            run.unwrap().to_owned(),
+                            execution.unwrap().to_owned(),
+                        )) || record.is_some_and(|record| {
+                            record.corr_id.run() == run
+                                && record.corr_id.stage_run_id() == execution
+                        }))
+                });
+                if !native {
+                    legacy.push_str(line);
+                }
+            }
+            journal.legacy_rows = legacy;
+        }
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+        Err(e) => return Err(e.into()),
+    }
+    // The marker is committed with the summary. Subtract only what was actually
+    // projected, preserving legacy command counters added between executions.
+    if let Some(marker) = state.get("native_accounting_projected") {
+        let mut baseline = numeric(state.get("token_usage"))?;
+        for (key, value) in numeric(Some(marker))? {
+            let entry = baseline.entry(key.clone()).or_default();
+            *entry = entry.checked_sub(value).ok_or_else(|| {
+                StateError::Other("native usage projection exceeds summary".into())
+            })?;
+            if *entry == 0 && !journal.baseline.contains_key(&key) {
+                baseline.remove(&key);
+            }
+        }
+        journal.baseline = baseline;
+    }
+    let initial = !journal_path.exists();
+    if let Some(record) = record {
+        if record.usage.request_id.is_empty()
+            || record.corr_id.run().is_none()
+            || record.corr_id.stage_run_id().is_none()
+        {
+            return Err(StateError::Other(
+                "native usage requires run, stage_run_id and request_id".into(),
+            ));
+        }
+        // Establish the imported baseline before the first append can commit.
+        if initial {
+            durable_replace(&journal_path, &serde_json::to_vec(&journal)?)?;
+        }
+        if journal.index_record(record)? {
+            use std::io::Write;
+            let mut wal = std::fs::OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(&wal_path)?;
+            let mut bytes = serde_json::to_vec(record)?;
+            bytes.push(b'\n');
+            wal.write_all(&bytes)?;
+            wal.sync_all()?;
+            File::open(root)?.sync_all()?;
+        }
+    }
+    let native = journal.totals.clone();
+    let stages = &journal.stages;
+    let mut total = journal.baseline.clone();
+    add(&mut total, native.clone())?;
+    let mut rows = journal.legacy_rows.clone();
+    if !rows.is_empty() && !rows.ends_with('\n') {
+        rows.push('\n');
+    }
+    for ((run, execution), (path, usage)) in stages {
+        let mut row = serde_json::to_value(usage)?.as_object().unwrap().clone();
+        row.insert("stage".into(), Value::String(path.replace('/', ".")));
+        row.insert("run_id".into(), Value::String(run.clone()));
+        row.insert("stage_run_id".into(), Value::String(execution.clone()));
+        rows.push_str(&serde_json::to_string(&row)?);
+        rows.push('\n');
+    }
+    // Journal first: either derived write can fail; the next call recomputes both.
+    // The append log is authoritative between barriers. JSON remains a compatible
+    // checkpoint for existing readers and imported pre-WAL journals.
+    if record.is_none() || initial {
+        durable_replace(&journal_path, &serde_json::to_vec(&journal)?)?;
+    }
+    durable_replace(&rows_path, rows.as_bytes())?;
+    state.insert("token_usage".into(), serde_json::to_value(total)?);
+    state.insert(
+        "native_accounting_projected".into(),
+        serde_json::to_value(native)?,
+    );
+    durable_replace(sf, &serde_json::to_vec(&state)?)?;
+    let stamp = (
+        native_file_stamp(&journal_path)?,
+        native_file_stamp(&wal_path)?,
+    );
+    // Bound process-local acceleration; eviction only costs a journal replay.
+    let mut cache = native_cache().lock().unwrap();
+    if cache.len() >= 64 {
+        cache.clear();
+    }
+    cache.insert(sf.to_path_buf(), (stamp, journal));
+    Ok(())
 }
 
 // ---------------------------------------------------------------------------
@@ -282,6 +583,64 @@ pub trait StateStore: Send + Sync + Debug {
     fn record_stage_error(&self, class: &str, detail: &str);
 
     fn accumulate_token_usage(&self, usage: &HashMap<String, i64>);
+
+    /// Reject unsupported explicit native execution before dispatch.
+    fn validate_native_accounting(&self) -> Result<(), StateError> {
+        Err(StateError::Other(
+            "native accounting unsupported by this store".into(),
+        ))
+    }
+
+    /// Recovery is harmless for legacy/custom stores with no native journal.
+    fn native_accounting(
+        &self,
+        record: Option<&super::accounting::UsageRecord>,
+    ) -> Result<(), StateError> {
+        if record.is_none() {
+            Ok(())
+        } else {
+            Err(StateError::Other(
+                "native accounting persistence unsupported by this store".into(),
+            ))
+        }
+    }
+
+    /// Append one pre-serialized stage row, serialized with native projections.
+    fn append_stage_usage(&self, row: &str) -> Result<(), StateError> {
+        use std::io::Write;
+        writeln!(self.open(TOKEN_USAGE_JSONL, BlobMode::Append)?, "{row}")?;
+        Ok(())
+    }
+
+    /// Durable outer-agent conversational totals for this exact run.
+    fn outer_conversational_usage(
+        &self,
+        run_id: &str,
+    ) -> Result<gremlins_magic_bus::stats::UsageStats, StateError> {
+        use super::accounting::{add, counters};
+        self.native_accounting(None)?;
+        let mut total = std::collections::BTreeMap::new();
+        if self.exists("native_accounting.json") {
+            let journal: NativeJournal =
+                serde_json::from_reader(self.open("native_accounting.json", BlobMode::Read)?)?;
+            for record in journal.records {
+                // Unknown legacy kinds are conversational. New producers mark compaction explicitly.
+                if record.corr_id.run() == Some(run_id)
+                    && record.usage.agent_id.is_empty()
+                    && record.usage.request_kind != "compaction"
+                {
+                    add(&mut total, counters(&record)?)?;
+                }
+            }
+        }
+        let mut value = serde_json::to_value(total)?;
+        value
+            .as_object_mut()
+            .unwrap()
+            .entry("turns")
+            .or_insert(Value::from(0));
+        Ok(serde_json::from_value(value)?)
+    }
 
     /// Create the `finished` marker and patch terminal fields.
     fn write_terminal_state(&self, exit_code: i32);
@@ -1435,6 +1794,24 @@ impl StateStore for FileSystemStateStore {
         write_bail_atomically(self.root.path(), &bail_path, &attempt, &payload);
     }
 
+    fn validate_native_accounting(&self) -> Result<(), StateError> {
+        Ok(())
+    }
+
+    fn append_stage_usage(&self, row: &str) -> Result<(), StateError> {
+        use std::io::Write;
+        let _lock = acquire_lock(&self.state_file())?;
+        writeln!(self.open(TOKEN_USAGE_JSONL, BlobMode::Append)?, "{row}")?;
+        Ok(())
+    }
+
+    fn native_accounting(
+        &self,
+        record: Option<&super::accounting::UsageRecord>,
+    ) -> Result<(), StateError> {
+        persist_native_accounting(&self.state_file(), record)
+    }
+
     fn accumulate_token_usage(&self, usage: &HashMap<String, i64>) {
         if usage.is_empty() {
             return;
@@ -2088,6 +2465,10 @@ impl StateStore for ScopedFileSystemStateStore {
     delegate!(inner, fn patch(&self, delete: &[String], fields: &Map<String, Value>));
     delegate!(inner, fn record_stage_error(&self, class: &str, detail: &str));
     delegate!(inner, fn accumulate_token_usage(&self, usage: &HashMap<String, i64>));
+    delegate!(inner, fn validate_native_accounting(&self) -> Result<(), StateError>);
+    delegate!(inner, fn append_stage_usage(&self, row: &str) -> Result<(), StateError>);
+    delegate!(inner, fn outer_conversational_usage(&self, run_id: &str) -> Result<gremlins_magic_bus::stats::UsageStats, StateError>);
+    delegate!(inner, fn native_accounting(&self, record: Option<&super::accounting::UsageRecord>) -> Result<(), StateError>);
     delegate!(inner, fn write_terminal_state(&self, exit_code: i32));
     delegate!(inner, fn add_subprocess_cost(&self, amount: f64));
     delegate!(inner, fn patch_parallel_attempt(&self, child_key: &str, attempt: &str));
@@ -4470,5 +4851,56 @@ mod tests {
             Err(e) => assert!(e.to_string().contains("not supported")),
             Ok(_checkout) => panic!("expected error"),
         }
+    }
+}
+
+#[cfg(test)]
+mod native_storage_tests {
+    use super::*;
+
+    #[test]
+    fn accounting_cleanup_only_removes_owned_random_temps() {
+        let dir = tempfile::tempdir().unwrap();
+        let orphan = dir
+            .path()
+            .join("native_accounting.0123456789abcdef01234567.tmp");
+        let unrelated = dir.path().join("notes.0123456789abcdef01234567.tmp");
+        std::fs::write(&orphan, "partial").unwrap();
+        std::fs::write(&unrelated, "keep").unwrap();
+        cleanup_accounting_temps(dir.path()).unwrap();
+        assert!(!orphan.exists());
+        assert!(unrelated.exists());
+    }
+
+    #[test]
+    fn recovery_cleans_orphan_temps_without_creating_accounting_files() {
+        let dir = tempfile::tempdir().unwrap();
+        let state = dir.path().join("state.json");
+        std::fs::write(&state, b"{\"cmd\":\"keep\"}").unwrap();
+        for prefix in ["state", "native_accounting", "token_usage"] {
+            std::fs::write(
+                dir.path()
+                    .join(format!("{prefix}.0123456789abcdef01234567.tmp")),
+                b"interrupted",
+            )
+            .unwrap();
+        }
+        let unrelated = dir.path().join("state.manual.tmp");
+        std::fs::write(&unrelated, b"keep").unwrap();
+        persist_native_accounting(&state, None).unwrap();
+        assert_eq!(std::fs::read(&state).unwrap(), b"{\"cmd\":\"keep\"}");
+        assert!(unrelated.exists());
+        assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 3);
+        assert!(!dir.path().join("native_accounting.json").exists());
+        assert!(!dir.path().join(TOKEN_USAGE_JSONL).exists());
+    }
+
+    #[test]
+    fn failed_replace_removes_temporary_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let target = dir.path().join("native_accounting.json");
+        std::fs::create_dir(&target).unwrap();
+        assert!(durable_replace(&target, b"{}").is_err());
+        assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 1);
     }
 }

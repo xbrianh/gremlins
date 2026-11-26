@@ -9,7 +9,7 @@
 
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, OnceLock};
 
 use tokio::sync::{mpsc, oneshot, watch, RwLock};
 
@@ -17,6 +17,7 @@ use serde_json::{Map, Value};
 
 use crate::clients::cancel::CancelToken;
 use crate::clients::interactive::InteractiveHandle;
+use crate::executor::accounting::AccountingCollector;
 use crate::executor::gremlin::{validate_gremlin_id, Gremlin};
 use crate::executor::state;
 use crate::executor::str_field;
@@ -34,6 +35,8 @@ pub(crate) struct RunHandle {
     pub cancel: Arc<CancelToken>,
     pub task: Option<tokio::task::JoinHandle<()>>,
     pub aborted: Arc<AtomicBool>,
+    pub accounting: Arc<OnceLock<Arc<AccountingCollector>>>,
+    producer_done: Vec<oneshot::Receiver<()>>,
     #[allow(dead_code)]
     pub state_tx: watch::Sender<RunState>,
     /// Interactive handle (supervisor → agent loop).
@@ -423,22 +426,56 @@ impl RunRegistry {
         }
     }
 
+    /// Bind before spawning an externally owned chat stage. On false, do not
+    /// start it. Move the matching sender into the stage task, dropping it only
+    /// after production ends (including panic/abort), not during runner cleanup.
+    pub(crate) async fn bind_run_producer(&self, id: &str, done: oneshot::Receiver<()>) -> bool {
+        let mut runs = self.runs.write().await;
+        let Some(handle) = runs.get_mut(id) else {
+            return false;
+        };
+        handle.producer_done.retain_mut(|receiver| {
+            matches!(
+                receiver.try_recv(),
+                Err(oneshot::error::TryRecvError::Empty)
+            )
+        });
+        handle.producer_done.push(done);
+        true
+    }
+
     // ── Stop ────────────────────────────────────────────────────────────
 
     /// Stop a run: remove from map, cancel/abort task, publish terminal state,
     /// release log subscription. Returns `None` when the id was not live.
     pub(crate) async fn stop_run(&self, id: &str) -> Option<StoppedRun> {
-        let mut runs = self.runs.write().await;
-        let handle = runs.remove(id)?;
-
-        handle.cancel.cancel();
-        if let Some(task) = &handle.task {
-            task.abort();
-        }
+        // Completion callbacks also acquire the map lock. Never join while holding it.
+        let mut handle = self.runs.write().await.remove(id)?;
         handle.aborted.store(true, Ordering::Relaxed);
-
+        handle.cancel.cancel();
+        if let Some(task) = handle.task.take() {
+            task.abort();
+            if let Err(error) = task.await {
+                if !error.is_cancelled() {
+                    super::lifecycle::record_run_error(id, &handle.store, &error.to_string());
+                }
+            }
+        }
+        // Chat stages have no registry-owned task. Unwind them before the cut.
+        for producer in handle.producer_done.drain(..) {
+            let _ = producer.await;
+        }
+        if let Some(collector) = handle.accounting.get() {
+            if let Err(error) = collector.flush().await {
+                super::lifecycle::record_run_error(
+                    id,
+                    &handle.store,
+                    &format!("accounting flush failed: {error}"),
+                );
+            }
+        }
+        handle.store.write_terminal_state(1);
         let _ = handle.state_tx.send(terminal_state(id, "stopped"));
-
         release_log_sub(&handle);
 
         Some(handle.state_tx.clone())
@@ -503,6 +540,7 @@ impl RunRegistry {
             common.aborted,
             common.interactive,
             common.store,
+            common.accounting,
             common.log_flush,
             common.log_sub,
             initial,
@@ -558,6 +596,7 @@ impl RunRegistry {
                 common.aborted,
                 common.interactive,
                 common.store,
+                common.accounting,
                 common.log_flush,
                 common.log_sub,
                 initial,
@@ -599,6 +638,7 @@ impl RunRegistry {
                 common.aborted,
                 common.interactive,
                 common.store,
+                common.accounting,
                 common.log_flush,
                 common.log_sub,
                 RunState {
@@ -693,6 +733,7 @@ impl RunRegistry {
         aborted: Arc<AtomicBool>,
         interactive: InteractiveHandle,
         store: StoreHandle,
+        accounting: Arc<OnceLock<Arc<AccountingCollector>>>,
         log_flush: Option<LogFlushHandle>,
         log_sub: Option<Subscriber<EventKind>>,
         initial_state: RunState,
@@ -706,6 +747,7 @@ impl RunRegistry {
             aborted,
             interactive,
             store,
+            accounting,
             log_flush,
             log_sub,
             initial_state,
@@ -720,6 +762,7 @@ struct LaunchCommon {
     aborted: Arc<AtomicBool>,
     interactive: InteractiveHandle,
     store: StoreHandle,
+    accounting: Arc<OnceLock<Arc<AccountingCollector>>>,
     log_flush: Option<LogFlushHandle>,
     log_sub: Option<Subscriber<EventKind>>,
 }
@@ -732,6 +775,7 @@ fn launch_common(
     gremlin.runtime_config.registry = Some(Arc::clone(registry));
     let (interactive, log_flush, log_sub) = setup_gremlin_channels(gremlin, relay);
     let store = gremlin.state.store_handle();
+    let accounting = Arc::clone(&gremlin.accounting);
     let cancel = gremlin.cancel_token.clone();
     let aborted = Arc::new(AtomicBool::new(false));
     LaunchCommon {
@@ -739,6 +783,7 @@ fn launch_common(
         aborted,
         interactive,
         store,
+        accounting,
         log_flush: Some(log_flush),
         log_sub: Some(log_sub),
     }
@@ -802,6 +847,7 @@ fn insert_run_entry_inner(
     aborted: Arc<AtomicBool>,
     interactive: InteractiveHandle,
     store: StoreHandle,
+    accounting: Arc<OnceLock<Arc<AccountingCollector>>>,
     log_flush: Option<LogFlushHandle>,
     log_sub: Option<Subscriber<EventKind>>,
     initial_state: RunState,
@@ -816,6 +862,8 @@ fn insert_run_entry_inner(
             state_tx,
             interactive,
             store,
+            accounting,
+            producer_done: Vec::new(),
             log_flush,
             log_sub,
         },
@@ -895,5 +943,107 @@ mod controller_claim_tests {
         assert_eq!(claims.claim("run", "stage").err(), Some("controller_busy"));
         drop(replacement);
         assert!(claims.claim("run", "stage").is_ok());
+    }
+}
+
+#[cfg(test)]
+mod accounting_barrier_tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn stop_waits_for_external_chat_producer_without_holding_registry_lock() {
+        let root = tempfile::tempdir().unwrap();
+        let model = crate::model_uri::ModelURI::parse("cmd/echo").unwrap();
+        let gremlin = super::super::chat::create_chat_gremlin(
+            "accounting-chat-barrier",
+            &model,
+            "helpful",
+            root.path(),
+            &HashMap::new(),
+        )
+        .unwrap();
+        let (shutdown, _) = watch::channel(false);
+        let registry = Arc::new(RunRegistry::new(shutdown));
+        let id = gremlin.id.to_string();
+        let cancel = CancelToken::new();
+        let _gremlin = registry
+            .register_chat_gremlin(id.clone(), gremlin, cancel.clone())
+            .await;
+        let mut state = registry
+            .runs
+            .read()
+            .await
+            .get(&id)
+            .unwrap()
+            .state_tx
+            .subscribe();
+        let (done_tx, done_rx) = oneshot::channel();
+        assert!(registry.bind_run_producer(&id, done_rx).await);
+        let stopping = {
+            let registry = registry.clone();
+            let id = id.clone();
+            tokio::spawn(async move { registry.stop_run(&id).await })
+        };
+        cancel.cancelled().await;
+        assert!(!stopping.is_finished());
+        assert_eq!(state.borrow().status, "running");
+        // Also proves stop released its map lock before awaiting the producer.
+        assert!(!registry.contains_run(&id).await);
+        let (_, late_rx) = oneshot::channel();
+        assert!(!registry.bind_run_producer(&id, late_rx).await);
+        drop(done_tx); // panic/abort releases the barrier by sender destruction.
+        tokio::time::timeout(std::time::Duration::from_secs(2), stopping)
+            .await
+            .unwrap()
+            .unwrap();
+        state.changed().await.unwrap();
+        assert_eq!(state.borrow().status, "stopped");
+    }
+
+    #[tokio::test]
+    async fn stop_joins_producer_before_publishing_terminal() {
+        struct OnDrop(Arc<AtomicBool>);
+        impl Drop for OnDrop {
+            fn drop(&mut self) {
+                self.0.store(true, Ordering::SeqCst);
+            }
+        }
+
+        let root = tempfile::tempdir().unwrap();
+        let model = crate::model_uri::ModelURI::parse("cmd/echo").unwrap();
+        let gremlin = super::super::chat::create_chat_gremlin(
+            "accounting-stop-barrier",
+            &model,
+            "helpful",
+            root.path(),
+            &HashMap::new(),
+        )
+        .unwrap();
+        let (shutdown, _) = watch::channel(false);
+        let registry = Arc::new(RunRegistry::new(shutdown));
+        let id = gremlin.id.to_string();
+        let _gremlin = registry
+            .register_chat_gremlin(id.clone(), gremlin, CancelToken::new())
+            .await;
+        let dropped = Arc::new(AtomicBool::new(false));
+        let guard = OnDrop(dropped.clone());
+        let task = tokio::spawn(async move {
+            let _guard = guard;
+            std::future::pending::<()>().await;
+        });
+        let mut state = {
+            let mut runs = registry.runs.write().await;
+            let handle = runs.get_mut(&id).unwrap();
+            handle.task = Some(task);
+            handle.state_tx.subscribe()
+        };
+        tokio::time::timeout(std::time::Duration::from_secs(2), registry.stop_run(&id))
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(dropped.load(Ordering::SeqCst));
+        state.changed().await.unwrap();
+        assert_eq!(state.borrow().status, "stopped");
+        assert!(!registry.contains_run(&id).await);
     }
 }

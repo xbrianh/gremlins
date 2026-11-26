@@ -73,6 +73,7 @@ pub enum RunError {
     State(#[from] StateError),
 }
 
+pub mod accounting;
 mod active_leaf;
 pub mod agent_runner;
 pub mod blob_io;

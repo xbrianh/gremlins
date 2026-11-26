@@ -20,4 +20,5 @@ pub use event::{DispatchEvent, Timestamp};
 pub use event_kind::EventKind;
 pub use policy::{DeliveryPolicy, SubscriberRegistration};
 pub use receiver::{ReceiverHalf, Recv, TryRecvError};
+pub use stats::ModelCallUsage;
 pub use subscriber::{Subscriber, SubscriberError};

@@ -665,6 +665,7 @@ pub(crate) fn create_chat_gremlin(
         cancel_token: None,
         interactive_sessions: None,
         execution_inputs: Default::default(),
+        accounting: Arc::new(std::sync::OnceLock::new()),
         clean_cmds: Vec::new(),
         enclosing_task_models: None,
         enclosing_model: None,

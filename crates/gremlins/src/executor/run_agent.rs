@@ -88,6 +88,53 @@ fn chat_done_usage(
     }
 }
 
+fn home_starting_usage(gremlin: &Gremlin) -> crate::clients::protocol::UsageStats {
+    if let Some(value) = gremlin.state.read_field("home_starting_usage") {
+        return usage_baseline_from_state(Some(&value));
+    }
+    // Snapshot legacy balances before the first native collector creates a ledger.
+    let legacy = (!gremlin.state.store_ref().exists("native_accounting.json"))
+        .then(|| {
+            gremlin
+                .state
+                .read_field("home_outer_usage")
+                .or_else(|| gremlin.state.read_field("token_usage"))
+        })
+        .flatten();
+    let usage = usage_baseline_from_state(legacy.as_ref());
+    gremlin.state.patch(
+        &[],
+        serde_json::json!({"home_starting_usage": usage})
+            .as_object()
+            .unwrap(),
+    );
+    usage
+}
+
+/// Starting balance and command usage are separate from the corrected native ledger.
+fn home_native_usage(gremlin: &Gremlin) -> Result<crate::clients::protocol::UsageStats, RunError> {
+    let starting = home_starting_usage(gremlin);
+    let command = usage_baseline_from_state(gremlin.state.read_field("home_cmd_usage").as_ref());
+    let native = gremlin
+        .state
+        .store_ref()
+        .outer_conversational_usage(gremlin.id.as_str())
+        .map_err(|error| RunError::Message(format!("home usage journal: {error}")))?;
+    let baseline = chat_done_usage(Some(&starting), Some(&command));
+    Ok(chat_done_usage(baseline.as_ref(), Some(&native)).unwrap())
+}
+
+fn advance_home_cmd_usage(gremlin: &Gremlin, local: &crate::clients::protocol::UsageStats) {
+    let previous = usage_baseline_from_state(gremlin.state.read_field("home_cmd_usage").as_ref());
+    let usage = chat_done_usage(Some(&previous), Some(local)).unwrap();
+    gremlin.state.patch(
+        &[],
+        serde_json::json!({"home_cmd_usage": usage})
+            .as_object()
+            .unwrap(),
+    );
+}
+
 /// Merge task-model layers into a kind-keyed map.
 pub(crate) fn resolve_task_models(
     global: Option<&IndexMap<String, String>>,
@@ -417,10 +464,27 @@ pub(crate) async fn run_agent(
             artifact: artifact_check,
         });
 
-    let usage_baseline = is_chat
-        .then(|| usage_baseline_from_state(gremlin.state.read_field("token_usage").as_ref()));
+    let is_native = client.provider() != "cmd";
+    let usage_baseline = if is_chat {
+        Some(home_native_usage(gremlin)?)
+    } else {
+        None
+    };
+    let accounting = if is_native {
+        let collector = crate::executor::accounting::AccountingCollector::start(
+            gremlin.id.as_str(),
+            gremlin.state.store_handle(),
+        )
+        .map_err(|error| stage_failed(&agent.name, error))?;
+        collector
+            .register_execution(&invocation.stage_run_id, &stage_path)
+            .map_err(|error| stage_failed(&agent.name, error))?;
+        Some(collector)
+    } else {
+        None
+    };
     let params = RunParams {
-        defer_done: is_chat,
+        defer_done: is_chat || is_native,
         output_corr_id: Some(corr_id.clone()),
         usage_baseline: usage_baseline.clone(),
         prompt: prepared.user_prompt(),
@@ -492,160 +556,221 @@ pub(crate) async fn run_agent(
         params.model.as_deref().unwrap_or("default")
     );
 
-    let run_result = client.run(params, interactive).await;
-    // Pipeline retries redispatch a fresh invocation via run_stage, not legacy resume().
-    client.release_invocation(&corr_id);
-    // Close our subscription so the prompt-dump task drains any
-    // already-buffered events and then exits.
-    drop(prompt_dumper_guard);
-    let _ = tokio::time::timeout(std::time::Duration::from_secs(5), prompt_dumper_task).await;
+    // Keep attachment outcomes behind the same persistence boundary as bus
+    // completion. An existing chat supervisor retains terminal ownership.
+    let debug_terminal = interactive.supervise_if_needed();
+    let result = async {
+        let run_result = client.run(params, interactive).await;
+        // Pipeline retries redispatch a fresh invocation via run_stage, not legacy resume().
+        client.release_invocation(&corr_id);
+        let accounting_result = if let Some(collector) = &accounting {
+            collector.flush().await
+        } else {
+            Ok(())
+        };
+        // Close our subscription so the prompt-dump task drains any
+        // already-buffered events and then exits.
+        drop(prompt_dumper_guard);
+        let _ = tokio::time::timeout(std::time::Duration::from_secs(5), prompt_dumper_task).await;
+        accounting_result.map_err(|error| stage_failed(&prepared.name, error))?;
 
-    let completed = match run_result {
-        Ok(c) => c,
-        Err(error) => {
-            // Persist partial token usage from failed agent-loop turns so
-            // the Gremlin::finish() snapshot has accurate totals rather
-            // than the previous stage's stale values.
-            if let Some(usage) = stage_usage.lock().unwrap().take() {
-                let mut delta: HashMap<String, i64> = HashMap::new();
-                delta.insert("turns".to_string(), usage.turns as i64);
-                delta.extend(
-                    [
-                        ("prompt_tokens", usage.prompt_tokens),
-                        ("completion_tokens", usage.completion_tokens),
-                        ("cached_input_tokens", usage.cached_input_tokens),
-                        (
-                            "cache_creation_input_tokens",
-                            usage.cache_creation_input_tokens,
-                        ),
-                        ("reasoning_tokens", usage.reasoning_tokens),
-                    ]
-                    .into_iter()
-                    .filter_map(|(k, v)| v.map(|v| (k.to_string(), v as i64))),
-                );
-                gremlin.state.accumulate_token_usage(&delta);
-                state::emit_stage_token_usage(gremlin.state.store_ref(), &stage_path, &delta);
+        // Persist even when the backend failed after reporting partial requests.
+        let native_home_usage = if is_chat && is_native {
+            let usage = home_native_usage(gremlin)?;
+            gremlin.state.patch(
+                &[],
+                serde_json::json!({"home_outer_usage": usage})
+                    .as_object()
+                    .unwrap(),
+            );
+            Some(usage)
+        } else {
+            None
+        };
+
+        let completed = match run_result {
+            Ok(c) => c,
+            Err(error) => {
+                // Persist partial token usage from failed agent-loop turns so
+                // the Gremlin::finish() snapshot has accurate totals rather
+                // than the previous stage's stale values.
+                if let Some(usage) = stage_usage.lock().unwrap().take().filter(|_| !is_native) {
+                    let mut delta: HashMap<String, i64> = HashMap::new();
+                    delta.insert("turns".to_string(), usage.turns as i64);
+                    delta.extend(
+                        [
+                            ("prompt_tokens", usage.prompt_tokens),
+                            ("completion_tokens", usage.completion_tokens),
+                            ("cached_input_tokens", usage.cached_input_tokens),
+                            (
+                                "cache_creation_input_tokens",
+                                usage.cache_creation_input_tokens,
+                            ),
+                            ("reasoning_tokens", usage.reasoning_tokens),
+                        ]
+                        .into_iter()
+                        .filter_map(|(k, v)| v.map(|v| (k.to_string(), v as i64))),
+                    );
+                    if is_chat {
+                        advance_home_cmd_usage(gremlin, &usage);
+                    }
+                    gremlin.state.accumulate_token_usage(&delta);
+                    state::emit_stage_token_usage(gremlin.state.store_ref(), &stage_path, &delta);
+                }
+                // Earlier turns remain authoritative in their own artifacts. Persist
+                // only this prompt so cancellation cannot replay the signed prefix.
+                if matches!(&error, ClientError::Cancelled) && is_chat {
+                    if let Some(turn_num) = chat_turn {
+                        let messages = [Message::user(prepared.user_prompt())];
+                        if let Err(e) =
+                            persist_chat_conversation_turn(gremlin, turn_num, &messages).await
+                        {
+                            log::warn!("chat: failed to persist conversation on cancel: {e}");
+                        }
+                    }
+                }
+                if matches!(&error, ClientError::Bail { .. }) && !is_chat {
+                    emit_corr_event(
+                        &corr_id,
+                        EventKind::Ended {
+                            reason: "bailed".into(),
+                        },
+                    );
+                }
+                return Err(client_run_err(error, &prepared.name));
             }
-            // Earlier turns remain authoritative in their own artifacts. Persist
-            // only this prompt so cancellation cannot replay the signed prefix.
-            if matches!(&error, ClientError::Cancelled) && is_chat {
-                if let Some(turn_num) = chat_turn {
-                    let messages = [Message::user(prepared.user_prompt())];
-                    if let Err(e) =
-                        persist_chat_conversation_turn(gremlin, turn_num, &messages).await
+        };
+
+        emit_corr_event(
+            &corr_id,
+            EventKind::LogLine {
+                id: gremlin.id.to_string(),
+                line: format!(
+                    "[{name}][{model}] agent: completed (turns={turns})",
+                    name = prepared.name,
+                    model = effective_model,
+                    turns = completed.token_usage.as_ref().map(|u| u.turns).unwrap_or(0)
+                ),
+            },
+        );
+
+        if let Some(usage) = completed.token_usage.as_ref().filter(|_| !is_native) {
+            let mut delta: HashMap<String, i64> = HashMap::new();
+            delta.insert("turns".to_string(), usage.turns as i64);
+            delta.extend(
+                [
+                    ("prompt_tokens", usage.prompt_tokens),
+                    ("completion_tokens", usage.completion_tokens),
+                    ("cached_input_tokens", usage.cached_input_tokens),
+                    (
+                        "cache_creation_input_tokens",
+                        usage.cache_creation_input_tokens,
+                    ),
+                    ("reasoning_tokens", usage.reasoning_tokens),
+                ]
+                .into_iter()
+                .filter_map(|(k, v)| v.map(|v| (k.to_string(), v as i64))),
+            );
+            if is_chat {
+                advance_home_cmd_usage(gremlin, usage);
+            }
+            gremlin.state.accumulate_token_usage(&delta);
+            state::emit_stage_token_usage(gremlin.state.store_ref(), &stage_path, &delta);
+        }
+
+        if is_chat {
+            if let Some(usage) =
+                chat_done_usage(usage_baseline.as_ref(), completed.token_usage.as_ref())
+                    .filter(|_| !is_native)
+            {
+                gremlin.state.patch(
+                    &[],
+                    serde_json::json!({"home_outer_usage": usage})
+                        .as_object()
+                        .unwrap(),
+                );
+            }
+            if let (Some(conversation), Some(turn_num)) = (&completed.conversation, chat_turn) {
+                if conversation.compacted_prefix() {
+                    // Compaction replaced the prefix — write the full compacted
+                    // transcript as turn 0001 and clear all other per-turn
+                    // artifacts so the next submission does not reload
+                    // compacted-away messages or duplicate retained ones.
+                    let messages = conversation.messages();
+                    if let Err(e) = persist_compacted_conversation_with_context(
+                        gremlin,
+                        &messages,
+                        conversation.request_context(),
+                    )
+                    .await
                     {
-                        log::warn!("chat: failed to persist conversation on cancel: {e}");
+                        log::warn!("chat: failed to persist compacted conversation: {e}");
+                    }
+                } else {
+                    let messages = conversation.messages();
+                    let diff: Vec<Message> =
+                        if canonical_prefix.is_empty() || messages.len() < canonical_prefix.len() {
+                            messages.clone()
+                        } else {
+                            let cp = &messages[..canonical_prefix.len()];
+                            let same = serde_json::to_string(cp).unwrap_or_default()
+                                == serde_json::to_string(&canonical_prefix).unwrap_or_default();
+                            if same {
+                                messages[canonical_prefix.len()..].to_vec()
+                            } else {
+                                messages.clone()
+                            }
+                        };
+                    if let Err(e) = persist_chat_conversation_turn_with_context(
+                        gremlin,
+                        turn_num,
+                        &diff,
+                        conversation.request_context(),
+                    )
+                    .await
+                    {
+                        log::warn!("chat: failed to persist conversation turn {turn_num}: {e}");
                     }
                 }
             }
-            return Err(client_run_err(error, &prepared.name));
         }
-    };
 
-    emit_corr_event(
-        &corr_id,
-        EventKind::LogLine {
-            id: gremlin.id.to_string(),
-            line: format!(
-                "[{name}][{model}] agent: completed (turns={turns})",
-                name = prepared.name,
-                model = effective_model,
-                turns = completed.token_usage.as_ref().map(|u| u.turns).unwrap_or(0)
-            ),
-        },
-    );
+        commit_agent(&prepared, local_registry.as_ref())
+            .await
+            .map_err(|error| agent_commit_err(error, &prepared.name))?;
 
-    if let Some(usage) = &completed.token_usage {
-        let mut delta: HashMap<String, i64> = HashMap::new();
-        delta.insert("turns".to_string(), usage.turns as i64);
-        delta.extend(
-            [
-                ("prompt_tokens", usage.prompt_tokens),
-                ("completion_tokens", usage.completion_tokens),
-                ("cached_input_tokens", usage.cached_input_tokens),
-                (
-                    "cache_creation_input_tokens",
-                    usage.cache_creation_input_tokens,
-                ),
-                ("reasoning_tokens", usage.reasoning_tokens),
-            ]
-            .into_iter()
-            .filter_map(|(k, v)| v.map(|v| (k.to_string(), v as i64))),
-        );
-        gremlin.state.accumulate_token_usage(&delta);
-        state::emit_stage_token_usage(gremlin.state.store_ref(), &stage_path, &delta);
+        // Merge the localized registry back into the main registry.
+        gremlin
+            .state
+            .join(local_registry.as_ref(), Collision::Ignore, None)
+            .await
+            .map_err(|error| stage_failed(&prepared.name, error))?;
+
+        // Native completion (including attachment output) must follow durable
+        // accounting, artifact commit, and registry merge, not just the model loop.
+        if (is_chat || is_native) && completed.exit_code == 0 {
+            emit_corr_event(
+                &corr_id,
+                EventKind::Done {
+                    text: completed.text_result.unwrap_or_default(),
+                    summary: completed.summary.unwrap_or_default(),
+                    usage: native_home_usage.or_else(|| {
+                        chat_done_usage(usage_baseline.as_ref(), completed.token_usage.as_ref())
+                    }),
+                },
+            );
+        }
+
+        Ok(())
     }
-
-    if is_chat {
-        if let (Some(conversation), Some(turn_num)) = (&completed.conversation, chat_turn) {
-            if conversation.compacted_prefix() {
-                // Compaction replaced the prefix — write the full compacted
-                // transcript as turn 0001 and clear all other per-turn
-                // artifacts so the next submission does not reload
-                // compacted-away messages or duplicate retained ones.
-                let messages = conversation.messages();
-                if let Err(e) = persist_compacted_conversation_with_context(
-                    gremlin,
-                    &messages,
-                    conversation.request_context(),
-                )
-                .await
-                {
-                    log::warn!("chat: failed to persist compacted conversation: {e}");
-                }
-            } else {
-                let messages = conversation.messages();
-                let diff: Vec<Message> =
-                    if canonical_prefix.is_empty() || messages.len() < canonical_prefix.len() {
-                        messages.clone()
-                    } else {
-                        let cp = &messages[..canonical_prefix.len()];
-                        let same = serde_json::to_string(cp).unwrap_or_default()
-                            == serde_json::to_string(&canonical_prefix).unwrap_or_default();
-                        if same {
-                            messages[canonical_prefix.len()..].to_vec()
-                        } else {
-                            messages.clone()
-                        }
-                    };
-                if let Err(e) = persist_chat_conversation_turn_with_context(
-                    gremlin,
-                    turn_num,
-                    &diff,
-                    conversation.request_context(),
-                )
-                .await
-                {
-                    log::warn!("chat: failed to persist conversation turn {turn_num}: {e}");
-                }
-            }
+    .await;
+    if let Some(terminal) = debug_terminal {
+        match &result {
+            Ok(()) => terminal.end("agent completed"),
+            Err(error) => terminal.end(&error.to_string()),
         }
     }
-
-    commit_agent(&prepared, local_registry.as_ref())
-        .await
-        .map_err(|error| agent_commit_err(error, &prepared.name))?;
-
-    // Merge the localized registry back into the main registry.
-    gremlin
-        .state
-        .join(local_registry.as_ref(), Collision::Ignore, None)
-        .await
-        .map_err(|error| stage_failed(&prepared.name, error))?;
-
-    // Home-chat completion is authoritative only after commit and registry merge.
-    if is_chat && completed.exit_code == 0 {
-        emit_corr_event(
-            &corr_id,
-            EventKind::Done {
-                text: completed.text_result.unwrap_or_default(),
-                summary: completed.summary.unwrap_or_default(),
-                usage: chat_done_usage(usage_baseline.as_ref(), completed.token_usage.as_ref()),
-            },
-        );
-    }
-
-    Ok(())
+    result
 }
 
 // ---------------------------------------------------------------------------
@@ -669,7 +794,7 @@ fn conversation_from_json(
         Envelope {
             messages: Vec<Message>,
             #[serde(default)]
-            request_context: Option<ResolvedRequestContext>,
+            request_context: Option<Box<ResolvedRequestContext>>,
         },
     }
 
@@ -680,7 +805,7 @@ fn conversation_from_json(
         ConversationArtifact::Envelope {
             messages,
             request_context,
-        } => Ok((messages, request_context)),
+        } => Ok((messages, request_context.map(|context| *context))),
     }
 }
 
@@ -843,6 +968,10 @@ pub(crate) fn done_check_env(
 }
 
 #[cfg(test)]
+#[path = "run_agent/bail_tests.rs"]
+mod bail_tests;
+
+#[cfg(test)]
 mod tests {
     use super::*;
     use crate::builders::agent::AgentBuilder;
@@ -934,6 +1063,7 @@ mod tests {
             .unwrap();
         let (_sandbox, gremlin) = test_gremlin(stage);
         let context = ResolvedRequestContext {
+            usage_attribution: None,
             provider: "anthropic".into(),
             model: "retained-model".into(),
             system: Some("resolved workspace and skills".into()),
@@ -1031,6 +1161,616 @@ mod tests {
 
     const CAPTURED: &str = "deliberate run_agent dispatch capture";
 
+    struct HomeUsageBackend {
+        fail: bool,
+        baselines: Mutex<Vec<u64>>,
+    }
+
+    #[async_trait::async_trait]
+    impl Backend for HomeUsageBackend {
+        async fn run(
+            &self,
+            mut params: RunParams,
+            _interactive: InteractiveSession,
+        ) -> Result<CompletedRun, ClientError> {
+            use crate::clients::protocol::UsageStats;
+            use gremlins_magic_bus::ModelCallUsage;
+            let baseline = params.usage_baseline.as_ref().unwrap();
+            self.baselines
+                .lock()
+                .unwrap()
+                .push(baseline.prompt_tokens.unwrap_or(0));
+            let corr = params.output_corr_id.as_ref().unwrap();
+            // Live snapshots may be corrected or include Task usage. Only the
+            // final request record is durable, as with the native stream guard.
+            for (request, tokens, task) in [
+                ("outer", 4, false),
+                ("outer", 6, false),
+                ("task", 100, true),
+            ] {
+                let usage = UsageStats {
+                    prompt_tokens: Some(tokens),
+                    turns: 1,
+                    completion_tokens: None,
+                    cached_input_tokens: None,
+                    cache_creation_input_tokens: None,
+                    reasoning_tokens: None,
+                };
+                emit_corr_event(
+                    corr,
+                    EventKind::TokenUsage {
+                        id: params.gremlin_id.clone().unwrap(),
+                        usage: usage.clone(),
+                        cost_usd: None,
+                        last_prompt_tokens: Some(tokens),
+                        last_cached_input_tokens: None,
+                    },
+                );
+                if tokens == 4 {
+                    continue;
+                }
+                emit_corr_event(
+                    corr,
+                    EventKind::ModelCallUsage {
+                        usage: ModelCallUsage {
+                            request_id: format!("{}-{request}", corr.stage_run_id().unwrap()),
+                            provider: "anthropic".into(),
+                            model: "home-test".into(),
+                            agent_id: if task { "[task.test]" } else { "" }.into(),
+                            request_kind: String::new(),
+                            reported: true,
+                            completed: !self.fail,
+                            raw: serde_json::json!({}),
+                            usage,
+                        },
+                    },
+                );
+            }
+            if self.fail {
+                return Err(ClientError::Runtime {
+                    message: CAPTURED.into(),
+                });
+            }
+            params
+                .prepopulated_conversation
+                .set_next_prompt(&params.prompt);
+            params
+                .prepopulated_conversation
+                .render_turn(false, params.system_prompt.clone())
+                .await
+                .unwrap();
+            params
+                .prepopulated_conversation
+                .finalize(1, "home reply", &[], None);
+            Ok(CompletedRun {
+                exit_code: 0,
+                text_result: Some("home reply".into()),
+                summary: None,
+                events: None,
+                cost_usd: None,
+                token_usage: Some(UsageStats {
+                    prompt_tokens: Some(6),
+                    turns: 1,
+                    completion_tokens: None,
+                    cached_input_tokens: None,
+                    cache_creation_input_tokens: None,
+                    reasoning_tokens: None,
+                }),
+                conversation: Some(params.prepopulated_conversation),
+            })
+        }
+
+        fn model(&self) -> &str {
+            "home-test"
+        }
+    }
+
+    const HOME_CORRECTION: &str = "Use the corrected cobalt lighthouse coordinates.";
+
+    struct NativeLoopBackend {
+        baselines: Mutex<Vec<u64>>,
+        locals: Mutex<Vec<u64>>,
+        inputs: Option<crate::clients::execution_input::InputRegistry>,
+    }
+
+    #[async_trait::async_trait]
+    impl Backend for NativeLoopBackend {
+        async fn run(
+            &self,
+            params: RunParams,
+            interactive: InteractiveSession,
+        ) -> Result<CompletedRun, ClientError> {
+            use crate::clients::agent::agent_loop::{loop_opts, run_agent_loop, test_ctx};
+            use crate::clients::agent::task::{TaskModel, TaskModelSelector};
+            use rig_core::completion::Usage;
+            use rig_core::test_utils::{MockCompletionModel, MockStreamEvent as E};
+            assert!(params.defer_done, "executor owns native completion");
+            let baseline = params
+                .usage_baseline
+                .as_ref()
+                .and_then(|u| u.prompt_tokens)
+                .unwrap_or(0);
+            self.baselines.lock().unwrap().push(baseline);
+            let correction = if baseline == 0 {
+                self.inputs.as_ref().map(|inputs| {
+                    let corr = params.output_corr_id.as_ref().unwrap();
+                    let (_, sender) = inputs
+                        .resolve(
+                            corr.run().unwrap(),
+                            corr.stage_run_id().unwrap(),
+                            corr.stage(),
+                        )
+                        .expect("correction is pinned to this invocation A");
+                    sender
+                        .try_send("correction-A".into(), HOME_CORRECTION.into())
+                        .unwrap()
+                })
+            } else {
+                if self.inputs.is_some() {
+                    let history =
+                        serde_json::to_string(&params.prepopulated_conversation.messages())
+                            .unwrap();
+                    assert_eq!(history.matches(HOME_CORRECTION).count(), 1);
+                }
+                None
+            };
+            let done = || E::tool_call("done", "Done", serde_json::json!({"summary": "finished"}));
+            let model = if baseline == 0 {
+                MockCompletionModel::from_stream_turns([
+                    vec![
+                        E::tool_call(
+                            "task",
+                            "Task",
+                            serde_json::json!({"kind": "Scout", "prompt": "inspect"}),
+                        ),
+                        E::final_response(Usage::new().input_tokens(100)),
+                    ],
+                    vec![done(), E::final_response(Usage::new().input_tokens(50))],
+                ])
+            } else {
+                MockCompletionModel::from_stream_turns([vec![
+                    done(),
+                    E::final_response(Usage::new().input_tokens(20)),
+                ]])
+            };
+            let child = MockCompletionModel::from_stream_turns([vec![
+                done(),
+                E::final_response(Usage::new().input_tokens(30)),
+            ]]);
+            let factory = crate::clients::agent::task_models::sync_factory(move |_| {
+                Ok(TaskModel {
+                    model: child.clone().erase(),
+                    backend: None,
+                    temperature: None,
+                    max_tokens: None,
+                    extra: None,
+                    preserve_reasoning: None,
+                })
+            });
+            let mut ctx = test_ctx(params.cwd.clone(), None);
+            let prompt = params.prompt.clone();
+            ctx.prepopulated_conversation = params.prepopulated_conversation.clone();
+            ctx.params = params;
+            ctx.params.task_models = TaskModelSelector::new(
+                HashMap::from([(TaskKind::Scout, "test/child".into())]),
+                factory,
+            );
+            ctx.idle_timeout = 5.0;
+            let result = run_agent_loop(
+                model.erase(),
+                &prompt,
+                ctx,
+                crate::clients::CancelToken::new(),
+                loop_opts(None),
+                interactive,
+            )
+            .await?;
+            if let Some(receipt) = correction {
+                assert_eq!(
+                    receipt.await.unwrap(),
+                    crate::clients::execution_input::Delivery::Delivered
+                );
+                let history =
+                    serde_json::to_string(&result.conversation.as_ref().unwrap().messages())
+                        .unwrap();
+                assert_eq!(history.matches(HOME_CORRECTION).count(), 1);
+            }
+            self.locals
+                .lock()
+                .unwrap()
+                .push(result.token_usage.as_ref().unwrap().prompt_tokens.unwrap());
+            Ok(result)
+        }
+
+        fn model(&self) -> &str {
+            "native-loop-test"
+        }
+    }
+
+    #[tokio::test]
+    async fn home_real_loop_correction_replay_and_next_turn_usage() {
+        use crate::executor::stage_boundary::StageInvocation;
+        let stage = AgentBuilder::new("chat-0001")
+            .prompt(CHAT_A)
+            .build()
+            .unwrap();
+        let (_sandbox, mut gremlin) = test_gremlin(stage);
+        gremlin.state.patch(
+            &[],
+            serde_json::json!({"kind": "chat"}).as_object().unwrap(),
+        );
+        let spec = "anthropic/home-real-loop-usage";
+        let backend = Arc::new(NativeLoopBackend {
+            baselines: Mutex::new(vec![]),
+            locals: Mutex::new(vec![]),
+            inputs: Some(gremlin.execution_inputs.clone()),
+        });
+        install_test_backend(&ModelURI::parse(spec).unwrap().to_string(), backend.clone());
+        gremlin.model_override = Some(spec.into());
+        let registry = Arc::new(crate::executor::supervisor::run_registry::RunRegistry::new(
+            tokio::sync::watch::channel(false).0,
+        ));
+        gremlin = registry
+            .register_chat_gremlin(
+                gremlin.id.to_string(),
+                gremlin,
+                crate::clients::CancelToken::new(),
+            )
+            .await;
+        let (_guard, mut rx) = gremlins_magic_bus::subscribe_run(gremlin.id.as_str());
+        let mut executions = vec![];
+        for turn in 1..=2 {
+            let mut node = chat_node(turn, CHAT_A).await;
+            let ExecutorStage::Agent { model, .. } = &mut node else {
+                unreachable!()
+            };
+            *model = Some(ModelURI::parse(spec).unwrap());
+            let invocation = StageInvocation::enter(gremlin.id.as_str(), node.name(), "agent");
+            run_agent(&node, &mut gremlin, &invocation, "", "", None, None)
+                .await
+                .unwrap();
+            executions.push(invocation.stage_run_id.clone());
+            let mut records = vec![];
+            let mut terminal = vec![];
+            let mut live = vec![];
+            let mut missed_live = 0;
+            while let Ok(event) = rx.try_recv() {
+                match event.kind() {
+                    EventKind::ModelCallUsage { usage } => {
+                        records.push((event.corr_id().clone(), usage.clone()))
+                    }
+                    EventKind::Done { usage, .. } => {
+                        terminal.push(usage.as_ref().unwrap().prompt_tokens.unwrap())
+                    }
+                    EventKind::TokenUsage { usage, .. } => {
+                        if turn == 1 && usage.prompt_tokens == Some(150) {
+                            missed_live += 1;
+                            continue;
+                        }
+                        live.push(usage.prompt_tokens.unwrap());
+                    }
+                    _ => {}
+                }
+            }
+            assert!(
+                gremlin
+                    .execution_inputs
+                    .resolve(
+                        gremlin.id.as_str(),
+                        &invocation.stage_run_id,
+                        Some(node.name())
+                    )
+                    .is_none(),
+                "completed invocation A must not accept corrections on turn B"
+            );
+            let (history, _) = read_chat_conversation_with_context(&gremlin, None).await;
+            assert_eq!(
+                serde_json::to_string(&history)
+                    .unwrap()
+                    .matches(HOME_CORRECTION)
+                    .count(),
+                1
+            );
+            assert_eq!(terminal, [if turn == 1 { 150 } else { 170 }]);
+            if turn == 1 {
+                // The viewer misses the last live snapshot, but receives Done.
+                assert_eq!(missed_live, 1);
+                assert_ne!(live.last(), Some(&150));
+                let mut displayed = live.last().copied();
+                assert_ne!(displayed, Some(150));
+                displayed = terminal.last().copied();
+                assert_eq!(displayed, Some(150));
+            } else {
+                assert_eq!(live.last(), Some(&170));
+            }
+            assert_eq!(
+                gremlin.state.read_field("token_usage").unwrap()["prompt_tokens"],
+                if turn == 1 { 180 } else { 200 }
+            );
+            if turn == 1 {
+                assert_eq!(records.len(), 3);
+                assert_eq!(
+                    records
+                        .iter()
+                        .map(|(_, u)| &u.request_id)
+                        .collect::<std::collections::HashSet<_>>()
+                        .len(),
+                    3
+                );
+                assert!(
+                    records
+                        .iter()
+                        .all(|(corr, _)| corr.stage_run_id()
+                            == Some(invocation.stage_run_id.as_str()))
+                );
+                let before = gremlin.state.read_field("token_usage").unwrap();
+                let rows_before =
+                    std::fs::read(config::state_root().join("gr-test-0001/token_usage.jsonl"))
+                        .unwrap();
+                let (client, server) = tokio::net::UnixStream::pair().unwrap();
+                let (read, write) = server.into_split();
+                let writer = gremlins_magic_bus::connection::SharedWriter::new(write);
+                let request = serde_json::json!({
+                    "op": "watch", "id": gremlin.id.as_str(),
+                    "stage_run_id": invocation.stage_run_id, "replay": true
+                });
+                let watch_registry = registry.clone();
+                let watch = tokio::spawn(async move {
+                    crate::executor::supervisor::attachment::handle_watch(
+                        &request,
+                        &watch_registry,
+                        tokio::io::BufReader::new(read),
+                        &writer,
+                    )
+                    .await;
+                });
+                let mut reader = tokio::io::BufReader::new(client);
+                let mut replay_done = vec![];
+                loop {
+                    let frame = tokio::time::timeout(
+                        std::time::Duration::from_secs(5),
+                        crate::executor::socket::read_json_line(&mut reader),
+                    )
+                    .await
+                    .unwrap()
+                    .unwrap()
+                    .unwrap();
+                    if frame["type"] == "done" {
+                        assert_eq!(frame["stage_run_id"], invocation.stage_run_id);
+                        replay_done.push(frame["usage"]["prompt_tokens"].clone());
+                    }
+                    if frame["type"] == "replay_checkpoint" {
+                        break;
+                    }
+                }
+                assert_eq!(replay_done, [serde_json::json!(150)]);
+                watch.abort();
+                let _ = watch.await;
+                assert_eq!(gremlin.state.read_field("token_usage").unwrap(), before);
+                assert_eq!(
+                    std::fs::read(config::state_root().join("gr-test-0001/token_usage.jsonl"))
+                        .unwrap(),
+                    rows_before
+                );
+                assert_eq!(
+                    home_native_usage(&gremlin).unwrap().prompt_tokens,
+                    Some(150)
+                );
+                // Reopen with the cached fallback deliberately absent.
+                gremlin.state.patch(
+                    &[],
+                    serde_json::json!({"home_outer_usage": null})
+                        .as_object()
+                        .unwrap(),
+                );
+                gremlin.state = StateData::open("gr-test").unwrap();
+                assert_eq!(
+                    home_native_usage(&gremlin).unwrap().prompt_tokens,
+                    Some(150)
+                );
+                while rx.try_recv().is_ok() {}
+            }
+        }
+        let rows =
+            std::fs::read_to_string(config::state_root().join("gr-test-0001/token_usage.jsonl"))
+                .unwrap();
+        let rows: Vec<serde_json::Value> = rows
+            .lines()
+            .map(|line| serde_json::from_str(line).unwrap())
+            .collect();
+        assert_eq!(rows.len(), 2);
+        assert_ne!(executions[0], executions[1]);
+        for (execution, tokens) in executions.iter().zip([180, 20]) {
+            let row = rows
+                .iter()
+                .find(|row| row["stage_run_id"] == *execution)
+                .unwrap();
+            assert_eq!(row["prompt_tokens"], tokens);
+        }
+        assert_eq!(*backend.baselines.lock().unwrap(), [0, 150]);
+        assert_eq!(*backend.locals.lock().unwrap(), [150, 20]);
+    }
+
+    #[tokio::test]
+    async fn native_pipeline_done_waits_for_commit_and_accounting() {
+        use crate::executor::stage_boundary::StageInvocation;
+        for missing_output in [false, true] {
+            let stage = AgentBuilder::new("chat-0001")
+                .prompt(CHAT_A)
+                .build()
+                .unwrap();
+            let (_sandbox, mut gremlin) = test_gremlin(stage);
+            let spec = "anthropic/pipeline-done-barrier";
+            install_test_backend(
+                &ModelURI::parse(spec).unwrap().to_string(),
+                Arc::new(NativeLoopBackend {
+                    baselines: Mutex::new(vec![]),
+                    locals: Mutex::new(vec![]),
+                    inputs: None,
+                }),
+            );
+            let mut node = chat_node(1, CHAT_A).await;
+            let ExecutorStage::Agent { stage, model, .. } = &mut node else {
+                unreachable!()
+            };
+            *model = Some(ModelURI::parse(spec).unwrap());
+            if missing_output {
+                stage
+                    .outputs_map
+                    .insert("missing".into(), "artifact://missing-output".into());
+            }
+            let invocation = StageInvocation::enter(gremlin.id.as_str(), node.name(), "agent");
+            let (_guard, mut rx) = gremlins_magic_bus::subscribe_run(gremlin.id.as_str());
+            let result = run_agent(&node, &mut gremlin, &invocation, "", "", None, None).await;
+            assert_eq!(result.is_err(), missing_output);
+            assert_eq!(
+                gremlin.state.read_field("token_usage").unwrap()["prompt_tokens"],
+                180
+            );
+            let mut done = 0;
+            while let Ok(event) = rx.try_recv() {
+                if let EventKind::Done { usage, .. } = event.kind() {
+                    assert_eq!(event.corr_id(), &invocation.corr_id());
+                    assert_eq!(usage.as_ref().unwrap().prompt_tokens, Some(150));
+                    done += 1;
+                }
+            }
+            assert_eq!(done, usize::from(!missing_output));
+        }
+    }
+
+    #[tokio::test]
+    async fn home_two_turn_usage_excludes_tasks_and_corrects_requests() {
+        use crate::executor::stage_boundary::StageInvocation;
+        let stage = AgentBuilder::new("chat-0001")
+            .prompt(CHAT_A)
+            .build()
+            .unwrap();
+        let (_sandbox, mut gremlin) = test_gremlin(stage);
+        gremlin.state.patch(
+            &[],
+            serde_json::json!({
+                "kind": "chat", "token_usage": {"prompt_tokens": 900}
+            })
+            .as_object()
+            .unwrap(),
+        );
+        let spec = "anthropic/home-two-turn-usage";
+        let backend = Arc::new(HomeUsageBackend {
+            fail: false,
+            baselines: Mutex::new(vec![]),
+        });
+        install_test_backend(&ModelURI::parse(spec).unwrap().to_string(), backend.clone());
+        gremlin.model_override = Some(spec.into());
+        let (_guard, mut rx) = gremlins_magic_bus::subscribe_run(gremlin.id.as_str());
+        for turn in 1..=2 {
+            let mut node = chat_node(turn, CHAT_A).await;
+            let ExecutorStage::Agent { model, .. } = &mut node else {
+                unreachable!()
+            };
+            *model = Some(ModelURI::parse(spec).unwrap());
+            let invocation = StageInvocation::enter(gremlin.id.as_str(), node.name(), "agent");
+            run_agent(&node, &mut gremlin, &invocation, "", "", None, None)
+                .await
+                .unwrap();
+            assert_eq!(
+                gremlin.state.read_field("token_usage").unwrap()["prompt_tokens"],
+                900 + 106 * turn
+            );
+            assert_eq!(
+                gremlin.state.read_field("home_outer_usage").unwrap()["prompt_tokens"],
+                900 + 6 * turn
+            );
+        }
+        assert_eq!(*backend.baselines.lock().unwrap(), [900, 906]);
+        let mut terminal = vec![];
+        while let Ok(event) = rx.try_recv() {
+            if let EventKind::Done { usage, .. } = event.kind() {
+                terminal.push(usage.as_ref().unwrap().prompt_tokens.unwrap());
+            }
+        }
+        assert_eq!(terminal, [906, 912]);
+    }
+
+    #[tokio::test]
+    async fn home_native_failure_flushes_corrected_and_task_usage_before_error() {
+        use crate::executor::stage_boundary::StageInvocation;
+        let stage = AgentBuilder::new("chat-0001")
+            .prompt(CHAT_A)
+            .build()
+            .unwrap();
+        let (_sandbox, mut gremlin) = test_gremlin(stage);
+        gremlin.state.patch(
+            &[],
+            serde_json::json!({"kind": "chat"}).as_object().unwrap(),
+        );
+        let spec = "anthropic/home-failed-usage";
+        install_test_backend(
+            &ModelURI::parse(spec).unwrap().to_string(),
+            Arc::new(HomeUsageBackend {
+                fail: true,
+                baselines: Mutex::new(vec![]),
+            }),
+        );
+        gremlin.model_override = Some(spec.into());
+        let mut node = chat_node(1, CHAT_A).await;
+        let ExecutorStage::Agent { model, .. } = &mut node else {
+            unreachable!()
+        };
+        *model = Some(ModelURI::parse(spec).unwrap());
+        let invocation = StageInvocation::enter(gremlin.id.as_str(), node.name(), "agent");
+        let (_guard, mut rx) = gremlins_magic_bus::subscribe_run(gremlin.id.as_str());
+        let error = run_agent(&node, &mut gremlin, &invocation, "", "", None, None)
+            .await
+            .unwrap_err();
+        assert!(error.to_string().contains(CAPTURED), "{error}");
+        assert_eq!(
+            gremlin.state.read_field("home_outer_usage").unwrap()["prompt_tokens"],
+            6
+        );
+        assert_eq!(home_native_usage(&gremlin).unwrap().prompt_tokens, Some(6));
+        assert_eq!(
+            gremlin.state.read_field("token_usage").unwrap()["prompt_tokens"],
+            106
+        );
+        while let Ok(event) = rx.try_recv() {
+            assert!(!matches!(event.kind(), EventKind::Done { .. }));
+        }
+        // Reopening must recover the failed attempt without trusting the cache.
+        gremlin.state.patch(
+            &[],
+            serde_json::json!({"home_outer_usage": {"prompt_tokens": 999}})
+                .as_object()
+                .unwrap(),
+        );
+        gremlin.state = StateData::open("gr-test").unwrap();
+        let retry = Arc::new(HomeUsageBackend {
+            fail: false,
+            baselines: Mutex::new(vec![]),
+        });
+        install_test_backend(&ModelURI::parse(spec).unwrap().to_string(), retry.clone());
+        let invocation = StageInvocation::enter(gremlin.id.as_str(), node.name(), "agent");
+        run_agent(&node, &mut gremlin, &invocation, "", "", None, None)
+            .await
+            .unwrap();
+        assert_eq!(*retry.baselines.lock().unwrap(), [6]);
+        assert_eq!(
+            gremlin.state.read_field("home_outer_usage").unwrap()["prompt_tokens"],
+            12
+        );
+        assert_eq!(
+            gremlin.state.read_field("token_usage").unwrap()["prompt_tokens"],
+            212
+        );
+        let mut done = vec![];
+        while let Ok(event) = rx.try_recv() {
+            if let EventKind::Done { usage, .. } = event.kind() {
+                done.push(usage.as_ref().unwrap().prompt_tokens.unwrap());
+            }
+        }
+        assert_eq!(done, [12]);
+    }
+
     #[derive(Default)]
     struct CaptureBackend(Mutex<Option<RunParams>>);
 
@@ -1052,7 +1792,7 @@ mod tests {
         }
     }
 
-    fn test_gremlin(stage: StageSpec) -> (Sandbox, Gremlin) {
+    pub(super) fn test_gremlin(stage: StageSpec) -> (Sandbox, Gremlin) {
         let sandbox = Sandbox::new();
         let default_model = "cmd/run-agent-old-default";
         let state_dir = config::state_root().join("gr-test-0001");
@@ -1094,6 +1834,7 @@ mod tests {
             discovered_skills: None,
             extra_sandbox_roots: vec![],
             native_definition: None,
+            accounting: Default::default(),
         };
         (sandbox, gremlin)
     }
@@ -1182,7 +1923,7 @@ mod tests {
         }
     }
 
-    async fn chat_node(turn: usize, prompt: &str) -> ExecutorStage {
+    pub(super) async fn chat_node(turn: usize, prompt: &str) -> ExecutorStage {
         let stage = AgentBuilder::new(format!("chat-{turn:04}"))
             .prompt(prompt)
             .build()
@@ -1215,14 +1956,18 @@ mod tests {
             &[],
             serde_json::json!({"kind": "chat"}).as_object().unwrap(),
         );
-        let spec = "cmd/native-chat-commit-failure";
-        let backend = Arc::new(ChatCancellationBackend::default());
-        install_test_backend(spec, backend);
+        let spec = "anthropic/native-chat-commit-failure";
+        let backend = Arc::new(HomeUsageBackend {
+            fail: false,
+            baselines: Mutex::new(vec![]),
+        });
+        install_test_backend(&ModelURI::parse(spec).unwrap().to_string(), backend);
         gremlin.model_override = Some(spec.into());
         let mut node = chat_node(1, CHAT_A).await;
-        let ExecutorStage::Agent { stage, .. } = &mut node else {
+        let ExecutorStage::Agent { stage, model, .. } = &mut node else {
             unreachable!()
         };
+        *model = Some(ModelURI::parse(spec).unwrap());
         stage
             .outputs_map
             .insert("missing".into(), "artifact://missing-output".into());
@@ -1233,6 +1978,233 @@ mod tests {
         while let Ok(event) = rx.try_recv() {
             assert!(!matches!(event.kind(), EventKind::Done { .. }));
         }
+    }
+
+    struct CmdUsageBackend;
+
+    #[async_trait::async_trait]
+    impl Backend for CmdUsageBackend {
+        async fn run(
+            &self,
+            params: RunParams,
+            _interactive: InteractiveSession,
+        ) -> Result<CompletedRun, ClientError> {
+            let usage = usage_baseline_from_state(Some(&serde_json::json!({
+                "turns": 2, "prompt_tokens": 11, "completion_tokens": 7,
+                "cached_input_tokens": 0, "reasoning_tokens": 3
+            })));
+            // A live snapshot must not be added again at completion.
+            emit_corr_event(
+                params.output_corr_id.as_ref().unwrap(),
+                EventKind::TokenUsage {
+                    id: params.gremlin_id.unwrap(),
+                    usage: usage.clone(),
+                    cost_usd: None,
+                    last_prompt_tokens: Some(11),
+                    last_cached_input_tokens: Some(0),
+                },
+            );
+            Ok(CompletedRun {
+                exit_code: 0,
+                text_result: Some("cmd usage reply".into()),
+                summary: None,
+                events: None,
+                cost_usd: None,
+                token_usage: Some(usage),
+                conversation: None,
+            })
+        }
+
+        fn model(&self) -> &str {
+            "cmd-usage"
+        }
+        fn name(&self) -> &'static str {
+            "cmd"
+        }
+        fn accepts_interactive_commands(&self) -> bool {
+            false
+        }
+    }
+
+    #[tokio::test]
+    async fn home_legacy_native_cmd_native_preserves_separate_balances() {
+        use crate::executor::stage_boundary::StageInvocation;
+        for legacy_field in ["home_outer_usage", "token_usage"] {
+            let stage = AgentBuilder::new("chat-0001")
+                .prompt(CHAT_A)
+                .build()
+                .unwrap();
+            let (_sandbox, mut gremlin) = test_gremlin(stage);
+            let mut fields =
+                serde_json::json!({"kind": "chat", "token_usage": {"prompt_tokens": 900}});
+            fields[legacy_field] = serde_json::json!({"prompt_tokens": 40});
+            gremlin.state.patch(&[], fields.as_object().unwrap());
+            let spec = format!("anthropic/home-transition-{legacy_field}");
+            let backend = Arc::new(HomeUsageBackend {
+                fail: false,
+                baselines: Mutex::new(vec![]),
+            });
+            install_test_backend(
+                &ModelURI::parse(&spec).unwrap().to_string(),
+                backend.clone(),
+            );
+            let cmd = format!("cmd/home-transition-{legacy_field}");
+            install_test_backend(&cmd, Arc::new(CmdUsageBackend));
+            let (_guard, mut rx) = gremlins_magic_bus::subscribe_run(gremlin.id.as_str());
+            for (turn, model) in [(1, spec.as_str()), (2, cmd.as_str()), (3, spec.as_str())] {
+                gremlin.model_override = Some(model.into());
+                gremlin.client = Client::parse(model).unwrap();
+                let node = chat_node(turn, CHAT_A).await;
+                let invocation = StageInvocation::enter(gremlin.id.as_str(), node.name(), "agent");
+                run_agent(&node, &mut gremlin, &invocation, "", "", None, None)
+                    .await
+                    .unwrap();
+                if turn == 2 {
+                    persist_chat_conversation_turn(&gremlin, turn, &[Message::user(CHAT_A)])
+                        .await
+                        .unwrap();
+                }
+            }
+            assert_eq!(*backend.baselines.lock().unwrap(), [40, 57]);
+            assert_eq!(
+                gremlin.state.read_field("home_starting_usage").unwrap()["prompt_tokens"],
+                40
+            );
+            assert_eq!(
+                gremlin.state.read_field("home_cmd_usage").unwrap()["prompt_tokens"],
+                11
+            );
+            assert_eq!(home_native_usage(&gremlin).unwrap().prompt_tokens, Some(63));
+            let mut terminal = vec![];
+            while let Ok(event) = rx.try_recv() {
+                if let EventKind::Done { usage, .. } = event.kind() {
+                    terminal.push(usage.as_ref().unwrap().prompt_tokens.unwrap());
+                }
+            }
+            assert_eq!(terminal, [46, 57, 63]);
+        }
+    }
+
+    #[tokio::test]
+    async fn home_terminal_excludes_explicit_compaction_and_ledger_blocks_legacy_import() {
+        use crate::executor::accounting::UsageRecord;
+        use crate::executor::stage_boundary::StageInvocation;
+        let stage = AgentBuilder::new("chat-0001")
+            .prompt(CHAT_A)
+            .build()
+            .unwrap();
+        let (_sandbox, mut gremlin) = test_gremlin(stage);
+        gremlin.state.patch(
+            &[],
+            serde_json::json!({"kind": "chat", "home_outer_usage": {"prompt_tokens": 900}})
+                .as_object()
+                .unwrap(),
+        );
+        let corr = gremlins_magic_bus::CorrId::new()
+            .with_run(gremlin.id.as_str())
+            .with_stage("compact")
+            .with_stage_run_id("compact");
+        let record = UsageRecord {
+            corr_id: corr,
+            stage_path: "compact".into(),
+            usage: serde_json::from_value(serde_json::json!({
+                "request_id": "compact", "provider": "test", "model": "test",
+                "agent_id": "", "request_kind": "compaction", "reported": true,
+                "completed": true, "raw": {}, "usage": {"turns": 1, "prompt_tokens": 500}
+            }))
+            .unwrap(),
+        };
+        gremlin
+            .state
+            .store_ref()
+            .native_accounting(Some(&record))
+            .unwrap();
+        let spec = "anthropic/home-compaction-terminal";
+        install_test_backend(
+            &ModelURI::parse(spec).unwrap().to_string(),
+            Arc::new(HomeUsageBackend {
+                fail: false,
+                baselines: Mutex::new(vec![]),
+            }),
+        );
+        gremlin.model_override = Some(spec.into());
+        let mut node = chat_node(1, CHAT_A).await;
+        let ExecutorStage::Agent { model, .. } = &mut node else {
+            unreachable!()
+        };
+        *model = Some(ModelURI::parse(spec).unwrap());
+        let invocation = StageInvocation::enter(gremlin.id.as_str(), node.name(), "agent");
+        let (_guard, mut rx) = gremlins_magic_bus::subscribe_run(gremlin.id.as_str());
+        run_agent(&node, &mut gremlin, &invocation, "", "", None, None)
+            .await
+            .unwrap();
+        let mut terminal = vec![];
+        while let Ok(event) = rx.try_recv() {
+            if let EventKind::Done { usage, .. } = event.kind() {
+                terminal.push(usage.as_ref().unwrap().prompt_tokens.unwrap());
+            }
+        }
+        assert_eq!(terminal, [6]);
+        assert_eq!(
+            gremlin.state.read_field("token_usage").unwrap()["prompt_tokens"],
+            606
+        );
+    }
+
+    #[tokio::test]
+    async fn cmd_completed_usage_records_one_stage_row_and_one_run_increment() {
+        use crate::executor::stage_boundary::StageInvocation;
+        let stage = AgentBuilder::new("chat-0001")
+            .prompt(CHAT_A)
+            .build()
+            .unwrap();
+        let (_sandbox, mut gremlin) = test_gremlin(stage);
+        let prior = serde_json::json!({"turns": 4, "prompt_tokens": 100, "completion_tokens": 20});
+        gremlin.state.patch(
+            &[],
+            serde_json::json!({"kind": "chat", "token_usage": prior, "home_outer_usage": prior})
+                .as_object()
+                .unwrap(),
+        );
+        let spec = "cmd/completed-usage-test";
+        install_test_backend(spec, Arc::new(CmdUsageBackend));
+        gremlin.model_override = Some(spec.into());
+        gremlin.client = Client::parse(spec).unwrap();
+        let node = chat_node(1, CHAT_A).await;
+        let invocation = StageInvocation::enter(gremlin.id.as_str(), node.name(), "agent");
+        let (_guard, mut rx) = gremlins_magic_bus::subscribe_run(gremlin.id.as_str());
+        run_agent(&node, &mut gremlin, &invocation, "", "nested", None, None)
+            .await
+            .unwrap();
+        let expected = serde_json::json!({"turns": 6, "prompt_tokens": 111, "completion_tokens": 27, "cached_input_tokens": 0, "reasoning_tokens": 3});
+        assert_eq!(gremlin.state.read_field("token_usage").unwrap(), expected);
+        let mut rows_blob = gremlin
+            .state
+            .store_ref()
+            .open("token_usage.jsonl", state::BlobMode::Read)
+            .unwrap();
+        let mut rows = String::new();
+        std::io::Read::read_to_string(&mut rows_blob, &mut rows).unwrap();
+        let rows: Vec<serde_json::Value> = rows
+            .lines()
+            .map(|line| serde_json::from_str(line).unwrap())
+            .collect();
+        assert_eq!(
+            rows,
+            [
+                serde_json::json!({"stage": "nested.chat-0001", "turns": 2, "prompt_tokens": 11, "completion_tokens": 7, "cached_input_tokens": 0, "reasoning_tokens": 3})
+            ]
+        );
+        let mut done = 0;
+        while let Ok(event) = rx.try_recv() {
+            if let EventKind::Done { usage, text, .. } = event.kind() {
+                assert_eq!(event.corr_id(), &invocation.corr_id());
+                assert_eq!(text, "cmd usage reply");
+                assert_eq!(serde_json::to_value(usage).unwrap(), expected);
+                done += 1;
+            }
+        }
+        assert_eq!(done, 1);
     }
 
     async fn assert_cmd_done_events(spec: &str, is_chat: bool, succeeds: bool) {
@@ -1252,7 +2224,7 @@ mod tests {
         if is_chat {
             gremlin.state.patch(
                 &[],
-                serde_json::json!({"kind": "chat", "token_usage": {
+                serde_json::json!({"kind": "chat", "home_outer_usage": {
                     "turns": 3, "prompt_tokens": 17, "completion_tokens": 0
                 }})
                 .as_object()
@@ -1277,6 +2249,16 @@ mod tests {
             assert!(error.contains("exited 7"), "{error}");
         }
 
+        assert!(
+            gremlin.state.read_field("token_usage").is_none(),
+            "plain commands must not invent model usage"
+        );
+        if is_chat {
+            assert_eq!(
+                gremlin.state.read_field("home_outer_usage").unwrap()["prompt_tokens"],
+                17
+            );
+        }
         let mut done = Vec::new();
         loop {
             match rx.try_recv() {

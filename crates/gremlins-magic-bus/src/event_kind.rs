@@ -6,7 +6,7 @@
 
 use serde::{Deserialize, Serialize};
 
-use crate::stats::{TurnStats, UsageStats};
+use crate::stats::{ModelCallUsage, TurnStats, UsageStats};
 
 /// Every event kind that flows through the bus.
 ///
@@ -62,6 +62,9 @@ pub enum EventKind {
     /// Serialized CompletionRequest for prompt-debug dumps.
     #[serde(rename = "prompt_request")]
     PromptRequest { id: String, json: String },
+
+    /// Per-request accounting, not a chat or display event.
+    ModelCallUsage { usage: ModelCallUsage },
 
     // ── From InteractiveEvent ─────────────────────────────────────────
     #[serde(rename = "turn_started")]
@@ -250,6 +253,67 @@ impl EventKind {
 #[cfg(test)]
 mod tests {
     use super::EventKind;
+    use crate::ModelCallUsage;
+
+    #[test]
+    fn model_call_usage_round_trips_nested_accounting_payload() {
+        let payload = serde_json::json!({
+            "request_id": "request-1",
+            "provider": "provider",
+            "model": "model",
+            "agent_id": "agent-1",
+            "reported": true,
+            "completed": true,
+            "raw": {"input_tokens": 12, "output_tokens": 0, "details": {"cached": 3}},
+            "usage": {
+                "prompt_tokens": 12,
+                "completion_tokens": 0,
+                "cached_input_tokens": 3,
+                "cache_creation_input_tokens": 0,
+                "reasoning_tokens": 0,
+                "turns": 1
+            }
+        });
+        let usage: ModelCallUsage = serde_json::from_value(payload.clone()).unwrap();
+        assert_eq!(serde_json::to_value(&usage).unwrap(), payload);
+        let event = EventKind::ModelCallUsage { usage };
+        let expected = serde_json::json!({"type": "model_call_usage", "usage": payload});
+        assert_eq!(serde_json::to_value(&event).unwrap(), expected);
+        let decoded: EventKind = serde_json::from_value(expected.clone()).unwrap();
+        assert_eq!(serde_json::to_value(decoded).unwrap(), expected);
+        assert!(!event.is_chat_event());
+        assert!(!event.is_stream_event());
+    }
+
+    #[test]
+    fn model_call_usage_preserves_missing_usage_and_incomplete_request() {
+        let json = serde_json::json!({
+            "type": "model_call_usage",
+            "usage": {
+                "request_id": "request-2",
+                "provider": "provider",
+                "model": "model",
+                "agent_id": "agent-2",
+                "reported": false,
+                "completed": false,
+                "raw": null,
+                "usage": {"turns": 0}
+            }
+        });
+        let event: EventKind = serde_json::from_value(json.clone()).unwrap();
+        let EventKind::ModelCallUsage { usage } = &event else {
+            panic!("expected model call usage");
+        };
+        assert!(!usage.reported);
+        assert!(!usage.completed);
+        assert!(usage.raw.is_null());
+        assert_eq!(usage.usage.prompt_tokens, None);
+        assert_eq!(usage.usage.completion_tokens, None);
+        assert_eq!(usage.usage.cached_input_tokens, None);
+        assert_eq!(usage.usage.cache_creation_input_tokens, None);
+        assert_eq!(usage.usage.reasoning_tokens, None);
+        assert_eq!(serde_json::to_value(event).unwrap(), json);
+    }
 
     #[test]
     fn stage_boundary_accepts_legacy_payload_and_preserves_new_identity() {

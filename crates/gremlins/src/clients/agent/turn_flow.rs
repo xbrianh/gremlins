@@ -46,7 +46,7 @@ fn usage_stats(
     }
 }
 
-fn event_usage(baseline: Option<&UsageStats>, usage: &UsageStats) -> UsageStats {
+pub(super) fn event_usage(baseline: Option<&UsageStats>, usage: &UsageStats) -> UsageStats {
     let Some(baseline) = baseline else {
         return usage.clone();
     };

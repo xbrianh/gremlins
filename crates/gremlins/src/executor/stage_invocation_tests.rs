@@ -109,6 +109,7 @@ fn fixture(stage: StageSpec) -> (Sandbox, Gremlin, ExecutorStage) {
         discovered_skills: None,
         extra_sandbox_roots: vec![],
         native_definition: None,
+        accounting: Default::default(),
     };
     (sandbox, gremlin, node)
 }

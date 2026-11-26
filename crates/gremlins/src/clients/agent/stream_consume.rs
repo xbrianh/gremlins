@@ -2,9 +2,9 @@
 
 use std::time::{Duration, Instant};
 
+use crate::clients::request_usage::UsageStream;
 use rig_core::completion::message::{Origin, Reasoning};
-use rig_core::operation::Completion;
-use rig_core::streaming::{Item, StreamEvent, Streamed};
+use rig_core::streaming::{Item, StreamEvent};
 
 use crate::clients::cancel::CancelToken;
 use crate::clients::error::ClientError;
@@ -19,7 +19,7 @@ use super::agent_loop::{retry_backoff, LoopOpts, LoopState, StreamTurnOutcome, S
 #[allow(clippy::too_many_arguments)]
 pub(super) async fn consume_stream_events(
     state: &mut LoopState,
-    mut response: Streamed<Completion>,
+    mut response: UsageStream,
     cancel: &CancelToken,
     opts: &LoopOpts<'_>,
     prefix: &str,

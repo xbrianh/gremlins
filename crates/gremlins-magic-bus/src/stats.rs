@@ -16,6 +16,23 @@ pub struct UsageStats {
     pub turns: usize,
 }
 
+/// Accounting for one model request, including requests that did not complete.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ModelCallUsage {
+    pub request_id: String,
+    /// Empty for conversational requests and legacy records.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub request_kind: String,
+    pub provider: String,
+    pub model: String,
+    pub agent_id: String,
+    pub reported: bool,
+    pub completed: bool,
+    /// Provider usage metadata only; never request or response content.
+    pub raw: serde_json::Value,
+    pub usage: UsageStats,
+}
+
 /// One turn's token/cache delta.
 ///
 /// Field names intentionally mirror [`UsageStats`] so chat consumers see the

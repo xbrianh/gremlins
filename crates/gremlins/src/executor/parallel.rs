@@ -888,6 +888,7 @@ mod tests {
             discovered_skills: None,
             extra_sandbox_roots: Vec::new(),
             native_definition: None,
+            accounting: Default::default(),
         };
         (sandbox, gremlin)
     }

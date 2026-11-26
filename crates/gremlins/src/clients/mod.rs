@@ -37,10 +37,12 @@ pub(crate) mod native;
 pub mod openai_protocol;
 pub mod params;
 pub mod protocol;
+pub(crate) mod request_usage;
 pub(crate) mod shell_parse;
 pub(crate) mod stream_json;
 pub(crate) mod token_provider;
 pub(crate) mod tools;
+mod usage_normalize;
 
 /// Names accepted in model specs, in backend registration order.
 pub fn provider_names() -> impl Iterator<Item = &'static str> {

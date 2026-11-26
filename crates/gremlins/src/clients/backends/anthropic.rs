@@ -27,6 +27,39 @@ const DEFAULT_MAX_TOKENS: u64 = 128_000;
 /// x-api-key header and supplies the identity provider's bearer token instead.
 const DYNAMIC_AUTH_PLACEHOLDER_KEY: &str = "unused";
 
+pub(crate) fn capture_compaction(
+    accounting: &mut crate::clients::request_usage::RequestUsage,
+    raw: &serde_json::Value,
+    http_success: bool,
+) {
+    let mut usage = rig_core::completion::Usage::default();
+    if let Some(iterations) = raw.pointer("/usage/iterations").and_then(|v| v.as_array()) {
+        for iteration in iterations.iter().filter(|v| v["type"] == "compaction") {
+            for (key, target) in [
+                ("input_tokens", &mut usage.input_tokens),
+                ("output_tokens", &mut usage.output_tokens),
+                ("cache_read_input_tokens", &mut usage.cached_input_tokens),
+                (
+                    "cache_creation_input_tokens",
+                    &mut usage.cache_creation_input_tokens,
+                ),
+            ] {
+                if let Some(value) = iteration.get(key).and_then(|v| v.as_u64()) {
+                    *target = Some(target.unwrap_or(0).saturating_add(value));
+                }
+            }
+        }
+    }
+    if let Some(input) = usage.input_tokens.as_mut() {
+        *input = input
+            .saturating_add(usage.cached_input_tokens.unwrap_or(0))
+            .saturating_add(usage.cache_creation_input_tokens.unwrap_or(0));
+    }
+    let completed = http_success && raw.get("error").is_none_or(serde_json::Value::is_null);
+    // Compaction is billable work, but never an agent turn.
+    accounting.capture_usage(&usage, raw, completed, false);
+}
+
 // ── AnthropicClientState ─────────────────────────────────────────────────
 
 /// Either a statically-built client (for ApiKey / Token auth) or the
@@ -262,7 +295,6 @@ impl Backend for AnthropicBackend {
         context: &crate::clients::compaction::ResolvedRequestContext,
         instructions: Option<&str>,
     ) -> Result<Option<CompactionResult>, ClientError> {
-        use http::StatusCode;
         use rig_core::http_client::HttpClientExt;
         use rig_core::wire::{Body, Mode, Operation, Wire};
 
@@ -319,37 +351,74 @@ impl Backend for AnthropicBackend {
         };
         // Keep the concrete wire's endpoint, headers and HTTP version intact.
         let req = http::Request::from_parts(parts, body);
+        let mut accounting = context.usage_attribution.as_ref().map(|owner| {
+            let mut usage = crate::clients::request_usage::RequestUsage::new(
+                &owner.corr_id,
+                "anthropic",
+                &context.model,
+                &owner.agent_id,
+            );
+            usage.mark_compaction();
+            usage
+        });
         let resp: http::Response<rig_core::http_client::LazyBody<Vec<u8>>> = driver
             .transport
             .send(req)
             .await
-            .map_err(|e| ClientError::Runtime {
-                message: format!("compaction HTTP request failed: {e}"),
-            })?;
-
-        if resp.status() != StatusCode::OK {
-            let status = resp.status().as_u16();
-            // Read (a truncated portion of) the error body so compaction
-            // failures are diagnosable from logs.
-            let body_snippet = match resp.into_body().await {
-                Ok(data) => {
-                    let text = String::from_utf8_lossy(&data);
-                    if text.len() > 500 {
-                        format!("{}…", &text[..500])
-                    } else {
-                        text.to_string()
+            .map_err(|e| {
+                if let Some(status) = e.non_success_status() {
+                    let body = e.non_success_body().unwrap_or_default();
+                    if let (Some(accounting), Ok(raw)) = (
+                        accounting.as_mut(),
+                        serde_json::from_str::<serde_json::Value>(body),
+                    ) {
+                        capture_compaction(accounting, &raw, false);
+                    }
+                    let snippet: String = body.chars().take(500).collect();
+                    ClientError::ApiServerError {
+                        message: format!("compaction returned HTTP {}: {snippet}", status.as_u16()),
+                    }
+                } else {
+                    ClientError::Runtime {
+                        message: format!("compaction HTTP request failed: {e}"),
                     }
                 }
-                Err(_) => String::from("(body unavailable)"),
-            };
+            })?;
+
+        let status = resp.status();
+        let body_bytes = resp.into_body().await.map_err(|e| {
+            if status.is_success() {
+                ClientError::Runtime {
+                    message: format!("failed to read compaction response body: {e}"),
+                }
+            } else {
+                ClientError::ApiServerError {
+                    message: format!(
+                        "compaction returned HTTP {}: failed to read response body: {e}",
+                        status.as_u16()
+                    ),
+                }
+            }
+        })?;
+        if let (Some(accounting), Ok(raw)) = (
+            accounting.as_mut(),
+            serde_json::from_slice::<serde_json::Value>(&body_bytes),
+        ) {
+            capture_compaction(accounting, &raw, status.is_success());
+        }
+
+        if !status.is_success() {
+            let status = status.as_u16();
+            // Read (a truncated portion of) the error body so compaction
+            // failures are diagnosable from logs.
+            let body_snippet: String = String::from_utf8_lossy(&body_bytes)
+                .chars()
+                .take(500)
+                .collect();
             return Err(ClientError::ApiServerError {
                 message: format!("compaction returned HTTP {status}: {body_snippet}"),
             });
         }
-
-        let body_bytes = resp.into_body().await.map_err(|e| ClientError::Runtime {
-            message: format!("failed to read compaction response body: {e}"),
-        })?;
 
         #[derive(serde::Deserialize)]
         struct CompactionContent {
@@ -517,6 +586,76 @@ mod tests {
     use crate::clients::cancel::CancelToken;
     use crate::test_support::EnvGuard;
 
+    fn captured_compaction(
+        raw: &serde_json::Value,
+        success: bool,
+    ) -> gremlins_magic_bus::ModelCallUsage {
+        let corr = gremlins_magic_bus::CorrId::new().with_run(uuid::Uuid::new_v4().to_string());
+        let (_subscription, mut rx) = gremlins_magic_bus::subscribe_run(corr.run().unwrap());
+        let mut accounting =
+            crate::clients::request_usage::RequestUsage::new(&corr, "anthropic", "model", "agent");
+        accounting.mark_compaction();
+        capture_compaction(&mut accounting, raw, success);
+        drop(accounting);
+        let gremlins_magic_bus::EventKind::ModelCallUsage { usage } =
+            rx.try_recv().unwrap().into_kind()
+        else {
+            panic!("expected compaction accounting");
+        };
+        usage
+    }
+
+    #[test]
+    fn compaction_sums_iterations_and_preserves_only_usage_metadata() {
+        let raw = serde_json::json!({
+            "content": "private summary", "error": null,
+            "usageMetadata": {"provider": 1}, "usage_metadata": {"provider": 2},
+            "copilot_usage": {"provider": 3},
+            "usage": {"input_tokens": 999, "iterations": [
+                {"type": "compaction", "input_tokens": 100, "output_tokens": 20,
+                 "cache_read_input_tokens": 40, "cache_creation_input_tokens": 10},
+                {"type": "compaction", "input_tokens": 50, "output_tokens": 5,
+                 "cache_read_input_tokens": 2, "cache_creation_input_tokens": 3},
+                {"type": "message", "input_tokens": 999},
+                {"type": "compaction", "input_tokens": -1, "output_tokens": "invalid"}
+            ]}
+        });
+        let record = captured_compaction(&raw, true);
+        assert!(record.completed && record.reported);
+        assert_eq!(record.request_kind, "compaction");
+        assert_eq!(record.usage.turns, 0);
+        assert_eq!(record.usage.prompt_tokens, Some(205));
+        assert_eq!(record.usage.completion_tokens, Some(25));
+        assert_eq!(record.usage.cached_input_tokens, Some(42));
+        assert_eq!(record.usage.cache_creation_input_tokens, Some(13));
+        for key in ["usage", "usageMetadata", "usage_metadata", "copilot_usage"] {
+            assert_eq!(record.raw[key], raw[key]);
+        }
+        assert_eq!(record.raw.as_object().unwrap().len(), 4);
+    }
+
+    #[test]
+    fn compaction_completion_requires_http_success_and_no_raw_error() {
+        for (success, error, completed) in [
+            (false, serde_json::Value::Null, false),
+            (true, serde_json::json!({"message": "private error"}), false),
+            (true, serde_json::Value::Null, true),
+        ] {
+            let record = captured_compaction(
+                &serde_json::json!({
+                    "error": error,
+                    "usage": {"iterations": [{"type": "compaction", "input_tokens": 0}]}
+                }),
+                success,
+            );
+            assert_eq!(record.completed, completed);
+            assert!(record.reported);
+            assert_eq!(record.usage.prompt_tokens, Some(0));
+            assert_eq!(record.usage.turns, 0);
+            assert!(record.raw.get("error").is_none());
+        }
+    }
+
     struct CompactToken(std::sync::Mutex<Vec<String>>);
 
     #[async_trait]
@@ -542,6 +681,9 @@ mod tests {
 
         let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
         let base = format!("http://{}/gateway", listener.local_addr().unwrap());
+        let null_summary = auth == "null-summary";
+        let http_failure = auth == "http-failure";
+        let unreadable = auth == "unreadable-error";
         let server = std::thread::spawn(move || {
             let (stream, _) = listener.accept().unwrap();
             stream
@@ -565,10 +707,21 @@ mod tests {
             reader.read_exact(&mut body).unwrap();
             let fixture = json!({
                 "stop_reason": "compaction",
-                "content": [{"type": "compaction", "content": "server summary", "signature": "server signature", "encrypted_content": "sealed", "tool_changes": [{"name": "Do"}]}],
+                "content": [{"type": "compaction", "content": if null_summary { None } else { Some("server summary") }, "signature": "server signature", "encrypted_content": "sealed", "tool_changes": [{"name": "Do"}]}],
                 "usage": {"input_tokens": 0, "output_tokens": 0, "iterations": [{"type": "compaction", "input_tokens": 123, "output_tokens": 17}]}
             }).to_string();
-            write!(reader.get_mut(), "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}", fixture.len(), fixture).unwrap();
+            let status = if http_failure || unreadable {
+                "503 Service Unavailable"
+            } else {
+                "201 Created"
+            };
+            let length = fixture.len();
+            let fixture = if unreadable {
+                &fixture[..fixture.len() / 2]
+            } else {
+                &fixture
+            };
+            write!(reader.get_mut(), "HTTP/1.1 {status}\r\nContent-Type: application/json\r\nContent-Length: {length}\r\nConnection: close\r\n\r\n{fixture}").unwrap();
             (
                 headers,
                 serde_json::from_slice::<serde_json::Value>(&body).unwrap(),
@@ -578,7 +731,17 @@ mod tests {
             .with_base_url(&base)
             .with_beta("compact-2026-09-04")
             .connect(DynHttpClient::new(ReqwestClient::default()));
+        let corr = gremlins_magic_bus::CorrId::new()
+            .with_run(uuid::Uuid::new_v4().to_string())
+            .with_stage("compact")
+            .with_stage_run_id("manual-or-auto")
+            .with_turn(3);
+        let (_subscription, mut usage_rx) = gremlins_magic_bus::subscribe_run(corr.run().unwrap());
         let context = crate::clients::compaction::ResolvedRequestContext {
+            usage_attribution: Some(crate::clients::compaction::UsageAttribution {
+                corr_id: corr.clone(),
+                agent_id: "parent/child".into(),
+            }),
             provider: "anthropic".into(),
             model: "claude-sonnet-4-6".into(),
             system: Some("nondefault system framing".into()),
@@ -663,10 +826,45 @@ mod tests {
         };
         let result = backend
             .compact(&messages, &context, Some("keep decisions"))
-            .await
-            .unwrap()
-            .unwrap();
+            .await;
+        if http_failure || unreadable {
+            let Err(ClientError::ApiServerError { message }) = result else {
+                panic!("expected HTTP status error, got {result:?}");
+            };
+            assert!(message.contains("HTTP 503"));
+            let event = usage_rx.try_recv().expect("failed request accounting");
+            let gremlins_magic_bus::EventKind::ModelCallUsage { usage } = event.into_kind() else {
+                panic!("expected compaction accounting");
+            };
+            assert_eq!(usage.request_kind, "compaction");
+            assert!(!usage.completed);
+            assert_eq!(usage.usage.turns, 0);
+            assert_eq!(usage.reported, !unreadable);
+            server.join().unwrap();
+            return;
+        }
+        let result = result.unwrap();
+        let event = usage_rx
+            .try_recv()
+            .expect("compaction publishes accounting");
+        assert_eq!(event.corr_id(), &corr);
+        let gremlins_magic_bus::EventKind::ModelCallUsage { usage } = event.into_kind() else {
+            panic!("expected compaction accounting");
+        };
+        assert_eq!(usage.request_kind, "compaction");
+        assert_eq!(usage.model, context.model);
+        assert_eq!(usage.agent_id, "parent/child");
+        assert!(usage.reported && usage.completed);
+        assert_eq!(usage.usage.prompt_tokens, Some(123));
+        assert_eq!(usage.usage.completion_tokens, Some(17));
+        assert!(usage.raw.get("content").is_none());
+        assert!(usage_rx.try_recv().is_err());
         let (headers, body) = server.join().unwrap();
+        if null_summary {
+            assert!(result.is_none());
+            return;
+        }
+        let result = result.unwrap();
         assert_eq!(
             context.extra.as_ref().unwrap()["compaction"]["type"],
             "caller-value"
@@ -750,6 +948,21 @@ mod tests {
     #[tokio::test]
     async fn production_compact_matches_streaming_wire_dynamic() {
         compact_matches_streaming_wire("dynamic").await;
+    }
+
+    #[tokio::test]
+    async fn production_compact_null_summary_still_publishes_charge() {
+        compact_matches_streaming_wire("null-summary").await;
+    }
+
+    #[tokio::test]
+    async fn production_compact_http_failure_retains_charge_without_completion() {
+        compact_matches_streaming_wire("http-failure").await;
+    }
+
+    #[tokio::test]
+    async fn production_compact_unreadable_error_body_preserves_http_status() {
+        compact_matches_streaming_wire("unreadable-error").await;
     }
 
     fn scrub_anthropic_env(guard: &mut EnvGuard) {

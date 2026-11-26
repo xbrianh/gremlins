@@ -698,7 +698,8 @@ fn event_run_id_matches(kind: &EventKind, target: &str) -> bool {
         | EventKind::OperatorMessage { id, .. }
         | EventKind::PromptRequest { id, .. } => id == target,
         // Variants that carry no per-run id: match everything.
-        EventKind::TurnStarted { .. }
+        EventKind::ModelCallUsage { .. }
+        | EventKind::TurnStarted { .. }
         | EventKind::StreamChunk { .. }
         | EventKind::ReasoningChunk { .. }
         | EventKind::TurnComplete { .. }
