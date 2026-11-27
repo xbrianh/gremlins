@@ -116,66 +116,70 @@ fn run_kind_frame(kind: &EventKind) -> Option<Value> {
     }
 }
 
-/// Protocol policy only: delivery ordering and I/O are shared below. Watch
-/// display is selector-gated; parent lifecycle can end an invisible selection.
-#[derive(Clone, Copy)]
-enum PassiveStream<'a> {
-    Watch(&'a gremlins_magic_bus::CorrId, &'a WatchMetadata),
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum WatchEffect {
+    None,
+    RunStarted,
+    RunEnded,
+    InvocationClosed,
 }
 
-impl PassiveStream<'_> {
-    fn frame(self, dispatch: &DispatchEvent<EventKind>) -> Option<Value> {
-        match self {
-            Self::Watch(filter, metadata) => metadata.frame(dispatch, filter),
+/// Parent lifecycle is shared by mailbox admission and watch termination.
+fn watch_parent_effect(
+    dispatch: &DispatchEvent<EventKind>,
+    filter: &gremlins_magic_bus::CorrId,
+) -> WatchEffect {
+    let corr = dispatch.corr_id();
+    match dispatch.kind() {
+        EventKind::RunStarted { id, .. }
+            if corr.run() == filter.run() && filter.run() == Some(id.as_str()) =>
+        {
+            WatchEffect::RunStarted
         }
+        EventKind::RunCompleted { id, .. }
+        | EventKind::RunFailed { id, .. }
+        | EventKind::RunStopped { id }
+            if corr.run() == filter.run() && filter.run() == Some(id.as_str()) =>
+        {
+            WatchEffect::RunEnded
+        }
+        _ => WatchEffect::None,
     }
+}
 
-    fn terminal_update(self, dispatch: &DispatchEvent<EventKind>) -> Option<bool> {
-        let Self::Watch(filter, _) = self;
-        let id = filter.run().expect("watch run");
-        if let EventKind::StageBoundary {
+/// Lifecycle is independent of visibility: a parent can end an invisible selection.
+fn watch_effect(
+    dispatch: &DispatchEvent<EventKind>,
+    filter: &gremlins_magic_bus::CorrId,
+) -> WatchEffect {
+    let parent_effect = watch_parent_effect(dispatch, filter);
+    if parent_effect != WatchEffect::None {
+        return parent_effect;
+    }
+    let corr = dispatch.corr_id();
+    match dispatch.kind() {
+        EventKind::StageBoundary {
+            id,
             stage,
             stage_run_id,
             active: false,
             ..
-        } = dispatch.kind()
+        } if corr.matches_prefix(filter)
+            && filter.stage_run_id() == Some(stage_run_id.as_str())
+            && corr.run() == Some(id.as_str())
+            && corr.stage() == Some(stage.as_str())
+            && corr.stage_run_id() == Some(stage_run_id.as_str()) =>
         {
-            let corr = dispatch.corr_id();
-            if filter.stage_run_id() == Some(stage_run_id.as_str())
-                && corr.matches_prefix(filter)
-                && corr
-                    .run()
-                    .is_some_and(|run| event_run_id_matches(dispatch.kind(), run))
-                && corr.stage() == Some(stage.as_str())
-                && corr.stage_run_id() == Some(stage_run_id.as_str())
-            {
-                return Some(true);
-            }
+            WatchEffect::InvocationClosed
         }
-        if dispatch.corr_id().run() != Some(id) || !event_run_id_matches(dispatch.kind(), id) {
-            return None;
-        }
-        match dispatch.kind() {
-            EventKind::RunStarted { .. } => Some(false),
-            _ if watch_parent_terminal(dispatch, id) => Some(true),
-
-            _ => None,
-        }
-    }
-
-    fn checkpoint(self) -> Value {
-        match self {
-            Self::Watch(filter, _) => serde_json::json!({
-                "type": "replay_checkpoint", "id": filter.run(), "scope": "run",
-                "stage": filter.stage(), "stage_run_id": filter.stage_run_id(),
-            }),
-        }
+        _ => WatchEffect::None,
     }
 }
 
 async fn write_history(
     writer: &SharedWriter,
-    stream: PassiveStream<'_>,
+    filter: &gremlins_magic_bus::CorrId,
+    metadata: &WatchMetadata,
     history: HistorySnapshot<EventKind>,
 ) -> Result<bool, String> {
     if !history.complete {
@@ -191,19 +195,21 @@ async fn write_history(
     let mut run_terminal = false;
     let mut invocation_terminal = false;
     for dispatch in history.events {
-        let frame = stream.frame(&dispatch);
-        if let Some(update) = stream.terminal_update(&dispatch) {
-            if matches!(dispatch.kind(), EventKind::StageBoundary { .. }) {
-                invocation_terminal |= update;
-            } else {
-                run_terminal = update;
-            }
+        let frame = metadata.frame(&dispatch, filter);
+        match watch_effect(&dispatch, filter) {
+            WatchEffect::None => {}
+            WatchEffect::RunStarted => run_terminal = false,
+            WatchEffect::RunEnded => run_terminal = true,
+            WatchEffect::InvocationClosed => invocation_terminal = true,
         }
         if let Some(value) = frame {
             writer.write_json_line(&value).await?;
         }
     }
-    let mut checkpoint = stream.checkpoint();
+    let mut checkpoint = serde_json::json!({
+        "type": "replay_checkpoint", "id": filter.run(), "scope": "run",
+        "stage": filter.stage(), "stage_run_id": filter.stage_run_id(),
+    });
     checkpoint["complete"] = serde_json::json!(history.complete);
     checkpoint["through_sequence"] = serde_json::json!(history.through_sequence);
     checkpoint["evicted_through_sequence"] = serde_json::json!(history.evicted_through_sequence);
@@ -212,15 +218,19 @@ async fn write_history(
 }
 
 /// Returns true after a terminal event or closure; delivery failures propagate.
-async fn forward_passive(
+async fn forward_watch(
     writer: &SharedWriter,
-    stream: PassiveStream<'_>,
+    filter: &gremlins_magic_bus::CorrId,
+    metadata: &WatchMetadata,
     event: Recv<EventKind>,
 ) -> Result<bool, String> {
     match event {
         Recv::Event(dispatch) => {
-            let frame = stream.frame(&dispatch);
-            let terminal = stream.terminal_update(&dispatch) == Some(true);
+            let frame = metadata.frame(&dispatch, filter);
+            let terminal = matches!(
+                watch_effect(&dispatch, filter),
+                WatchEffect::RunEnded | WatchEffect::InvocationClosed
+            );
             if let Some(frame) = frame {
                 writer.write_json_line(&frame).await?;
             }
@@ -396,25 +406,9 @@ fn watch_frame(
 
 fn watch_accepts(dispatch: &DispatchEvent<EventKind>, filter: &gremlins_magic_bus::CorrId) -> bool {
     dispatch.corr_id().matches_prefix(filter)
-        || (dispatch.corr_id().run() == filter.run()
-            && event_run_id_matches(dispatch.kind(), filter.run().expect("watch run"))
-            && matches!(
-                dispatch.kind(),
-                EventKind::RunStarted { .. }
-                    | EventKind::RunCompleted { .. }
-                    | EventKind::RunFailed { .. }
-                    | EventKind::RunStopped { .. }
-            ))
-}
-
-fn watch_parent_terminal(dispatch: &DispatchEvent<EventKind>, id: &str) -> bool {
-    dispatch.corr_id().run() == Some(id)
-        && event_run_id_matches(dispatch.kind(), id)
-        && matches!(
-            dispatch.kind(),
-            EventKind::RunCompleted { .. }
-                | EventKind::RunFailed { .. }
-                | EventKind::RunStopped { .. }
+        || matches!(
+            watch_parent_effect(dispatch, filter),
+            WatchEffect::RunStarted | WatchEffect::RunEnded
         )
 }
 
@@ -429,7 +423,7 @@ async fn write_watch_history(
     for dispatch in &history.events {
         metadata.record_boundary(dispatch, filter);
     }
-    write_history(writer, PassiveStream::Watch(filter, metadata), history).await
+    write_history(writer, filter, metadata, history).await
 }
 
 /// Observe native history/live events without acquiring an input lease.
@@ -510,7 +504,7 @@ pub(crate) async fn handle_watch(
             }
             event = rx.recv() => {
                 if !matches!(
-                    forward_passive(writer, PassiveStream::Watch(&filter, &metadata), event).await,
+                    forward_watch(writer, &filter, &metadata, event).await,
                     Ok(false)
                 ) {
                     break;
@@ -571,17 +565,20 @@ mod routing_tests {
             |corr, id: &str| DispatchEvent::new(corr, EventKind::RunStopped { id: id.into() });
         let parent = stopped(CorrId::new().with_run("parent"), "parent");
         let metadata = WatchMetadata::default();
-        let watch = PassiveStream::Watch(&filter, &metadata);
         // Parent termination closes a stage watch without leaking the frame.
-        assert!(forward_passive(&writer, watch, Recv::Event(parent.clone()))
-            .await
-            .unwrap());
+        assert!(
+            forward_watch(&writer, &filter, &metadata, Recv::Event(parent.clone()))
+                .await
+                .unwrap()
+        );
         // Nor may the watch close on mismatched payload identity.
         let mismatched = stopped(filter.clone(), "other");
-        assert!(!forward_passive(&writer, watch, Recv::Event(mismatched))
-            .await
-            .unwrap());
-        assert!(!forward_passive(&writer, watch, Recv::Lagged(3))
+        assert!(
+            !forward_watch(&writer, &filter, &metadata, Recv::Event(mismatched))
+                .await
+                .unwrap()
+        );
+        assert!(!forward_watch(&writer, &filter, &metadata, Recv::Lagged(3))
             .await
             .unwrap());
         let frame = socket::read_json_line(&mut reader).await.unwrap().unwrap();
@@ -591,18 +588,24 @@ mod routing_tests {
             CorrId::new().with_run("parent:child").with_stage("build"),
             "parent:child",
         );
-        assert!(!forward_passive(&writer, watch, Recv::Event(child))
-            .await
-            .unwrap());
+        assert!(
+            !forward_watch(&writer, &filter, &metadata, Recv::Event(child))
+                .await
+                .unwrap()
+        );
         let frame = socket::read_json_line(&mut reader).await.unwrap().unwrap();
         assert_eq!(frame["run_id"], "parent:child");
         let parent = stopped(filter.clone(), "parent");
-        assert!(forward_passive(&writer, watch, Recv::Event(parent))
-            .await
-            .unwrap());
+        assert!(
+            forward_watch(&writer, &filter, &metadata, Recv::Event(parent))
+                .await
+                .unwrap()
+        );
         let frame = socket::read_json_line(&mut reader).await.unwrap().unwrap();
         assert_eq!(frame["stage"], "build");
-        assert!(forward_passive(&writer, watch, Recv::Closed).await.unwrap());
+        assert!(forward_watch(&writer, &filter, &metadata, Recv::Closed)
+            .await
+            .unwrap());
     }
 
     #[test]
@@ -805,13 +808,9 @@ mod routing_tests {
                 },
             ))
             .await;
-            assert!(!forward_passive(
-                &writer,
-                PassiveStream::Watch(&filter, &metadata),
-                rx.recv().await
-            )
-            .await
-            .unwrap());
+            assert!(!forward_watch(&writer, &filter, &metadata, rx.recv().await)
+                .await
+                .unwrap());
             let live = socket::read_json_line(&mut reader).await.unwrap().unwrap();
             assert_eq!(live["sequence"], cut + 1);
             assert_eq!(live.get("stage_type").and_then(Value::as_str), stage_type);
@@ -1230,7 +1229,22 @@ mod routing_tests {
                     .unwrap(),
                 closed
             );
-            drop(client);
+            drop(writer);
+            let mut reader = BufReader::new(client);
+            if closed {
+                let boundary = socket::read_json_line(&mut reader).await.unwrap().unwrap();
+                assert_eq!(boundary["type"], "stage_boundary");
+                assert_eq!(boundary["active"], false);
+                assert_eq!(boundary["stage_run_id"], "chosen");
+                assert_eq!(boundary["sequence"], 1);
+            }
+            // Run lifecycle is outside the display selector, but still updates
+            // replay termination. Restart cannot reopen a closed invocation.
+            let checkpoint = socket::read_json_line(&mut reader).await.unwrap().unwrap();
+            assert_eq!(checkpoint["type"], "replay_checkpoint");
+            assert_eq!(checkpoint["complete"], true);
+            assert_eq!(checkpoint["through_sequence"], if closed { 3 } else { 2 });
+            assert!(socket::read_json_line(&mut reader).await.unwrap().is_none());
         }
     }
 
@@ -1318,47 +1332,162 @@ mod routing_tests {
         use gremlins_magic_bus::CorrId;
         let stage = CorrId::new().with_run("parent").with_stage("build");
         let exact = stage.clone().with_stage_run_id("chosen");
-        let metadata = WatchMetadata::default();
-        let stream = PassiveStream::Watch(&exact, &metadata);
-        for (run, invocation, payload_invocation, expected) in [
-            ("parent", "chosen", "chosen", Some(true)),
-            ("parent:child", "chosen", "chosen", Some(true)),
-            ("parent:childish", "other", "chosen", None),
-            ("foreign", "chosen", "chosen", None),
-            ("parent", "chosen", "other", None),
+        for (
+            run,
+            payload_run,
+            corr_stage,
+            payload_stage,
+            invocation,
+            payload_invocation,
+            expected,
+        ) in [
+            (
+                "parent",
+                "parent",
+                "build",
+                "build",
+                "chosen",
+                "chosen",
+                WatchEffect::InvocationClosed,
+            ),
+            (
+                "parent:child",
+                "parent:child",
+                "build",
+                "build",
+                "chosen",
+                "chosen",
+                WatchEffect::InvocationClosed,
+            ),
+            (
+                "parent:childish",
+                "parent:childish",
+                "build",
+                "build",
+                "other",
+                "chosen",
+                WatchEffect::None,
+            ),
+            (
+                "foreign",
+                "foreign",
+                "build",
+                "build",
+                "chosen",
+                "chosen",
+                WatchEffect::None,
+            ),
+            (
+                "parent",
+                "other",
+                "build",
+                "build",
+                "chosen",
+                "chosen",
+                WatchEffect::None,
+            ),
+            (
+                "parent:child",
+                "parent",
+                "build",
+                "build",
+                "chosen",
+                "chosen",
+                WatchEffect::None,
+            ),
+            (
+                "parent",
+                "parent",
+                "other",
+                "build",
+                "chosen",
+                "chosen",
+                WatchEffect::None,
+            ),
+            (
+                "parent",
+                "parent",
+                "build",
+                "other",
+                "chosen",
+                "chosen",
+                WatchEffect::None,
+            ),
+            (
+                "parent",
+                "parent",
+                "build",
+                "build",
+                "other",
+                "chosen",
+                WatchEffect::None,
+            ),
+            (
+                "parent",
+                "parent",
+                "build",
+                "build",
+                "chosen",
+                "other",
+                WatchEffect::None,
+            ),
         ] {
             let dispatch = DispatchEvent::new(
                 CorrId::new()
                     .with_run(run)
-                    .with_stage("build")
+                    .with_stage(corr_stage)
                     .with_stage_run_id(invocation),
                 EventKind::StageBoundary {
-                    id: run.into(),
-                    stage: "build".into(),
+                    id: payload_run.into(),
+                    stage: payload_stage.into(),
                     stage_run_id: payload_invocation.into(),
                     stage_type: "agent".into(),
                     active: false,
                 },
             );
-            assert_eq!(stream.terminal_update(&dispatch), expected);
-            assert_eq!(
-                PassiveStream::Watch(&stage, &metadata).terminal_update(&dispatch),
-                None
-            );
+            assert_eq!(watch_effect(&dispatch, &exact), expected);
+            assert_eq!(watch_effect(&dispatch, &stage), WatchEffect::None);
         }
-        let started = DispatchEvent::new(
-            CorrId::new().with_run("parent"),
-            EventKind::RunStarted {
-                id: "parent".into(),
-                definition: "test".into(),
-                stage: "build".into(),
-            },
-        );
-        assert_eq!(stream.terminal_update(&started), Some(false));
-        assert_eq!(
-            PassiveStream::Watch(&stage, &metadata).terminal_update(&started),
-            Some(false)
-        );
+        for (corr_run, payload_run, matches) in [
+            ("parent", "parent", true),
+            ("foreign", "parent", false),
+            ("parent", "foreign", false),
+            ("parent:child", "parent:child", false),
+            ("parent:child", "parent", false),
+            ("parent", "parent:child", false),
+        ] {
+            for kind in [
+                EventKind::RunStarted {
+                    id: payload_run.into(),
+                    definition: "test".into(),
+                    stage: "build".into(),
+                },
+                EventKind::RunStopped {
+                    id: payload_run.into(),
+                },
+                EventKind::RunCompleted {
+                    id: payload_run.into(),
+                    exit_code: 0,
+                },
+                EventKind::RunFailed {
+                    id: payload_run.into(),
+                    exit_code: 1,
+                    error: None,
+                },
+            ] {
+                let expected = if !matches {
+                    WatchEffect::None
+                } else if matches!(&kind, EventKind::RunStarted { .. }) {
+                    WatchEffect::RunStarted
+                } else {
+                    WatchEffect::RunEnded
+                };
+                let dispatch = DispatchEvent::new(CorrId::new().with_run(corr_run), kind);
+                for filter in [&exact, &stage] {
+                    assert_eq!(watch_effect(&dispatch, filter), expected);
+                }
+            }
+        }
     }
 
     #[tokio::test]
@@ -1454,13 +1583,9 @@ mod routing_tests {
                             .unwrap());
                         for (index, event) in events.iter().enumerate() {
                             bus.emit_async(event.clone()).await;
-                            let ended = forward_passive(
-                                &writer,
-                                PassiveStream::Watch(&filter, &metadata),
-                                rx.recv().await,
-                            )
-                            .await
-                            .unwrap();
+                            let ended = forward_watch(&writer, &filter, &metadata, rx.recv().await)
+                                .await
+                                .unwrap();
                             assert_eq!(ended, index == events.len() - 1);
                         }
                     }
