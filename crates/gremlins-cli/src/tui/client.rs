@@ -568,7 +568,7 @@ impl DaemonClient {
     ) -> Result<(mpsc::Receiver<Value>, tokio::task::JoinHandle<()>), String> {
         let session_id = self.session_id().await;
         let stream = self.open_aux_stream().await?;
-        follow_watch(stream, &session_id, run_id, stage, stage_run_id).await
+        follow_watch(stream, &session_id, run_id, stage, stage_run_id, true).await
     }
 
     /// Read persisted history together with its native handoff watermark.
@@ -673,7 +673,7 @@ async fn follow_run(
     session_id: &str,
     id: &str,
 ) -> Result<(mpsc::Receiver<Value>, tokio::task::JoinHandle<()>), String> {
-    follow_watch(stream, session_id, id, None, None).await
+    follow_watch(stream, session_id, id, None, None, true).await
 }
 
 async fn follow_watch(
@@ -682,9 +682,10 @@ async fn follow_watch(
     id: &str,
     stage: Option<&str>,
     stage_run_id: Option<&str>,
+    replay: bool,
 ) -> Result<(mpsc::Receiver<Value>, tokio::task::JoinHandle<()>), String> {
     let mut request =
-        json!({"op":"watch", "scope":"run", "id":id, "session_id":session_id, "replay":true});
+        json!({"op":"watch", "scope":"run", "id":id, "session_id":session_id, "replay":replay});
     for (key, value) in [("stage", stage), ("stage_run_id", stage_run_id)] {
         if let Some(value) = value {
             request[key] = json!(value);
@@ -701,7 +702,7 @@ async fn follow_watch(
     if ack["type"] != "watched"
         || ack["scope"] != "run"
         || ack["id"] != id
-        || ack["replay"] != true
+        || ack["replay"] != replay
         || ack.get("stage") != Some(&json!(stage))
         || ack.get("stage_run_id") != Some(&json!(stage_run_id))
     {

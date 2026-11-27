@@ -73,7 +73,7 @@ impl DaemonClient {
         let turn = request["turn"].as_str().map(str::to_owned);
         // Existing runs can subscribe before enqueue. The initial reservation
         // is not live yet; its first turn is recovered from atomic bus replay.
-        let prepared = self.prepare_home(&id, true).await;
+        let prepared = self.prepare_home(&id, false).await;
         // Retire the previous turn's forwarder before new output can arrive.
         {
             let mut display = self.home_display.lock().await;
@@ -90,14 +90,14 @@ impl DaemonClient {
         {
             Ok(response) => response,
             Err(error) => {
-                if let Ok((_, reader, _)) = prepared {
+                if let Ok((_, reader)) = prepared {
                     reader.abort();
                 }
                 return Err(error);
             }
         };
         if response["type"] == "error" {
-            if let Ok((_, reader, _)) = prepared {
+            if let Ok((_, reader)) = prepared {
                 reader.abort();
             }
             return Ok(response);
@@ -129,26 +129,26 @@ impl DaemonClient {
         drop(write);
         let stream = match prepared {
             Ok(stream) if actual == id => Ok(stream),
-            Ok((_, reader, _)) => {
+            Ok((_, reader)) => {
                 reader.abort();
-                self.prepare_home(&actual, false).await
+                self.prepare_home(&actual, true).await
             }
-            Err(_) => self.prepare_home(&actual, false).await,
+            Err(_) => self.prepare_home(&actual, true).await,
         };
         // A failed watch is independent of the accepted submission. Retry only
         // the passive replay subscription, never the chat request.
         let stream = match stream {
             Ok(stream) => Ok(stream),
-            Err(_) => self.prepare_home(&actual, false).await,
+            Err(_) => self.prepare_home(&actual, true).await,
         };
         let mut initial_warning = None;
-        let (rx, reader, gaps) = match stream {
+        let (rx, reader) = match stream {
             Ok(stream) => stream,
             Err(error) => {
                 initial_warning = Some(format!("home display unavailable: {error}"));
                 let (tx, rx) = mpsc::channel(1);
                 drop(tx);
-                (rx, Reader(tokio::spawn(async {})), Vec::new())
+                (rx, Reader(tokio::spawn(async {})))
             }
         };
         let mut display = self.home_display.lock().await;
@@ -163,7 +163,6 @@ impl DaemonClient {
         let forward = tokio::spawn(forward_home_stream(
             rx,
             reader,
-            gaps,
             HomeWatchContext {
                 session_write,
                 out,
@@ -208,44 +207,23 @@ impl DaemonClient {
     async fn prepare_home(
         &self,
         id: &str,
-        discard_history: bool,
-    ) -> Result<(mpsc::Receiver<Value>, Reader, Vec<Value>), String> {
+        replay: bool,
+    ) -> Result<(mpsc::Receiver<Value>, Reader), String> {
         let stream = self.open_aux_stream().await?;
         let session = self.session_id().await;
-        let (mut rx, reader) = tokio::time::timeout(
+        let (rx, reader) = tokio::time::timeout(
             std::time::Duration::from_secs(5),
-            follow_run(stream, &session, id),
+            follow_watch(stream, &session, id, None, None, replay),
         )
         .await
         .map_err(|_| "home watch acknowledgment timed out".to_owned())??;
-        let reader = Reader(reader);
-        let mut gaps = Vec::new();
-        if discard_history {
-            let cut = tokio::time::timeout(std::time::Duration::from_secs(5), async {
-                while let Some(frame) = rx.recv().await {
-                    if matches!(frame["type"].as_str(), Some("history_gap" | "lagged")) {
-                        gaps.push(frame.clone());
-                    }
-                    if frame["type"] == "replay_checkpoint" {
-                        return Ok(());
-                    }
-                }
-                Err("home watch closed before replay checkpoint".to_owned())
-            })
-            .await;
-            if !matches!(cut, Ok(Ok(()))) {
-                reader.abort();
-                return Err("home watch did not complete replay".into());
-            }
-        }
-        Ok((rx, reader, gaps))
+        Ok((rx, Reader(reader)))
     }
 }
 
 async fn forward_home_stream<F, Fut>(
     mut rx: mpsc::Receiver<Value>,
     mut reader: Reader,
-    gaps: Vec<Value>,
     context: HomeWatchContext,
     initial_warning: Option<String>,
     mut recover: F,
@@ -260,14 +238,11 @@ async fn forward_home_stream<F, Fut>(
         run,
         turn,
     } = context;
-    let mut gaps = gaps.into_iter();
     let mut warned = false;
     let mut backoff = std::time::Duration::from_millis(50);
     let mut sequences = std::collections::HashSet::new();
     loop {
-        let frame = if let Some(gap) = gaps.next() {
-            gap
-        } else if let Some(frame) = rx.recv().await {
+        let frame = if let Some(frame) = rx.recv().await {
             frame
         } else {
             {

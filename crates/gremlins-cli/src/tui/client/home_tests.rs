@@ -17,9 +17,6 @@ async fn stale_prepare_cannot_retire_successor_display() {
             client.session.write.lock().await.generation = 1;
             *display = Some(Display { forward: successor });
         }
-        socket::write_json_line(observer.get_mut(), &json!({"type":"replay_checkpoint"}))
-            .await
-            .unwrap();
         assert!(socket::read_json_line(&mut observer)
             .await
             .unwrap()
@@ -38,6 +35,35 @@ async fn stale_prepare_cannot_retire_successor_display() {
 }
 
 #[tokio::test]
+async fn live_only_home_watch_rejects_replay_ack_and_closes_reader() {
+    let (stream, peer) = UnixStream::pair().unwrap();
+    let (client, _peers) = DaemonClient::fake_with_aux_streams(
+        json!({"session_id":"owner", "home_run_id":"home"}),
+        vec![stream],
+    );
+    let server = async {
+        let mut peer = BufReader::new(peer);
+        let request = socket::read_json_line(&mut peer).await.unwrap().unwrap();
+        assert_eq!(request["replay"], false);
+        socket::write_json_line(
+            peer.get_mut(),
+            &json!({"type":"watched", "scope":"run",
+            "id":"home", "stage":null, "stage_run_id":null, "replay":true}),
+        )
+        .await
+        .unwrap();
+        assert!(socket::read_json_line(&mut peer).await.unwrap().is_none());
+    };
+    let (result, ()) = tokio::time::timeout(std::time::Duration::from_secs(2), async {
+        tokio::join!(client.prepare_home("home", false), server)
+    })
+    .await
+    .unwrap();
+    assert!(result.is_err());
+    client.shutdown().await;
+}
+
+#[tokio::test]
 async fn malformed_home_ack_closes_prepared_reader() {
     for ack in [
         json!({"type":"unexpected"}),
@@ -51,9 +77,6 @@ async fn malformed_home_ack_closes_prepared_reader() {
         );
         let server = async {
             let mut observer = watch(peer, true).await;
-            socket::write_json_line(observer.get_mut(), &json!({"type":"replay_checkpoint"}))
-                .await
-                .unwrap();
             let mut session = BufReader::new(session);
             socket::read_json_line(&mut session).await.unwrap().unwrap();
             socket::write_json_line(session.get_mut(), &ack)
@@ -101,12 +124,7 @@ async fn home_watch_failure_and_eof_recover_by_replay_without_resubmission() {
             raw_tx: mpsc::unbounded_channel().0,
         });
         let server = tokio::spawn(async move {
-            let mut observer = watch(initial_peer, !exhaust_initial_watches).await;
-            if !exhaust_initial_watches {
-                socket::write_json_line(observer.get_mut(), &json!({"type":"replay_checkpoint"}))
-                    .await
-                    .unwrap();
-            }
+            let observer = watch(initial_peer, !exhaust_initial_watches).await;
             let mut session = BufReader::new(session);
             assert_eq!(
                 socket::read_json_line(&mut session).await.unwrap().unwrap()["op"],
@@ -127,32 +145,10 @@ async fn home_watch_failure_and_eof_recover_by_replay_without_resubmission() {
                 Vec::new()
             };
             for peer in failed_watches {
-                let mut failed = BufReader::new(peer);
-                let request = socket::read_json_line(&mut failed).await.unwrap().unwrap();
-                assert_eq!(request["op"], "watch");
-                assert_eq!(request["id"], "replacement");
-                socket::write_json_line(
-                    failed.get_mut(),
-                    &json!({"type":"error", "message":"retry watch"}),
-                )
-                .await
-                .unwrap();
+                watch_run(peer, "replacement", true, false).await;
             }
-            let mut recovery = BufReader::new(recovery_peer);
-            let request = socket::read_json_line(&mut recovery)
-                .await
-                .unwrap()
-                .unwrap();
-            assert_eq!(request["op"], "watch");
-            assert_eq!(request["replay"], true);
             let run = if reject { "replacement" } else { "home" };
-            socket::write_json_line(
-                recovery.get_mut(),
-                &json!({"type":"watched", "scope":"run", "id":run,
-                "stage":null, "stage_run_id":null, "replay":true}),
-            )
-            .await
-            .unwrap();
+            let mut recovery = watch_run(recovery_peer, run, true, true).await;
             socket::write_json_line(
                 recovery.get_mut(),
                 &json!({"type":"done", "text":"recovered", "summary":"",
@@ -208,7 +204,6 @@ async fn home_recovery_retries_failures_and_deduplicates_replayed_sequences() {
         let forward = tokio::spawn(forward_home_stream(
             rx,
             Reader(tokio::spawn(async {})),
-            Vec::new(),
             HomeWatchContext {
                 session_write: Arc::clone(&client.session.write),
                 out,
@@ -253,13 +248,25 @@ async fn home_recovery_retries_failures_and_deduplicates_replayed_sequences() {
 }
 
 async fn watch(peer: UnixStream, live: bool) -> BufReader<UnixStream> {
+    watch_run(peer, "home", false, live).await
+}
+
+async fn watch_run(
+    peer: UnixStream,
+    id: &str,
+    replay: bool,
+    accept: bool,
+) -> BufReader<UnixStream> {
     let mut peer = BufReader::new(peer);
     let req = socket::read_json_line(&mut peer).await.unwrap().unwrap();
-    assert_eq!(req["op"], "watch");
-    assert_eq!(req["session_id"], "owner");
-    assert_eq!(req["replay"], true);
-    let ack = if live {
-        json!({"type":"watched", "scope":"run", "id":"home", "stage":null, "stage_run_id":null, "replay":true})
+    assert_eq!(
+        req,
+        json!({"op":"watch", "scope":"run", "id":id,
+        "session_id":"owner", "replay":replay})
+    );
+    let ack = if accept {
+        json!({"type":"watched", "scope":"run", "id":id, "stage":null,
+            "stage_run_id":null, "replay":replay})
     } else {
         json!({"type":"error", "message":"not live"})
     };
@@ -275,10 +282,7 @@ async fn stale_enqueue_ack_cannot_replace_home_identity() {
         vec![stream],
     );
     let server = tokio::spawn(async move {
-        let mut observer = watch(peer, true).await;
-        socket::write_json_line(observer.get_mut(), &json!({"type":"replay_checkpoint"}))
-            .await
-            .unwrap();
+        let _observer = watch(peer, true).await;
         let mut session = BufReader::new(session);
         socket::read_json_line(&mut session).await.unwrap().unwrap();
         socket::write_json_line(
@@ -329,10 +333,7 @@ async fn generation_reset_during_home_enqueue(during_prepare: bool) {
     let (waiting_tx, waiting_rx) = oneshot::channel();
     let (release_tx, release_rx) = oneshot::channel();
     let server = async move {
-        let mut initial = watch(initial_peer, true).await;
-        socket::write_json_line(initial.get_mut(), &json!({"type":"replay_checkpoint"}))
-            .await
-            .unwrap();
+        let _initial = watch(initial_peer, true).await;
         let mut session = BufReader::new(session);
         let request = socket::read_json_line(&mut session).await.unwrap().unwrap();
         assert_eq!(request["op"], "chat");
@@ -439,8 +440,6 @@ async fn exercise(first: bool) {
         streams,
     );
     let (tx, mut rx) = mpsc::unbounded_channel();
-    // The fixture's receivers are intentionally discarded; observe via a new
-    // output channel on the same request/transport implementation.
     let mut client = client;
     client.out = Arc::new(OutState {
         chat_tx: tx,
@@ -449,17 +448,6 @@ async fn exercise(first: bool) {
     });
     let server = tokio::spawn(async move {
         let mut observer = watch(a_peer, !first).await;
-        if !first {
-            socket::write_json_line(
-                observer.get_mut(),
-                &json!({"type":"stream_chunk", "text":"old", "run_id":"home", "turn":"old-turn"}),
-            )
-            .await
-            .unwrap();
-            socket::write_json_line(observer.get_mut(), &json!({"type":"replay_checkpoint"}))
-                .await
-                .unwrap();
-        }
         let mut session = BufReader::new(session);
         let req = socket::read_json_line(&mut session).await.unwrap().unwrap();
         assert_eq!(req["op"], "chat");
@@ -472,7 +460,10 @@ async fn exercise(first: bool) {
             )
             .await
             .unwrap();
-            observer = watch(b_peer, true).await;
+            observer = watch_run(b_peer, "home", true, true).await;
+            socket::write_json_line(observer.get_mut(), &json!({"type":"history_gap"}))
+                .await
+                .unwrap();
         }
         for frame in [
             json!({"type":"stream_chunk", "text":"stale preack output", "run_id":"home", "turn":"new-turn", "correlation_turn":"old-turn"}),
@@ -502,6 +493,16 @@ async fn exercise(first: bool) {
         .await
         .unwrap();
     assert_eq!(response["type"], "ok");
+    if first {
+        let (event, turn, execution) =
+            tokio::time::timeout(std::time::Duration::from_secs(2), rx.recv())
+                .await
+                .unwrap()
+                .unwrap();
+        assert!(matches!(event, EventKind::SystemWarning { .. }));
+        assert_eq!(turn.as_deref(), Some("new-turn"));
+        assert_eq!(execution, None);
+    }
     for expected in ["turn_started", "stream_chunk", "done"] {
         let (event, turn, execution) =
             tokio::time::timeout(std::time::Duration::from_secs(2), rx.recv())
@@ -525,12 +526,12 @@ async fn exercise(first: bool) {
 }
 
 #[tokio::test]
-async fn home_display_subscribes_before_enqueue_and_discards_previous_history() {
+async fn home_live_only_watch_accepts_early_output_without_replay_checkpoint() {
     exercise(false).await;
 }
 
 #[tokio::test]
-async fn first_home_turn_uses_replay_after_ack_only_submission() {
+async fn first_watch_failure_recovers_with_replay_and_genuine_gap() {
     exercise(true).await;
 }
 
@@ -587,10 +588,7 @@ async fn exercise_transport_warning(reject_watch: bool) {
     let ack = json!({"type":"ok", "id":"replacement", "status":"streaming", "session_id":"owner"});
     let expected_ack = ack.clone();
     let server = tokio::spawn(async move {
-        let mut initial = watch(initial_peer, true).await;
-        socket::write_json_line(initial.get_mut(), &json!({"type":"replay_checkpoint"}))
-            .await
-            .unwrap();
+        let _initial = watch(initial_peer, true).await;
         let mut session = BufReader::new(session);
         let request = socket::read_json_line(&mut session).await.unwrap().unwrap();
         assert_eq!(request["op"], "chat");
@@ -598,24 +596,7 @@ async fn exercise_transport_warning(reject_watch: bool) {
         socket::write_json_line(session.get_mut(), &ack)
             .await
             .unwrap();
-        let mut replacement = BufReader::new(replacement_peer);
-        let request = socket::read_json_line(&mut replacement)
-            .await
-            .unwrap()
-            .unwrap();
-        assert_eq!(request["op"], "watch");
-        assert_eq!(request["id"], "replacement");
-        assert_eq!(request["session_id"], "owner");
-        assert_eq!(request["replay"], true);
-        let response = if reject_watch {
-            json!({"type":"error", "message":"replacement unavailable"})
-        } else {
-            json!({"type":"watched", "scope":"run", "id":"replacement",
-                "stage":null, "stage_run_id":null, "replay":true})
-        };
-        socket::write_json_line(replacement.get_mut(), &response)
-            .await
-            .unwrap();
+        watch_run(replacement_peer, "replacement", true, !reject_watch).await;
         // A successful watch then closes without a terminal turn frame.
     });
     let response = tokio::time::timeout(
@@ -754,9 +735,7 @@ async fn exercise_queued_gap(kind: &str, buffered: bool, reset: bool) {
                 .await
                 .unwrap();
         }
-        socket::write_json_line(observer.get_mut(), &json!({"type":"replay_checkpoint"}))
-            .await
-            .unwrap();
+
         let mut session = BufReader::new(session);
         let request = socket::read_json_line(&mut session).await.unwrap().unwrap();
         assert_eq!(request["turn"], "1");
@@ -861,12 +840,16 @@ async fn exercise_replacement(selected_gap: bool) {
     });
     let server = tokio::spawn(async move {
         let mut initial = watch(a_peer, true).await;
-        socket::write_json_line(initial.get_mut(), &json!({"type":"history_gap"}))
+        socket::write_json_line(initial.get_mut(), &json!({"type":"lagged"}))
             .await
             .unwrap();
-        socket::write_json_line(initial.get_mut(), &json!({"type":"replay_checkpoint"}))
-            .await
-            .unwrap();
+        socket::write_json_line(
+            initial.get_mut(),
+            &json!({"type":"stream_chunk",
+            "text":"discarded stream", "run_id":"home", "correlation_turn":"new-turn"}),
+        )
+        .await
+        .unwrap();
         let mut session = BufReader::new(session);
         let req = socket::read_json_line(&mut session).await.unwrap().unwrap();
         assert_eq!(req["op"], "chat");
@@ -877,22 +860,7 @@ async fn exercise_replacement(selected_gap: bool) {
         )
         .await
         .unwrap();
-        let mut replacement = BufReader::new(b_peer);
-        let req = socket::read_json_line(&mut replacement)
-            .await
-            .unwrap()
-            .unwrap();
-        assert_eq!(req["op"], "watch");
-        assert_eq!(req["id"], "replacement");
-        assert_eq!(req["session_id"], "owner");
-        assert_eq!(req["replay"], true);
-        socket::write_json_line(
-            replacement.get_mut(),
-            &json!({"type":"watched", "scope":"run", "id":"replacement",
-                "stage":null, "stage_run_id":null, "replay":true}),
-        )
-        .await
-        .unwrap();
+        let mut replacement = watch_run(b_peer, "replacement", true, true).await;
         if selected_gap {
             socket::write_json_line(
                 replacement.get_mut(),
@@ -955,7 +923,6 @@ async fn exercise_replacement(selected_gap: bool) {
         assert_eq!(turn.as_deref(), Some("new-turn"));
         assert_eq!(execution, None);
     }
-    // The discarded initial watch's gap must never produce a warning.
     for expected in ["stream_chunk", "done"] {
         let (event, turn, execution) =
             tokio::time::timeout(std::time::Duration::from_secs(2), rx.recv())

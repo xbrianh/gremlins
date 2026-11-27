@@ -988,6 +988,17 @@ impl Fixture {
         (chat, raw)
     }
 
+    // Live-only preenqueue watches need only an ack; recovery replays history.
+    async fn home_peer(&self, id: &str, replay: bool) -> BufReader<UnixStream> {
+        let mut peer = self.peer().await;
+        assert_eq!(
+            read(&mut peer).await,
+            json!({"op":"watch","scope":"run","id":id,"session_id":"test","replay":replay})
+        );
+        socket::write_json_line(peer.get_mut(), &json!({"type":"watched","scope":"run","id":id,"stage":null,"stage_run_id":null,"replay":replay})).await.unwrap();
+        peer
+    }
+
     async fn native_input_peer(
         &self,
         run: &str,
@@ -1081,28 +1092,9 @@ async fn home_idle_submission_sends_exactly_one_real_chat_request() {
     assert_eq!(active.as_deref(), Some("1"));
     assert!(f.app.active_request);
 
-    let mut observer = f.peer().await;
-    assert_eq!(
-        read(&mut observer).await,
-        json!({"op":"watch","scope":"run","id":"home","session_id":"test","replay":true})
-    );
-    for frame in [
-        json!({"type":"watched","scope":"run","id":"home","stage":null,"stage_run_id":null,"replay":true}),
-        json!({"type":"replay_checkpoint"}),
-    ] {
-        socket::write_json_line(observer.get_mut(), &frame)
-            .await
-            .unwrap();
-    }
+    let _observer = f.home_peer("home", false).await;
     let mut session = BufReader::new(&mut f.peers[1]);
-    let request = tokio::time::timeout(
-        Duration::from_secs(10),
-        socket::read_json_line(&mut session),
-    )
-    .await
-    .unwrap()
-    .unwrap()
-    .unwrap();
+    let request = read(&mut session).await;
     assert_eq!(request["op"], "chat");
     assert_eq!(request["text"], "hello home");
     assert_eq!(request["turn"], "1");
@@ -1516,136 +1508,141 @@ async fn home_background_stream_and_done_stay_in_home_without_summary_duplicate(
 }
 
 #[tokio::test]
-async fn home_replacement_missing_start_replay_renders_gap_and_preack_text_once() {
-    let mut f = Fixture::with_socket();
-    let (mut chat, mut raw) = f.connect_home_queues().await;
-    install_home_session(&mut f.app, &f.client).await;
-    assert_eq!(f.app.home_run_id.as_deref(), Some("home"));
-    f.start_home("1");
-    let mut active = Some("1".into());
-    let client = Arc::clone(&f.client);
-    let enqueue = tokio::spawn(async move {
-        client
-            .send_session_request_for_generation(
-                json!({"op":"chat", "text":"replacement prompt", "turn":"1"}),
-                0,
-            )
-            .await
-            .unwrap()
-    });
-    let mut peer = f.peer().await;
-    assert_eq!(
-        read(&mut peer).await,
-        json!({"op":"watch","scope":"run","id":"home","session_id":"test","replay":true})
-    );
-    for frame in [
-        json!({"type":"watched","scope":"run","id":"home","stage":null,"stage_run_id":null,"replay":true}),
-        json!({"type":"history_gap"}),
-        json!({"type":"stream_chunk","text":"OLD RUN MUST NOT RENDER","run_id":"home","correlation_turn":"1","stage_type":"agent","stage_run_id":"old-exec"}),
-        json!({"type":"replay_checkpoint"}),
-    ] {
-        socket::write_json_line(peer.get_mut(), &frame)
-            .await
-            .unwrap();
-    }
-    let mut session = BufReader::new(&mut f.peers[1]);
-    let request = read(&mut session).await;
-    assert_eq!(request["op"], "chat");
-    assert_eq!(request["turn"], "1");
-    // Replacement output predates this ack and is recovered by atomic replay.
-    socket::write_json_line(
-        session.get_mut(),
-        &json!({"type":"ok","id":"replacement","session_id":"test"}),
-    )
-    .await
-    .unwrap();
-    let mut replacement = f.peer().await;
-    assert_eq!(
-        read(&mut replacement).await,
-        json!({"op":"watch","scope":"run","id":"replacement","session_id":"test","replay":true})
-    );
-    let frames = [
-        json!({"type":"watched","scope":"run","id":"replacement","stage":null,"stage_run_id":null,"replay":true}),
-        json!({"type":"history_gap","run_id":"replacement"}),
-        json!({"type":"stream_chunk","text":"OLD RUN MUST NOT RENDER","run_id":"home","correlation_turn":"old","stage_type":"agent","stage_run_id":"old-exec"}),
-        json!({"type":"stream_chunk","text":"preack replacement text","run_id":"replacement","correlation_turn":"1","stage_type":"agent","stage_run_id":"replacement-exec"}),
-        json!({"type":"replay_checkpoint"}),
-        json!({"type":"done","text":"preack replacement text final","summary":"UNUSED SUMMARY","run_id":"replacement","correlation_turn":"1","stage_type":"agent","stage_run_id":"replacement-exec"}),
-    ];
-    let wire: String = frames.iter().map(|frame| format!("{frame}\n")).collect();
-    tokio::io::AsyncWriteExt::write_all(replacement.get_mut(), wire.as_bytes())
-        .await
-        .unwrap();
-    assert_eq!(enqueue.await.unwrap()["id"], "replacement");
-    let identity = tokio::time::timeout(Duration::from_secs(2), raw.recv())
-        .await
-        .unwrap()
-        .unwrap();
-    assert_eq!(
-        identity,
-        json!({"type":"home_run_identity", "id":"replacement",
-        "turn":"1", "session_id":"test", "generation":0})
-    );
-    apply_home_identity(
-        &mut f.app,
-        &identity,
-        f.client.session_generation().await,
-        &active,
-    );
-    let mut kinds = Vec::new();
-    while active.is_some() {
-        let (event, turn, execution) = tokio::time::timeout(Duration::from_secs(2), chat.recv())
-            .await
-            .unwrap()
-            .unwrap();
-        kinds.push(
-            serde_json::to_value(&event).unwrap()["type"]
-                .as_str()
+async fn home_live_preenqueue_and_replacement_replay_render_early_output_once() {
+    for replacement in [false, true] {
+        let id = if replacement { "replacement" } else { "home" };
+        let mut f = Fixture::with_socket();
+        let (mut chat, mut raw) = f.connect_home_queues().await;
+        install_home_session(&mut f.app, &f.client).await;
+        assert_eq!(f.app.home_run_id.as_deref(), Some("home"));
+        f.start_home("1");
+        let mut active = Some("1".into());
+        let client = Arc::clone(&f.client);
+        let enqueue = tokio::spawn(async move {
+            client
+                .send_session_request_for_generation(
+                    json!({"op":"chat", "text":"replacement prompt", "turn":"1"}),
+                    0,
+                )
+                .await
                 .unwrap()
-                .to_owned(),
-        );
-        apply_home_event(
-            &mut f.app,
-            &mut f.live,
-            &mut active,
-            &mut HomeInterrupt::default(),
-            event,
-            turn,
-            execution,
-        )
-        .unwrap();
-        if kinds.last().map(String::as_str) == Some("system_warning") {
-            assert!(f.app.active_request); // A display gap is not turn failure.
-            assert_eq!(active.as_deref(), Some("1"));
+        });
+        // Existing history may be incomplete: replay:false must enqueue without
+        // receiving old history, a history_gap, or any replay checkpoint.
+        let mut initial = f.home_peer("home", false).await;
+        if !replacement {
+            socket::write_json_line(initial.get_mut(), &json!({"type":"stream_chunk","text":"preack replacement text","run_id":"home","correlation_turn":"1","stage_type":"agent","stage_run_id":"early-exec"})).await.unwrap();
         }
+        let mut session = BufReader::new(&mut f.peers[1]);
+        let request = read(&mut session).await;
+        assert_eq!(request["op"], "chat");
+        assert_eq!(request["turn"], "1");
+        // Replacement output predates this ack and is recovered by atomic replay.
+        socket::write_json_line(
+            session.get_mut(),
+            &json!({"type":"ok","id":id,"session_id":"test"}),
+        )
+        .await
+        .unwrap();
+        let mut output = if replacement {
+            f.home_peer(id, true).await
+        } else {
+            initial
+        };
+        let mut frames = if replacement {
+            vec![
+                json!({"type":"history_gap","run_id":"replacement"}),
+                json!({"type":"stream_chunk","text":"OLD RUN MUST NOT RENDER","run_id":"home","correlation_turn":"old","stage_type":"agent","stage_run_id":"old-exec"}),
+                json!({"type":"stream_chunk","text":"preack replacement text","run_id":"replacement","correlation_turn":"1","stage_type":"agent","stage_run_id":"early-exec"}),
+                json!({"type":"replay_checkpoint"}),
+            ]
+        } else {
+            Vec::new()
+        };
+        frames.push(json!({"type":"done","text":"preack replacement text final","summary":"UNUSED SUMMARY","run_id":id,"correlation_turn":"1","stage_type":"agent","stage_run_id":"early-exec"}));
+        let wire: String = frames.iter().map(|frame| format!("{frame}\n")).collect();
+        tokio::io::AsyncWriteExt::write_all(output.get_mut(), wire.as_bytes())
+            .await
+            .unwrap();
+        assert_eq!(enqueue.await.unwrap()["id"], id);
+        let identity = tokio::time::timeout(Duration::from_secs(2), raw.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            identity,
+            json!({"type":"home_run_identity", "id":id,
+        "turn":"1", "session_id":"test", "generation":0})
+        );
+        apply_home_identity(
+            &mut f.app,
+            &identity,
+            f.client.session_generation().await,
+            &active,
+        );
+        let mut kinds = Vec::new();
+        while active.is_some() {
+            let (event, turn, execution) =
+                tokio::time::timeout(Duration::from_secs(2), chat.recv())
+                    .await
+                    .unwrap()
+                    .unwrap();
+            kinds.push(
+                serde_json::to_value(&event).unwrap()["type"]
+                    .as_str()
+                    .unwrap()
+                    .to_owned(),
+            );
+            apply_home_event(
+                &mut f.app,
+                &mut f.live,
+                &mut active,
+                &mut HomeInterrupt::default(),
+                event,
+                turn,
+                execution,
+            )
+            .unwrap();
+            if kinds.last().map(String::as_str) == Some("system_warning") {
+                assert!(f.app.active_request); // A display gap is not turn failure.
+                assert_eq!(active.as_deref(), Some("1"));
+            }
+        }
+        assert_eq!(
+            kinds,
+            if replacement {
+                vec!["system_warning", "stream_chunk", "done"]
+            } else {
+                vec!["stream_chunk", "done"]
+            }
+        );
+        assert!(chat.try_recv().is_err());
+        let rendered = f.rendered();
+        assert_eq!(
+            rendered
+                .matches("home display history discontinuity")
+                .count(),
+            usize::from(replacement),
+            "{rendered}"
+        );
+        assert_eq!(
+            rendered.matches("preack replacement text final").count(),
+            1,
+            "{rendered}"
+        );
+        assert_eq!(
+            rendered.matches("preack replacement text").count(),
+            1,
+            "{rendered}"
+        );
+        assert!(!rendered.contains("OLD RUN MUST NOT RENDER"));
+        assert!(!rendered.contains("UNUSED SUMMARY"));
+        assert_eq!(f.app.home_run_id.as_deref(), Some(id));
+        assert!(active.is_none());
+        assert!(!f.app.active_request);
+        f.assert_no_fallback().await;
+        f.client.shutdown().await;
     }
-    assert_eq!(kinds, ["system_warning", "stream_chunk", "done"]);
-    assert!(chat.try_recv().is_err());
-    let rendered = f.rendered();
-    assert_eq!(
-        rendered
-            .matches("home display history discontinuity")
-            .count(),
-        1,
-        "{rendered}"
-    );
-    assert_eq!(
-        rendered.matches("preack replacement text final").count(),
-        1,
-        "{rendered}"
-    );
-    assert_eq!(
-        rendered.matches("preack replacement text").count(),
-        1,
-        "{rendered}"
-    );
-    assert!(!rendered.contains("OLD RUN MUST NOT RENDER"));
-    assert!(!rendered.contains("UNUSED SUMMARY"));
-    assert_eq!(f.app.home_run_id.as_deref(), Some("replacement"));
-    assert!(active.is_none());
-    assert!(!f.app.active_request);
-    f.assert_no_fallback().await;
-    f.client.shutdown().await;
 }
 
 #[tokio::test]
@@ -1665,12 +1662,7 @@ async fn home_successful_enqueue_then_prestage_failure_allows_fresh_untargeted_c
             .await
             .unwrap()
     });
-    let mut observer = f.peer().await;
-    assert_eq!(read(&mut observer).await["op"], "watch");
-    socket::write_json_line(observer.get_mut(), &json!({"type":"watched","scope":"run","id":"home","stage":null,"stage_run_id":null,"replay":true})).await.unwrap();
-    socket::write_json_line(observer.get_mut(), &json!({"type":"replay_checkpoint"}))
-        .await
-        .unwrap();
+    let _observer = f.home_peer("home", false).await;
     let mut session = BufReader::new(&mut f.peers[1]);
     let first = read(&mut session).await;
     assert_eq!(first["op"], "chat");
@@ -1709,15 +1701,7 @@ async fn home_successful_enqueue_then_prestage_failure_allows_fresh_untargeted_c
         model_tx,
     )
     .unwrap();
-    let mut next_observer = f.peer().await;
-    assert_eq!(read(&mut next_observer).await["op"], "watch");
-    socket::write_json_line(next_observer.get_mut(), &json!({"type":"watched","scope":"run","id":"home","stage":null,"stage_run_id":null,"replay":true})).await.unwrap();
-    socket::write_json_line(
-        next_observer.get_mut(),
-        &json!({"type":"replay_checkpoint"}),
-    )
-    .await
-    .unwrap();
+    let _next_observer = f.home_peer("home", false).await;
     let mut session = BufReader::new(&mut f.peers[1]);
     let fresh = read(&mut session).await;
     assert_eq!(fresh["op"], "chat");
@@ -1866,15 +1850,7 @@ async fn home_queued_a_non_delivery_preserves_identity_after_normal_b_submission
         model_tx,
     )
     .unwrap();
-    let mut observer = f.peer().await;
-    assert_eq!(
-        read(&mut observer).await,
-        json!({"op":"watch","scope":"run","id":"home","session_id":"test","replay":true})
-    );
-    socket::write_json_line(observer.get_mut(), &json!({"type":"watched","scope":"run","id":"home","stage":null,"stage_run_id":null,"replay":true})).await.unwrap();
-    socket::write_json_line(observer.get_mut(), &json!({"type":"replay_checkpoint"}))
-        .await
-        .unwrap();
+    let mut observer = f.home_peer("home", false).await;
     let mut session = BufReader::new(&mut f.peers[1]);
     let b = read(&mut session).await;
     assert_eq!(b["op"], "chat");
