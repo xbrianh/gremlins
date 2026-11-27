@@ -7,21 +7,18 @@ use super::{
     stats_title, HomeInterrupt, REASONING_COMPLETED_TITLE, REASONING_PLACEHOLDER_TITLE,
 };
 
-pub(super) fn apply_home_identity(
-    app: &mut App,
-    raw: &serde_json::Value,
-    session_generation: u64,
-    active_turn: &Option<String>,
-) {
+pub(super) fn apply_home_identity(app: &mut App, raw: &serde_json::Value, session_generation: u64) {
     if raw.get("type").and_then(|v| v.as_str()) != Some("home_run_identity")
         || raw.get("generation").and_then(|v| v.as_u64()) != Some(session_generation)
     {
         return;
     }
     // The raw identity acknowledgment and terminal display use separate channels.
-    // Remember the latest submitted turn even when display completion wins the race.
-    let Some(active) = active_turn
-        .as_deref()
+    // Prefer the current owner; only use the latest submission after it retires,
+    // when display completion wins the race with the acknowledgment.
+    let Some(active) = app
+        .conversations
+        .home_turn()
         .or_else(|| app.conversations.latest_home_turn())
         .filter(|turn| !turn.is_empty())
     else {
@@ -42,7 +39,6 @@ pub(super) fn apply_home_identity(
 pub(super) fn apply_home_event<B: ratatui::backend::Backend>(
     app: &mut App,
     live_area: &mut LiveArea<B>,
-    active_turn: &mut Option<String>,
     interrupt: &mut HomeInterrupt,
     event: gremlins_magic_bus::EventKind,
     turn: Option<String>,
@@ -50,7 +46,7 @@ pub(super) fn apply_home_event<B: ratatui::backend::Backend>(
 ) -> io::Result<()> {
     let home = Target::Home;
     // Filter every event, including task progress, before touching the transcript.
-    let expected = active_turn.as_deref().or(interrupt.ended_turn.as_deref());
+    let expected = app.conversations.home_turn();
     if !turn
         .as_deref()
         .is_some_and(|turn| !turn.is_empty() && Some(turn) == expected)
@@ -61,7 +57,7 @@ pub(super) fn apply_home_event<B: ratatui::backend::Backend>(
     // Execution identity must be installed before any rendering, not just on TurnStarted.
     if let Some(turn) = turn
         .as_deref()
-        .filter(|turn| !turn.is_empty() && active_turn.as_deref() == Some(*turn))
+        .filter(|turn| !turn.is_empty() && app.conversations.home_turn() == Some(*turn))
     {
         if execution.is_some() {
             app.conversations.home_turn_started(turn, execution.clone());
@@ -186,11 +182,10 @@ pub(super) fn apply_home_event<B: ratatui::backend::Backend>(
                 summary.len(),
                 live_area.target_has_current_turn(&home)
             );
-            if !live_area.target_has_current_turn(&home) {
-                log::debug!("Done SKIPPED — no current turn");
-                return Ok(());
-            }
             live_area.with_target_transcript(&home, |transcript, reasoning| {
+                if !transcript.has_current_turn() {
+                    return;
+                }
                 transcript.reconcile_response(&text);
                 if transcript.response_is_empty() && text.is_empty() {
                     transcript.push_response(&summary);
@@ -202,21 +197,17 @@ pub(super) fn apply_home_event<B: ratatui::backend::Backend>(
                     reasoning.set_title(&new_title);
                 }
                 let stream = std::mem::replace(reasoning, new_reasoning_band());
-                let had_turn = transcript.has_current_turn();
                 transcript.finish_turn();
-                if had_turn {
-                    transcript.commit_reasoning_title(stream);
-                }
+                transcript.commit_reasoning_title(stream);
                 transcript.clear_tool_output();
             });
             finish_home_request(app, live_area);
-            *active_turn = None;
             live_area.compose(app)?;
         }
         gremlins_magic_bus::EventKind::Ended { reason, .. } => {
-            if !live_area.target_has_current_turn(&home) {
-                return Ok(());
-            }
+            // Transcript absence is not owner absence: a submitted turn can end
+            // before any transcript turn exists. The owner filter above is authoritative.
+            let ended_turn = app.conversations.home_turn().map(str::to_owned);
             finish_home_request(app, live_area);
             let msg = format!("chat ended: {reason}");
             live_area.with_target_transcript(&home, |transcript, reasoning| {
@@ -231,9 +222,8 @@ pub(super) fn apply_home_event<B: ratatui::backend::Backend>(
             });
             // Preserve the interrupted turn for double-press hard cancellation.
             if reason == "interrupted" && interrupt.in_window(Instant::now()) {
-                interrupt.ended_turn = active_turn.take();
+                interrupt.ended_turn = ended_turn;
             } else {
-                *active_turn = None;
                 interrupt.ended_turn = None;
             }
             live_area.compose(app)?;
@@ -241,7 +231,6 @@ pub(super) fn apply_home_event<B: ratatui::backend::Backend>(
         gremlins_magic_bus::EventKind::Error { message: msg, .. } => {
             // Submission can fail before execution creates a transcript turn.
             finish_home_request(app, live_area);
-            *active_turn = None;
             let full = format!("chat error: {msg}");
             live_area.with_target_transcript(&home, |transcript, reasoning| {
                 let stream = std::mem::replace(reasoning, new_reasoning_band());

@@ -368,11 +368,8 @@ impl App {
     /// leaving the saved draft and its execution address untouched.
     fn input_edited(&mut self) {
         if self.history_search.is_none() {
-            self.conversations.observe_draft(
-                &self.selected_target,
-                &self.input,
-                self.active_request,
-            );
+            self.conversations
+                .observe_draft(&self.selected_target, &self.input);
         }
     }
 
@@ -1894,8 +1891,7 @@ mod tests {
             }),
         );
         app.insert_char('x');
-        let Submission::Correction { id, .. } =
-            app.conversations.submit(&Target::Home, &app.input, true)
+        let Submission::Correction { id, .. } = app.conversations.submit(&Target::Home, &app.input)
         else {
             panic!("expected correction")
         };
@@ -1931,7 +1927,7 @@ mod tests {
         app.cancel_search();
         assert_eq!(app.input.text(), "original correction");
         assert!(matches!(
-            app.conversations.submit(&Target::Home, &app.input, false),
+            app.conversations.submit(&Target::Home, &app.input),
             Submission::Blocked(_)
         ));
     }

@@ -768,7 +768,6 @@ async fn exercise_queued_gap(kind: &str, buffered: bool, reset: bool) {
     let mut app = App::new();
     let mut area = LiveArea::with_backend(TestBackend::new(100, 24), 100, 24);
     let mut interrupt = HomeInterrupt::default();
-    let mut active = Some("1".to_owned());
     app.conversations.begin_home_turn("1".into());
     area.submit_prompt("old prompt".into());
     if reset {
@@ -777,23 +776,13 @@ async fn exercise_queued_gap(kind: &str, buffered: bool, reset: bool) {
         app.conversations.retire_home_session();
         interrupt = HomeInterrupt::default();
         // /clear increments turn_gen; the next submission increments it again.
-        active = Some("3".to_owned());
         app.conversations.begin_home_turn("3".into());
         area.submit_prompt("new prompt".into());
     }
     let (event, turn, execution) = rx.try_recv().unwrap();
     assert!(matches!(event, EventKind::SystemWarning { .. }));
     assert_eq!(turn.as_deref(), Some("1"));
-    apply_home_event(
-        &mut app,
-        &mut area,
-        &mut active,
-        &mut interrupt,
-        event,
-        turn,
-        execution,
-    )
-    .unwrap();
+    apply_home_event(&mut app, &mut area, &mut interrupt, event, turn, execution).unwrap();
     assert!(area.target_has_current_turn(&Target::Home));
     area.compose(&app).unwrap();
     let rendered = area

@@ -155,7 +155,6 @@ fn route_submission<B: ratatui::backend::Backend>(
     client: &Arc<client::DaemonClient>,
     _attachment: &Attachment,
     delivery_tx: &mpsc::UnboundedSender<(u64, Result<(), String>)>,
-    home_busy: bool,
 ) -> bool {
     if app.input.is_empty() {
         return true;
@@ -164,10 +163,7 @@ fn route_submission<B: ratatui::backend::Backend>(
         live.push_transcript_line("session reset is in progress — wait before sending".to_string());
         return true;
     }
-    match app
-        .conversations
-        .submit(&app.selected_target, &app.input, home_busy)
-    {
+    match app.conversations.submit(&app.selected_target, &app.input) {
         Submission::HomePrompt => false,
         Submission::Blocked(message) => {
             live.push_transcript_line(message.to_string());
@@ -1018,6 +1014,10 @@ fn watch_key_action(app: &App) -> WatchKeyAction {
 /// press. `/quit` and Ctrl+D on empty input remain the explicit exits.
 const PENDING_QUIT_WINDOW: Duration = Duration::from_secs(1);
 
+fn selected_home_turn_active(app: &App) -> bool {
+    app.selected_target.is_home() && app.conversations.home_turn().is_some()
+}
+
 /// Classify a Ctrl+C press at `now` against the pending-quit state.
 ///
 /// Returns `true` when a prior first press is still within
@@ -1040,7 +1040,7 @@ enum InterruptAction {
     NoOp,
 }
 
-/// Count an ESC/Ctrl+C press while `app.active_request` is true.
+/// Count an ESC/Ctrl+C press for the selected home turn owner.
 ///
 /// The first press requests a soft interrupt, the second press within
 /// [`PENDING_QUIT_WINDOW`] requests a hard cancel, and any further presses in
@@ -1143,23 +1143,18 @@ fn finish_home_request<B: ratatui::backend::Backend>(app: &mut App, live_area: &
     if app.selected_target.is_home() {
         app.active_request = false;
     }
-    app.conversations.set_execution(Target::Home, None);
+    app.conversations.retire_home_turn();
 }
 
 /// Retire the interrupted turn without dismissing its addressed draft.
-fn clear_active_turn_ui<B: ratatui::backend::Backend>(
-    app: &mut App,
-    live_area: &mut LiveArea<B>,
-    active_turn: &mut Option<String>,
-) {
+fn clear_active_turn_ui<B: ratatui::backend::Backend>(app: &mut App, live_area: &mut LiveArea<B>) {
     live_area.clear_current_turn();
     finish_home_request(app, live_area);
-    *active_turn = None;
 }
 
 /// Request a soft interrupt for the active turn without tearing down the UI.
-fn soft_interrupt_active_turn(client: &Arc<client::DaemonClient>, active_turn: &Option<String>) {
-    send_cancel_chat(client, active_turn.as_deref(), "soft");
+fn soft_interrupt_active_turn(client: &Arc<client::DaemonClient>, app: &App) {
+    send_cancel_chat(client, app.conversations.home_turn(), "soft");
 }
 
 /// Hard-cancel the active turn and invalidate its pending events.
@@ -1167,12 +1162,11 @@ fn hard_cancel_active_turn(
     app: &mut App,
     live_area: &mut LiveArea,
     turn_gen: &mut u64,
-    active_turn: &mut Option<String>,
     client: &Arc<client::DaemonClient>,
 ) {
     *turn_gen += 1;
-    send_cancel_chat(client, active_turn.as_deref(), "hard");
-    clear_active_turn_ui(app, live_area, active_turn);
+    send_cancel_chat(client, app.conversations.home_turn(), "hard");
+    clear_active_turn_ui(app, live_area);
 }
 
 /// Run the shared Esc / first-Ctrl+C reset path.
@@ -1257,8 +1251,7 @@ fn build_chat_request(
 ///
 /// This is the shared tail of the Enter and `Ctrl+G`-editor paths. Caller
 /// is responsible for taking the input, recording history, and stopping any
-/// log follow first. The caller must have already checked `active_request`
-/// and `session_recreating`.
+/// log follow first. Routing has already validated the Home address and session.
 #[allow(clippy::too_many_arguments)]
 fn send_chat_input<B: ratatui::backend::Backend>(
     live_area: &mut LiveArea<B>,
@@ -1266,16 +1259,9 @@ fn send_chat_input<B: ratatui::backend::Backend>(
     client: &Arc<client::DaemonClient>,
     input: String,
     turn_gen: &mut u64,
-    active_turn: &mut Option<String>,
     session_generation: u64,
     model_tx: mpsc::UnboundedSender<ChatModelQuery>,
 ) -> io::Result<()> {
-    if app.active_request {
-        let msg = "a request is already in progress — wait for the response";
-        live_area.push_transcript_line(msg.to_string());
-        return Ok(());
-    }
-
     // Start a new turn with the prompt.
     live_area.clear_tool_output();
     live_area.submit_prompt(input.clone());
@@ -1289,7 +1275,6 @@ fn send_chat_input<B: ratatui::backend::Backend>(
     let turn_id = turn_gen.to_string();
     app.set_conversation_status(Target::Home, ConversationStatus::Running);
     app.conversations.begin_home_turn(turn_id.clone());
-    *active_turn = Some(turn_id.clone());
     let client_for_chat = Arc::clone(client);
     let chat_tx = client_for_chat.chat_sender();
     // The operator's project root, resolved the same way the info bar does.
@@ -1813,7 +1798,6 @@ async fn run_app(live_area: &mut LiveArea) -> io::Result<()> {
     // submit) can be recognised and dropped.
     let mut turn_gen: u64 = 0;
     // The turn id of the currently active turn, if any.
-    let mut active_turn: Option<String> = None;
     // A navigation shortcut must not replace the very draft being parked.
     let mut last_stage: Option<Target> = None;
     let mut attachment = Attachment::default();
@@ -1894,7 +1878,7 @@ async fn run_app(live_area: &mut LiveArea) -> io::Result<()> {
 
                             let now = Instant::now();
 
-                            if app.active_request {
+                            if selected_home_turn_active(&app) {
                                 // Non-chat layering runs before the interrupt
                                 // routing: on the Runs screen, Ctrl+C closes
                                 // the pane / exits to chat rather than
@@ -1908,14 +1892,13 @@ async fn run_app(live_area: &mut LiveArea) -> io::Result<()> {
                                 }
                                 match interrupt.press(now) {
                                     InterruptAction::SendSoft => {
-                                        soft_interrupt_active_turn(&client, &active_turn);
+                                        soft_interrupt_active_turn(&client, &app);
                                     }
                                     InterruptAction::SendHard => {
                                         hard_cancel_active_turn(
                                             &mut app,
                                             live_area,
                                             &mut turn_gen,
-                                            &mut active_turn,
                                             &client,
                                         );
                                     }
@@ -1924,7 +1907,7 @@ async fn run_app(live_area: &mut LiveArea) -> io::Result<()> {
                                 continue;
                             }
 
-                            // After a hard cancel cleared `active_request`,
+                            // After a hard cancel retired the home turn,
                             // the interrupt window may still be open.  Treat
                             // any press inside it as a no-op so Ctrl+C never
                             // arms the quit path while the turn is being
@@ -2029,10 +2012,8 @@ async fn run_app(live_area: &mut LiveArea) -> io::Result<()> {
                             if !app.screen.is_chat() {
                                 continue;
                             }
-                            // Never suspend the TUI while a chat turn is
-                            // in flight; the editor can't even be given a
-                            // meaningful prompt to submit yet.
-                            if app.active_request {
+                            // Home's turn must not gate another conversation's correction.
+                            if selected_home_turn_active(&app) {
                                 live_area.push_transcript_line(
                                     "a request is already in progress — wait for the response"
                                         .to_string(),
@@ -2133,17 +2114,16 @@ async fn run_app(live_area: &mut LiveArea) -> io::Result<()> {
                                 continue;
                             }
                             // Idle ESC is inert — the input bar is left intact.
-                            if app.active_request {
+                            if selected_home_turn_active(&app) {
                                 match interrupt.press(Instant::now()) {
                                     InterruptAction::SendSoft => {
-                                        soft_interrupt_active_turn(&client, &active_turn);
+                                        soft_interrupt_active_turn(&client, &app);
                                     }
                                     InterruptAction::SendHard => {
                                         hard_cancel_active_turn(
                                             &mut app,
                                             live_area,
                                             &mut turn_gen,
-                                            &mut active_turn,
                                             &client,
                                         );
                                     }
@@ -2167,11 +2147,8 @@ async fn run_app(live_area: &mut LiveArea) -> io::Result<()> {
                                     interrupt.ended_turn.as_deref(),
                                     "hard",
                                 );
-                                clear_active_turn_ui(
-                                    &mut app,
-                                    live_area,
-                                    &mut interrupt.ended_turn,
-                                );
+                                clear_active_turn_ui(&mut app, live_area);
+                                interrupt.ended_turn = None;
                             }
                         }
                         KeyCode::Tab => {
@@ -2292,7 +2269,7 @@ async fn run_app(live_area: &mut LiveArea) -> io::Result<()> {
                                 continue;
                             }
                             let command = dispatch(app.input.text());
-                            if command.is_none() && route_submission(&mut app, live_area, &client, &attachment, &delivery_tx, active_turn.is_some()) {
+                            if command.is_none() && route_submission(&mut app, live_area, &client, &attachment, &delivery_tx) {
                                 continue;
                             }
 
@@ -2369,7 +2346,6 @@ async fn run_app(live_area: &mut LiveArea) -> io::Result<()> {
                                         // new session is installed.
                                         turn_gen += 1;
                                         interrupt = HomeInterrupt::default();
-                                        active_turn = None;
                                         app.home_run_id = None;
                                         app.set_conversation_status(Target::Home, ConversationStatus::Idle);
                                         app.conversations.retire_home_session();
@@ -2501,7 +2477,6 @@ async fn run_app(live_area: &mut LiveArea) -> io::Result<()> {
                                     &client,
                                     input,
                                     &mut turn_gen,
-                                    &mut active_turn,
                                     session_generation,
                                     model_tx.clone(),
                                 )?;
@@ -2824,7 +2799,7 @@ async fn run_app(live_area: &mut LiveArea) -> io::Result<()> {
 
             // ── Raw lines (non-event JSON from the main socket) ─
             Some(raw) = raw_rx.recv() => {
-                apply_home_identity(&mut app, &raw, client.session_generation().await, &active_turn);
+                apply_home_identity(&mut app, &raw, client.session_generation().await);
                 app.observe_live_pipeline_frame(&raw);
                 if raw.get("type").and_then(|v| v.as_str()) == Some("event_lagged") {
                     // Resync lifecycle status from the daemon so terminal
@@ -2982,7 +2957,7 @@ async fn run_app(live_area: &mut LiveArea) -> io::Result<()> {
 
             // ── Chat events ────────────────────────────────
             Some((event, turn, execution)) = chat_rx.recv() => {
-                apply_home_event(&mut app, live_area, &mut active_turn, &mut interrupt, event, turn, execution)?;
+                apply_home_event(&mut app, live_area, &mut interrupt, event, turn, execution)?;
             }
 
         }
@@ -3275,8 +3250,7 @@ mod attachment_tests {
 
     fn pending_correction(app: &mut App, target: &Target, text: &str) -> u64 {
         app.replace_input(text);
-        let Submission::Correction { id, .. } = app.conversations.submit(target, &app.input, false)
-        else {
+        let Submission::Correction { id, .. } = app.conversations.submit(target, &app.input) else {
             panic!("expected correction")
         };
         id
@@ -4296,13 +4270,58 @@ mod tests {
     }
 
     #[test]
+    fn editor_allows_writable_correction_while_home_is_running() {
+        use super::{app::Execution, selected_home_turn_active, Submission, Target};
+
+        let mut app = App::new();
+        app.conversations.begin_home_turn("home-turn".into());
+        let target = Target::StageExecution {
+            run_id: "pipeline".into(),
+            stage: "review".into(),
+        };
+        let execution = Execution {
+            run_id: "pipeline".into(),
+            stage_run_id: "review-turn".into(),
+            nonce: 1,
+        };
+        app.conversations
+            .set_execution(target.clone(), Some(execution.clone()));
+        app.select_composer(target.clone());
+        app.replace_input("change course");
+        for active in [false, true] {
+            app.active_request = active;
+            assert!(!selected_home_turn_active(&app));
+        }
+        assert!(matches!(
+            app.conversations.submit(&target, &app.input),
+            Submission::Correction { execution: addressed, .. } if addressed == execution
+        ));
+        assert_eq!(app.conversations.home_turn(), Some("home-turn"));
+    }
+
+    #[test]
+    fn composer_and_interrupts_use_home_owner_not_display_state() {
+        use super::selected_home_turn_active;
+
+        let mut app = App::new();
+        app.conversations.begin_home_turn("home-turn".into());
+        for active in [false, true] {
+            app.active_request = active;
+            assert!(selected_home_turn_active(&app));
+        }
+        app.conversations.retire_home_turn();
+        assert!(app.active_request);
+        assert!(!selected_home_turn_active(&app));
+    }
+
+    #[test]
     fn hard_interrupt_retires_home_turn_without_dismissing_its_correction() {
         use super::{app::Execution, clear_active_turn_ui, LiveArea, Submission, Target};
         use ratatui::backend::TestBackend;
 
         let mut app = App::new();
         let mut area = LiveArea::with_backend(TestBackend::new(80, 24), 80, 24);
-        let mut active_turn = Some(String::from("old"));
+        app.conversations.begin_home_turn("old".into());
         let execution = |turn: &str, nonce| Execution {
             run_id: "session".into(),
             stage_run_id: turn.into(),
@@ -4314,20 +4333,20 @@ mod tests {
         app.replace_input("change course");
         app.cursor_end();
 
-        clear_active_turn_ui(&mut app, &mut area, &mut active_turn);
-        assert!(active_turn.is_none());
+        clear_active_turn_ui(&mut app, &mut area);
+        assert!(app.conversations.home_turn().is_none());
         assert!(!app.active_request);
         assert_eq!(app.input.text(), "change course");
         assert_eq!(app.input_cursor, app.input.len());
         assert!(matches!(
-            app.conversations.submit(&Target::Home, &app.input, false),
+            app.conversations.submit(&Target::Home, &app.input),
             Submission::Blocked(_)
         ));
 
         app.conversations
             .set_execution(Target::Home, Some(execution("next", 2)));
         assert!(matches!(
-            app.conversations.submit(&Target::Home, &app.input, true),
+            app.conversations.submit(&Target::Home, &app.input),
             Submission::Blocked(_)
         ));
         area.clear_target_input(&Target::Home, &mut app);

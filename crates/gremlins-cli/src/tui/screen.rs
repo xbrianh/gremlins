@@ -2537,7 +2537,7 @@ mod tests {
             app.input.replace_all("home correction");
             app.input_cursor = 4;
             let Submission::Correction { id, .. } =
-                app.conversations.submit(&Target::Home, &app.input, true)
+                app.conversations.submit(&Target::Home, &app.input)
             else {
                 panic!("expected correction")
             };
@@ -2579,7 +2579,7 @@ mod tests {
             );
             app.replace_input("home correction");
             let Submission::Correction { id, .. } =
-                app.conversations.submit(&Target::Home, &app.input, true)
+                app.conversations.submit(&Target::Home, &app.input)
             else {
                 panic!("expected correction")
             };
