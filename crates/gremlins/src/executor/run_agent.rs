@@ -135,6 +135,34 @@ fn advance_home_cmd_usage(gremlin: &Gremlin, local: &crate::clients::protocol::U
     );
 }
 
+fn record_cmd_usage(
+    gremlin: &Gremlin,
+    stage_path: &str,
+    is_chat: bool,
+    usage: &crate::clients::protocol::UsageStats,
+) {
+    let mut delta = HashMap::from([("turns".to_string(), usage.turns as i64)]);
+    delta.extend(
+        [
+            ("prompt_tokens", usage.prompt_tokens),
+            ("completion_tokens", usage.completion_tokens),
+            ("cached_input_tokens", usage.cached_input_tokens),
+            (
+                "cache_creation_input_tokens",
+                usage.cache_creation_input_tokens,
+            ),
+            ("reasoning_tokens", usage.reasoning_tokens),
+        ]
+        .into_iter()
+        .filter_map(|(key, value)| value.map(|value| (key.to_string(), value as i64))),
+    );
+    if is_chat {
+        advance_home_cmd_usage(gremlin, usage);
+    }
+    gremlin.state.accumulate_token_usage(&delta);
+    state::emit_stage_token_usage(gremlin.state.store_ref(), stage_path, &delta);
+}
+
 /// Merge task-model layers into a kind-keyed map.
 pub(crate) fn resolve_task_models(
     global: Option<&IndexMap<String, String>>,
@@ -590,27 +618,7 @@ pub(crate) async fn run_agent(
                 // the Gremlin::finish() snapshot has accurate totals rather
                 // than the previous stage's stale values.
                 if let Some(usage) = stage_usage.lock().unwrap().take().filter(|_| !is_native) {
-                    let mut delta: HashMap<String, i64> = HashMap::new();
-                    delta.insert("turns".to_string(), usage.turns as i64);
-                    delta.extend(
-                        [
-                            ("prompt_tokens", usage.prompt_tokens),
-                            ("completion_tokens", usage.completion_tokens),
-                            ("cached_input_tokens", usage.cached_input_tokens),
-                            (
-                                "cache_creation_input_tokens",
-                                usage.cache_creation_input_tokens,
-                            ),
-                            ("reasoning_tokens", usage.reasoning_tokens),
-                        ]
-                        .into_iter()
-                        .filter_map(|(k, v)| v.map(|v| (k.to_string(), v as i64))),
-                    );
-                    if is_chat {
-                        advance_home_cmd_usage(gremlin, &usage);
-                    }
-                    gremlin.state.accumulate_token_usage(&delta);
-                    state::emit_stage_token_usage(gremlin.state.store_ref(), &stage_path, &delta);
+                    record_cmd_usage(gremlin, &stage_path, is_chat, &usage);
                 }
                 // Earlier turns remain authoritative in their own artifacts. Persist
                 // only this prompt so cancellation cannot replay the signed prefix.
@@ -650,27 +658,7 @@ pub(crate) async fn run_agent(
         );
 
         if let Some(usage) = completed.token_usage.as_ref().filter(|_| !is_native) {
-            let mut delta: HashMap<String, i64> = HashMap::new();
-            delta.insert("turns".to_string(), usage.turns as i64);
-            delta.extend(
-                [
-                    ("prompt_tokens", usage.prompt_tokens),
-                    ("completion_tokens", usage.completion_tokens),
-                    ("cached_input_tokens", usage.cached_input_tokens),
-                    (
-                        "cache_creation_input_tokens",
-                        usage.cache_creation_input_tokens,
-                    ),
-                    ("reasoning_tokens", usage.reasoning_tokens),
-                ]
-                .into_iter()
-                .filter_map(|(k, v)| v.map(|v| (k.to_string(), v as i64))),
-            );
-            if is_chat {
-                advance_home_cmd_usage(gremlin, usage);
-            }
-            gremlin.state.accumulate_token_usage(&delta);
-            state::emit_stage_token_usage(gremlin.state.store_ref(), &stage_path, &delta);
+            record_cmd_usage(gremlin, &stage_path, is_chat, usage);
         }
 
         if is_chat {
@@ -2191,6 +2179,202 @@ mod tests {
             }
         }
         assert_eq!(done, 1);
+    }
+
+    struct FailedCmdUsageBackend {
+        snapshots: bool,
+        cancelled: bool,
+    }
+
+    #[async_trait::async_trait]
+    impl Backend for FailedCmdUsageBackend {
+        async fn run(
+            &self,
+            params: RunParams,
+            _interactive: InteractiveSession,
+        ) -> Result<CompletedRun, ClientError> {
+            if self.snapshots {
+                // These are cumulative snapshots, not independent deltas.
+                for (turns, prompt, completion, reasoning) in [(1, 5, 2, 1), (2, 11, 7, 3)] {
+                    let usage = usage_baseline_from_state(Some(&serde_json::json!({
+                        "turns": turns, "prompt_tokens": prompt,
+                        "completion_tokens": completion, "cached_input_tokens": 0,
+                        "reasoning_tokens": reasoning
+                    })));
+                    emit_corr_event(
+                        params.output_corr_id.as_ref().unwrap(),
+                        EventKind::TokenUsage {
+                            id: params.gremlin_id.clone().unwrap(),
+                            usage,
+                            cost_usd: None,
+                            last_prompt_tokens: Some(prompt),
+                            last_cached_input_tokens: Some(0),
+                        },
+                    );
+                }
+            }
+            if self.cancelled {
+                Err(ClientError::Cancelled)
+            } else {
+                Err(ClientError::Runtime {
+                    message: "command failed after partial usage".into(),
+                })
+            }
+        }
+
+        fn model(&self) -> &str {
+            "failed-cmd-usage"
+        }
+
+        fn name(&self) -> &'static str {
+            "cmd"
+        }
+    }
+
+    async fn assert_failed_cmd_usage(snapshots: bool, cancelled: bool) {
+        use crate::executor::stage_boundary::StageInvocation;
+        let stage = AgentBuilder::new("chat-0001")
+            .prompt(CHAT_A)
+            .build()
+            .unwrap();
+        let (_sandbox, mut gremlin) = test_gremlin(stage);
+        let prior_run = serde_json::json!({
+            "turns": 4, "prompt_tokens": 100, "completion_tokens": 20
+        });
+        let prior_cmd = serde_json::json!({
+            "turns": 3, "prompt_tokens": 30, "completion_tokens": 9
+        });
+        let prior_outer = serde_json::json!({
+            "turns": 8, "prompt_tokens": 200, "completion_tokens": 40,
+            "cached_input_tokens": 12
+        });
+        gremlin.state.patch(
+            &[],
+            serde_json::json!({
+                "kind": "chat", "token_usage": prior_run,
+                "home_cmd_usage": prior_cmd, "home_outer_usage": prior_outer
+            })
+            .as_object()
+            .unwrap(),
+        );
+        let spec = format!("cmd/failed-usage-{snapshots}-{cancelled}");
+        install_test_backend(
+            &spec,
+            Arc::new(FailedCmdUsageBackend {
+                snapshots,
+                cancelled,
+            }),
+        );
+        gremlin.model_override = Some(spec.clone());
+        gremlin.client = Client::parse(&spec).unwrap();
+        let node = chat_node(1, CHAT_A).await;
+        let invocation = StageInvocation::enter(gremlin.id.as_str(), node.name(), "agent");
+        let (_guard, mut rx) = gremlins_magic_bus::subscribe_run(gremlin.id.as_str());
+        let error = run_agent(&node, &mut gremlin, &invocation, "", "nested", None, None)
+            .await
+            .unwrap_err();
+        if cancelled {
+            assert!(matches!(error, RunError::Cancelled), "{error}");
+        } else {
+            assert!(
+                error
+                    .to_string()
+                    .contains("command failed after partial usage"),
+                "{error}"
+            );
+        }
+        assert_eq!(
+            gremlin.state.read_field("home_outer_usage").unwrap(),
+            prior_outer
+        );
+        let expected_run = if snapshots {
+            serde_json::json!({
+                "turns": 6, "prompt_tokens": 111, "completion_tokens": 27,
+                "cached_input_tokens": 0, "reasoning_tokens": 3
+            })
+        } else {
+            prior_run
+        };
+        let expected_cmd = if snapshots {
+            serde_json::json!({
+                "turns": 5, "prompt_tokens": 41, "completion_tokens": 16,
+                "cached_input_tokens": 0, "reasoning_tokens": 3
+            })
+        } else {
+            prior_cmd
+        };
+        assert_eq!(
+            gremlin.state.read_field("token_usage").unwrap(),
+            expected_run
+        );
+        assert_eq!(
+            gremlin.state.read_field("home_cmd_usage").unwrap(),
+            expected_cmd
+        );
+        let rows_blob = gremlin
+            .state
+            .store_ref()
+            .open("token_usage.jsonl", state::BlobMode::Read);
+        if snapshots {
+            let mut rows_blob = rows_blob.unwrap();
+            let mut rows = String::new();
+            std::io::Read::read_to_string(&mut rows_blob, &mut rows).unwrap();
+            let rows: Vec<serde_json::Value> = rows
+                .lines()
+                .map(|line| serde_json::from_str(line).unwrap())
+                .collect();
+            assert_eq!(
+                rows,
+                [serde_json::json!({
+                    "stage": "nested.chat-0001", "turns": 2,
+                    "prompt_tokens": 11, "completion_tokens": 7,
+                    "cached_input_tokens": 0, "reasoning_tokens": 3
+                })]
+            );
+        } else {
+            match rows_blob {
+                Err(state::StateError::Io(error)) => assert_eq!(
+                    error.kind(),
+                    std::io::ErrorKind::NotFound,
+                    "unexpected error opening usage ledger: {error}"
+                ),
+                Err(error) => panic!("unexpected error opening usage ledger: {error}"),
+                Ok(_) => panic!("no snapshot must not create a usage ledger"),
+            }
+        }
+        let mut seen_snapshots = 0;
+        loop {
+            match rx.try_recv() {
+                Ok(event) => match event.kind() {
+                    EventKind::Done { .. } => panic!("failed command emitted Done"),
+                    EventKind::TokenUsage { .. } => seen_snapshots += 1,
+                    _ => {}
+                },
+                Err(gremlins_magic_bus::TryRecvError::Empty) => break,
+                Err(error) => panic!("event subscription failed: {error}"),
+            }
+        }
+        assert_eq!(seen_snapshots, if snapshots { 2 } else { 0 });
+    }
+
+    #[tokio::test]
+    async fn cmd_failure_accumulates_only_last_usage_snapshot_once() {
+        assert_failed_cmd_usage(true, false).await;
+    }
+
+    #[tokio::test]
+    async fn cmd_failure_without_usage_preserves_balances_and_has_no_row() {
+        assert_failed_cmd_usage(false, false).await;
+    }
+
+    #[tokio::test]
+    async fn cmd_cancellation_accumulates_only_last_usage_snapshot_once() {
+        assert_failed_cmd_usage(true, true).await;
+    }
+
+    #[tokio::test]
+    async fn cmd_cancellation_without_usage_preserves_balances_and_has_no_row() {
+        assert_failed_cmd_usage(false, true).await;
     }
 
     async fn assert_cmd_done_events(spec: &str, is_chat: bool, succeeds: bool) {
