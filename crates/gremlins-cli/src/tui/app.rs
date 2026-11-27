@@ -364,35 +364,22 @@ impl App {
             })
     }
 
-    /// Record an edit when it happens. A history search edits its own query,
-    /// leaving the saved draft and its execution address untouched.
-    fn input_edited(&mut self) {
-        if self.history_search.is_none() {
-            self.conversations
-                .observe_draft(&self.selected_target, &self.input);
-        }
-    }
-
     pub fn replace_input(&mut self, text: &str) {
         self.input.replace_all(text);
-        self.input_edited();
     }
 
     pub fn add_input_substitution(&mut self, span: std::ops::Range<usize>, value: String) {
         self.input.add_substitution(span, value);
-        self.input_edited();
     }
 
     pub fn clear_input(&mut self) {
         self.input.clear();
         self.input_cursor = 0;
-        self.input_edited();
     }
 
     pub fn take_input(&mut self) -> InputBuffer {
         let input = std::mem::take(&mut self.input);
         self.input_cursor = 0;
-        self.input_edited();
         input
     }
 
@@ -407,7 +394,6 @@ impl App {
     }
 
     pub fn clear_composer(&mut self, target: &Target) {
-        self.conversations.dismiss(target);
         if &self.selected_target == target {
             if let Some(search) = &mut self.history_search {
                 search.clear_saved_draft();
@@ -421,11 +407,7 @@ impl App {
     }
 
     pub fn finish_delivery(&mut self, id: u64, result: Result<(), String>) -> Option<Receipt> {
-        let receipt = self.conversations.finish(id, result)?;
-        if receipt.clear_draft {
-            self.clear_composer(&receipt.target);
-        }
-        Some(receipt)
+        self.conversations.finish(id, result)
     }
 
     /// Number of active (running) gremlins.
@@ -1085,7 +1067,6 @@ impl App {
         let idx = self.input_cursor.min(self.input.len());
         self.input.insert_char(idx, ch);
         self.input_cursor = idx + ch.len_utf8();
-        self.input_edited();
     }
 
     /// Delete the character *before* the cursor (backspace).
@@ -1100,7 +1081,6 @@ impl App {
         }
         self.input.delete_range(start..self.input_cursor);
         self.input_cursor = start;
-        self.input_edited();
     }
 
     /// Delete the character *at* the cursor (delete key).
@@ -1114,7 +1094,6 @@ impl App {
             end += 1;
         }
         self.input.delete_range(self.input_cursor..end);
-        self.input_edited();
     }
 
     /// Replace the completion span with `replacement` and move the cursor to
@@ -1128,7 +1107,6 @@ impl App {
         debug_assert!(self.input.is_char_boundary(span.end));
         self.input.replace_range(span.clone(), &replacement);
         self.input_cursor = span.start + replacement.len();
-        self.input_edited();
     }
 
     /// Reset the cursor to the end of the current input (e.g. after history
@@ -1256,7 +1234,6 @@ impl App {
         if let Some(&idx) = search.matches.get(search.position) {
             if let Some(entry) = self.input_history.get(idx) {
                 self.input.replace_all(entry);
-                self.input_edited();
                 self.input_cursor = self.input.len();
                 return;
             }
@@ -1902,7 +1879,7 @@ mod tests {
             stage: "build".into(),
         });
         app.insert_char('y');
-        assert!(!app.finish_delivery(id, Ok(())).unwrap().clear_draft);
+        app.finish_delivery(id, Ok(())).unwrap();
         assert_eq!(app.input.text(), "y");
         app.select_composer(Target::Home);
         assert_eq!(app.input.text(), "x");
@@ -1910,7 +1887,7 @@ mod tests {
     }
 
     #[test]
-    fn cancel_search_does_not_rebind_a_stale_home_draft() {
+    fn cancel_search_submits_using_current_home_idle_state() {
         let mut app = App::new();
         app.conversations.set_execution(
             Target::Home,
@@ -1928,7 +1905,7 @@ mod tests {
         assert_eq!(app.input.text(), "original correction");
         assert!(matches!(
             app.conversations.submit(&Target::Home, &app.input),
-            Submission::Blocked(_)
+            Submission::HomePrompt
         ));
     }
 

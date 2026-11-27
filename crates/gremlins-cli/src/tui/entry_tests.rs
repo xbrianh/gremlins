@@ -1087,6 +1087,7 @@ async fn home_queued_draft_waits_for_any_agent_execution_then_delivers_exact_cor
     // No TurnStarted or capabilities: an ordinary agent frame carries identity.
     f.home_output("A", "working", home_execution());
     assert!(f.submit(&tx));
+    assert!(f.app.input.is_empty());
     let (mut peer, request) = f.correction_peer().await;
     socket::write_json_line(peer.get_mut(), &json!({"type":"input_bound","id":"home","stage_run_id":"exec-A","req_id":request["req_id"]})).await.unwrap();
     let command = read(&mut peer).await;
@@ -1108,7 +1109,7 @@ async fn home_queued_draft_waits_for_any_agent_execution_then_delivers_exact_cor
 }
 
 #[tokio::test]
-async fn home_rejected_corrections_preserve_draft_and_require_explicit_retry() {
+async fn home_rejected_corrections_recover_in_transcript_and_require_explicit_retry() {
     let mut f = Fixture::with_watch_socket(3);
     let (tx, mut rx) = mpsc::unbounded_channel();
     f.start_home("A");
@@ -1117,16 +1118,18 @@ async fn home_rejected_corrections_preserve_draft_and_require_explicit_retry() {
         json!({"type":"reasoning_chunk","text":"thinking"}),
         Some(home_execution()),
     );
-    f.app.replace_input("keep this correction");
     for reason in ["busy", "unsupported", "not_ready"] {
+        f.app.replace_input("keep this correction");
         assert!(f.submit(&tx));
+        assert!(f.app.input.is_empty());
         let (mut peer, _) = f.correction_peer().await;
         reply(&mut peer, json!({"type":"error","message":reason})).await;
         let (id, result) = delivery(&mut rx).await;
         assert!(result.as_ref().unwrap_err().contains(reason));
         f.live
             .show_receipt(f.app.finish_delivery(id, result).unwrap());
-        assert_eq!(f.app.input.text(), "keep this correction");
+        assert!(f.app.input.is_empty());
+        assert!(f.rendered().contains("keep this correction"));
         f.client.release_inputs();
         f.assert_closed(&mut peer).await;
         assert!(rx.try_recv().is_err());
@@ -1270,7 +1273,6 @@ async fn home_late_delivery_for_a_cannot_clear_b_draft() {
     let (id, result) = delivery(&mut rx).await;
     assert!(result.is_ok());
     if let Some(receipt) = f.app.finish_delivery(id, result) {
-        assert!(!receipt.clear_draft);
         f.live.show_receipt(receipt);
     }
     assert_eq!(f.app.input.text(), "B draft");
@@ -1535,7 +1537,7 @@ async fn home_live_preenqueue_and_replacement_replay_render_early_output_once() 
 }
 
 #[tokio::test]
-async fn home_two_turn_completion_routes_fresh_prompts_and_refuses_stale_corrections() {
+async fn home_two_turn_completion_routes_parked_text_as_fresh_prompts() {
     for mode in [
         "visible",
         "parked",
@@ -1599,7 +1601,7 @@ async fn home_two_turn_completion_routes_fresh_prompts_and_refuses_stale_correct
                 f.home_event("1", json!({"type":"tool_result","id":"read","name":"Read","call":"Read(x)","output":"final tool result"}), Some(home_execution()));
             }
         }
-        if mode == "correction" {
+        if mode == "correction" || mode == "parked" {
             f.app.replace_input("second prompt");
         }
         if mode == "parked" {
@@ -1684,21 +1686,19 @@ async fn home_two_turn_completion_routes_fresh_prompts_and_refuses_stale_correct
             !f.app.active_request,
             "{mode}: terminal left request active"
         );
-        let stale_correction = mode.ends_with("correction") || mode == "enqueue-rejection";
-        if stale_correction {
+        let parked_text =
+            mode.ends_with("correction") || mode == "enqueue-rejection" || mode == "parked";
+        if parked_text {
             assert_eq!(f.app.input.text(), "second prompt");
-            assert!(f.submit(&tx));
-            assert_eq!(f.app.input.text(), "second prompt");
-            assert!(f.rendered().contains("addressed execution has changed"));
-            f.assert_no_fallback().await;
-            f.app.clear_input(); // Only explicit dismissal releases the stale correction.
-            f.app.replace_input("fresh prompt");
-            assert!(!f.submit(&tx));
-            f.assert_unsent();
         } else {
             assert!(f.app.input.is_empty(), "{mode}: composer was not consumed");
+            f.app.replace_input("second prompt");
         }
-        if !mode.starts_with("missing") && mode != "failure" && !stale_correction {
+        if !mode.starts_with("missing")
+            && mode != "failure"
+            && !mode.ends_with("correction")
+            && mode != "enqueue-rejection"
+        {
             assert!(f.rendered().contains(REASONING_COMPLETED_TITLE));
             assert!(f.rendered().contains("first final"));
             assert!(f.rendered().contains("final tool result"));
@@ -1706,12 +1706,7 @@ async fn home_two_turn_completion_routes_fresh_prompts_and_refuses_stale_correct
         if mode == "failure" {
             assert!(f.rendered().contains("pre-stage setup failed"));
         }
-        let prompt = if stale_correction {
-            "fresh prompt"
-        } else {
-            "second prompt"
-        };
-        f.app.replace_input(prompt);
+        let prompt = "second prompt";
         assert!(!f.submit(&tx), "{mode}: fresh prompt refused");
         f.send_prompt(&mut generation);
         let _next = f.home_peer("home", false).await;
@@ -1744,22 +1739,10 @@ async fn home_two_turn_completion_routes_fresh_prompts_and_refuses_stale_correct
             f.home_event("1", terminal, Some(home_execution()));
             assert_eq!(f.app.conversations.home_turn(), Some("2"));
         }
-        let refusals = f
-            .rendered()
-            .matches("addressed execution has changed")
-            .count();
         f.app.replace_input("third prompt");
         assert!(f.submit(&tx));
+        assert_eq!(f.app.input.text(), "third prompt");
         assert!(rx.try_recv().is_err());
-        assert_eq!(
-            f.rendered()
-                .matches("addressed execution has changed")
-                .count(),
-            refusals
-        );
-        if !stale_correction {
-            assert_eq!(refusals, 0);
-        }
         f.assert_no_fallback().await;
         f.client.shutdown().await;
     }
@@ -1787,7 +1770,8 @@ async fn home_native_input_rejection_and_delivery_are_not_bus_responses() {
     assert!(result.as_ref().unwrap_err().contains("agent is not ready"));
     f.live
         .show_receipt(f.app.finish_delivery(id, result).unwrap());
-    assert_eq!(f.app.input.text(), "  native correction\n");
+    assert!(f.app.input.is_empty());
+    assert!(f.rendered().contains("native correction"));
     assert!(f.rendered().contains("agent is not ready"));
     f.assert_unsent();
     assert!(self::socket::read_json_line(&mut peer)
@@ -1795,8 +1779,10 @@ async fn home_native_input_rejection_and_delivery_are_not_bus_responses() {
         .unwrap()
         .is_none());
 
-    // Only another Enter retries. The receipt clears the draft, not the turn.
+    // Recovery is in the transcript; explicitly re-enter text to retry.
+    f.app.replace_input("  native correction\n");
     assert!(f.submit(&tx));
+    assert!(f.app.input.is_empty());
     let (mut peer, request) = f.native_input_peer("home", "native-A").await;
     socket::write_json_line(peer.get_mut(), &json!({"type":"input_bound","id":"home","stage_run_id":"native-A","req_id":request["req_id"]})).await.unwrap();
     assert_eq!(
@@ -1861,7 +1847,7 @@ async fn home_queued_a_non_delivery_preserves_identity_after_normal_b_submission
         json!({"type":"done","text":"A final","summary":""}),
         None,
     );
-    f.app.clear_input(); // Explicit dismissal releases A's composer, not its receipt.
+    assert!(f.app.input.is_empty());
     f.app.replace_input("normal B prompt");
     assert!(!f.submit(&tx));
     // Exercise the normal prompt entry point, rather than manufacturing begin_home_turn.
@@ -1916,7 +1902,6 @@ async fn home_queued_a_non_delivery_preserves_identity_after_normal_b_submission
     let (id, result) = delivery(&mut rx).await;
     assert!(result.is_err());
     let receipt = f.app.finish_delivery(id, result).unwrap();
-    assert!(!receipt.clear_draft);
     assert!(receipt.text.contains("A correction kept for recovery"));
     assert!(receipt.text.contains("home/native-A"));
     f.live.show_receipt(receipt);
@@ -2043,7 +2028,56 @@ async fn unsent_parked_a_draft_cannot_correct_reentered_b() {
 }
 
 #[tokio::test]
-async fn returning_home_preserves_parked_exact_correction_address() {
+async fn returning_home_routes_parked_text_only_to_current_live_b() {
+    let mut f = Fixture::with_watch_socket(2);
+    let (tx, mut rx) = mpsc::unbounded_channel();
+    f.start_home("A");
+    f.home_output("A", "A working", home_execution());
+    f.app.replace_input("parked home text");
+    f.siblings("agent");
+    let _stage = f.exact("B").await;
+    f.app.replace_input("stage draft");
+    f.home_event(
+        "A",
+        json!({"type":"done","text":"A final","summary":""}),
+        None,
+    );
+    f.app.conversations.begin_home_turn("B".into());
+    f.app.active_request = true;
+    f.home_output(
+        "B",
+        "B working",
+        protocol::Execution {
+            run_id: "home".into(),
+            stage_run_id: "exec-B".into(),
+            nonce: 0,
+        },
+    );
+    assert_eq!(f.app.input.text(), "stage draft");
+    f.home();
+    assert_eq!(f.app.input.text(), "parked home text");
+    assert!(f.submit(&tx));
+    assert!(f.app.input.is_empty());
+    let (mut peer, request) = f.native_input_peer("home", "exec-B").await;
+    reply(&mut peer, json!({"type":"input_bound","id":"home","stage_run_id":"exec-B","req_id":request["req_id"]})).await;
+    let command = read(&mut peer).await;
+    assert_eq!(
+        command,
+        json!({"cmd":"message","req_id":request["req_id"],"text":"parked home text"})
+    );
+    input_status(&mut peer, "delivered", &request).await;
+    let (id, result) = delivery(&mut rx).await;
+    assert!(result.is_ok());
+    f.live
+        .show_receipt(f.app.finish_delivery(id, result).unwrap());
+    assert!(f.app.input.is_empty());
+    assert!(rx.try_recv().is_err());
+    f.assert_no_fallback().await;
+    f.client.shutdown().await;
+}
+
+#[tokio::test]
+async fn returning_home_routes_parked_text_to_still_live_a() {
     let mut f = Fixture::with_watch_socket(2);
     f.start_home("A");
     f.home_output("A", "working", home_execution());
@@ -2134,14 +2168,15 @@ async fn exact_debug_is_passive_first_input_is_a_and_bus_continues_once() {
 }
 
 #[tokio::test]
-async fn selected_rejections_keep_draft_and_only_explicit_retry_binds_again() {
+async fn selected_rejections_recover_in_transcript_and_only_explicit_retry_binds_again() {
     let mut f = Fixture::with_watch_socket(4);
     f.siblings("agent");
     let _bus = f.exact("A").await;
     let (tx, mut rx) = mpsc::unbounded_channel();
-    f.app.replace_input("keep correction");
     for reason in ["busy", "unsupported", "wrong ack"] {
+        f.app.replace_input("keep correction");
         assert!(f.submit(&tx));
+        assert!(f.app.input.is_empty());
         let (mut peer, request) = f.native_input_peer("run", "A").await;
         let response = if reason == "wrong ack" {
             json!({"type":"input_bound", "id":"run", "stage_run_id":"B", "req_id":request["req_id"]})
@@ -2153,7 +2188,8 @@ async fn selected_rejections_keep_draft_and_only_explicit_retry_binds_again() {
         assert!(result.is_err());
         f.live
             .show_receipt(f.app.finish_delivery(id, result).unwrap());
-        assert_eq!(f.app.input.text(), "keep correction");
+        assert!(f.app.input.is_empty());
+        assert!(f.rendered().contains("keep correction"));
         assert!(socket::read_json_line(&mut peer).await.unwrap().is_none());
         assert!(rx.try_recv().is_err());
         f.assert_unsent();
@@ -2192,6 +2228,15 @@ async fn selected_exec_is_readonly_and_quit_outside_selection_is_local() {
 
 #[tokio::test]
 async fn delayed_selected_a_delivery_preserves_new_a_and_b_drafts() {
+    selected_receipt_preserves_buffers(true).await;
+}
+
+#[tokio::test]
+async fn delayed_selected_a_failure_recovers_only_in_originating_transcript() {
+    selected_receipt_preserves_buffers(false).await;
+}
+
+async fn selected_receipt_preserves_buffers(success: bool) {
     let mut f = Fixture::with_watch_socket(3);
     f.siblings("agent");
     let _a_bus = f.exact("A").await;
@@ -2199,23 +2244,53 @@ async fn delayed_selected_a_delivery_preserves_new_a_and_b_drafts() {
     let (tx, mut rx) = mpsc::unbounded_channel();
     f.app.replace_input("old A correction");
     assert!(f.submit(&tx));
+    assert!(f.app.input.is_empty());
     let mut input = f.bind_selected("A").await;
     let command = read(&mut input).await;
     input_status(&mut input, "queued", &command).await;
     f.app.replace_input("new A draft");
+    assert!(f.submit(&tx));
+    assert_eq!(f.app.input.text(), "new A draft");
+    assert!(rx.try_recv().is_err());
+    assert!(tokio::time::timeout(
+        Duration::from_millis(30),
+        socket::read_json_line(&mut input)
+    )
+    .await
+    .is_err());
     let _b_bus = f.exact("B").await;
     f.app.replace_input("new B draft");
-    input_status(&mut input, "delivered", &command).await;
+    let b_before = f.rendered();
+    input_status(
+        &mut input,
+        if success { "delivered" } else { "dropped" },
+        &command,
+    )
+    .await;
     let (id, result) = delivery(&mut rx).await;
-    assert!(result.is_ok());
+    assert_eq!(result.is_ok(), success);
     let receipt = f.app.finish_delivery(id, result).unwrap();
-    assert!(!receipt.clear_draft);
+    if !success {
+        assert!(receipt.text.contains("old A correction"));
+    }
     f.live.show_receipt(receipt);
     assert_eq!(f.app.input.text(), "new B draft");
-    assert!(!f.rendered().contains("correction delivered"));
+    assert_eq!(f.rendered(), b_before);
+    assert!(rx.try_recv().is_err());
+    f.assert_unsent();
+    assert!(tokio::time::timeout(
+        Duration::from_millis(30),
+        f.socket.as_ref().unwrap().0.accept()
+    )
+    .await
+    .is_err());
     f.live.select_conversation(&mut f.app, a);
     assert_eq!(f.app.input.text(), "new A draft");
-    assert_eq!(f.rendered().matches("correction delivered").count(), 1);
+    if success {
+        assert_eq!(f.rendered().matches("correction delivered").count(), 1);
+    } else {
+        assert!(f.rendered().contains("old A correction"));
+    }
     f.client.shutdown().await;
 }
 
@@ -2233,7 +2308,7 @@ async fn queued_selected_disconnect_or_drop_is_not_delivery() {
         input_status(&mut input, "queued", &command).await;
         tokio::task::yield_now().await;
         assert!(rx.try_recv().is_err());
-        assert_eq!(f.app.input.text(), "recover this");
+        assert!(f.app.input.is_empty());
         if !disconnect {
             input_status(&mut input, "dropped", &command).await;
         }
@@ -2242,7 +2317,8 @@ async fn queued_selected_disconnect_or_drop_is_not_delivery() {
         assert!(result.is_err());
         f.live
             .show_receipt(f.app.finish_delivery(id, result).unwrap());
-        assert_eq!(f.app.input.text(), "recover this");
+        assert!(f.app.input.is_empty());
+        assert!(f.rendered().contains("recover this"));
         f.assert_unsent();
         f.client.shutdown().await;
     }

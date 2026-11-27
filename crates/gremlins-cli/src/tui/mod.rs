@@ -174,6 +174,9 @@ fn route_submission<B: ratatui::backend::Backend>(
             execution,
             text,
         } => {
+            app.take_input();
+            app.clear_completion();
+            live.reset_input_scroll();
             let c = Arc::clone(client);
             let tx = delivery_tx.clone();
             let epoch = c.input_epoch();
@@ -2108,8 +2111,10 @@ async fn run_app(live_area: &mut LiveArea) -> io::Result<()> {
                                 continue;
                             }
 
-                            // Explicit dismissal releases the draft's execution address.
-                            if app.conversations.is_correction_draft(&app.selected_target) {
+                            // Dismiss the current conversation's input, regardless of where it was typed.
+                            if !app.input.is_empty()
+                                && (!app.selected_target.is_home() || selected_home_turn_active(&app))
+                            {
                                 live_area.clear_target_input(&app.selected_target.clone(), &mut app);
                                 continue;
                             }
@@ -3537,7 +3542,7 @@ mod attachment_tests {
         assert!(rendered_attachment(&mut live, &app).contains("continue failed: cannot continue"));
         let receipt = app.finish_delivery(id, Ok(())).unwrap();
         live.show_receipt(receipt);
-        assert!(app.input.is_empty());
+        assert_eq!(app.input.text(), "keep this correction");
     }
 
     fn rendered_attachment(
@@ -3865,7 +3870,8 @@ mod attachment_tests {
         );
         let receipt = app.finish_delivery(id, Ok(())).unwrap();
         live.show_receipt(receipt);
-        assert!(app.input.is_empty());
+        assert_eq!(app.input.text(), "unique correction");
+        app.clear_input();
         let rendered = rendered_attachment(&mut live, &app);
         assert_eq!(
             rendered.matches("unique correction").count(),
@@ -4340,17 +4346,17 @@ mod tests {
         assert_eq!(app.input_cursor, app.input.len());
         assert!(matches!(
             app.conversations.submit(&Target::Home, &app.input),
-            Submission::Blocked(_)
+            Submission::HomePrompt
         ));
 
         app.conversations
             .set_execution(Target::Home, Some(execution("next", 2)));
         assert!(matches!(
             app.conversations.submit(&Target::Home, &app.input),
-            Submission::Blocked(_)
+            Submission::Correction { .. }
         ));
         area.clear_target_input(&Target::Home, &mut app);
-        assert!(!app.conversations.is_correction_draft(&Target::Home));
+        assert!(app.input.is_empty());
     }
 
     #[test]

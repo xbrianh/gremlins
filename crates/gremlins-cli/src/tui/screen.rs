@@ -606,11 +606,8 @@ impl<B: Backend> LiveArea<B> {
             .active_request = active;
     }
 
-    /// Render a receipt that the model has already correlated and applied.
+    /// Render a receipt without changing composer state or input scroll.
     pub fn show_receipt(&mut self, receipt: crate::tui::app::Receipt) {
-        if receipt.clear_draft && receipt.target == self.active_target {
-            self.reset_input_scroll();
-        }
         let message = match receipt.result {
             // Home's owner stream does not forward operator-message events.
             Ok(()) if receipt.target.is_home() => {
@@ -2295,6 +2292,8 @@ mod tests {
                 let mut live = new_live(100, 24);
                 let mut app = App::new();
                 live.select_conversation(&mut app, target.clone());
+                app.replace_input("visible draft");
+                app.input_cursor = 4;
                 let bus_output = |live: &mut LiveArea<TestBackend>| {
                     live.with_target_transcript(&target, |transcript, _| {
                         transcript.push_transcript_block(vec!["unique operator message".into()]);
@@ -2308,9 +2307,10 @@ mod tests {
                 live.show_receipt(Receipt {
                     target: target.clone(),
                     text: "unique operator message [execution run/original]".into(),
-                    clear_draft: false,
                     result: Ok(()),
                 });
+                assert_eq!(app.input.text(), "visible draft");
+                assert_eq!(app.input_cursor, 4);
                 live.compose(&app).unwrap();
                 let rendered = dump_buffer(live.backend().buffer());
                 assert_eq!(
@@ -2376,7 +2376,6 @@ mod tests {
             live.show_receipt(Receipt {
                 target: origin.clone(),
                 text: "unique operator message [execution run/original]".into(),
-                clear_draft: false,
                 result: Ok(()),
             });
             if !bus_first {
@@ -2520,7 +2519,7 @@ mod tests {
     }
 
     #[test]
-    fn receipt_preserves_history_search_and_clears_only_the_delivered_draft() {
+    fn receipt_preserves_history_search_and_composer() {
         use crate::tui::app::{Execution, Submission, Target};
 
         for success in [true, false] {
@@ -2554,16 +2553,22 @@ mod tests {
             assert_eq!(app.input.text(), "é");
             assert_eq!(app.input_cursor, "é".len());
             app.cancel_search();
-            assert_eq!(
-                app.input.text(),
-                if success { "" } else { "home correction" }
-            );
-            assert_eq!(app.input_cursor, if success { 0 } else { 4 });
+            assert_eq!(app.input.text(), "home correction");
+            assert_eq!(app.input_cursor, 4);
+            live.compose(&app).unwrap();
+            let visible = dump_buffer(live.backend().buffer());
+            let confirmation = if success {
+                "correction delivered: home correction"
+            } else {
+                "correction: home correction"
+            };
+            assert_eq!(visible.matches(confirmation).count(), 1, "{visible}");
+            assert_eq!(visible.contains("failed"), !success);
         }
     }
 
     #[test]
-    fn background_receipt_updates_only_its_composer_and_transcript() {
+    fn background_receipt_preserves_composers_and_updates_only_its_transcript() {
         use crate::tui::app::{Execution, Submission, Target};
         for success in [true, false] {
             let mut live = new_live(90, 20);
@@ -2604,10 +2609,7 @@ mod tests {
             assert!(!dump_buffer(live.backend().buffer()).contains("home correction"));
             live.select_conversation(&mut app, Target::Home);
             assert!(app.active_request);
-            assert_eq!(
-                app.input.text(),
-                if success { "" } else { "home correction" }
-            );
+            assert_eq!(app.input.text(), "home correction");
             assert!(app.finish_delivery(id, Ok(())).is_none()); // duplicate receipt is inert
             live.compose(&app).unwrap();
             let visible = dump_buffer(live.backend().buffer());
@@ -2619,7 +2621,6 @@ mod tests {
                     1,
                     "{visible}"
                 );
-                assert!(!visible.contains("> home correction"), "{visible}");
             } else {
                 assert_eq!(
                     visible.matches("correction: home correction").count(),
