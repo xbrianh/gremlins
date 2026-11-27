@@ -14,6 +14,10 @@
 
 mod home;
 
+#[cfg(test)]
+#[path = "client/home_shutdown_tests.rs"]
+mod home_shutdown_tests;
+
 use std::collections::{HashMap, VecDeque};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex as StdMutex};
@@ -652,9 +656,16 @@ impl DaemonClient {
         Ok(())
     }
 
-    /// Abort both background read loops, closing the sockets.
+    /// Retire pending home acquisitions and abort the background readers.
     pub async fn shutdown(&self) {
-        self.home_display.lock().await.take();
+        {
+            // Match install_home's lock order so a late watch acknowledgment
+            // cannot publish a display after shutdown, even if none exists yet.
+            let mut display = self.home_display.lock().await;
+            let mut write = self.session.write.lock().await;
+            write.generation += 1;
+            display.take();
+        }
         self.invalidate_inputs();
         self.control.shutdown().await;
         self.session.shutdown().await;
@@ -677,13 +688,28 @@ async fn follow_run(
 }
 
 async fn follow_watch(
-    mut stream: tokio::net::UnixStream,
+    stream: tokio::net::UnixStream,
     session_id: &str,
     id: &str,
     stage: Option<&str>,
     stage_run_id: Option<&str>,
     replay: bool,
 ) -> Result<(mpsc::Receiver<Value>, tokio::task::JoinHandle<()>), String> {
+    follow_watch_mapped(stream, session_id, id, stage, stage_run_id, replay, Some).await
+}
+
+async fn follow_watch_mapped<F>(
+    mut stream: tokio::net::UnixStream,
+    session_id: &str,
+    id: &str,
+    stage: Option<&str>,
+    stage_run_id: Option<&str>,
+    replay: bool,
+    mut receive: F,
+) -> Result<(mpsc::Receiver<Value>, tokio::task::JoinHandle<()>), String>
+where
+    F: FnMut(Value) -> Option<Value> + Send + 'static,
+{
     let mut request =
         json!({"op":"watch", "scope":"run", "id":id, "session_id":session_id, "replay":replay});
     for (key, value) in [("stage", stage), ("stage_run_id", stage_run_id)] {
@@ -712,6 +738,9 @@ async fn follow_watch(
     let (tx, rx) = mpsc::channel(256);
     let handle = tokio::spawn(async move {
         while let Some(frame) = socket::read_json_line(&mut reader).await.ok().flatten() {
+            let Some(frame) = receive(frame) else {
+                continue;
+            };
             if tx.send(frame).await.is_err() {
                 break;
             }

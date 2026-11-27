@@ -5,6 +5,18 @@ use super::*;
 #[path = "home_tests.rs"]
 mod tests;
 
+#[cfg(test)]
+#[path = "home_reservation_tests.rs"]
+mod reservation_tests;
+
+#[cfg(test)]
+#[path = "home_live_warning_tests.rs"]
+mod live_warning_tests;
+
+#[cfg(test)]
+#[path = "home_review_tests.rs"]
+mod review_tests;
+
 struct Reader(tokio::task::JoinHandle<()>);
 
 impl Reader {
@@ -27,13 +39,59 @@ struct HomeWatchContext {
     turn: Option<String>,
 }
 
+#[derive(Default)]
+struct WatchGate {
+    pending: bool,
+    recovering: bool,
+    acknowledged: bool,
+    disconnected: bool,
+    ready: Arc<tokio::sync::Notify>,
+    turn: Option<String>,
+    rejected: Option<String>,
+    frames: VecDeque<Value>,
+}
+
+struct Submission(
+    Arc<std::sync::Mutex<WatchGate>>,
+    Arc<tokio::sync::Notify>,
+    Option<String>,
+    bool,
+);
+
+impl Drop for Submission {
+    fn drop(&mut self) {
+        if !self.3 {
+            return;
+        }
+        let mut gate = self.0.lock().unwrap();
+        if gate.pending {
+            let rejected = gate.turn.clone();
+            gate.frames.retain(|frame| {
+                !matches!(
+                    frame["type"].as_str(),
+                    Some("lagged" | "history_gap" | "home_transport_warning")
+                ) && (home_turn(frame).is_none() || home_turn(frame) != rejected)
+            });
+            gate.rejected = rejected;
+            gate.turn = self.2.clone();
+            gate.pending = false;
+        }
+        self.1.notify_one();
+    }
+}
+
 pub(super) struct Display {
     forward: tokio::task::JoinHandle<()>,
+    generation: u64,
+    run: String,
+    gate: Arc<std::sync::Mutex<WatchGate>>,
+    changed: Arc<tokio::sync::Notify>,
 }
 
 impl Drop for Display {
     fn drop(&mut self) {
         self.forward.abort();
+        self.gate.lock().unwrap().ready.notify_waiters();
     }
 }
 
@@ -71,35 +129,94 @@ impl DaemonClient {
             )
         };
         let turn = request["turn"].as_str().map(str::to_owned);
-        // Existing runs can subscribe before enqueue. The initial reservation
-        // is not live yet; its first turn is recovered from atomic bus replay.
-        let prepared = self.prepare_home(&id, false).await;
-        // Retire the previous turn's forwarder before new output can arrive.
-        {
-            let mut display = self.home_display.lock().await;
+        let reusable = loop {
+            let guard = self.home_display.lock().await;
+            let Some(display) = guard.as_ref().filter(|display| {
+                display.generation == expected_generation
+                    && display.run == id
+                    && !display.forward.is_finished()
+            }) else {
+                break false;
+            };
+            let ready = Arc::clone(&display.gate.lock().unwrap().ready);
+            let notified = ready.notified();
+            tokio::pin!(notified);
+            notified.as_mut().enable();
+            {
+                let gate = display.gate.lock().unwrap();
+                if !gate.recovering {
+                    break !gate.disconnected;
+                }
+            }
+            drop(guard);
+            // Do not hold the display lock while the recovery handshake runs.
+            notified.await;
+        };
+        if !reusable {
+            let gate = Arc::new(std::sync::Mutex::new(WatchGate {
+                pending: true,
+                turn: turn.clone(),
+                ..WatchGate::default()
+            }));
+            let prepared = self
+                .prepare_home_gated(&id, false, Some(Arc::clone(&gate)))
+                .await;
+            self.install_home(
+                prepared,
+                expected_generation,
+                session_id.clone(),
+                id.clone(),
+                turn.clone(),
+                gate,
+            )
+            .await?;
+        }
+        let mut submission = loop {
+            let guard = self.home_display.lock().await;
             let write = self.session.write.lock().await;
             if write.generation != expected_generation {
                 return Err("home display belongs to a retired session".into());
             }
-            display.take();
-        }
+            let display = guard.as_ref().ok_or("home display retired")?;
+            let ready = Arc::clone(&display.gate.lock().unwrap().ready);
+            let notified = ready.notified();
+            tokio::pin!(notified);
+            notified.as_mut().enable();
+            let submission = {
+                let mut gate = display.gate.lock().unwrap();
+                if gate.recovering {
+                    None
+                } else {
+                    if gate.pending && reusable {
+                        return Err("home submission already pending".into());
+                    }
+                    let previous = gate.turn.clone();
+                    gate.pending = true;
+                    gate.turn = turn.clone();
+                    Some(Submission(
+                        Arc::clone(&display.gate),
+                        Arc::clone(&display.changed),
+                        previous,
+                        true,
+                    ))
+                }
+            };
+            if let Some(submission) = submission {
+                break submission;
+            }
+            drop(write);
+            drop(guard);
+            notified.await;
+        };
         let response = match self
             .session
             .send_on_session_for_generation(request, expected_generation)
             .await
         {
             Ok(response) => response,
-            Err(error) => {
-                if let Ok((_, reader)) = prepared {
-                    reader.abort();
-                }
-                return Err(error);
-            }
+            Err(error) => return Err(error),
         };
         if response["type"] == "error" {
-            if let Ok((_, reader)) = prepared {
-                reader.abort();
-            }
             return Ok(response);
         }
         let mut write = self.session.write.lock().await;
@@ -127,24 +244,53 @@ impl DaemonClient {
             "turn":turn, "session_id":session_id,
             "generation":expected_generation}));
         drop(write);
-        let stream = match prepared {
-            Ok(stream) if actual == id => Ok(stream),
-            Ok((_, reader)) => {
-                reader.abort();
-                self.prepare_home(&actual, true).await
+        if actual == id {
+            let mut gate = submission.0.lock().unwrap();
+            gate.pending = false;
+            gate.acknowledged = true;
+            // An enqueue acknowledgment does not repair a disconnected socket.
+            // Only a successful passive recovery may clear `disconnected`.
+            submission.3 = false;
+            drop(gate);
+            submission.1.notify_one();
+        } else {
+            {
+                let mut display = self.home_display.lock().await;
+                let write = self.session.write.lock().await;
+                if write.generation != expected_generation {
+                    return Err("home display belongs to a retired session".into());
+                }
+                display.take();
             }
-            Err(_) => self.prepare_home(&actual, true).await,
-        };
-        // A failed watch is independent of the accepted submission. Retry only
-        // the passive replay subscription, never the chat request.
-        let stream = match stream {
-            Ok(stream) => Ok(stream),
-            Err(_) => self.prepare_home(&actual, true).await,
-        };
+            drop(submission);
+            let gate = Arc::new(std::sync::Mutex::new(WatchGate {
+                acknowledged: true,
+                turn: turn.clone(),
+                ..WatchGate::default()
+            }));
+            let stream = self
+                .prepare_home_gated(&actual, true, Some(Arc::clone(&gate)))
+                .await;
+            self.install_home(stream, expected_generation, session_id, actual, turn, gate)
+                .await?;
+        }
+        Ok(response)
+    }
+
+    async fn install_home(
+        &self,
+        stream: Result<(mpsc::Receiver<Value>, Reader), String>,
+        expected_generation: u64,
+        session_id: String,
+        actual: String,
+        turn: Option<String>,
+        gate: Arc<std::sync::Mutex<WatchGate>>,
+    ) -> Result<(), String> {
         let mut initial_warning = None;
         let (rx, reader) = match stream {
             Ok(stream) => stream,
             Err(error) => {
+                gate.lock().unwrap().disconnected = true;
                 initial_warning = Some(format!("home display unavailable: {error}"));
                 let (tx, rx) = mpsc::channel(1);
                 drop(tx);
@@ -153,14 +299,29 @@ impl DaemonClient {
         };
         let mut display = self.home_display.lock().await;
         let write = self.session.write.lock().await;
-        if write.generation != expected_generation {
+        // Validate before publishing anything; on failure Reader's Drop closes
+        // the candidate socket without touching an installed successor display.
+        if write.generation != expected_generation
+            || write.session_id.as_deref() != Some(&session_id)
+        {
             return Err("home display belongs to a retired session".into());
+        }
+        if display.as_ref().is_some_and(|display| {
+            let gate = display.gate.lock().unwrap();
+            !display.forward.is_finished()
+                && (gate.pending || gate.recovering || !gate.disconnected)
+        }) {
+            return Err("home watch already installed".into());
         }
         let session_write = Arc::clone(&self.session.write);
         let out = Arc::clone(&self.out);
         #[cfg(test)]
         let recovery_streams = Arc::clone(&self.aux_streams);
-        let forward = tokio::spawn(forward_home_stream(
+
+        let changed = Arc::new(tokio::sync::Notify::new());
+        let recovery_run = actual.clone();
+        let recovery_gate = Arc::clone(&gate);
+        let forward = tokio::spawn(forward_home_gated(
             rx,
             reader,
             HomeWatchContext {
@@ -171,9 +332,11 @@ impl DaemonClient {
                 turn,
             },
             initial_warning,
+            Some((Arc::clone(&gate), Arc::clone(&changed))),
             move || {
                 let session_id = session_id.clone();
-                let actual = actual.clone();
+                let gate = Arc::clone(&recovery_gate);
+                let actual = recovery_run.clone();
                 #[cfg(test)]
                 let recovery_streams = Arc::clone(&recovery_streams);
                 async move {
@@ -192,7 +355,15 @@ impl DaemonClient {
                     .await?;
                     let (rx, reader) = tokio::time::timeout(
                         std::time::Duration::from_secs(5),
-                        follow_run(stream, &session_id, &actual),
+                        follow_watch_mapped(
+                            stream,
+                            &session_id,
+                            &actual,
+                            None,
+                            None,
+                            true,
+                            home_frame_receiver(true, Some(gate)),
+                        ),
                     )
                     .await
                     .map_err(|_| "home watch acknowledgment timed out".to_owned())??;
@@ -200,20 +371,44 @@ impl DaemonClient {
                 }
             },
         ));
-        *display = Some(Display { forward });
-        Ok(response)
+        *display = Some(Display {
+            forward,
+            generation: expected_generation,
+            run: actual,
+            gate,
+            changed,
+        });
+        Ok(())
     }
 
+    #[cfg(test)]
     async fn prepare_home(
         &self,
         id: &str,
         replay: bool,
     ) -> Result<(mpsc::Receiver<Value>, Reader), String> {
+        self.prepare_home_gated(id, replay, None).await
+    }
+
+    async fn prepare_home_gated(
+        &self,
+        id: &str,
+        replay: bool,
+        gate: Option<Arc<std::sync::Mutex<WatchGate>>>,
+    ) -> Result<(mpsc::Receiver<Value>, Reader), String> {
         let stream = self.open_aux_stream().await?;
         let session = self.session_id().await;
         let (rx, reader) = tokio::time::timeout(
             std::time::Duration::from_secs(5),
-            follow_watch(stream, &session, id, None, None, replay),
+            follow_watch_mapped(
+                stream,
+                &session,
+                id,
+                None,
+                None,
+                replay,
+                home_frame_receiver(replay, gate),
+            ),
         )
         .await
         .map_err(|_| "home watch acknowledgment timed out".to_owned())??;
@@ -221,11 +416,65 @@ impl DaemonClient {
     }
 }
 
+#[cfg(test)]
 async fn forward_home_stream<F, Fut>(
+    rx: mpsc::Receiver<Value>,
+    reader: Reader,
+    context: HomeWatchContext,
+    initial_warning: Option<String>,
+    recover: F,
+) where
+    F: FnMut() -> Fut,
+    Fut: std::future::Future<Output = Result<(mpsc::Receiver<Value>, Reader), String>>,
+{
+    forward_home_gated(rx, reader, context, initial_warning, None, recover).await;
+}
+
+fn home_frame_receiver(
+    mut replay: bool,
+    gate: Option<Arc<std::sync::Mutex<WatchGate>>>,
+) -> impl FnMut(Value) -> Option<Value> + Send {
+    move |mut frame| {
+        if frame["type"] == "replay_checkpoint" {
+            replay = false;
+        }
+        if !replay
+            && matches!(frame["type"].as_str(), Some("lagged" | "history_gap"))
+            && home_turn(&frame).is_none()
+        {
+            if let Some(gate) = &gate {
+                // Completed/idle turns have no warning owner. Drop these at
+                // ingress so a later submission cannot adopt a stale warning.
+                let turn = gate.lock().unwrap().turn.clone()?;
+                frame["turn"] = json!(turn);
+            }
+        }
+        Some(frame)
+    }
+}
+
+type Gate = (Arc<std::sync::Mutex<WatchGate>>, Arc<tokio::sync::Notify>);
+
+/// Bus sequences are monotonic across turns, so replay needs only one cursor.
+#[derive(Default)]
+struct ReplayCursor(Option<u64>);
+
+impl ReplayCursor {
+    fn accept(&mut self, sequence: u64) -> bool {
+        if self.0.is_some_and(|seen| sequence <= seen) {
+            return false;
+        }
+        self.0 = Some(sequence);
+        true
+    }
+}
+
+async fn forward_home_gated<F, Fut>(
     mut rx: mpsc::Receiver<Value>,
     mut reader: Reader,
     context: HomeWatchContext,
     initial_warning: Option<String>,
+    gate: Option<Gate>,
     mut recover: F,
 ) where
     F: FnMut() -> Fut,
@@ -240,9 +489,46 @@ async fn forward_home_stream<F, Fut>(
     } = context;
     let mut warned = false;
     let mut backoff = std::time::Duration::from_millis(50);
-    let mut sequences = std::collections::HashSet::new();
+    let mut cursor = ReplayCursor::default();
+    // Subscription gaps belong to the turn that lost the watch, even if a new
+    // enqueue is accepted before replay has drained.
+    let mut recovery_turn = gate.as_ref().and_then(|(state, _)| {
+        let state = state.lock().unwrap();
+        state.acknowledged.then(|| turn.clone())
+    });
+    let mut acquisition_retry = initial_warning.is_some();
+    let mut finished_turn = None;
     loop {
-        let frame = if let Some(frame) = rx.recv().await {
+        if let Some((state, changed)) = &gate {
+            let full = {
+                let state = state.lock().unwrap();
+                state.pending && state.frames.len() >= 256
+            };
+            if full {
+                changed.notified().await;
+                continue;
+            }
+        }
+        let queued = gate.as_ref().and_then(|(gate, _)| {
+            let mut gate = gate.lock().unwrap();
+            if gate.pending {
+                None
+            } else {
+                gate.frames.pop_front()
+            }
+        });
+        let from_queue = queued.is_some();
+        let next = if let Some(frame) = queued {
+            Some(frame)
+        } else if let Some((_, changed)) = &gate {
+            tokio::select! {
+                frame = rx.recv() => frame,
+                _ = changed.notified() => continue,
+            }
+        } else {
+            rx.recv().await
+        };
+        let frame = if let Some(frame) = next {
             frame
         } else {
             {
@@ -252,48 +538,176 @@ async fn forward_home_stream<F, Fut>(
                 }
             }
             reader.abort();
-            if let Ok((next_rx, next_reader)) = recover().await {
-                rx = next_rx;
-                reader = next_reader;
-                continue;
+            if let Some((state, changed)) = &gate {
+                let pending = {
+                    let mut state = state.lock().unwrap();
+                    state.disconnected = true;
+                    // A reserved run may not be watchable until chat starts it.
+                    state.recovering = state.acknowledged;
+                    recovery_turn = Some(state.turn.clone());
+                    state.pending || !state.acknowledged
+                };
+                if pending {
+                    changed.notified().await;
+                    continue;
+                }
+            }
+            // A refused reservation is expected before its first enqueue.
+            // Give replay one chance before reporting an acquisition failure.
+            if acquisition_retry {
+                acquisition_retry = false;
+                if let Ok((next_rx, next_reader)) = recover().await {
+                    rx = next_rx;
+                    reader = next_reader;
+                    if let Some((state, _)) = &gate {
+                        let mut state = state.lock().unwrap();
+                        state.recovering = false;
+                        state.disconnected = false;
+                        state.ready.notify_waiters();
+                    }
+                    continue;
+                }
             }
             if !warned {
                 let write = session_write.lock().await;
                 if write.generation != generation {
                     return;
                 }
-                home_watch_warning(
-                    &out,
-                    turn.clone(),
-                    initial_warning
-                        .as_deref()
-                        .unwrap_or("home display connection closed before turn completion"),
-                );
+                let message = initial_warning
+                    .as_deref()
+                    .unwrap_or("home display connection closed before turn completion");
+                if let Some((gate, _)) = &gate {
+                    let mut gate = gate.lock().unwrap();
+                    if gate.pending {
+                        let turn = gate.turn.clone();
+                        gate.frames.push_back(json!({"type":"home_transport_warning", "turn":turn, "message":message}));
+                    } else if gate.turn.is_some() {
+                        home_watch_warning(&out, gate.turn.clone(), message);
+                    }
+                } else {
+                    home_watch_warning(&out, turn.clone(), message);
+                }
                 warned = true;
+            }
+            if let Ok((next_rx, next_reader)) = recover().await {
+                rx = next_rx;
+                reader = next_reader;
+                if let Some((state, _)) = &gate {
+                    let mut state = state.lock().unwrap();
+                    state.recovering = false;
+                    state.disconnected = false;
+                    state.ready.notify_waiters();
+                }
+                continue;
+            }
+            if let Some((state, _)) = &gate {
+                let mut state = state.lock().unwrap();
+                if state.turn.is_none() && !state.pending {
+                    // Failed idle recovery must not block the next enqueue.
+                    state.recovering = false;
+                    state.ready.notify_waiters();
+                    return;
+                }
             }
             tokio::time::sleep(backoff).await;
             backoff = (backoff * 2).min(std::time::Duration::from_secs(5));
             continue;
         };
-        let frame_turn = home_turn(&frame);
-        if frame_turn.is_some() && frame_turn != turn {
-            continue;
+        let mut frame = frame;
+        // Queued frames already passed checkpoint/warning attribution on
+        // ingress below; never attribute them again after pending is released.
+        if !from_queue {
+            if frame["type"] == "replay_checkpoint" {
+                recovery_turn = None;
+            }
+            if matches!(frame["type"].as_str(), Some("lagged" | "history_gap"))
+                && home_turn(&frame).is_none()
+            {
+                match &recovery_turn {
+                    Some(None) => continue,
+                    Some(Some(turn)) => frame["turn"] = json!(turn),
+                    None => {}
+                }
+            }
         }
         let write = session_write.lock().await;
         if write.generation != generation {
             return;
         }
-        let terminal = frame["run_id"] == run
-            && matches!(frame["type"].as_str(), Some("done" | "ended"))
-            && frame_turn == turn;
-        if frame["run_id"] == run {
-            if let Some(seq) = frame["seq"].as_u64() {
-                if !sequences.insert(seq) {
+        if !from_queue {
+            if let Some((state, _)) = &gate {
+                let mut state = state.lock().unwrap();
+                if !state.frames.is_empty() {
+                    state.frames.push_back(frame);
                     continue;
                 }
             }
         }
-        forward_home(&out, frame, &run, turn.as_deref());
+        let frame_turn = home_turn(&frame);
+        let active_turn = if let Some((gate, _)) = &gate {
+            let mut gate = gate.lock().unwrap();
+            if gate.pending {
+                gate.frames.push_back(frame);
+                continue;
+            }
+            if gate.rejected.is_some() && frame_turn == gate.rejected {
+                continue;
+            }
+            gate.turn.clone()
+        } else {
+            turn.clone()
+        };
+        // A per-turn ended after completion is not a run terminal. While
+        // idle it adds no information; late terminals during B keep A's identity.
+        if frame["type"] == "ended"
+            && active_turn.is_none()
+            && frame_turn.is_some()
+            && frame_turn == finished_turn
+        {
+            continue;
+        }
+        let terminal = (frame["run_id"] == run || frame["id"] == run)
+            && (matches!(
+                frame["type"].as_str(),
+                Some("run_completed" | "run_failed" | "run_stopped")
+            ) || (frame["type"] == "ended" && frame_turn.is_none()));
+        let turn_finished = frame["run_id"] == run
+            && matches!(frame["type"].as_str(), Some("done" | "ended"))
+            && frame_turn == active_turn;
+        if frame["run_id"] == run {
+            // attachment::watch_frame emits `sequence` (not `seq`).
+            if let Some(seq) = frame["sequence"].as_u64() {
+                if !cursor.accept(seq) {
+                    continue;
+                }
+            }
+        }
+        if matches!(frame["type"].as_str(), Some("lagged" | "history_gap"))
+            && active_turn.is_none()
+            && frame_turn.is_none()
+        {
+            continue;
+        }
+        if frame["type"] == "home_transport_warning" {
+            home_watch_warning(
+                &out,
+                active_turn.clone(),
+                frame["message"]
+                    .as_str()
+                    .unwrap_or("home display unavailable"),
+            );
+        } else {
+            forward_home(&out, frame, &run, active_turn.as_deref());
+        }
+        if turn_finished {
+            finished_turn = active_turn.clone();
+            if let Some((state, _)) = &gate {
+                let mut state = state.lock().unwrap();
+                if !state.pending && state.turn == active_turn {
+                    state.turn = None;
+                }
+            }
+        }
         if terminal {
             return;
         }

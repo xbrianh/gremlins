@@ -1677,6 +1677,15 @@ async fn home_two_turn_completion_routes_parked_text_as_fresh_prompts() {
         if mode == "parked" {
             assert_eq!(f.app.input.text(), "unrelated draft");
             f.live.select_conversation(&mut f.app, Target::Home);
+            // Selecting a stage and returning must neither close nor replace
+            // the Home display socket, even when Home finishes while parked.
+            assert!(tokio::time::timeout(
+                Duration::from_millis(30),
+                socket::read_json_line(&mut observer)
+            )
+            .await
+            .is_err());
+            f.assert_no_fallback().await;
         }
         assert!(
             f.app.conversations.home_turn().is_none(),
@@ -1709,7 +1718,14 @@ async fn home_two_turn_completion_routes_parked_text_as_fresh_prompts() {
         let prompt = "second prompt";
         assert!(!f.submit(&tx), "{mode}: fresh prompt refused");
         f.send_prompt(&mut generation);
-        let _next = f.home_peer("home", false).await;
+        // A fresh turn reuses the existing Home watch, including after parking
+        // Home behind a stage and returning or rejecting the first enqueue.
+        assert!(tokio::time::timeout(
+            Duration::from_millis(30),
+            f.socket.as_ref().unwrap().0.accept()
+        )
+        .await
+        .is_err());
         let mut session = BufReader::new(&mut f.peers[1]);
         let second = read(&mut session).await;
         assert_eq!(second["op"], "chat");
@@ -1718,12 +1734,29 @@ async fn home_two_turn_completion_routes_parked_text_as_fresh_prompts() {
         assert_ne!(second["turn"], first["turn"]);
         assert!(second.get("target").is_none());
         assert!(second.get("stage_run_id").is_none());
-        socket::write_json_line(
-            session.get_mut(),
-            &json!({"type":"error","message":"fixture complete"}),
+        let accepted_b = mode == "visible" || mode == "parked";
+        if accepted_b {
+            socket::write_json_line(observer.get_mut(), &json!({"type":"stream_chunk","run_id":"home","correlation_turn":"2","stage_type":"agent","stage_run_id":"exec-B","text":"second early"})).await.unwrap();
+            assert!(
+                tokio::time::timeout(Duration::from_millis(30), chat.recv())
+                    .await
+                    .is_err(),
+                "{mode}: B output escaped before enqueue acknowledgment"
+            );
+        }
+        reply(
+            &mut session,
+            if accepted_b {
+                json!({"type":"ok","id":"home","session_id":"test"})
+            } else {
+                json!({"type":"error","message":"fixture complete"})
+            },
         )
-        .await
-        .unwrap();
+        .await;
+        if accepted_b {
+            assert_eq!(read(&mut session).await["op"], "chat_model");
+            reply(&mut session, json!({"type":"ok","model":null})).await;
+        }
         assert!(tokio::time::timeout(
             Duration::from_millis(30),
             socket::read_json_line(&mut session)
@@ -1731,6 +1764,74 @@ async fn home_two_turn_completion_routes_parked_text_as_fresh_prompts() {
         .await
         .is_err());
         drop(session);
+        if accepted_b {
+            let (event, turn, execution) =
+                tokio::time::timeout(Duration::from_secs(2), chat.recv())
+                    .await
+                    .unwrap()
+                    .unwrap();
+            assert_eq!(turn.as_deref(), Some("2"));
+            assert_eq!(
+                serde_json::to_value(&event).unwrap()["text"],
+                "second early"
+            );
+            assert_eq!(execution.as_ref().unwrap().stage_run_id, "exec-B");
+            apply_home_event(
+                &mut f.app,
+                &mut f.live,
+                &mut HomeInterrupt::default(),
+                event,
+                turn,
+                execution,
+            )
+            .unwrap();
+            assert_eq!(f.rendered().matches("second early").count(), 1);
+            assert!(f.app.active_request);
+            assert!(f.live.target_has_current_turn(&Target::Home));
+
+            // A valid late A terminal must not retire B or its persistent watch.
+            socket::write_json_line(
+                observer.get_mut(),
+                &json!({"type":"ended","run_id":"home","correlation_turn":"1","reason":"finished"}),
+            )
+            .await
+            .unwrap();
+            // A subsequent B chunk is a wire-order barrier for the late terminal.
+            socket::write_json_line(observer.get_mut(), &json!({"type":"stream_chunk","run_id":"home","correlation_turn":"2","stage_type":"agent","stage_run_id":"exec-B","text":" continues"})).await.unwrap();
+            loop {
+                let (event, turn, execution) =
+                    tokio::time::timeout(Duration::from_secs(2), chat.recv())
+                        .await
+                        .unwrap()
+                        .unwrap();
+                let is_b = turn.as_deref() == Some("2");
+                if is_b {
+                    assert_eq!(
+                        serde_json::to_value(&event).unwrap()["type"],
+                        "stream_chunk"
+                    );
+                } else {
+                    assert_eq!(turn.as_deref(), Some("1"));
+                    assert_eq!(serde_json::to_value(&event).unwrap()["type"], "ended");
+                }
+                apply_home_event(
+                    &mut f.app,
+                    &mut f.live,
+                    &mut HomeInterrupt::default(),
+                    event,
+                    turn,
+                    execution,
+                )
+                .unwrap();
+                assert_eq!(f.app.conversations.home_turn(), Some("2"));
+                assert!(f.app.active_request);
+                assert!(f.live.target_has_current_turn(&Target::Home));
+                if is_b {
+                    break;
+                }
+            }
+            assert_eq!(f.rendered().matches("second early continues").count(), 1);
+        }
         for terminal in [
             json!({"type":"done","text":"STALE","summary":""}),
             json!({"type":"ended","reason":"STALE"}),
@@ -1740,9 +1841,52 @@ async fn home_two_turn_completion_routes_parked_text_as_fresh_prompts() {
             assert_eq!(f.app.conversations.home_turn(), Some("2"));
         }
         f.app.replace_input("third prompt");
-        assert!(f.submit(&tx));
-        assert_eq!(f.app.input.text(), "third prompt");
+        if !accepted_b {
+            assert!(f.submit(&tx));
+            assert_eq!(f.app.input.text(), "third prompt");
+        }
         assert!(rx.try_recv().is_err());
+        if accepted_b {
+            socket::write_json_line(observer.get_mut(), &json!({"type":"done","run_id":"home","correlation_turn":"2","stage_type":"agent","stage_run_id":"exec-B","text":"second early continues final","summary":"UNUSED B SUMMARY"})).await.unwrap();
+            let (event, turn, execution) =
+                tokio::time::timeout(Duration::from_secs(2), chat.recv())
+                    .await
+                    .unwrap()
+                    .unwrap();
+            assert_eq!(turn.as_deref(), Some("2"));
+            assert_eq!(serde_json::to_value(&event).unwrap()["type"], "done");
+            apply_home_event(
+                &mut f.app,
+                &mut f.live,
+                &mut HomeInterrupt::default(),
+                event,
+                turn,
+                execution,
+            )
+            .unwrap();
+            assert!(f.app.conversations.home_turn().is_none());
+            assert!(!f.app.active_request);
+            assert!(!f.live.target_has_current_turn(&Target::Home));
+            assert_eq!(f.app.input.text(), "third prompt");
+            let rendered = f.rendered();
+            for text in [
+                "first final",
+                "final tool result",
+                "second early",
+                "second early continues final",
+            ] {
+                assert_eq!(rendered.matches(text).count(), 1, "{mode}: {rendered}");
+            }
+            assert!(!rendered.contains("STALE"), "{rendered}");
+            assert!(!rendered.contains("UNUSED B SUMMARY"), "{rendered}");
+            assert!(chat.try_recv().is_err());
+            assert!(tokio::time::timeout(
+                Duration::from_millis(30),
+                socket::read_json_line(&mut observer)
+            )
+            .await
+            .is_err());
+        }
         f.assert_no_fallback().await;
         f.client.shutdown().await;
     }

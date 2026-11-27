@@ -1,6 +1,283 @@
 use super::*;
 use tokio::net::UnixStream;
 
+#[test]
+fn replay_cursor_stays_constant_size_across_completed_turns() {
+    let mut cursor = ReplayCursor::default();
+    let bytes = std::mem::size_of_val(&cursor);
+    for turn in 0..100_000_u64 {
+        assert!(cursor.accept(turn * 2));
+        assert!(cursor.accept(turn * 2 + 1));
+        assert!(!cursor.accept(turn * 2));
+    }
+    assert_eq!(cursor.0, Some(199_999));
+    assert_eq!(std::mem::size_of_val(&cursor), bytes);
+    assert!(bytes <= 2 * std::mem::size_of::<u64>());
+}
+
+#[tokio::test]
+async fn home_persistent_socket_gates_rejected_and_accepted_turns() {
+    let (stream, peer) = UnixStream::pair().unwrap();
+    let (spare, _spare_peer) = UnixStream::pair().unwrap();
+    let (mut client, [_control, session]) = DaemonClient::fake_with_aux_streams(
+        json!({"session_id":"owner", "home_run_id":"home"}),
+        vec![stream, spare],
+    );
+    let (chat_tx, mut output) = mpsc::unbounded_channel();
+    client.out = Arc::new(OutState {
+        chat_tx,
+        event_tx: mpsc::unbounded_channel().0,
+        raw_tx: mpsc::unbounded_channel().0,
+    });
+    let (a_done, a_finished) = oneshot::channel();
+    let server = async {
+        let mut observer = watch(peer, true).await;
+        let mut session = BufReader::new(session);
+        let mut chats = 0;
+        {
+            let turn = "A";
+            let request = socket::read_json_line(&mut session).await.unwrap().unwrap();
+            chats += 1;
+            assert_eq!(request["op"], "chat");
+            assert_eq!(request["turn"], turn);
+            socket::write_json_line(
+                observer.get_mut(),
+                &json!({
+                    "type":"stream_chunk", "run_id":"home", "turn":turn,
+                    "text":format!("early {turn}")
+                }),
+            )
+            .await
+            .unwrap();
+            assert!(
+                tokio::time::timeout(std::time::Duration::from_millis(30), output.recv())
+                    .await
+                    .is_err(),
+                "output escaped before {turn} acknowledgment"
+            );
+            let ack = json!({"type":"ok", "id":"home"});
+            socket::write_json_line(session.get_mut(), &ack)
+                .await
+                .unwrap();
+            let (event, actual_turn, _) = output.recv().await.unwrap();
+            assert_eq!(actual_turn.as_deref(), Some(turn));
+            assert_eq!(
+                serde_json::to_value(event).unwrap()["text"],
+                format!("early {turn}")
+            );
+            socket::write_json_line(
+                observer.get_mut(),
+                &json!({"type":"ended", "run_id":"home", "turn":"A"}),
+            )
+            .await
+            .unwrap();
+            assert!(
+                tokio::time::timeout(
+                    std::time::Duration::from_millis(30),
+                    socket::read_json_line(&mut observer)
+                )
+                .await
+                .is_err(),
+                "matching per-turn ended retired the original watch"
+            );
+            socket::write_json_line(
+                observer.get_mut(),
+                &json!({
+                    "type":"done", "run_id":"home", "turn":turn,
+                    "text":format!("done {turn}"), "summary":""
+                }),
+            )
+            .await
+            .unwrap();
+            let (event, actual_turn, _) = output.recv().await.unwrap();
+            assert_eq!(actual_turn.as_deref(), Some(turn));
+            let event = serde_json::to_value(event).unwrap();
+            assert_eq!(event["type"], "done");
+            assert_eq!(event["text"], format!("done {turn}"));
+            socket::write_json_line(
+                observer.get_mut(),
+                &json!({"type":"ended", "run_id":"home", "turn":"A"}),
+            )
+            .await
+            .unwrap();
+            assert!(
+                tokio::time::timeout(
+                    std::time::Duration::from_millis(30),
+                    socket::read_json_line(&mut observer)
+                )
+                .await
+                .is_err(),
+                "per-turn ended retired the original watch"
+            );
+            a_done.send(()).unwrap();
+        }
+        (observer, session, chats, output)
+    };
+    // Continue the same server state after A, without acquiring another watch.
+    let driver = async {
+        let ack = client
+            .send_session_request_for_generation(json!({"op":"chat", "turn":"A"}), 0)
+            .await
+            .unwrap();
+        assert_eq!(ack["type"], "ok");
+        a_finished.await.unwrap();
+    };
+    let ((mut observer, mut session, mut chats, mut output), ()) =
+        tokio::time::timeout(std::time::Duration::from_secs(2), async {
+            tokio::join!(server, driver)
+        })
+        .await
+        .unwrap();
+    let server = async {
+        for turn in ["rejected", "B"] {
+            let request = socket::read_json_line(&mut session).await.unwrap().unwrap();
+            chats += 1;
+            assert_eq!(request["op"], "chat");
+            assert_eq!(request["turn"], turn);
+            socket::write_json_line(observer.get_mut(), &json!({"type":"stream_chunk", "run_id":"home", "turn":turn, "text":format!("early {turn}")})).await.unwrap();
+            assert!(
+                tokio::time::timeout(std::time::Duration::from_millis(30), output.recv())
+                    .await
+                    .is_err()
+            );
+            socket::write_json_line(
+                session.get_mut(),
+                &if turn == "rejected" {
+                    json!({"type":"error", "message":"rejected"})
+                } else {
+                    json!({"type":"ok", "id":"home"})
+                },
+            )
+            .await
+            .unwrap();
+            if turn == "rejected" {
+                continue;
+            }
+            let (event, turn, _) = output.recv().await.unwrap();
+            assert_eq!(turn.as_deref(), Some("B"));
+            assert_eq!(serde_json::to_value(event).unwrap()["text"], "early B");
+            socket::write_json_line(
+                observer.get_mut(),
+                &json!({"type":"ended", "run_id":"home", "turn":"A", "reason":"finished"}),
+            )
+            .await
+            .unwrap();
+            let (event, turn, _) = output.recv().await.unwrap();
+            assert_eq!(turn.as_deref(), Some("A"));
+            assert!(matches!(event, EventKind::Ended { .. }));
+            {
+                let (turn, text) = ("B", "done B");
+                socket::write_json_line(observer.get_mut(), &json!({"type":"done", "run_id":"home", "turn":turn, "text":text, "summary":""})).await.unwrap();
+                let (event, actual_turn, _) = output.recv().await.unwrap();
+                assert_eq!(actual_turn.as_deref(), Some(turn));
+                let event = serde_json::to_value(event).unwrap();
+                assert_eq!(event["type"], "done");
+                assert_eq!(event["text"], text);
+            }
+        }
+        assert_eq!(chats, 3);
+        assert!(tokio::time::timeout(
+            std::time::Duration::from_millis(30),
+            socket::read_json_line(&mut session)
+        )
+        .await
+        .is_err());
+        assert!(tokio::time::timeout(
+            std::time::Duration::from_millis(30),
+            socket::read_json_line(&mut observer)
+        )
+        .await
+        .is_err());
+        assert!(output.try_recv().is_err());
+    };
+    let driver = async {
+        for (turn, expected) in [("rejected", "error"), ("B", "ok")] {
+            let ack = client
+                .send_session_request_for_generation(json!({"op":"chat", "turn":turn}), 0)
+                .await
+                .unwrap();
+            assert_eq!(ack["type"], expected);
+        }
+    };
+    tokio::time::timeout(std::time::Duration::from_secs(2), async {
+        tokio::join!(server, driver)
+    })
+    .await
+    .unwrap();
+    assert_eq!(
+        client.aux_streams.lock().await.as_ref().unwrap().len(),
+        1,
+        "exactly one auxiliary watch acquired"
+    );
+    client.shutdown().await;
+}
+
+#[tokio::test]
+async fn home_ended_reacquires_live_watch_and_shutdown_closes_reader() {
+    let (first, first_peer) = UnixStream::pair().unwrap();
+    let (second, second_peer) = UnixStream::pair().unwrap();
+    let (client, [_control, session]) = DaemonClient::fake_with_aux_streams(
+        json!({"session_id":"owner", "home_run_id":"home"}),
+        vec![first, second],
+    );
+    let server = async {
+        let mut session = BufReader::new(session);
+        for (peer, turn) in [(first_peer, "A"), (second_peer, "B")] {
+            let mut observer = watch(peer, true).await;
+            let request = socket::read_json_line(&mut session).await.unwrap().unwrap();
+            assert_eq!(request["op"], "chat");
+            assert_eq!(request["turn"], turn);
+            socket::write_json_line(session.get_mut(), &json!({"type":"ok", "id":"home"}))
+                .await
+                .unwrap();
+            if turn == "A" {
+                socket::write_json_line(
+                    observer.get_mut(),
+                    &json!({"type":"ended", "run_id":"home"}),
+                )
+                .await
+                .unwrap();
+            }
+            assert!(socket::read_json_line(&mut observer)
+                .await
+                .unwrap()
+                .is_none());
+        }
+    };
+    let driver = async {
+        client
+            .send_session_request_for_generation(json!({"op":"chat", "turn":"A"}), 0)
+            .await
+            .unwrap();
+        loop {
+            if client
+                .home_display
+                .lock()
+                .await
+                .as_ref()
+                .unwrap()
+                .forward
+                .is_finished()
+            {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+        client
+            .send_session_request_for_generation(json!({"op":"chat", "turn":"B"}), 0)
+            .await
+            .unwrap();
+        assert!(client.aux_streams.lock().await.as_ref().unwrap().is_empty());
+        client.shutdown().await;
+        assert!(client.home_display.lock().await.is_none());
+    };
+    tokio::time::timeout(std::time::Duration::from_secs(2), async {
+        tokio::join!(server, driver)
+    })
+    .await
+    .unwrap();
+}
+
 #[tokio::test]
 async fn stale_prepare_cannot_retire_successor_display() {
     let (stream, peer) = UnixStream::pair().unwrap();
@@ -15,7 +292,13 @@ async fn stale_prepare_cannot_retire_successor_display() {
         {
             let mut display = client.home_display.lock().await;
             client.session.write.lock().await.generation = 1;
-            *display = Some(Display { forward: successor });
+            *display = Some(Display {
+                forward: successor,
+                generation: 1,
+                run: "successor".into(),
+                gate: Arc::new(std::sync::Mutex::new(WatchGate::default())),
+                changed: Arc::new(tokio::sync::Notify::new()),
+            });
         }
         assert!(socket::read_json_line(&mut observer)
             .await
@@ -64,7 +347,7 @@ async fn live_only_home_watch_rejects_replay_ack_and_closes_reader() {
 }
 
 #[tokio::test]
-async fn malformed_home_ack_closes_prepared_reader() {
+async fn malformed_home_ack_releases_pending_submission() {
     for ack in [
         json!({"type":"unexpected"}),
         json!({"type":"ok"}),
@@ -82,10 +365,12 @@ async fn malformed_home_ack_closes_prepared_reader() {
             socket::write_json_line(session.get_mut(), &ack)
                 .await
                 .unwrap();
-            assert!(socket::read_json_line(&mut observer)
-                .await
-                .unwrap()
-                .is_none());
+            assert!(tokio::time::timeout(
+                std::time::Duration::from_millis(20),
+                socket::read_json_line(&mut observer)
+            )
+            .await
+            .is_err());
         };
         let send =
             client.send_session_request_for_generation(json!({"op":"chat", "turn":"turn"}), 0);
@@ -95,6 +380,18 @@ async fn malformed_home_ack_closes_prepared_reader() {
         .await
         .unwrap();
         assert!(result.is_err());
+        assert!(
+            !client
+                .home_display
+                .lock()
+                .await
+                .as_ref()
+                .unwrap()
+                .gate
+                .lock()
+                .unwrap()
+                .pending
+        );
         client.shutdown().await;
     }
 }
@@ -156,10 +453,30 @@ async fn home_watch_failure_and_eof_recover_by_replay_without_resubmission() {
             )
             .await
             .unwrap();
-            // Keep the submission socket open to detect accidental resubmission.
+            // The next prompt must reuse the recovered display, not resubmit the old turn.
+            let next = socket::read_json_line(&mut session).await.unwrap().unwrap();
+            assert_eq!(next["op"], "chat");
+            assert_eq!(next["turn"], "next");
+            socket::write_json_line(session.get_mut(), &json!({"type":"ok", "id":run}))
+                .await
+                .unwrap();
+            socket::write_json_line(
+                recovery.get_mut(),
+                &json!({"type":"done",
+                "text":"next answer", "summary":"", "run_id":run, "turn":"next"}),
+            )
+            .await
+            .unwrap();
             assert!(tokio::time::timeout(
                 std::time::Duration::from_millis(50),
                 socket::read_json_line(&mut session)
+            )
+            .await
+            .is_err());
+            // A second watch request on the healthy recovery socket is forbidden too.
+            assert!(tokio::time::timeout(
+                std::time::Duration::from_millis(50),
+                socket::read_json_line(&mut recovery)
             )
             .await
             .is_err());
@@ -171,12 +488,33 @@ async fn home_watch_failure_and_eof_recover_by_replay_without_resubmission() {
                 .unwrap()["type"],
             "ok"
         );
+        let (event, turn, _) = tokio::time::timeout(std::time::Duration::from_secs(2), async {
+            loop {
+                let item = rx.recv().await.unwrap();
+                if matches!(item.0, EventKind::SystemWarning { .. }) {
+                    continue;
+                }
+                break item;
+            }
+        })
+        .await
+        .unwrap();
+        assert_eq!(serde_json::to_value(event).unwrap()["text"], "recovered");
+        assert_eq!(turn.as_deref(), Some("turn"));
+        assert_eq!(
+            client
+                .send_session_request_for_generation(json!({"op":"chat", "turn":"next"}), 0)
+                .await
+                .unwrap()["type"],
+            "ok"
+        );
         let (event, turn, _) = tokio::time::timeout(std::time::Duration::from_secs(2), rx.recv())
             .await
             .unwrap()
             .unwrap();
-        assert_eq!(serde_json::to_value(event).unwrap()["text"], "recovered");
-        assert_eq!(turn.as_deref(), Some("turn"));
+        assert_eq!(serde_json::to_value(event).unwrap()["text"], "next answer");
+        assert_eq!(turn.as_deref(), Some("next"));
+        assert!(client.aux_streams.lock().await.as_ref().unwrap().is_empty());
         server.await.unwrap();
         client.shutdown().await;
     }
@@ -187,7 +525,7 @@ async fn home_recovery_retries_failures_and_deduplicates_replayed_sequences() {
     for initial_failure in [false, true] {
         let (tx, rx) = mpsc::channel(4);
         let chunk = json!({"type":"stream_chunk", "text":"once", "run_id":"home",
-            "turn":"turn", "seq":42});
+            "turn":"turn", "sequence":42});
         if !initial_failure {
             tx.send(chunk.clone()).await.unwrap();
         }
@@ -219,11 +557,14 @@ async fn home_recovery_retries_failures_and_deduplicates_replayed_sequences() {
                     if attempts < 3 {
                         return Err("temporarily unavailable".into());
                     }
-                    let (tx, rx) = mpsc::channel(4);
+                    let (tx, rx) = mpsc::channel(5);
                     tx.send(chunk.clone()).await.unwrap();
                     tx.send(chunk).await.unwrap();
                     tx.send(json!({"type":"done", "text":"finished", "summary":"",
-                        "run_id":"home", "turn":"turn", "seq":43}))
+                        "run_id":"home", "turn":"turn", "sequence":43}))
+                        .await
+                        .unwrap();
+                    tx.send(json!({"type":"ended", "run_id":"home"}))
                         .await
                         .unwrap();
                     Ok((rx, Reader(tokio::spawn(async {}))))
@@ -245,6 +586,374 @@ async fn home_recovery_retries_failures_and_deduplicates_replayed_sequences() {
         assert_eq!(terminal, 1);
         client.shutdown().await;
     }
+}
+
+#[tokio::test]
+async fn healthy_home_a_then_b_recovers_missing_output_and_completes_once() {
+    let (initial, initial_peer) = UnixStream::pair().unwrap();
+    let (recovery, recovery_peer) = UnixStream::pair().unwrap();
+    let (spare, _spare_peer) = UnixStream::pair().unwrap();
+    let (mut client, [_control, session]) = DaemonClient::fake_with_aux_streams(
+        json!({"session_id":"owner", "home_run_id":"home"}),
+        vec![initial, recovery, spare],
+    );
+    let (chat_tx, mut output) = mpsc::unbounded_channel();
+    client.out = Arc::new(OutState {
+        chat_tx,
+        event_tx: mpsc::unbounded_channel().0,
+        raw_tx: mpsc::unbounded_channel().0,
+    });
+    let (a_done, a_finished) = oneshot::channel();
+    let (a_completed_tx, a_completed_rx) = oneshot::channel();
+    let server = async {
+        let mut a_completed_tx = Some(a_completed_tx);
+        let mut observer = watch(initial_peer, true).await;
+        let mut session = BufReader::new(session);
+        for (turn, seq) in [("A", 1), ("B", 3)] {
+            let request = socket::read_json_line(&mut session).await.unwrap().unwrap();
+            assert_eq!(request["op"], "chat");
+            assert_eq!(request["turn"], turn);
+            socket::write_json_line(session.get_mut(), &json!({"type":"ok", "id":"home"}))
+                .await
+                .unwrap();
+            socket::write_json_line(
+                observer.get_mut(),
+                &json!({"type":"stream_chunk",
+                "run_id":"home", "turn":turn, "sequence":seq, "text":format!("live {turn}")}),
+            )
+            .await
+            .unwrap();
+            let (event, actual, _) = output.recv().await.unwrap();
+            assert_eq!(actual.as_deref(), Some(turn));
+            assert_eq!(
+                serde_json::to_value(event).unwrap()["text"],
+                format!("live {turn}")
+            );
+            if turn == "A" {
+                socket::write_json_line(
+                    observer.get_mut(),
+                    &json!({"type":"done",
+                    "run_id":"home", "turn":"A", "sequence":2, "text":"done A", "summary":""}),
+                )
+                .await
+                .unwrap();
+                let (event, actual, _) = output.recv().await.unwrap();
+                assert_eq!(actual.as_deref(), Some("A"));
+                assert_eq!(serde_json::to_value(event).unwrap()["type"], "done");
+                a_completed_tx.take().unwrap().send(()).unwrap();
+            }
+        }
+        drop(observer);
+        let mut recovery = watch_run(recovery_peer, "home", true, true).await;
+        for frame in [
+            json!({"type":"stream_chunk", "run_id":"home", "turn":"B", "sequence":3, "text":"live B"}),
+            json!({"type":"history_gap"}),
+            json!({"type":"stream_chunk", "run_id":"home", "turn":"B", "sequence":4, "text":"missing B"}),
+            json!({"type":"done", "run_id":"home", "turn":"B", "sequence":5, "text":"done B", "summary":""}),
+            json!({"type":"done", "run_id":"home", "turn":"B", "sequence":5, "text":"done B", "summary":""}),
+            json!({"type":"ended", "run_id":"home"}),
+        ] {
+            socket::write_json_line(recovery.get_mut(), &frame)
+                .await
+                .unwrap();
+        }
+        let mut warnings = 0;
+        for expected in ["missing B", "done B"] {
+            loop {
+                let (event, actual, _) = output.recv().await.unwrap();
+                assert_eq!(actual.as_deref(), Some("B"));
+                if matches!(event, EventKind::SystemWarning { .. }) {
+                    warnings += 1;
+                    continue;
+                }
+                assert_eq!(serde_json::to_value(event).unwrap()["text"], expected);
+                break;
+            }
+        }
+        assert_eq!(warnings, 2, "transport closure and genuine history gap");
+        assert!(socket::read_json_line(&mut recovery)
+            .await
+            .unwrap()
+            .is_none());
+        assert!(
+            output.try_recv().is_err(),
+            "duplicate completion was forwarded"
+        );
+        assert!(tokio::time::timeout(
+            std::time::Duration::from_millis(30),
+            socket::read_json_line(&mut session)
+        )
+        .await
+        .is_err());
+        a_done.send(()).unwrap();
+    };
+    let driver = async {
+        let mut a_completed_rx = Some(a_completed_rx);
+        for turn in ["A", "B"] {
+            assert_eq!(
+                client
+                    .send_session_request_for_generation(json!({"op":"chat", "turn":turn}), 0)
+                    .await
+                    .unwrap()["type"],
+                "ok"
+            );
+            if turn == "A" {
+                a_completed_rx.take().unwrap().await.unwrap();
+            }
+        }
+        a_finished.await.unwrap();
+    };
+    tokio::time::timeout(std::time::Duration::from_secs(3), async {
+        tokio::join!(server, driver);
+    })
+    .await
+    .unwrap();
+    assert_eq!(client.aux_streams.lock().await.as_ref().unwrap().len(), 1);
+    client.shutdown().await;
+}
+
+#[tokio::test]
+async fn home_idle_peer_loss_recovers_without_warning_on_next_prompt() {
+    let (initial, initial_peer) = UnixStream::pair().unwrap();
+    let (recovery, recovery_peer) = UnixStream::pair().unwrap();
+    let (spare, _spare_peer) = UnixStream::pair().unwrap();
+    let (mut client, [_control, session]) = DaemonClient::fake_with_aux_streams(
+        json!({"session_id":"owner", "home_run_id":"home"}),
+        vec![initial, recovery, spare],
+    );
+    let (chat_tx, mut output) = mpsc::unbounded_channel();
+    client.out = Arc::new(OutState {
+        chat_tx,
+        event_tx: mpsc::unbounded_channel().0,
+        raw_tx: mpsc::unbounded_channel().0,
+    });
+    let (idle_tx, idle_rx) = oneshot::channel();
+    let (finished_tx, finished_rx) = oneshot::channel();
+    let server = async {
+        let mut observer = watch(initial_peer, true).await;
+        let mut session = BufReader::new(session);
+        let request = socket::read_json_line(&mut session).await.unwrap().unwrap();
+        assert_eq!(
+            request,
+            json!({"op":"chat", "turn":"A", "session_id":"owner"})
+        );
+        socket::write_json_line(session.get_mut(), &json!({"type":"ok", "id":"home"}))
+            .await
+            .unwrap();
+        socket::write_json_line(
+            observer.get_mut(),
+            &json!({"type":"done",
+            "run_id":"home", "turn":"A", "sequence":1, "text":"done A", "summary":""}),
+        )
+        .await
+        .unwrap();
+        let (event, turn, _) = output.recv().await.unwrap();
+        assert_eq!(turn.as_deref(), Some("A"));
+        assert_eq!(serde_json::to_value(event).unwrap()["text"], "done A");
+        drop(observer);
+
+        let mut recovery = BufReader::new(recovery_peer);
+        let request = socket::read_json_line(&mut recovery)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(request["replay"], true);
+        // Submit B while the recovery acknowledgment is deliberately withheld.
+        idle_tx.send(()).unwrap();
+        assert!(
+            tokio::time::timeout(
+                std::time::Duration::from_millis(50),
+                socket::read_json_line(&mut session)
+            )
+            .await
+            .is_err(),
+            "B enqueued without an established watch"
+        );
+        socket::write_json_line(
+            recovery.get_mut(),
+            &json!({"type":"watched",
+            "scope":"run", "id":"home", "replay":true,
+            "stage":null, "stage_run_id":null}),
+        )
+        .await
+        .unwrap();
+
+        let request = socket::read_json_line(&mut session).await.unwrap().unwrap();
+        assert_eq!(
+            request,
+            json!({"op":"chat", "turn":"B", "session_id":"owner"})
+        );
+        socket::write_json_line(session.get_mut(), &json!({"type":"ok", "id":"home"}))
+            .await
+            .unwrap();
+        for frame in [
+            // These belong to the idle acquisition, but arrive only after B's
+            // enqueue. They must not acquire B's turn at receiver-drain time.
+            json!({"type":"history_gap"}),
+            json!({"type":"lagged"}),
+            json!({"type":"replay_checkpoint", "id":"home"}),
+            json!({"type":"stream_chunk", "run_id":"home", "turn":"B",
+                "sequence":3, "text":"live B"}),
+            json!({"type":"done", "run_id":"home", "turn":"B",
+                "sequence":4, "text":"done B", "summary":""}),
+        ] {
+            socket::write_json_line(recovery.get_mut(), &frame)
+                .await
+                .unwrap();
+        }
+        for expected in ["live B", "done B"] {
+            let (event, turn, _) = output.recv().await.unwrap();
+            assert_eq!(turn.as_deref(), Some("B"));
+            assert_eq!(
+                serde_json::to_value(event).unwrap()["text"],
+                expected,
+                "idle warning leaked into the next prompt"
+            );
+        }
+        assert!(output.try_recv().is_err());
+        finished_tx.send(()).unwrap();
+        assert!(socket::read_json_line(&mut recovery)
+            .await
+            .unwrap()
+            .is_none());
+    };
+    let driver = async {
+        client
+            .send_session_request_for_generation(json!({"op":"chat", "turn":"A"}), 0)
+            .await
+            .unwrap();
+        idle_rx.await.unwrap();
+        client
+            .send_session_request_for_generation(json!({"op":"chat", "turn":"B"}), 0)
+            .await
+            .unwrap();
+        finished_rx.await.unwrap();
+        client.shutdown().await;
+        assert!(client.home_display.lock().await.is_none());
+    };
+    tokio::time::timeout(std::time::Duration::from_secs(3), async {
+        tokio::join!(server, driver);
+    })
+    .await
+    .unwrap();
+    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    assert_eq!(
+        client.aux_streams.lock().await.as_ref().unwrap().len(),
+        1,
+        "shutdown triggered another recovery watch"
+    );
+}
+
+#[tokio::test]
+async fn generation_reset_during_recovery_handshake_suppresses_late_output() {
+    pending_home_recovery(false).await;
+}
+
+#[tokio::test]
+async fn shutdown_cancels_pending_home_recovery_retry() {
+    pending_home_recovery(true).await;
+}
+
+async fn pending_home_recovery(shutdown: bool) {
+    let (initial, initial_peer) = UnixStream::pair().unwrap();
+    let (recovery, recovery_peer) = UnixStream::pair().unwrap();
+    let (spare, _spare_peer) = UnixStream::pair().unwrap();
+    let (mut client, [_control, session]) = DaemonClient::fake_with_aux_streams(
+        json!({"session_id":"owner", "home_run_id":"home"}),
+        vec![initial, recovery, spare],
+    );
+    let (chat_tx, mut chat_rx) = mpsc::unbounded_channel();
+    let (raw_tx, mut raw_rx) = mpsc::unbounded_channel();
+    let (event_tx, mut event_rx) = mpsc::unbounded_channel();
+    client.out = Arc::new(OutState {
+        chat_tx,
+        raw_tx,
+        event_tx,
+    });
+    let (waiting_tx, waiting_rx) = oneshot::channel();
+    let (release_tx, release_rx) = oneshot::channel();
+    let server = async {
+        let observer = watch(initial_peer, true).await;
+        let mut session = BufReader::new(session);
+        socket::read_json_line(&mut session).await.unwrap().unwrap();
+        socket::write_json_line(session.get_mut(), &json!({"type":"ok", "id":"home"}))
+            .await
+            .unwrap();
+        drop(observer);
+        let mut recovery = BufReader::new(recovery_peer);
+        let request = socket::read_json_line(&mut recovery)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            request,
+            json!({"op":"watch", "scope":"run", "id":"home",
+            "session_id":"owner", "replay":true})
+        );
+        waiting_tx.send(()).unwrap();
+        release_rx.await.unwrap();
+        if !shutdown {
+            let frames = [
+                json!({"type":"watched", "scope":"run", "id":"home", "stage":null,
+                    "stage_run_id":null, "replay":true}),
+                json!({"type":"stream_chunk", "run_id":"home", "turn":"old", "text":"late"}),
+                json!({"type":"done", "run_id":"home", "turn":"old", "text":"late", "summary":""}),
+            ];
+            let wire: String = frames.iter().map(|frame| format!("{frame}\n")).collect();
+            tokio::io::AsyncWriteExt::write_all(recovery.get_mut(), wire.as_bytes())
+                .await
+                .unwrap();
+        }
+        assert!(socket::read_json_line(&mut recovery)
+            .await
+            .unwrap()
+            .is_none());
+    };
+    let driver = async {
+        client
+            .send_session_request_for_generation(json!({"op":"chat", "turn":"old"}), 0)
+            .await
+            .unwrap();
+        waiting_rx.await.unwrap();
+        assert_eq!(raw_rx.recv().await.unwrap()["type"], "home_run_identity");
+        let (warning, _, _) = chat_rx.recv().await.unwrap();
+        assert!(matches!(warning, EventKind::SystemWarning { .. }));
+        let forward = client
+            .home_display
+            .lock()
+            .await
+            .as_ref()
+            .unwrap()
+            .forward
+            .abort_handle();
+        if shutdown {
+            client.shutdown().await;
+            assert!(client.home_display.lock().await.is_none());
+        } else {
+            let mut write = client.session.write.lock().await;
+            write.generation = 1;
+            write.session_id = Some("new-owner".into());
+            write.home_run_id = Some("new-home".into());
+        }
+        release_tx.send(()).unwrap();
+        while !forward.is_finished() {
+            tokio::task::yield_now().await;
+        }
+    };
+    tokio::time::timeout(std::time::Duration::from_secs(3), async {
+        tokio::join!(server, driver);
+    })
+    .await
+    .unwrap();
+    assert!(chat_rx.try_recv().is_err(), "late chat output escaped");
+    assert!(raw_rx.try_recv().is_err(), "late raw output escaped");
+    assert!(event_rx.try_recv().is_err(), "late event escaped");
+    assert_eq!(
+        client.aux_streams.lock().await.as_ref().unwrap().len(),
+        1,
+        "recovery retried after cancellation"
+    );
+    client.shutdown().await;
 }
 
 async fn watch(peer: UnixStream, live: bool) -> BufReader<UnixStream> {
@@ -391,7 +1100,7 @@ async fn generation_reset_during_home_enqueue(during_prepare: bool) {
                     "turn":"old-turn", "session_id":"owner", "generation":0})
             );
         }
-        assert!(client.home_display.lock().await.is_none());
+        assert_eq!(client.home_display.lock().await.is_none(), during_prepare);
         {
             // Match the atomic identity publication performed by session reset.
             let mut write = client.session.write.lock().await;
@@ -419,7 +1128,7 @@ async fn generation_reset_during_home_enqueue(during_prepare: bool) {
             "home acknowledgment belongs to a retired session"
         }
     );
-    assert!(client.home_display.lock().await.is_none());
+    assert_eq!(client.home_display.lock().await.is_none(), during_prepare);
     {
         let write = client.session.write.lock().await;
         assert_eq!(write.generation, 1);
@@ -466,11 +1175,11 @@ async fn exercise(first: bool) {
                 .unwrap();
         }
         for frame in [
-            json!({"type":"stream_chunk", "text":"stale preack output", "run_id":"home", "turn":"new-turn", "correlation_turn":"old-turn"}),
             json!({"type":"turn_started", "stage_type":"agent", "stage_run_id":"execution", "run_id":"home", "turn":"old-turn", "correlation_turn":"new-turn"}),
             json!({"type":"stream_chunk", "text":"child", "run_id":"home/child", "turn":"new-turn"}),
             json!({"type":"stream_chunk", "text":"answer", "run_id":"home", "turn":"new-turn"}),
             json!({"type":"done", "text":"answer", "summary":"", "run_id":"home", "turn":"new-turn"}),
+            json!({"type":"ended", "run_id":"home"}),
         ] {
             socket::write_json_line(observer.get_mut(), &frame)
                 .await
@@ -493,7 +1202,9 @@ async fn exercise(first: bool) {
         .await
         .unwrap();
     assert_eq!(response["type"], "ok");
-    if first {
+    // A successful first replay suppresses the expected reservation refusal;
+    // only its genuine history gap is reported.
+    for _ in 0..if first { 1 } else { 0 } {
         let (event, turn, execution) =
             tokio::time::timeout(std::time::Duration::from_secs(2), rx.recv())
                 .await
@@ -545,7 +1256,7 @@ fn forward_home_preserves_agent_execution_and_wire_turn_without_start() {
     };
     let frame = json!({"type":"stream_chunk", "text":"answer",
         "run_id":"home", "stage_type":"agent", "correlation_stage":"chat", "stage_run_id":"exec",
-        "seq":42, "turn":"old-turn", "correlation_turn":"correlated-turn"});
+        "sequence":42, "turn":"old-turn", "correlation_turn":"correlated-turn"});
     forward_home(&out, frame.clone(), "home", Some("submitted-turn"));
     let (event, turn, execution) = rx.try_recv().unwrap();
     assert_eq!(serde_json::to_value(event).unwrap()["type"], "stream_chunk");
@@ -866,6 +1577,7 @@ async fn exercise_replacement(selected_gap: bool) {
             json!({"type":"done", "text":"answer", "summary":"", "run_id":"replacement",
                 "stage_type":"agent", "stage_run_id":"exec", "correlation_stage":"chat", "sequence":2,
                 "turn":"old-turn", "correlation_turn":"new-turn"}),
+            json!({"type":"ended", "run_id":"replacement"}),
         ] {
             socket::write_json_line(replacement.get_mut(), &frame)
                 .await
