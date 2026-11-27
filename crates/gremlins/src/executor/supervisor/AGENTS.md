@@ -23,7 +23,7 @@ and re-exports. The `RunHandle`/`RunState` types live in `run_registry.rs`, and
 | `attachment.rs` | Passive `handle_watch`: filtered run/stage/invocation bus display, lifecycle, and replay. No control ownership or pause-on-entry. |
 | `input.rs` | Exact execution input: resolve a live inbox, acquire a supervisor controller claim, and deliver commands/receipts independently of display. |
 | `session.rs` | Client session IO layer: `SessionOp` enum, `run_session_listener`/`run_session_dispatcher`, `handle_session_main`/`handle_session_op`/`handle_session_aux`, and `verify_session_id`. Uses `SessionTaskHandle` for session state and `RunRegistry` for run operations. |
-| `session_task.rs` | Per-session state owner: `SessionState`, `SessionTaskMsg`, `SessionTaskHandle`, `spawn_session_task`/`run_session_task`, and teardown. Owns parked chat gremlins, current turn, reserved home run id, listener and auxiliary tasks. |
+| `session_task.rs` | Per-session state owner: `SessionState`, `SessionTaskMsg`, `SessionTaskHandle`, `spawn_session_task`/`run_session_task`, and teardown. Owns parked chat gremlins, current turn, reserved session chat run id (`chat_run_id`), listener and auxiliary tasks. |
 | `prompt_msg.rs` | `PromptMsg` shared by the session and chat turn loop. |
 | `state_view.rs` | `StateView` — a uniform JSON snapshot of a gremlin's state across live (run map) and persisted (disk) sources. Used by the read-only query ops. |
 | `chat/` | TUI chat turn lifecycle. See `chat/AGENTS.md`. |

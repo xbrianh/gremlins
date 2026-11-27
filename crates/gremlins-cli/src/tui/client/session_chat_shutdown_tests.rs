@@ -9,7 +9,7 @@ async fn shutdown_retires_pending_replacement_watch_before_late_ack() {
     let (replacement, replacement_peer) = UnixStream::pair().unwrap();
     let (spare, spare_peer) = UnixStream::pair().unwrap();
     let (mut client, [_control, session]) = DaemonClient::fake_with_aux_streams(
-        json!({"session_id":"owner", "home_run_id":"G"}),
+        json!({"session_id":"owner", "chat_run_id":"G"}),
         vec![initial, replacement, spare],
     );
     let (chat_tx, mut chat_rx) = mpsc::unbounded_channel();
@@ -42,7 +42,7 @@ async fn shutdown_retires_pending_replacement_watch_before_late_ack() {
         assert_eq!(request["turn"], "old-turn");
         socket::write_json_line(
             session.get_mut(),
-            &json!({"type":"ok", "id":"H",
+            &json!({"type":"ok", "chat_run_id":"H", "enqueued":true,
             "session_id":"owner"}),
         )
         .await
@@ -79,11 +79,11 @@ async fn shutdown_retires_pending_replacement_watch_before_late_ack() {
     };
     let shutdown = async {
         waiting_rx.await.unwrap();
-        assert!(client.home_display.lock().await.is_none());
-        assert_eq!(client.home_run_id().await, "H");
+        assert!(client.session_chat_display.lock().await.is_none());
+        assert_eq!(client.chat_run_id().await, "H");
         assert_eq!(
             raw_rx.recv().await.unwrap(),
-            json!({"type":"home_run_identity",
+            json!({"type":"session_chat_run_identity",
             "id":"H", "turn":"old-turn", "session_id":"owner", "generation":0})
         );
         client.shutdown().await;
@@ -101,9 +101,9 @@ async fn shutdown_retires_pending_replacement_watch_before_late_ack() {
     .unwrap();
     assert_eq!(
         result.unwrap_err(),
-        "home display belongs to a retired session"
+        "session_chat display belongs to a retired session"
     );
-    assert!(client.home_display.lock().await.is_none());
+    assert!(client.session_chat_display.lock().await.is_none());
     // Wait beyond the initial recovery backoff; no retry may acquire the spare socket.
     let mut spare_peer = BufReader::new(spare_peer);
     assert!(tokio::time::timeout(
@@ -118,5 +118,5 @@ async fn shutdown_retires_pending_replacement_watch_before_late_ack() {
         "retired output or warning forwarded"
     );
     assert!(raw_rx.try_recv().is_err(), "late identity forwarded");
-    assert!(client.home_display.lock().await.is_none());
+    assert!(client.session_chat_display.lock().await.is_none());
 }

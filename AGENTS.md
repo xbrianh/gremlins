@@ -62,7 +62,7 @@ These values are persisted to `state.json` and read by other writers (the fleet 
 | You want to … | Look at |
 |---|---|
 | Understand the run-time architecture | `DESIGN.md` |
-| Understand passive watch and exact execution input | `crates/gremlins/src/executor/supervisor/AGENTS.md` (`watch` displays bus events; `input` controls an exact execution; wire `attach` is retired); replay background in `docs/actor-removal.md` / `docs/attachment-protocol.md` |
+| Understand passive watch and exact execution input | `crates/gremlins/src/executor/supervisor/AGENTS.md` (`watch` displays bus events; `input` controls an exact execution; wire `attach` is retired; TUI selection is Watch → Up/Down → Enter only, without pausing); replay background in `docs/actor-removal.md` / `docs/attachment-protocol.md` |
 | Add a new stage | `crates/gremlins/src/stages/` and an existing stage as a model |
 | Add a new client provider | `crates/gremlins/src/clients/` |
 | Add a new pipeline | YAMLs in `.gremlins/` |

@@ -56,9 +56,7 @@ this section — do not try to run them yourself.
 | `/stop <id>` | stop a gremlin |
 | `/resume <id>` | resume a gremlin |
 | `/log <id>` | show gremlin log |
-| `/watch` | show the running gremlins table; j/k/arrow keys select, Enter opens the selected gremlin's chat, s/r stop/resume, `Ctrl+O` toggles an inline live log |
-| `/attach [run] [stage|stage_run_id]` / `/attach home` | select bus output / release local selection and return home |
-| `/debug <stage_run_id>` / `/debug <run> <stage_run_id>` | select a concrete invocation in the same chat without pause-on-entry; exact agent input binds on submission, exec stages are read-only |
+| `/watch` | show runs and invocations; j/k/arrow keys move the highlight, Enter alone selects a conversation without pausing, s/r stop/resume, `Ctrl+W` or `Ctrl+O` toggles an inline live log |
 | `/skills` / `/skill <name>` | list / activate operator skills |
 | `/model` / `/model <spec>` / `/model clear` | show, set, or clear the TUI chat model (`model://provider/model` or `provider/model`) |
 | `/compact` | compact conversation history to reduce context usage |
@@ -69,42 +67,47 @@ this section — do not try to run them yourself.
 
 ### Keybindings
 
-- `Ctrl+C` — dismiss watch layers first; during an active home request, soft interrupt first and hard cancel on a repeat within one second. Outside an active request, repeat within one second to exit.
+- `Ctrl+C` — dismiss watch layers first; during an active session chat turn, soft interrupt first and hard cancel on a repeat within one second. Outside an active request, repeat within one second to exit.
 - `Ctrl+D` on an empty input — exit the TUI.
 - `Ctrl+L` — redraw the screen.
 - `Esc` — in `/watch`, close an open live log first, then return to chat; in chat, dismiss a correction draft without interrupting its execution.
 - `Ctrl+W` — enter the watch screen from chat; inside `/watch`, toggle the selected gremlin's live log (open it, or close an open pane); exits to chat when there is no selection left to follow.
 - `Ctrl+O` — in `/watch`: open or close the selected gremlin's live log.
 - `j` / `k` / `Up` / `Down` — in `/watch`: move the gremlin selection.
-- `Enter` — in `/watch`: observe the selected gremlin's chat without pausing; it keeps running unaided.
-- `Ctrl+T` — switch between home and the last attached stage, preserving drafts.
+- `Enter` — in `/watch`: the only conversation-selection action; a run row opens aggregate output, and an invocation row selects that concrete invocation without pausing or opening input. Select the session chat run row to return to session chat.
 - `s` — in `/watch`: stop the selected gremlin.
 - `r` — in `/watch`: resume the selected gremlin.
 - `Ctrl+G` — open the external editor to compose multi-line input.
 
 ### Interaction model
 
-Chat is always active; `/chat` is not required. At idle home, plain text starts
-a chat turn. During a turn or in a selected agent conversation, ordinary text
-corrects the exact execution rather than starting a replacement execution.
-Exec stages are read-only. `/watch` Enter, `/attach`, and `/debug` select bus
-output without pausing execution or opening an input connection.
-`/debug <stage_run_id>` or `/debug <run> <stage_run_id>` selects a concrete
-invocation in the same chat. Native input binds lazily on submission; command
-receipts report delivery separately from bus output. An exact agent invocation
-enables the composer as a UI hint only: input can still reject a stale execution,
-an unsupported backend, or a competing controller. Selection is not input authority.
-This TUI-local selector is separate from the exact-ID, input-only CLI debug
-command and has no agent-executable CLI equivalent.
+Chat is always active; `/chat` is not required. In idle session chat, plain
+text starts a new turn. During a turn or in a selected agent conversation,
+ordinary text corrects the exact execution rather than starting a replacement.
+Exec stages are read-only. Watch Enter is the only selection path; it observes
+bus output without pausing execution or opening an input connection. A run row
+opens aggregate output, and an invocation row selects that concrete invocation
+in the shared chat scene. Highlight movement and inline log toggles do not
+select conversations. The session chat run row is available before its first
+turn; select it to return to session chat.
+
+Native input binds lazily on submission; command receipts report delivery
+separately from bus output. An exact agent invocation enables the composer as
+a UI hint only: input can still reject a stale execution, an unsupported
+backend, or a competing controller. Selection is not input authority.
+CLI `gremlins debug SOURCE INVOCATION` is separate: it sends exact invocation
+input and does not select a TUI conversation.
 Selected-execution controls are `/pause` to pause, `/step` or `/continue` to
 single-step one turn, and bare `/resume-execution` or `/quit` to resume
 autonomously. `/quit <reason>` or `/bail <reason>` bails the selected execution.
 These TUI controls differ from CLI debug stdin: CLI `/continue` resumes
 autonomously and CLI `/quit [reason]` always bails.
 Explicit run controls are `/stop <id>` and `/resume <id>` (watch: `s`/`r`).
-`/exit`, `/attach home`, or switching away releases local selection without
-sending execution controls; home keeps streaming in the background while a
-stage is selected. `/attach` is a TUI selector, not a wire attachment operation.
+Switching conversations through Watch Enter releases local input without
+sending execution controls; it neither resumes nor cancels execution. Session
+chat keeps streaming in the background while another conversation is selected.
+Composer drafts and cursor positions are preserved per conversation target.
+`/exit` is not a TUI command; return via the session chat row in Watch.
 Slash commands are handled locally by the TUI. Text composed in the external editor is
 placed into the input bar for review and is only sent after the operator
 presses Enter.
@@ -125,7 +128,6 @@ to you. For run management, use the `gremlins` CLI through your Bash tool.
 | `/log <id>` | `gremlins log <id>` |
 | `/artifact <id> --list` / `/artifact <id> <uri>` | none — TUI-only |
 | `/watch` | `gremlins watch RUN` for read-only JSONL observation, not the TUI table |
-| `/attach` / `/debug` | none — TUI-only selectors; CLI `gremlins debug SOURCE INVOCATION` sends input, not selection |
 | `/model` | none — TUI-only |
 | `/compact` | none — TUI-only |
 | `/chat` | none — TUI-only |

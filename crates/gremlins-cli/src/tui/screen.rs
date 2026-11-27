@@ -140,7 +140,7 @@ pub struct LiveArea<B: Backend = CrosstermBackend<Stdout>> {
     /// all other targets are stored here.
     target_states: std::collections::HashMap<crate::tui::app::Target, RenderTargetState>,
     /// The target whose widgets are currently loaded into `scene`.
-    active_target: crate::tui::app::Target,
+    active_target: Option<crate::tui::app::Target>,
     /// Aggregate selectors own independent invocation widgets, in first-seen order.
     invocation_states: std::collections::HashMap<
         crate::tui::app::Target,
@@ -155,8 +155,7 @@ impl<B: Backend> LiveArea<B> {
     /// allocated for the given dimensions.
     pub fn with_backend(backend: B, cols: u16, rows: u16) -> Self {
         let area = Rect::new(0, 0, cols, rows);
-        let mut target_states = std::collections::HashMap::new();
-        target_states.insert(crate::tui::app::Target::Home, RenderTargetState::new());
+        let target_states = std::collections::HashMap::new();
         Self {
             backend,
             curr: Buffer::empty(area),
@@ -169,7 +168,7 @@ impl<B: Backend> LiveArea<B> {
             last_screen_was_chat: true,
             reserved_rows: INITIAL_RESERVED_ROWS,
             target_states,
-            active_target: crate::tui::app::Target::Home,
+            active_target: None,
             invocation_states: Default::default(),
         }
     }
@@ -349,6 +348,8 @@ impl<B: Backend> LiveArea<B> {
     /// full-screen view body; chat widgets are occluded and no overflow is
     /// committed.
     pub fn compose(&mut self, app: &App) -> io::Result<()> {
+        self.active_target
+            .get_or_insert_with(|| app.selected_target.clone());
         self.prune_invocation_states(app);
         let chat = app.screen.is_chat();
 
@@ -417,7 +418,8 @@ impl<B: Backend> LiveArea<B> {
             project_name: app.project_name_str(),
             chat_model: app.chat_model.as_deref(),
             target_label: app.selected_target.label(),
-            target_is_home: app.selected_target.is_home(),
+            target_is_session_chat: app.is_session_chat(&app.selected_target),
+            chat_run_id: app.chat_run_id.as_deref(),
             conversation_status: app.conversation_status(&app.selected_target),
             active_runs: &app.active_runs,
             watch_selection: app.watch_selection.as_deref(),
@@ -444,7 +446,7 @@ impl<B: Backend> LiveArea<B> {
         let width = self.cols;
         let mut invocations = self
             .invocation_states
-            .remove(&self.active_target)
+            .remove(self.active_target.as_ref().expect("bound during compose"))
             .unwrap_or_default();
         let mut widgets: Vec<&mut dyn LiveAreaWidget> =
             vec![&mut scene.transcript, &mut scene.reasoning];
@@ -468,8 +470,10 @@ impl<B: Backend> LiveArea<B> {
             &ctx,
             true,
         );
-        self.invocation_states
-            .insert(self.active_target.clone(), invocations);
+        self.invocation_states.insert(
+            self.active_target.clone().expect("bound during compose"),
+            invocations,
+        );
         result
     }
 
@@ -559,6 +563,26 @@ impl<B: Backend> LiveArea<B> {
         }
     }
 
+    /// Rename a conversation without selecting it or resetting its live widgets.
+    pub fn migrate_target(&mut self, old: &crate::tui::app::Target, new: crate::tui::app::Target) {
+        if old == &new {
+            return;
+        }
+        let mut state = self.target_states.remove(old).unwrap_or_default();
+        if self.active_target.as_ref() == Some(old) {
+            self.active_target = Some(new.clone());
+        } else if self.active_target.as_ref() == Some(&new) {
+            self.scene.transcript = std::mem::take(&mut state.transcript);
+            self.scene.reasoning = std::mem::replace(&mut state.reasoning, new_reasoning_band());
+            self.last_screen_was_chat = false;
+        }
+        self.target_states.insert(new.clone(), state);
+        self.invocation_states.remove(&new);
+        if let Some(states) = self.invocation_states.remove(old) {
+            self.invocation_states.insert(new, states);
+        }
+    }
+
     /// Switch the active conversation target, saving current widgets and
     /// loading the new target's state.
     ///
@@ -568,13 +592,17 @@ impl<B: Backend> LiveArea<B> {
     /// App-level state via [`sync_app_state`] before calling this method and
     /// for restoring via [`copy_app_state_to`] afterwards.
     pub fn switch_target(&mut self, new_target: crate::tui::app::Target) {
-        if new_target == self.active_target {
+        let Some(active_target) = self.active_target.as_ref() else {
+            self.active_target = Some(new_target);
+            return;
+        };
+        if &new_target == active_target {
             return;
         }
 
         // Phase 1: save current scene widgets into the outgoing target's
         // map entry — the outgoing target is becoming inactive.
-        let outgoing_key = self.active_target.clone();
+        let outgoing_key = active_target.clone();
         {
             let outgoing = self.target_states.entry(outgoing_key).or_default();
             std::mem::swap(&mut self.scene.transcript, &mut outgoing.transcript);
@@ -588,7 +616,7 @@ impl<B: Backend> LiveArea<B> {
             std::mem::swap(&mut self.scene.reasoning, &mut incoming.reasoning);
         }
 
-        self.active_target = new_target;
+        self.active_target = Some(new_target);
         self.last_screen_was_chat = false;
     }
 
@@ -606,11 +634,25 @@ impl<B: Backend> LiveArea<B> {
             .active_request = active;
     }
 
+    /// Store a model reply for restoration when `target` is selected.
+    pub fn set_target_chat_model(
+        &mut self,
+        target: &crate::tui::app::Target,
+        model: Option<String>,
+    ) {
+        self.target_states
+            .entry(target.clone())
+            .or_default()
+            .chat_model = model;
+    }
+
     /// Render a receipt without changing composer state or input scroll.
-    pub fn show_receipt(&mut self, receipt: crate::tui::app::Receipt) {
+    pub fn show_receipt(&mut self, app: &App, receipt: crate::tui::app::Receipt) {
+        self.active_target
+            .get_or_insert_with(|| app.selected_target.clone());
         let message = match receipt.result {
-            // Home's owner stream does not forward operator-message events.
-            Ok(()) if receipt.target.is_home() => {
+            // The session chat's owner stream does not forward operator-message events.
+            Ok(()) if app.is_session_chat(&receipt.target) => {
                 format!("correction delivered: {}", receipt.text)
             }
             // Bus operator-message events remain authoritative for the message body.
@@ -624,7 +666,7 @@ impl<B: Backend> LiveArea<B> {
 
     pub fn clear_target_input(&mut self, target: &crate::tui::app::Target, app: &mut App) {
         app.clear_composer(target);
-        if target == &self.active_target {
+        if self.active_target.as_ref() == Some(target) {
             self.reset_input_scroll();
         }
     }
@@ -634,10 +676,10 @@ impl<B: Backend> LiveArea<B> {
     /// Called before switching away from a target so the next time it's selected
     /// the displayed turn status is preserved.
     pub fn sync_app_state(&mut self, app: &App) {
-        let state = self
-            .target_states
-            .entry(self.active_target.clone())
-            .or_default();
+        let target = self
+            .active_target
+            .get_or_insert_with(|| app.selected_target.clone());
+        let state = self.target_states.entry(target.clone()).or_default();
 
         state.active_request = app.active_request;
         state.chat_model = app.chat_model.clone();
@@ -648,7 +690,11 @@ impl<B: Backend> LiveArea<B> {
     /// Called after switching to a new target so the event loop and render
     /// context operate on the correct transcript, draft, and status.
     pub fn copy_app_state_to(&self, app: &mut App) {
-        if let Some(state) = self.target_states.get(&self.active_target) {
+        if let Some(state) = self
+            .active_target
+            .as_ref()
+            .and_then(|target| self.target_states.get(target))
+        {
             app.active_request = state.active_request;
             app.chat_model = state.chat_model.clone();
         }
@@ -664,7 +710,11 @@ impl<B: Backend> LiveArea<B> {
         target: &crate::tui::app::Target,
         f: impl FnOnce(&mut TranscriptWidget, &mut StreamingWidget),
     ) {
-        if *target == self.active_target {
+        if self
+            .active_target
+            .as_ref()
+            .is_none_or(|active| active == target)
+        {
             f(&mut self.scene.transcript, &mut self.scene.reasoning);
         } else {
             let entry = self.target_states.entry(target.clone()).or_default();
@@ -699,7 +749,11 @@ impl<B: Backend> LiveArea<B> {
     /// When `target` is the active target the scene is checked directly;
     /// otherwise the stored state is consulted.
     pub fn target_has_current_turn(&self, target: &crate::tui::app::Target) -> bool {
-        if *target == self.active_target {
+        if self
+            .active_target
+            .as_ref()
+            .is_none_or(|active| active == target)
+        {
             self.scene.transcript.has_current_turn()
         } else if let Some(state) = self.target_states.get(target) {
             state.transcript.has_current_turn()
@@ -1223,7 +1277,7 @@ struct ColumnWidths {
 }
 
 impl ColumnWidths {
-    fn from_runs(runs: &[(&String, &crate::tui::app::ActiveRun)]) -> Self {
+    fn from_runs(runs: &[(&str, &crate::tui::app::ActiveRun)]) -> Self {
         let mut w = ColumnWidths {
             id: 2,          // "ID" header minimum
             status: 6,      // "STATUS" minimum
@@ -1245,7 +1299,7 @@ impl ColumnWidths {
                 "stopped" => motif::glyph::STOPPED,
                 _ => motif::glyph::DONE,
             };
-            let raw_id = id.as_str();
+            let raw_id = *id;
             let raw_status = format!("{glyph} {}", run.status);
             let raw_stage = run.stage.as_str();
             let raw_def = run.definition.as_str();
@@ -1623,11 +1677,23 @@ impl RunsView {
 
     fn listed_runs<'a>(
         ctx: &'a RenderContext,
-    ) -> Vec<(&'a String, &'a crate::tui::app::ActiveRun)> {
-        let mut runs: Vec<_> = ctx.active_runs.iter().collect();
+        reserved: &'a crate::tui::app::ActiveRun,
+    ) -> Vec<(&'a str, &'a crate::tui::app::ActiveRun)> {
+        let mut runs: Vec<_> = ctx
+            .active_runs
+            .iter()
+            .map(|(id, run)| (id.as_str(), run))
+            .collect();
+        if let Some(id) = ctx
+            .chat_run_id
+            .filter(|id| !ctx.active_runs.contains_key(*id))
+        {
+            runs.push((id, reserved));
+        }
         runs.sort_by(|a, b| {
-            let running = |r: &(&String, &crate::tui::app::ActiveRun)| r.1.status != "running";
-            running(a).cmp(&running(b)).then_with(|| a.0.cmp(b.0))
+            (a.1.status != "running")
+                .cmp(&(b.1.status != "running"))
+                .then_with(|| a.0.cmp(b.0))
         });
         runs
     }
@@ -1731,7 +1797,9 @@ impl RunsView {
             return;
         }
 
-        let runs = Self::listed_runs(ctx);
+        let mut reserved = crate::tui::app::ActiveRun::new("idle");
+        reserved.definition = "session chat".into();
+        let runs = Self::listed_runs(ctx, &reserved);
         let mut widths = ColumnWidths::from_runs(&runs);
         widths.clamp(area.width as usize);
 
@@ -1778,7 +1846,7 @@ impl RunsView {
         ];
         let header_wrapped = wrapped_height(&header_lines, area.width) as u16;
         let running = runs.iter().filter(|(_, r)| r.status == "running").count();
-        let total = ctx.active_runs.len();
+        let total = runs.len();
         let footer_line = Line::from(Span::styled(
             format!("  {running} running · {total} total"),
             Style::default()
@@ -1811,7 +1879,7 @@ impl RunsView {
                 .iter()
                 .map(|(key, row)| (key.as_str(), row.as_ref()))
                 .collect(),
-            None => runs.iter().map(|(id, _)| (id.as_str(), None)).collect(),
+            None => runs.iter().map(|(id, _)| (*id, None)).collect(),
         };
         if rows.is_empty() {
             Paragraph::new(vec![Line::from(Span::styled(
@@ -1834,7 +1902,11 @@ impl RunsView {
                     let selected = ctx.watch_selection == Some(*id);
                     if let Some(invocation) = invocation {
                         Self::invocation_row(invocation, selected)
-                    } else if let Some(run) = ctx.active_runs.get(*id) {
+                    } else if let Some(run) = ctx
+                        .active_runs
+                        .get(*id)
+                        .or_else(|| (ctx.chat_run_id == Some(*id)).then_some(&reserved))
+                    {
                         Self::run_row(id, run, selected, &widths)
                     } else {
                         Line::default()
@@ -2274,13 +2346,69 @@ mod tests {
     }
 
     #[test]
-    fn visible_nonhome_receipt_confirms_delivery_without_repeating_the_body() {
+    fn migrate_target_preserves_live_and_parked_conversation_state() {
+        use crate::tui::app::{ConversationStatus, Target};
+
+        for background in [false, true] {
+            let mut app = App::new();
+            let mut live = new_live(80, 24);
+            let old = app.session_chat_target();
+            let new = Target::Run {
+                run_id: "identified".into(),
+            };
+            let other = Target::Run {
+                run_id: "other".into(),
+            };
+            live.sync_app_state(&app);
+            live.submit_prompt("prompt".into());
+            live.push_response("partial response");
+            live.set_reasoning_title("thinking");
+            live.push_reasoning_text("live reasoning");
+            app.replace_input("next draft");
+            app.input_cursor = 4;
+            app.active_request = true;
+            app.chat_model = Some("model".into());
+            app.set_conversation_status(old.clone(), ConversationStatus::Running);
+            if background {
+                live.select_conversation(&mut app, other.clone());
+                app.replace_input("other draft");
+                app.input_cursor = 2;
+            }
+
+            live.sync_app_state(&app);
+            live.migrate_target(&old, new.clone());
+            app.migrate_chat_run_id("identified".into());
+            assert!(!live.target_states.contains_key(&old));
+            assert_eq!(app.conversation_status(&new), ConversationStatus::Running);
+            if background {
+                assert_eq!(app.selected_target, other);
+                assert_eq!(app.input.text(), "other draft");
+                assert_eq!(app.input_cursor, 2);
+                assert!(!app.active_request);
+                live.select_conversation(&mut app, new.clone());
+            }
+            assert_eq!(app.selected_target, new);
+            assert_eq!(live.active_target.as_ref(), Some(&new));
+            assert_eq!(app.input.text(), "next draft");
+            assert_eq!(app.input_cursor, 4);
+            assert!(app.active_request);
+            assert_eq!(app.chat_model.as_deref(), Some("model"));
+            assert_eq!(live.response_text(), "partial response");
+            assert!(live.has_current_turn());
+            assert_eq!(live.scene.reasoning.title(), Some("thinking"));
+            assert!(!live.scene.reasoning.is_empty());
+            live.migrate_target(&new, new.clone());
+            assert_eq!(live.response_text(), "partial response");
+        }
+    }
+
+    #[test]
+    fn visible_non_session_chat_receipt_confirms_delivery_without_repeating_the_body() {
         use crate::tui::app::{Receipt, Target};
 
         for target in [
-            Target::StageExecution {
+            Target::Run {
                 run_id: "run".into(),
-                stage: "review".into(),
             },
             Target::Invocation {
                 run_id: "run".into(),
@@ -2304,11 +2432,14 @@ mod tests {
                 if bus_first {
                     bus_output(&mut live);
                 }
-                live.show_receipt(Receipt {
-                    target: target.clone(),
-                    text: "unique operator message [execution run/original]".into(),
-                    result: Ok(()),
-                });
+                live.show_receipt(
+                    &app,
+                    Receipt {
+                        target: target.clone(),
+                        text: "unique operator message [execution run/original]".into(),
+                        result: Ok(()),
+                    },
+                );
                 assert_eq!(app.input.text(), "visible draft");
                 assert_eq!(app.input_cursor, 4);
                 live.compose(&app).unwrap();
@@ -2333,7 +2464,8 @@ mod tests {
                 ] {
                     assert_eq!(rendered.matches(text).count(), 1, "{rendered}");
                 }
-                live.select_conversation(&mut app, Target::Home);
+                let target = app.session_chat_target();
+                live.select_conversation(&mut app, target);
                 live.compose(&app).unwrap();
                 assert!(!dump_buffer(live.backend().buffer()).contains("correction delivered"));
             }
@@ -2373,11 +2505,14 @@ mod tests {
             if bus_first {
                 bus_output(&mut live);
             }
-            live.show_receipt(Receipt {
-                target: origin.clone(),
-                text: "unique operator message [execution run/original]".into(),
-                result: Ok(()),
-            });
+            live.show_receipt(
+                &app,
+                Receipt {
+                    target: origin.clone(),
+                    text: "unique operator message [execution run/original]".into(),
+                    result: Ok(()),
+                },
+            );
             if !bus_first {
                 bus_output(&mut live);
             }
@@ -2387,7 +2522,8 @@ mod tests {
             assert!(!visible.contains("unique operator message"));
             assert_eq!(app.input.text(), "successor draft");
 
-            live.select_conversation(&mut app, Target::Home);
+            let target = app.session_chat_target();
+            live.select_conversation(&mut app, target);
             live.compose(&app).unwrap();
             assert!(!dump_buffer(live.backend().buffer()).contains("correction delivered"));
             live.select_conversation(&mut app, origin);
@@ -2413,9 +2549,8 @@ mod tests {
 
         let mut live = new_live(90, 20);
         let mut app = App::new();
-        let selector = Target::StageExecution {
+        let selector = Target::Run {
             run_id: "run".into(),
-            stage: "review".into(),
         };
         let invocation = |index: usize| Target::Invocation {
             run_id: "run".into(),
@@ -2429,6 +2564,7 @@ mod tests {
             stage_run_id: "0".into(),
         };
         app.live_executions.insert(execution.key(), execution);
+        live.sync_app_state(&app);
         live.with_target_transcript(&invocation(2), |transcript, _| {
             transcript.submit_prompt("exact draft".into());
             transcript.push_response("exact transcript");
@@ -2520,23 +2656,24 @@ mod tests {
 
     #[test]
     fn receipt_preserves_history_search_and_composer() {
-        use crate::tui::app::{Execution, Submission, Target};
+        use crate::tui::app::{Execution, Submission};
 
         for success in [true, false] {
             let mut live = new_live(90, 20);
             let mut app = App::new();
+            let session_chat = app.session_chat_target();
             app.conversations.set_execution(
-                Target::Home,
+                session_chat.clone(),
                 Some(Execution {
-                    run_id: "home".into(),
-                    stage_run_id: "home-turn".into(),
+                    run_id: "session_chat".into(),
+                    stage_run_id: "session_chat-turn".into(),
                     nonce: 1,
                 }),
             );
-            app.input.replace_all("home correction");
+            app.input.replace_all("session_chat correction");
             app.input_cursor = 4;
             let Submission::Correction { id, .. } =
-                app.conversations.submit(&Target::Home, &app.input)
+                app.conversations.submit(&session_chat, &app.input)
             else {
                 panic!("expected correction")
             };
@@ -2547,20 +2684,21 @@ mod tests {
             } else {
                 Err("failed".into())
             };
-            live.show_receipt(app.finish_delivery(id, result).unwrap());
+            let receipt = app.finish_delivery(id, result).unwrap();
+            live.show_receipt(&app, receipt);
 
             assert!(app.history_search.is_some());
             assert_eq!(app.input.text(), "é");
             assert_eq!(app.input_cursor, "é".len());
             app.cancel_search();
-            assert_eq!(app.input.text(), "home correction");
+            assert_eq!(app.input.text(), "session_chat correction");
             assert_eq!(app.input_cursor, 4);
             live.compose(&app).unwrap();
             let visible = dump_buffer(live.backend().buffer());
             let confirmation = if success {
-                "correction delivered: home correction"
+                "correction delivered: session_chat correction"
             } else {
-                "correction: home correction"
+                "correction: session_chat correction"
             };
             assert_eq!(visible.matches(confirmation).count(), 1, "{visible}");
             assert_eq!(visible.contains("failed"), !success);
@@ -2574,23 +2712,25 @@ mod tests {
             let mut live = new_live(90, 20);
             let mut app = App::new();
             app.active_request = true;
+            let session_chat = app.session_chat_target();
             app.conversations.set_execution(
-                Target::Home,
+                session_chat.clone(),
                 Some(Execution {
-                    run_id: "home".into(),
-                    stage_run_id: "home-turn".into(),
+                    run_id: "session_chat".into(),
+                    stage_run_id: "session_chat-turn".into(),
                     nonce: 1,
                 }),
             );
-            app.replace_input("home correction");
+            app.replace_input("session_chat correction");
             let Submission::Correction { id, .. } =
-                app.conversations.submit(&Target::Home, &app.input)
+                app.conversations.submit(&session_chat, &app.input)
             else {
                 panic!("expected correction")
             };
-            let stage = Target::StageExecution {
+            let stage = Target::Invocation {
                 run_id: "pipeline".into(),
                 stage: "review".into(),
+                stage_run_id: "original".into(),
             };
             live.select_conversation(&mut app, stage);
             app.replace_input("stage draft");
@@ -2602,28 +2742,31 @@ mod tests {
                     Err("delivery uncertain".into())
                 },
             );
-            live.show_receipt(receipt.unwrap());
+            live.show_receipt(&app, receipt.unwrap());
             assert_eq!(app.input.text(), "stage draft");
             assert!(!app.active_request);
             live.compose(&app).unwrap();
-            assert!(!dump_buffer(live.backend().buffer()).contains("home correction"));
-            live.select_conversation(&mut app, Target::Home);
+            assert!(!dump_buffer(live.backend().buffer()).contains("session_chat correction"));
+            let target = app.session_chat_target();
+            live.select_conversation(&mut app, target);
             assert!(app.active_request);
-            assert_eq!(app.input.text(), "home correction");
+            assert_eq!(app.input.text(), "session_chat correction");
             assert!(app.finish_delivery(id, Ok(())).is_none()); // duplicate receipt is inert
             live.compose(&app).unwrap();
             let visible = dump_buffer(live.backend().buffer());
             if success {
                 assert_eq!(
                     visible
-                        .matches("correction delivered: home correction")
+                        .matches("correction delivered: session_chat correction")
                         .count(),
                     1,
                     "{visible}"
                 );
             } else {
                 assert_eq!(
-                    visible.matches("correction: home correction").count(),
+                    visible
+                        .matches("correction: session_chat correction")
+                        .count(),
                     1,
                     "{visible}"
                 );
@@ -2638,37 +2781,39 @@ mod tests {
 
         let mut live = new_live(90, 24);
         let mut app = App::new();
-        let stage = Target::StageExecution {
+        let stage = Target::Invocation {
             run_id: "pipeline".into(),
             stage: "review".into(),
+            stage_run_id: "original".into(),
         };
-        live.submit_prompt("home prompt".into());
-        live.replace_response("home response");
+        live.submit_prompt("session_chat prompt".into());
+        live.replace_response("session_chat response");
         live.select_conversation(&mut app, stage.clone());
         live.submit_prompt("stage prompt".into());
         live.replace_response("stage response");
 
-        live.with_target_transcript(&Target::Home, |transcript, _| {
-            transcript.push_transcript_block(vec!["home background update".into()]);
+        live.with_target_transcript(&app.session_chat_target(), |transcript, _| {
+            transcript.push_transcript_block(vec!["session_chat background update".into()]);
         });
         live.compose(&app).unwrap();
         let visible = dump_buffer(live.backend().buffer());
         assert!(visible.contains("stage response"));
-        assert!(!visible.contains("home response"));
-        assert!(!visible.contains("home background update"));
+        assert!(!visible.contains("session_chat response"));
+        assert!(!visible.contains("session_chat background update"));
 
-        live.select_conversation(&mut app, Target::Home);
+        let target = app.session_chat_target();
+        live.select_conversation(&mut app, target);
         live.compose(&app).unwrap();
         let visible = dump_buffer(live.backend().buffer());
-        assert!(visible.contains("home response"));
-        assert!(visible.contains("home background update"));
+        assert!(visible.contains("session_chat response"));
+        assert!(visible.contains("session_chat background update"));
         assert!(!visible.contains("stage response"));
 
         live.select_conversation(&mut app, stage);
         live.compose(&app).unwrap();
         let visible = dump_buffer(live.backend().buffer());
         assert!(visible.contains("stage response"));
-        assert!(!visible.contains("home background update"));
+        assert!(!visible.contains("session_chat background update"));
     }
 
     #[test]
@@ -4022,6 +4167,29 @@ mod tests {
             visible.contains("no gremlins"),
             "A watch table with no runs at all should render an empty state.\nBuffer:\n{visible}"
         );
+    }
+
+    #[test]
+    fn reserved_session_chat_renders_before_registration_without_duplicate_rows() {
+        let mut live = new_live(160, 20);
+        let mut app = App::new();
+        let id = "reserved-session-chat";
+        app.set_chat_run_id(id.into());
+        app.show_runs();
+        live.show_runs();
+        app.watch_selection = Some(id.into());
+        live.compose(&app).unwrap();
+        let visible = dump_buffer(live.backend().buffer());
+        assert!(visible.contains(id), "{visible}");
+        assert!(visible.contains("session chat"), "{visible}");
+        assert!(visible.contains("0 running · 1 total"), "{visible}");
+        assert!(!visible.contains("no gremlins"), "{visible}");
+
+        app.active_runs.insert(id.into(), ActiveRun::new("running"));
+        live.compose(&app).unwrap();
+        let visible = dump_buffer(live.backend().buffer());
+        assert_eq!(visible.matches(id).count(), 1, "{visible}");
+        assert!(visible.contains("1 running · 1 total"), "{visible}");
     }
 
     #[test]

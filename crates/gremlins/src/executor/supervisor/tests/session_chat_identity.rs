@@ -9,21 +9,27 @@ async fn reserved_session(
     assert_eq!(response["type"], "ok");
     let session_id = response["session_id"].as_str().unwrap();
     let session = sessions.lock().unwrap().get(session_id).unwrap().clone();
+    let chat_run_id = response["chat_run_id"].as_str().unwrap();
+    assert!(!chat_run_id.is_empty());
     assert_eq!(
-        session.get_home_run_id().await.as_deref(),
-        response["home_run_id"].as_str()
+        session.get_chat_run_id().await.as_deref(),
+        Some(chat_run_id)
     );
+    assert_eq!(session.get_chat_ids().await, vec![chat_run_id.to_string()]);
     (response, session)
 }
 
 #[tokio::test]
-async fn closed_session_chat_setup_keeps_home_reservation_until_teardown() {
+async fn closed_session_chat_setup_keeps_session_chat_reservation_until_teardown() {
     let (_sandbox, project_root, _) = sandbox_dirs(None);
     let (registry, _) = spawn_test_actor().await;
     let sessions = Default::default();
     let (response, session) = reserved_session(&registry, &sessions).await;
-    let home_id = response["home_run_id"].as_str().unwrap().to_string();
-    assert_eq!(session.get_home_run_id().await, Some(home_id.clone()));
+    let session_chat_id = response["chat_run_id"].as_str().unwrap().to_string();
+    assert_eq!(
+        session.get_chat_run_id().await,
+        Some(session_chat_id.clone())
+    );
     session.mark_closed().await;
 
     let result = super::super::chat::resolve_chat_handle(
@@ -36,23 +42,26 @@ async fn closed_session_chat_setup_keeps_home_reservation_until_teardown() {
     )
     .await;
     assert!(result.is_err());
-    assert_eq!(session.get_home_run_id().await, Some(home_id.clone()));
-    assert_eq!(session.get_chat_ids().await, vec![home_id.clone()]);
-    assert!(!registry.contains_run(&home_id).await);
+    assert_eq!(
+        session.get_chat_run_id().await,
+        Some(session_chat_id.clone())
+    );
+    assert_eq!(session.get_chat_ids().await, vec![session_chat_id.clone()]);
+    assert!(!registry.contains_run(&session_chat_id).await);
     teardown_session(&session).await;
-    assert!(session.get_home_run_id().await.is_none());
+    assert!(session.get_chat_run_id().await.is_none());
     assert!(session.get_chat_ids().await.is_empty());
 }
 
 #[tokio::test]
-async fn rejected_chat_spawn_does_not_commit_home_reservation() {
+async fn rejected_chat_spawn_does_not_commit_session_chat_reservation() {
     let (_sandbox, project_root, _) = sandbox_dirs(None);
     let (registry, _) = spawn_test_actor().await;
     let sessions = Default::default();
     let (response, session) = reserved_session(&registry, &sessions).await;
-    let home_id = response["home_run_id"].as_str().unwrap().to_string();
+    let session_chat_id = response["chat_run_id"].as_str().unwrap().to_string();
     let gremlin = create_chat_gremlin(
-        &home_id,
+        &session_chat_id,
         &model("cmd/echo"),
         "helpful",
         &project_root,
@@ -67,24 +76,30 @@ async fn rejected_chat_spawn_does_not_commit_home_reservation() {
     )
     .await
     .is_none());
-    assert_eq!(session.get_home_run_id().await, Some(home_id.clone()));
-    assert!(!registry.contains_run(&home_id).await);
+    assert_eq!(
+        session.get_chat_run_id().await,
+        Some(session_chat_id.clone())
+    );
+    assert!(!registry.contains_run(&session_chat_id).await);
     assert!(session.get_chat_gremlin_keys().await.is_empty());
     teardown_session(&session).await;
-    assert!(session.get_home_run_id().await.is_none());
+    assert!(session.get_chat_run_id().await.is_none());
 }
 
 #[tokio::test]
-async fn reserved_home_identity_survives_failures_then_resolves_reuses_and_replaces() {
+async fn reserved_session_chat_identity_survives_failures_then_resolves_reuses_and_replaces() {
     let (_sandbox, project_root, _) = sandbox_dirs(None);
     let (registry, _) = spawn_test_actor().await;
     let sessions: super::super::SessionRegistry = Default::default();
     let (response, session) = reserved_session(&registry, &sessions).await;
-    let home_id = response["home_run_id"].as_str().unwrap();
-    assert_eq!(session.get_chat_ids().await, vec![home_id.to_string()]);
-    assert!(!registry.contains_run(home_id).await);
+    let session_chat_id = response["chat_run_id"].as_str().unwrap();
+    assert_eq!(
+        session.get_chat_ids().await,
+        vec![session_chat_id.to_string()]
+    );
+    assert!(!registry.contains_run(session_chat_id).await);
     assert!(session.get_chat_gremlin_keys().await.is_empty());
-    assert_ne!(registry.reserve_chat_id().await, home_id);
+    assert_ne!(registry.reserve_chat_id().await, session_chat_id);
 
     let chat_model = model("cmd/echo");
     let env = HashMap::new();
@@ -103,9 +118,15 @@ async fn reserved_home_identity_survives_failures_then_resolves_reuses_and_repla
             Ok(_) => panic!("unknown provider should fail chat setup"),
         };
         assert!(error.to_string().contains("unknown provider"));
-        assert_eq!(session.get_home_run_id().await.as_deref(), Some(home_id));
-        assert_eq!(session.get_chat_ids().await, vec![home_id.to_string()]);
-        assert!(!registry.contains_run(home_id).await);
+        assert_eq!(
+            session.get_chat_run_id().await.as_deref(),
+            Some(session_chat_id)
+        );
+        assert_eq!(
+            session.get_chat_ids().await,
+            vec![session_chat_id.to_string()]
+        );
+        assert!(!registry.contains_run(session_chat_id).await);
         assert!(session.get_chat_gremlin_keys().await.is_empty());
         assert!(session.get_chat_handle().await.is_none());
     }
@@ -120,9 +141,11 @@ async fn reserved_home_identity_survives_failures_then_resolves_reuses_and_repla
     )
     .await
     .unwrap();
-    assert_eq!(handle.id, home_id);
-    assert!(session.get_home_run_id().await.is_none());
-    assert!(registry.contains_run(home_id).await);
+    assert!(!handle.id.is_empty());
+    assert_eq!(handle.id, session_chat_id);
+    assert!(session.get_chat_run_id().await.is_none());
+    assert!(registry.contains_run(session_chat_id).await);
+    assert_eq!(session.get_chat_handle().await.unwrap().id, session_chat_id);
     let reused = super::super::chat::resolve_chat_handle(
         &registry,
         &session,
@@ -133,10 +156,10 @@ async fn reserved_home_identity_survives_failures_then_resolves_reuses_and_repla
     )
     .await
     .unwrap();
-    assert_eq!(reused.id, home_id);
+    assert_eq!(reused.id, session_chat_id);
 
-    registry.stop_run(home_id).await;
-    assert!(!registry.contains_run(home_id).await);
+    registry.stop_run(session_chat_id).await;
+    assert!(!registry.contains_run(session_chat_id).await);
     let fresh = super::super::chat::resolve_chat_handle(
         &registry,
         &session,
@@ -147,26 +170,31 @@ async fn reserved_home_identity_survives_failures_then_resolves_reuses_and_repla
     )
     .await
     .unwrap();
-    assert_ne!(fresh.id, home_id);
+    assert!(!fresh.id.is_empty());
+    assert_ne!(fresh.id, session_chat_id);
+    assert!(registry.contains_run(&fresh.id).await);
+    assert_eq!(session.get_chat_handle().await.unwrap().id, fresh.id);
+    assert!(session.get_chat_run_id().await.is_none());
     teardown_session(&session).await;
     assert!(!registry.contains_run(&fresh.id).await);
-    assert!(!registry.contains_run(home_id).await);
+    assert!(!registry.contains_run(session_chat_id).await);
     assert!(sessions.lock().unwrap().is_empty());
 }
 
 #[tokio::test]
-async fn create_session_unused_home_reservation_is_owned_and_torn_down() {
+async fn create_session_unused_session_chat_reservation_is_owned_and_torn_down() {
     let (_sandbox, _, _) = sandbox_dirs(None);
     let (registry, _) = spawn_test_actor().await;
     let sessions: super::super::SessionRegistry = Default::default();
     let mut ids = Vec::new();
     for _ in 0..2 {
         let (response, session) = reserved_session(&registry, &sessions).await;
-        let id = response["home_run_id"].as_str().unwrap().to_string();
+        let id = response["chat_run_id"].as_str().unwrap().to_string();
+        assert!(!id.is_empty());
         assert_eq!(session.get_chat_ids().await, vec![id.clone()]);
         teardown_session(&session).await;
         assert!(session.get_chat_ids().await.is_empty());
-        assert!(session.get_home_run_id().await.is_none());
+        assert!(session.get_chat_run_id().await.is_none());
         assert!(!registry.contains_run(&id).await);
         assert!(!crate::config::state_root()
             .join(response["socket"].as_str().unwrap())
@@ -177,16 +205,16 @@ async fn create_session_unused_home_reservation_is_owned_and_torn_down() {
     assert!(sessions.lock().unwrap().is_empty());
 }
 
-async fn home_frame(reader: &mut tokio::io::BufReader<tokio::net::UnixStream>) -> Value {
+async fn session_chat_frame(reader: &mut tokio::io::BufReader<tokio::net::UnixStream>) -> Value {
     tokio::time::timeout(Duration::from_secs(10), socket::read_json_line(reader))
         .await
-        .expect("home socket response timed out")
+        .expect("session_chat socket response timed out")
         .unwrap()
-        .expect("home socket closed")
+        .expect("session_chat socket closed")
 }
 
 #[tokio::test]
-async fn announced_home_execution_resolves_input_and_shares_exact_controller_claim() {
+async fn announced_session_chat_execution_resolves_input_and_shares_exact_controller_claim() {
     use crate::executor::supervisor::test_provider::pending_request;
     use gremlins_magic_bus::{connection::BusSubGuard, subscribe_run, EventKind, Recv};
     use serde_json::json;
@@ -201,13 +229,13 @@ async fn announced_home_execution_resolves_input_and_shares_exact_controller_cla
     );
     std::fs::write(
         sandbox.join("config/settings.yaml"),
-        "default-model: openrouter/test-home-input\n",
+        "default-model: openrouter/test-session_chat-input\n",
     )
     .unwrap();
     let (registry, _) = spawn_test_actor().await;
     let sessions = Default::default();
     let (created, session) = reserved_session(&registry, &sessions).await;
-    let run_id = created["home_run_id"].as_str().unwrap();
+    let run_id = created["chat_run_id"].as_str().unwrap();
     let (sub, mut events) = subscribe_run(run_id);
     let _guard = BusSubGuard::new(sub);
     let path = crate::config::state_root().join(created["socket"].as_str().unwrap());
@@ -215,17 +243,22 @@ async fn announced_home_execution_resolves_input_and_shares_exact_controller_cla
     socket::write_json_line(
         main.get_mut(),
         &json!({"op":"chat", "session_id":created["session_id"],
-            "text":"Review draft", "turn":"home-input", "project_root":sandbox.path()}),
+            "text":"Review draft", "turn":"session_chat-input", "project_root":sandbox.path()}),
     )
     .await
     .unwrap();
-    let ack = home_frame(&mut main).await;
+    let ack = session_chat_frame(&mut main).await;
     assert_eq!(ack["type"], "ok", "{ack}");
-    assert_eq!(ack["id"], run_id);
+    assert_eq!(ack["chat_run_id"], run_id);
+    assert!(!ack["chat_run_id"].as_str().unwrap().is_empty());
+    assert_eq!(ack["enqueued"], true, "{ack}");
+    assert!(ack.get("id").is_none(), "{ack}");
+    assert_eq!(session.get_chat_handle().await.unwrap().id, run_id);
+    assert!(session.get_chat_run_id().await.is_none());
     let started = tokio::time::timeout(Duration::from_secs(10), async {
         loop {
             let Recv::Event(event) = events.recv().await else {
-                panic!("home bus closed or lagged")
+                panic!("session_chat bus closed or lagged")
             };
             if matches!(event.kind(), EventKind::TurnStarted { .. }) {
                 break event;
@@ -233,7 +266,7 @@ async fn announced_home_execution_resolves_input_and_shares_exact_controller_cla
         }
     })
     .await
-    .expect("home turn start timed out");
+    .expect("session_chat turn start timed out");
     let EventKind::TurnStarted {
         stage_run_id: execution_id,
     } = started.kind()
@@ -246,13 +279,13 @@ async fn announced_home_execution_resolves_input_and_shares_exact_controller_cla
         started.corr_id().stage_run_id(),
         Some(execution_id.as_str())
     );
-    assert!(started.corr_id().to_string().contains("home-input"));
+    assert!(started.corr_id().to_string().contains("session_chat-input"));
     // The provider request is a barrier after run_agent has bound its inbox.
     let (_, held) = pending_request(&provider).await;
     let (interactive, _, _) = registry.get_run_interactive(run_id).await.unwrap();
     let (identity, sender) = interactive
         .resolve_input(run_id, execution_id, None)
-        .expect("TurnStarted identity must resolve to the running home inbox");
+        .expect("TurnStarted identity must resolve to the running session_chat inbox");
     assert_eq!(identity.run_id, run_id);
     assert_eq!(identity.stage_run_id, *execution_id);
     assert_eq!(
@@ -272,12 +305,12 @@ async fn announced_home_execution_resolves_input_and_shares_exact_controller_cla
     let legacy_stage_run_id = target.stage_run_id().expect("live debugger target");
     let (legacy_identity, _) = interactive
         .resolve_input(run_id, legacy_stage_run_id, None)
-        .expect("legacy descriptor must resolve to the same home inbox");
+        .expect("legacy descriptor must resolve to the same session_chat inbox");
     assert_eq!(legacy_identity, identity);
     // TurnStarted carries no nonce; obtain it from the live input registration.
     let nonce = sender
         .nonce()
-        .expect("running home inbox must have a nonce");
+        .expect("running session_chat inbox must have a nonce");
     assert_eq!(nonce, target.nonce());
 
     let mut exact = BufReader::new(UnixStream::connect(&path).await.unwrap());
@@ -288,7 +321,7 @@ async fn announced_home_execution_resolves_input_and_shares_exact_controller_cla
     )
     .await
     .unwrap();
-    let bound = home_frame(&mut exact).await;
+    let bound = session_chat_frame(&mut exact).await;
     assert_eq!(bound["type"], "input_bound", "{bound}");
     assert_eq!(bound["req_id"], "exact");
     assert_eq!(bound["id"], identity.run_id);
@@ -304,7 +337,7 @@ async fn announced_home_execution_resolves_input_and_shares_exact_controller_cla
     )
     .await
     .unwrap();
-    let busy = home_frame(&mut contender).await;
+    let busy = session_chat_frame(&mut contender).await;
     assert_eq!(busy["type"], "error", "{busy}");
     assert_eq!(busy["req_id"], "contender");
     assert!(busy.to_string().contains("controller_busy"), "{busy}");

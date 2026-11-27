@@ -608,19 +608,19 @@ mod tests {
     #[test]
     fn outer_usage_keeps_failed_attempts_and_excludes_tasks_and_other_runs() {
         let (_dir, store) = seed(json!({}));
-        let mut failed = record("home", "outer", "failed", 3);
+        let mut failed = record("session_chat", "outer", "failed", 3);
         failed.usage.agent_id.clear();
         failed.usage.completed = false;
         failed.usage.usage.turns = 0;
-        let mut completed = record("home", "outer", "completed", 7);
+        let mut completed = record("session_chat", "outer", "completed", 7);
         completed.usage.agent_id.clear();
-        let task = record("home", "task", "task", 100);
+        let task = record("session_chat", "task", "task", 100);
         let mut foreign = record("other", "outer", "foreign", 100);
         foreign.usage.agent_id.clear();
         for record in [failed, completed, task, foreign] {
             store.native_accounting(Some(&record)).unwrap();
         }
-        let usage = store.outer_conversational_usage("home").unwrap();
+        let usage = store.outer_conversational_usage("session_chat").unwrap();
         assert_eq!(usage.prompt_tokens, Some(10));
         assert_eq!(usage.turns, 1);
     }

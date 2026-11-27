@@ -8,8 +8,8 @@ pub mod client;
 pub mod commands;
 pub mod completion;
 pub mod editor;
-mod home_events;
-use home_events::{apply_home_event, apply_home_identity};
+mod session_chat_events;
+use session_chat_events::{apply_session_chat_event, apply_session_chat_identity};
 pub mod input_buffer;
 pub mod markdown;
 pub mod motif;
@@ -22,6 +22,12 @@ pub mod widgets;
 
 #[cfg(test)]
 mod entry_tests;
+#[cfg(test)]
+mod event_loop_tests;
+#[cfg(test)]
+mod identity_follow_tests;
+#[cfg(test)]
+mod identity_migration_tests;
 
 #[cfg(test)]
 pub(crate) mod test_support {
@@ -121,10 +127,12 @@ impl Attachment {
         self.task = None;
         self.generation = self.generation.wrapping_add(1);
         if let Some(target) = self.target.take() {
-            if target.is_home() && app.conversation_status(&target) == ConversationStatus::Paused {
+            if app.is_session_chat(&target)
+                && app.conversation_status(&target) == ConversationStatus::Paused
+            {
                 app.set_conversation_status(target.clone(), ConversationStatus::Running);
             }
-            if !target.is_home() {
+            if !app.is_session_chat(&target) {
                 app.conversations.set_execution(target, None);
             }
         }
@@ -133,20 +141,92 @@ impl Attachment {
 
     fn accepts(&self, frame: &AttachmentFrame) -> bool {
         self.generation == frame.generation
-            && (self.target.as_ref() == Some(&frame.target)
-                || matches!((&self.target, &frame.target),
-                    (Some(Target::StageExecution { run_id: pinned, .. }),
-                     Target::StageExecution { run_id, stage })
-                    if pinned == run_id && stage.is_empty() && self.execution.is_some()))
+            && self.target.as_ref() == Some(&frame.target)
             && (frame.value["_passive_watch"] == true
                 || self.execution.is_none()
                 || self.execution == frame.execution)
     }
 }
 
-/// Install the daemon's reserved home identity before any watch rows arrive.
-async fn install_home_session(app: &mut App, client: &client::DaemonClient) {
-    app.home_run_id = Some(client.home_run_id().await);
+/// Select the daemon's reserved session chat before any watch rows arrive.
+async fn install_session_chat(app: &mut App, client: &client::DaemonClient) {
+    app.set_chat_run_id(client.chat_run_id().await);
+    app.selected_target = app.session_chat_target();
+}
+
+fn reconcile_session_chat_follow(app: &mut App, attachment: &mut Attachment, previous: &Target) {
+    if app.session_chat_target() != *previous
+        && attachment
+            .target
+            .as_ref()
+            .is_some_and(|target| app.is_session_chat(target))
+    {
+        attachment.invalidate(app);
+    }
+}
+
+fn reset_eligibility(app: &App) -> Result<(), &'static str> {
+    if !app.is_session_chat(&app.selected_target) {
+        Err("select the session chat in Watch before resetting it")
+    } else if app.session_recreating {
+        Err("session reset already in progress")
+    } else {
+        Ok(())
+    }
+}
+
+fn initiate_session_reset<B: ratatui::backend::Backend>(
+    app: &mut App,
+    live: &mut LiveArea<B>,
+    attachment: &mut Attachment,
+) -> bool {
+    if let Err(reason) = reset_eligibility(app) {
+        live.push_transcript_line(reason.into());
+        return false;
+    }
+    attachment.invalidate(app);
+    live.clear_current_turn();
+    live.clear_transcript();
+    for line in motif::banner() {
+        live.push_styled_line(line);
+    }
+    app.set_conversation_status(app.session_chat_target(), ConversationStatus::Idle);
+    app.conversations.retire_session_chat_session();
+    app.active_request = false;
+    app.session_recreating = true;
+    app.clear_input();
+    app.input_cursor = 0;
+    app.clear_completion();
+    app.active_skills.clear();
+    live.reset_input_scroll();
+    true
+}
+
+fn install_reset_reply<B: ratatui::backend::Backend>(
+    app: &mut App,
+    live: &mut LiveArea<B>,
+    new_chat_id: String,
+    result: Result<(), String>,
+) -> bool {
+    app.session_recreating = false;
+    let previous = app.session_chat_target();
+    match result {
+        Ok(()) => {
+            let selected = app.selected_target == previous;
+            app.set_chat_run_id(new_chat_id);
+            if selected {
+                live.select_conversation(app, app.session_chat_target());
+                app.chat_model = None;
+            }
+            true
+        }
+        Err(error) => {
+            live.with_target_transcript(&previous, |transcript, _| {
+                transcript.push_transcript_line(format!("error: {error}"));
+            });
+            false
+        }
+    }
 }
 
 fn route_submission<B: ratatui::backend::Backend>(
@@ -164,7 +244,7 @@ fn route_submission<B: ratatui::backend::Backend>(
         return true;
     }
     match app.conversations.submit(&app.selected_target, &app.input) {
-        Submission::HomePrompt => false,
+        Submission::SessionChatPrompt => false,
         Submission::Blocked(message) => {
             live.push_transcript_line(message.to_string());
             true
@@ -200,8 +280,10 @@ fn selected_control<B: ratatui::backend::Backend>(
     live: &mut LiveArea<B>,
     attachment: &mut Attachment,
 ) -> bool {
-    // Unselected home leaves /quit to dispatch (local TUI exit).
-    if app.selected_target.is_home() && attachment.target != Some(Target::Home) {
+    // Unselected session chat leaves /quit to dispatch (local TUI exit).
+    if app.is_session_chat(&app.selected_target)
+        && attachment.target.as_ref() != Some(&app.selected_target)
+    {
         return false;
     }
     let input = app.input.text().trim();
@@ -216,7 +298,6 @@ fn selected_control<B: ratatui::backend::Backend>(
         return false;
     }
     let op = match command {
-        "/exit" if reason.is_empty() => "detach",
         "/pause" if reason.is_empty() => "pause",
         "/step" | "/continue" if reason.is_empty() => "step",
         "/resume-execution" if reason.is_empty() => "resume",
@@ -228,10 +309,7 @@ fn selected_control<B: ratatui::backend::Backend>(
     };
     let reason = reason.to_owned();
     app.clear_input();
-    if op == "detach" {
-        attachment.invalidate(app);
-        live.select_conversation(app, Target::Home);
-    } else if op == "bail" && reason.is_empty() {
+    if op == "bail" && reason.is_empty() {
         live.push_transcript_line("usage: /bail <reason>".to_string());
     } else if app.conversation_status(&app.selected_target) == ConversationStatus::ReadOnly {
         live.push_transcript_line("selected conversation is read-only".to_string());
@@ -275,101 +353,12 @@ fn watch_enter<B: ratatui::backend::Backend>(
     client: &Arc<client::DaemonClient>,
     attachment: &mut Attachment,
     tx: &mpsc::UnboundedSender<AttachmentFrame>,
-    last_stage: &mut Option<Target>,
     follow: &mut Option<tokio::task::JoinHandle<()>>,
 ) {
     if let Some(target) = app.watch_target() {
         close_watch_follow(app, live, follow);
-        select_passive_watch(app, live, client, target, attachment, tx, last_stage);
+        select_passive_watch(app, live, client, target, attachment, tx);
     }
-}
-
-#[allow(clippy::too_many_arguments)]
-fn attach_stage_entry<B: ratatui::backend::Backend>(
-    app: &mut App,
-    live: &mut LiveArea<B>,
-    client: &Arc<client::DaemonClient>,
-    run_id: String,
-    stage: Option<String>,
-    attachment: &mut Attachment,
-    tx: &mpsc::UnboundedSender<AttachmentFrame>,
-    last_stage: &mut Option<Target>,
-) {
-    let stage_parts: Vec<_> = stage.as_deref().unwrap_or("").split_whitespace().collect();
-    let exact = if let [name, stage_run_id] = stage_parts.as_slice() {
-        Some(Target::Invocation {
-            run_id: run_id.clone(),
-            stage: (*name).into(),
-            stage_run_id: (*stage_run_id).into(),
-        })
-    } else if let [name] = stage_parts.as_slice() {
-        let mut matches = app
-            .live_executions
-            .values()
-            .filter(|e| e.run_id == run_id && (e.stage == *name || e.stage_run_id == *name));
-        let first = matches.next().map(|e| e.target());
-        if matches.next().is_none() {
-            first
-        } else {
-            None
-        }
-    } else {
-        None
-    };
-    let target = if let Some(target) = exact {
-        target
-    } else if stage.is_none() && app.home_run_id.as_deref() == Some(run_id.as_str()) {
-        Target::Home
-    } else {
-        Target::StageExecution {
-            run_id,
-            stage: stage.unwrap_or_default(),
-        }
-    };
-    let view_only = matches!(target, Target::StageExecution { .. });
-    let unavailable = matches!(&target, Target::Invocation { .. })
-        && !app.live_executions.values().any(|e| e.target() == target);
-    select_passive_watch(app, live, client, target, attachment, tx, last_stage);
-    if unavailable {
-        live.push_transcript_line(
-            "requested invocation is unavailable — retained output is view-only".into(),
-        );
-    }
-    if view_only {
-        live.push_transcript_line("view-only selection — use /attach <run> <stage> <stage_run_id> to select an exact agent execution".into());
-    }
-}
-
-#[allow(clippy::too_many_arguments)]
-fn debug_entry<B: ratatui::backend::Backend>(
-    app: &mut App,
-    live: &mut LiveArea<B>,
-    client: &Arc<client::DaemonClient>,
-    id: String,
-    attachment: &mut Attachment,
-    tx: &mpsc::UnboundedSender<AttachmentFrame>,
-    last_stage: &mut Option<Target>,
-    follow: &mut Option<tokio::task::JoinHandle<()>>,
-) {
-    let parts: Vec<_> = id.split_whitespace().collect();
-    let mut matches = app
-        .live_executions
-        .values()
-        .filter(|e| match parts.as_slice() {
-            [stage_run_id] => e.stage_run_id == *stage_run_id,
-            [run_id, stage_run_id] => e.run_id == *run_id && e.stage_run_id == *stage_run_id,
-            _ => false,
-        });
-    let target = matches.next().map(|e| e.target());
-    if target.is_none() || matches.next().is_some() {
-        live.push_transcript_line(
-            "select a live invocation: /debug <run> <stage_run_id>; find its stage_run_id in /watch (Enter selects the concrete row)".into(),
-        );
-        return;
-    }
-    close_watch_follow(app, live, follow);
-    let target = target.unwrap();
-    select_passive_watch(app, live, client, target, attachment, tx, last_stage);
 }
 
 /// Only lifecycle-confirmed agent invocations grant an input address.
@@ -406,24 +395,19 @@ fn select_passive_watch<B: ratatui::backend::Backend>(
     target: Target,
     attachment: &mut Attachment,
     tx: &mpsc::UnboundedSender<AttachmentFrame>,
-    last_stage: &mut Option<Target>,
 ) {
     attachment.invalidate(app);
     attachment.client = Some(Arc::clone(client));
     attachment.receipts = Some(tx.clone());
-    if !target.is_home() {
+    if !app.is_session_chat(&target) {
         pin_exact_execution(app, &target, attachment);
     }
     app.screen = Screen::Chat;
     live.exit_screen_view();
     live.select_conversation(app, target.clone());
     let (run_id, stage, stage_run_id) = match &target {
-        Target::Home => return,
-        Target::StageExecution { run_id, stage } => (
-            run_id.clone(),
-            (!stage.is_empty()).then(|| stage.clone()),
-            None,
-        ),
+        Target::Run { .. } if app.is_session_chat(&target) => return,
+        Target::Run { run_id } => (run_id.clone(), None, None),
         Target::Invocation {
             run_id,
             stage,
@@ -434,7 +418,6 @@ fn select_passive_watch<B: ratatui::backend::Backend>(
             Some(stage_run_id.clone()),
         ),
     };
-    *last_stage = Some(target.clone());
     if attachment.execution.is_none() {
         app.set_conversation_status(target.clone(), ConversationStatus::ReadOnly);
         app.conversations.set_execution(target.clone(), None);
@@ -499,13 +482,11 @@ fn watch_target_matches(selector: &Target, event: &Target) -> bool {
     match (selector, event) {
         (Target::Invocation { .. }, _) => selector == event,
         (
-            Target::StageExecution { run_id, stage },
+            Target::Run { run_id },
             Target::Invocation {
-                run_id: id,
-                stage: name,
-                ..
+                run_id: event_run, ..
             },
-        ) => run_id == id && (stage.is_empty() || stage == name),
+        ) => run_id == event_run,
         _ => false,
     }
 }
@@ -1017,8 +998,8 @@ fn watch_key_action(app: &App) -> WatchKeyAction {
 /// press. `/quit` and Ctrl+D on empty input remain the explicit exits.
 const PENDING_QUIT_WINDOW: Duration = Duration::from_secs(1);
 
-fn selected_home_turn_active(app: &App) -> bool {
-    app.selected_target.is_home() && app.conversations.home_turn().is_some()
+fn selected_session_chat_turn_active(app: &App) -> bool {
+    app.is_session_chat(&app.selected_target) && app.conversations.session_chat_turn().is_some()
 }
 
 /// Classify a Ctrl+C press at `now` against the pending-quit state.
@@ -1043,7 +1024,7 @@ enum InterruptAction {
     NoOp,
 }
 
-/// Count an ESC/Ctrl+C press for the selected home turn owner.
+/// Count an ESC/Ctrl+C press for the selected session chat turn owner.
 ///
 /// The first press requests a soft interrupt, the second press within
 /// [`PENDING_QUIT_WINDOW`] requests a hard cancel, and any further presses in
@@ -1064,22 +1045,22 @@ fn interrupt_press(count: &mut u8, window: &mut Option<Instant>, now: Instant) -
     }
 }
 
-/// Escalation belongs to the home conversation and only lasts one gesture.
+/// Escalation belongs to the session chat conversation and only lasts one gesture.
 #[derive(Default)]
-struct HomeInterrupt {
+struct SessionChatInterrupt {
     count: u8,
     window: Option<Instant>,
     ended_turn: Option<String>,
 }
 
-impl HomeInterrupt {
+impl SessionChatInterrupt {
     fn in_window(&self, now: Instant) -> bool {
         self.window
             .is_some_and(|first| now.duration_since(first) <= PENDING_QUIT_WINDOW)
     }
 
-    fn disarm_if_stale(&mut self, target: &Target, now: Instant) {
-        if !target.is_home() || !self.in_window(now) {
+    fn disarm_if_stale(&mut self, app: &App, now: Instant) {
+        if !app.is_session_chat(&app.selected_target) || !self.in_window(now) {
             *self = Self::default();
         }
     }
@@ -1092,9 +1073,9 @@ impl HomeInterrupt {
 /// Exit any non-chat screen and tear down its session-owned aux sockets.
 ///
 /// Returns `true` when a full-screen view was active and is now dropped.
-fn exit_current_screen(
+fn exit_current_screen<B: ratatui::backend::Backend>(
     app: &mut App,
-    live_area: &mut LiveArea,
+    live_area: &mut LiveArea<B>,
     watch_follow_handle: &mut Option<tokio::task::JoinHandle<()>>,
 ) -> bool {
     if !app.exit_screen() {
@@ -1112,9 +1093,9 @@ fn exit_current_screen(
 ///
 /// Returns `true` when a layer was consumed. This runs before active-turn and
 /// idle routing for both ESC and Ctrl+C.
-fn dismiss_non_chat_layer(
+fn dismiss_non_chat_layer<B: ratatui::backend::Backend>(
     app: &mut App,
-    live_area: &mut LiveArea,
+    live_area: &mut LiveArea<B>,
     watch_follow_handle: &mut Option<tokio::task::JoinHandle<()>>,
 ) -> bool {
     if app.screen == Screen::Runs && app.watch_following.is_some() {
@@ -1138,37 +1119,41 @@ fn send_cancel_chat(client: &Arc<client::DaemonClient>, active_turn: Option<&str
     });
 }
 
-/// The live flag mirrors the selected target; home also has a parked flag
+/// The live flag mirrors the selected target; session chat also has a parked flag
 /// that must be retired even if its terminal event arrives off screen.
-fn finish_home_request<B: ratatui::backend::Backend>(app: &mut App, live_area: &mut LiveArea<B>) {
-    app.set_conversation_status(Target::Home, ConversationStatus::Idle);
-    live_area.set_target_active_request(&Target::Home, false);
-    if app.selected_target.is_home() {
+fn finish_session_chat_request<B: ratatui::backend::Backend>(
+    app: &mut App,
+    live_area: &mut LiveArea<B>,
+) {
+    let target = app.session_chat_target();
+    app.set_conversation_status(target.clone(), ConversationStatus::Idle);
+    live_area.set_target_active_request(&target, false);
+    if app.is_session_chat(&app.selected_target) {
         app.active_request = false;
     }
-    app.conversations.retire_home_turn();
+    app.conversations.retire_session_chat_turn();
 }
 
 /// Retire the interrupted turn without dismissing its addressed draft.
 fn clear_active_turn_ui<B: ratatui::backend::Backend>(app: &mut App, live_area: &mut LiveArea<B>) {
     live_area.clear_current_turn();
-    finish_home_request(app, live_area);
+    finish_session_chat_request(app, live_area);
 }
 
 /// Request a soft interrupt for the active turn without tearing down the UI.
 fn soft_interrupt_active_turn(client: &Arc<client::DaemonClient>, app: &App) {
-    send_cancel_chat(client, app.conversations.home_turn(), "soft");
+    send_cancel_chat(client, app.conversations.session_chat_turn(), "soft");
 }
 
 /// Hard-cancel the active turn and invalidate its pending events.
-fn hard_cancel_active_turn(
+fn hard_cancel_active_turn<B: ratatui::backend::Backend>(
     app: &mut App,
-    live_area: &mut LiveArea,
+    live_area: &mut LiveArea<B>,
     turn_gen: &mut u64,
     client: &Arc<client::DaemonClient>,
 ) {
     *turn_gen += 1;
-    send_cancel_chat(client, app.conversations.home_turn(), "hard");
+    send_cancel_chat(client, app.conversations.session_chat_turn(), "hard");
     clear_active_turn_ui(app, live_area);
 }
 
@@ -1181,9 +1166,9 @@ fn hard_cancel_active_turn(
 /// which case the caller should `continue` the event loop immediately; the
 /// clear/cancel path returns `false` and falls through, exactly as the
 /// original Esc arm did.
-fn handle_esc_reset(
+fn handle_esc_reset<B: ratatui::backend::Backend>(
     app: &mut App,
-    live_area: &mut LiveArea,
+    live_area: &mut LiveArea<B>,
     watch_follow_handle: &mut Option<tokio::task::JoinHandle<()>>,
 ) -> bool {
     // Note: Esc only clears the ephemeral tool slot when it actually cancels
@@ -1254,7 +1239,7 @@ fn build_chat_request(
 ///
 /// This is the shared tail of the Enter and `Ctrl+G`-editor paths. Caller
 /// is responsible for taking the input, recording history, and stopping any
-/// log follow first. Routing has already validated the Home address and session.
+/// log follow first. Routing has already validated the session chat address and session.
 #[allow(clippy::too_many_arguments)]
 fn send_chat_input<B: ratatui::backend::Backend>(
     live_area: &mut LiveArea<B>,
@@ -1276,8 +1261,8 @@ fn send_chat_input<B: ratatui::backend::Backend>(
     app.active_request = true;
     *turn_gen += 1;
     let turn_id = turn_gen.to_string();
-    app.set_conversation_status(Target::Home, ConversationStatus::Running);
-    app.conversations.begin_home_turn(turn_id.clone());
+    app.set_conversation_status(app.session_chat_target(), ConversationStatus::Running);
+    app.conversations.begin_session_chat_turn(turn_id.clone());
     let client_for_chat = Arc::clone(client);
     let chat_tx = client_for_chat.chat_sender();
     // The operator's project root, resolved the same way the info bar does.
@@ -1686,7 +1671,131 @@ fn save_history(history: &[String]) {
     }
 }
 
+fn spawn_terminal_reader(reader: ReaderChannels, ct_tx: mpsc::UnboundedSender<Event>) {
+    let ReaderChannels {
+        mut suspend_rx,
+        mut resume_rx,
+        parked,
+        dead,
+    } = reader;
+    tokio::spawn(async move {
+        loop {
+            if suspend_rx.try_recv().is_ok() {
+                parked.notify_one();
+                if resume_rx.recv().await.is_none() {
+                    break;
+                }
+                continue;
+            }
+            match crossterm::event::poll(Duration::from_millis(20)) {
+                Ok(true) => match crossterm::event::read() {
+                    Ok(ev) => {
+                        if ct_tx.send(ev).is_err() {
+                            break;
+                        }
+                    }
+                    Err(_) => break,
+                },
+                Ok(false) => tokio::time::sleep(Duration::from_millis(10)).await,
+                Err(_) => break,
+            }
+        }
+        dead.notify_one();
+    });
+}
+
+struct LoopIo {
+    client: Arc<client::DaemonClient>,
+    event_rx: mpsc::UnboundedReceiver<gremlins_magic_bus::EventKind>,
+    chat_rx: mpsc::UnboundedReceiver<client::ChatEvent>,
+    raw_rx: mpsc::UnboundedReceiver<serde_json::Value>,
+    ct_rx: mpsc::UnboundedReceiver<Event>,
+    suspend_handle: SuspendHandle,
+    #[cfg(test)]
+    observe: Option<mpsc::UnboundedSender<LoopSnapshot>>,
+    #[cfg(test)]
+    watch_selection_override: mpsc::UnboundedReceiver<String>,
+}
+
+#[cfg(test)]
+#[derive(Clone, Debug)]
+struct LoopSnapshot {
+    selected_target: Target,
+    attachment_generation: u64,
+    attachment_target: Option<Target>,
+    screen: Screen,
+    input: String,
+    watch_selection: Option<String>,
+    watch_following: Option<String>,
+    watch_follow_error: Option<String>,
+    watch_ids: Vec<String>,
+    chat_run_id: Option<String>,
+    active_request: bool,
+    session_recreating: bool,
+    reset_rejection: Option<&'static str>,
+    session_turn: Option<String>,
+    session_execution: Option<protocol::Execution>,
+    session_transcript: String,
+    session_response: String,
+    old_session_transcript: String,
+    selected_transcript: String,
+    session_has_turn: bool,
+    width: u16,
+}
+
 async fn run_app(live_area: &mut LiveArea) -> io::Result<()> {
+    let (client, event_rx, chat_rx, raw_rx) = client::connect()
+        .await
+        .map_err(|e| io::Error::new(io::ErrorKind::NotConnected, e))?;
+    let (suspend_handle, reader) = SuspendHandle::new();
+    let (ct_tx, ct_rx) = mpsc::unbounded_channel::<Event>();
+    spawn_terminal_reader(reader, ct_tx);
+    run_app_loop(
+        live_area,
+        LoopIo {
+            client: Arc::new(client),
+            event_rx,
+            chat_rx,
+            raw_rx,
+            ct_rx,
+            suspend_handle,
+            #[cfg(test)]
+            observe: None,
+            #[cfg(test)]
+            watch_selection_override: mpsc::unbounded_channel().1,
+        },
+        LiveArea::resize,
+    )
+    .await
+}
+
+#[cfg(test)]
+async fn run_app_with_io<B: ratatui::backend::Backend>(
+    live_area: &mut LiveArea<B>,
+    io: LoopIo,
+) -> io::Result<()> {
+    run_app_loop(live_area, io, |_, _, _| Ok(())).await
+}
+
+async fn run_app_loop<B: ratatui::backend::Backend>(
+    live_area: &mut LiveArea<B>,
+    io: LoopIo,
+    resize: fn(&mut LiveArea<B>, u16, u16) -> io::Result<()>,
+) -> io::Result<()> {
+    let LoopIo {
+        client,
+        mut event_rx,
+        mut chat_rx,
+        mut raw_rx,
+        mut ct_rx,
+        suspend_handle,
+        #[cfg(test)]
+        observe,
+        #[cfg(test)]
+        mut watch_selection_override,
+    } = io;
+    #[cfg(test)]
+    let mut observed_width = live_area.size().0;
     let mut app = App::new();
 
     // Seed the in-memory history from the persisted file before the event
@@ -1694,14 +1803,7 @@ async fn run_app(live_area: &mut LiveArea) -> io::Result<()> {
     app.input_history = load_history();
 
     // ── Connect to the daemon socket ──────────────────────────────
-    let (client, mut event_rx, mut chat_rx, mut raw_rx) = match client::connect().await {
-        Ok(c) => c,
-        Err(e) => {
-            return Err(io::Error::new(io::ErrorKind::NotConnected, e));
-        }
-    };
-    let client = Arc::new(client);
-    install_home_session(&mut app, &client).await;
+    install_session_chat(&mut app, &client).await;
 
     // ── Initial state snapshot ────────────────────────────────────
     match client
@@ -1727,50 +1829,6 @@ async fn run_app(live_area: &mut LiveArea) -> io::Result<()> {
     match query_chat_model(&client, session_generation).await {
         (_, Ok(model)) => app.chat_model = model,
         (_, Err(e)) => log::debug!("initial chat_model query failed: {e}"),
-    }
-
-    // ── Crossterm event channel (polling task → async) ─────────
-    // Uses poll + sleep instead of blocking read so that the event
-    // loop is never starved by a background reader holding the stdin lock.
-    // The reader can be suspended (parked) while an external editor owns
-    // the terminal, so it never races the editor for keystrokes.
-    let (suspend_handle, reader) = SuspendHandle::new();
-    let (ct_tx, mut ct_rx) = mpsc::unbounded_channel::<Event>();
-    {
-        let ReaderChannels {
-            mut suspend_rx,
-            mut resume_rx,
-            parked,
-            dead,
-        } = reader;
-        tokio::spawn(async move {
-            loop {
-                // Park on a suspend request: acknowledge, then wait for the
-                // resume signal before polling again.
-                if suspend_rx.try_recv().is_ok() {
-                    parked.notify_one();
-                    if resume_rx.recv().await.is_none() {
-                        break;
-                    }
-                    continue;
-                }
-                match crossterm::event::poll(Duration::from_millis(20)) {
-                    Ok(true) => match crossterm::event::read() {
-                        Ok(ev) => {
-                            if ct_tx.send(ev).is_err() {
-                                break;
-                            }
-                        }
-                        Err(_) => break,
-                    },
-                    Ok(false) => {
-                        tokio::time::sleep(Duration::from_millis(10)).await;
-                    }
-                    Err(_) => break,
-                }
-            }
-            dead.notify_one();
-        });
     }
 
     // ── Channel for socket-op results ─────────────────────────────
@@ -1802,7 +1860,6 @@ async fn run_app(live_area: &mut LiveArea) -> io::Result<()> {
     let mut turn_gen: u64 = 0;
     // The turn id of the currently active turn, if any.
     // A navigation shortcut must not replace the very draft being parked.
-    let mut last_stage: Option<Target> = None;
     let mut attachment = Attachment::default();
     let (attach_tx, mut attach_rx) = mpsc::unbounded_channel::<AttachmentFrame>();
     let (delivery_tx, mut delivery_rx) = mpsc::unbounded_channel::<(u64, Result<(), String>)>();
@@ -1816,33 +1873,68 @@ async fn run_app(live_area: &mut LiveArea) -> io::Result<()> {
     // ── Ctrl+C pending-quit state (event-loop-local input routing) ──
     let mut pending_quit: Option<Instant> = None;
     // ── Active-turn interrupt state (soft -> hard -> no-op) ──
-    let mut interrupt = HomeInterrupt::default();
+    let mut interrupt = SessionChatInterrupt::default();
 
     // ── Event loop ────────────────────────────────────────────────
     loop {
         let (cols, _rows) = live_area.size();
         app.width = cols;
-        interrupt.disarm_if_stale(&app.selected_target, Instant::now());
+        #[cfg(test)]
+        while let Ok(selection) = watch_selection_override.try_recv() {
+            app.watch_selection = Some(selection);
+        }
+        interrupt.disarm_if_stale(&app, Instant::now());
         live_area.compose(&app)?;
+        #[cfg(test)]
+        if let Some(observe) = &observe {
+            let session_target = app.session_chat_target();
+            let mut session_transcript = String::new();
+            let mut session_response = String::new();
+            let mut old_session_transcript = String::new();
+            let mut selected_transcript = String::new();
+            live_area.with_target_transcript(&session_target, |t, _| {
+                session_transcript = t.snapshot_text();
+                session_response = t.response_accumulator().to_owned();
+            });
+            live_area.with_target_transcript(
+                &Target::Run {
+                    run_id: "session_chat".into(),
+                },
+                |t, _| old_session_transcript = t.snapshot_text(),
+            );
+            live_area.with_target_transcript(&app.selected_target, |t, _| {
+                selected_transcript = t.snapshot_text()
+            });
+            let _ = observe.send(LoopSnapshot {
+                selected_target: app.selected_target.clone(),
+                attachment_generation: attachment.generation,
+                attachment_target: attachment.target.clone(),
+                screen: app.screen.clone(),
+                input: app.input.text().to_owned(),
+                watch_selection: app.watch_selection.clone(),
+                watch_following: app.watch_following.clone(),
+                watch_follow_error: app.watch_follow_error.clone(),
+                watch_ids: app.watch_ids(),
+                chat_run_id: app.chat_run_id.clone(),
+                active_request: app.active_request,
+                session_recreating: app.session_recreating,
+                reset_rejection: reset_eligibility(&app).err(),
+                session_turn: app.conversations.session_chat_turn().map(str::to_owned),
+                session_execution: app.conversations.snapshot_execution(&session_target),
+                session_transcript,
+                session_response,
+                old_session_transcript,
+                selected_transcript,
+                session_has_turn: live_area.target_has_current_turn(&session_target),
+                width: observed_width,
+            });
+        }
 
         tokio::select! {
             // ── Crossterm events ──────────────────────────────
             Some(ev) = ct_rx.recv() => {
                 match ev {
                     Event::Key(key) if key.kind == KeyEventKind::Press => match key.code {
-                        KeyCode::Char('t')
-                            if key.modifiers.contains(crossterm::event::KeyModifiers::CONTROL)
-                                && app.screen.is_chat() && app.history_search.is_none() =>
-                        {
-                            let next = if app.selected_target.is_home() {
-                                last_stage.clone()
-                            } else {
-                                Some(Target::Home)
-                            };
-                            if let Some(target) = next {
-                                select_passive_watch(&mut app, live_area, &client, target, &mut attachment, &attach_tx, &mut last_stage);
-                            }
-                        }
                         KeyCode::Char('r')
                             if key.modifiers.contains(crossterm::event::KeyModifiers::CONTROL) =>
                         {
@@ -1881,7 +1973,7 @@ async fn run_app(live_area: &mut LiveArea) -> io::Result<()> {
 
                             let now = Instant::now();
 
-                            if selected_home_turn_active(&app) {
+                            if selected_session_chat_turn_active(&app) {
                                 // Non-chat layering runs before the interrupt
                                 // routing: on the Runs screen, Ctrl+C closes
                                 // the pane / exits to chat rather than
@@ -1910,7 +2002,7 @@ async fn run_app(live_area: &mut LiveArea) -> io::Result<()> {
                                 continue;
                             }
 
-                            // After a hard cancel retired the home turn,
+                            // After a hard cancel retired the session chat turn,
                             // the interrupt window may still be open.  Treat
                             // any press inside it as a no-op so Ctrl+C never
                             // arms the quit path while the turn is being
@@ -2015,8 +2107,8 @@ async fn run_app(live_area: &mut LiveArea) -> io::Result<()> {
                             if !app.screen.is_chat() {
                                 continue;
                             }
-                            // Home's turn must not gate another conversation's correction.
-                            if selected_home_turn_active(&app) {
+                            // Session chat's turn must not gate another conversation's correction.
+                            if selected_session_chat_turn_active(&app) {
                                 live_area.push_transcript_line(
                                     "a request is already in progress — wait for the response"
                                         .to_string(),
@@ -2113,13 +2205,13 @@ async fn run_app(live_area: &mut LiveArea) -> io::Result<()> {
 
                             // Dismiss the current conversation's input, regardless of where it was typed.
                             if !app.input.is_empty()
-                                && (!app.selected_target.is_home() || selected_home_turn_active(&app))
+                                && (!app.is_session_chat(&app.selected_target) || selected_session_chat_turn_active(&app))
                             {
                                 live_area.clear_target_input(&app.selected_target.clone(), &mut app);
                                 continue;
                             }
                             // Idle ESC is inert — the input bar is left intact.
-                            if selected_home_turn_active(&app) {
+                            if selected_session_chat_turn_active(&app) {
                                 match interrupt.press(Instant::now()) {
                                     InterruptAction::SendSoft => {
                                         soft_interrupt_active_turn(&client, &app);
@@ -2260,7 +2352,7 @@ async fn run_app(live_area: &mut LiveArea) -> io::Result<()> {
 
                             // Runs screen: Enter opens the selected gremlin.
                             if app.screen == Screen::Runs {
-                                watch_enter(&mut app, live_area, &client, &mut attachment, &attach_tx, &mut last_stage, &mut watch_follow_handle);
+                                watch_enter(&mut app, live_area, &client, &mut attachment, &attach_tx, &mut watch_follow_handle);
                                 continue;
                             }
 
@@ -2274,11 +2366,23 @@ async fn run_app(live_area: &mut LiveArea) -> io::Result<()> {
                                 continue;
                             }
                             let command = dispatch(app.input.text());
+                            let reset_input = if matches!(command, Some(CommandResult::RestartChat)) {
+                                let cursor = app.input_cursor;
+                                let draft = app.take_input();
+                                if !initiate_session_reset(&mut app, live_area, &mut attachment) {
+                                    app.input = draft;
+                                    app.input_cursor = cursor;
+                                    continue;
+                                }
+                                Some(draft)
+                            } else {
+                                None
+                            };
                             if command.is_none() && route_submission(&mut app, live_area, &client, &attachment, &delivery_tx) {
                                 continue;
                             }
 
-                            let input_buf: InputBuffer = app.take_input();
+                            let input_buf: InputBuffer = reset_input.unwrap_or_else(|| app.take_input());
                             let display_input = input_buf.text().to_string();
                             let input = input_buf.resolve();
                             app.input_cursor = 0;
@@ -2313,9 +2417,6 @@ async fn run_app(live_area: &mut LiveArea) -> io::Result<()> {
                                         status_generation = status_generation.wrapping_add(1);
                                         fetch_run_statuses(&client, &status_tx, status_generation);
                                     }
-                                    CommandResult::Debug(id) => {
-                                        debug_entry(&mut app, live_area, &client, id, &mut attachment, &attach_tx, &mut last_stage, &mut watch_follow_handle);
-                                    }
                                     CommandResult::Lines(lines) => {
                                         let mut block = Vec::with_capacity(lines.len() + 1);
                                         block.push(format!("> {display_input}"));
@@ -2323,25 +2424,6 @@ async fn run_app(live_area: &mut LiveArea) -> io::Result<()> {
                                         live_area.push_transcript_block(block);
                                     }
                                     CommandResult::RestartChat => {
-                                        if app.session_recreating {
-                                            live_area.push_transcript_line(
-                                                "session reset already in progress".to_string(),
-                                            );
-                                            continue;
-                                        }
-                                        attachment.invalidate(&mut app);
-                                        live_area.select_conversation(&mut app, Target::Home);
-                                        // Clear current turn.
-                                        live_area.clear_current_turn();
-                                        // Clear the transcript/scrollback so the
-                                        // UI no longer shows the old conversation
-                                        // after the daemon has discarded it. The
-                                        // transcript also clears its embedded
-                                        // reasoning and tool slots.
-                                        live_area.clear_transcript();
-                                        for line in motif::banner() {
-                                            live_area.push_styled_line(line);
-                                        }
                                         // `/clear` closes the current session and
                                         // opens a fresh one. The daemon cancels
                                         // any in-flight turn and drops the old
@@ -2350,11 +2432,7 @@ async fn run_app(live_area: &mut LiveArea) -> io::Result<()> {
                                         // to the dying session first, before the
                                         // new session is installed.
                                         turn_gen += 1;
-                                        interrupt = HomeInterrupt::default();
-                                        app.home_run_id = None;
-                                        app.set_conversation_status(Target::Home, ConversationStatus::Idle);
-                                        app.conversations.retire_home_session();
-                                        app.active_request = false;
+                                        interrupt = SessionChatInterrupt::default();
                                         if let Some(handle) = log_follow_handle.take() {
                                             handle.abort();
                                         }
@@ -2365,28 +2443,15 @@ async fn run_app(live_area: &mut LiveArea) -> io::Result<()> {
                                         // session socket is installed. Recreate
                                         // requests are also serialized inside
                                         // `DaemonClient::recreate_session`.
-                                        app.session_recreating = true;
                                         let c = Arc::clone(&client);
                                         let tx = reset_tx.clone();
                                         tokio::spawn(async move {
                                             let result = c.recreate_session().await;
                                             let _ = tx.send(result);
                                         });
-                                        app.clear_input();
-                                        app.input_cursor = 0;
-                                        app.clear_completion();
-                                        app.active_skills.clear();
-                                        live_area.reset_input_scroll();
                                     }
                                     CommandResult::Quit => {
                                         break;
-                                    }
-                                    CommandResult::AttachHome => {
-                                        attachment.invalidate(&mut app);
-                                        live_area.select_conversation(&mut app, Target::Home);
-                                    }
-                                    CommandResult::AttachStage { run_id, stage } => {
-                                        attach_stage_entry(&mut app, live_area, &client, run_id, stage, &mut attachment, &attach_tx, &mut last_stage);
                                     }
                                     CommandResult::ActivateSkill(name) => {
                                         // Discover skills to validate the name.
@@ -2475,7 +2540,7 @@ async fn run_app(live_area: &mut LiveArea) -> io::Result<()> {
                                 // the request is discarded atomically before it
                                 // can execute in the new conversation.
                                 let session_generation = client.session_generation().await;
-                                interrupt = HomeInterrupt::default();
+                                interrupt = SessionChatInterrupt::default();
                                 send_chat_input(
                                     live_area,
                                     &mut app,
@@ -2701,7 +2766,9 @@ async fn run_app(live_area: &mut LiveArea) -> io::Result<()> {
                         _ => {}
                     },
                     Event::Resize(cols, rows) => {
-                        live_area.resize(cols, rows)?;
+                        resize(live_area, cols, rows)?;
+                        #[cfg(test)]
+                        { observed_width = cols; }
                     }
                     _ => {}
                 }
@@ -2804,7 +2871,9 @@ async fn run_app(live_area: &mut LiveArea) -> io::Result<()> {
 
             // ── Raw lines (non-event JSON from the main socket) ─
             Some(raw) = raw_rx.recv() => {
-                apply_home_identity(&mut app, &raw, client.session_generation().await);
+                let previous_session = app.session_chat_target();
+                apply_session_chat_identity(&mut app, live_area, &raw, client.session_generation().await);
+                reconcile_session_chat_follow(&mut app, &mut attachment, &previous_session);
                 app.observe_live_pipeline_frame(&raw);
                 if raw.get("type").and_then(|v| v.as_str()) == Some("event_lagged") {
                     // Resync lifecycle status from the daemon so terminal
@@ -2858,13 +2927,8 @@ async fn run_app(live_area: &mut LiveArea) -> io::Result<()> {
 
             // ── Session recreation completion ─────────────
             Some(result) = reset_rx.recv() => {
-                app.session_recreating = false;
-                match result {
-                    Ok(()) => {
-                        install_home_session(&mut app, &client).await;
-                        // The old chat gremlin died with the old session; the
-                        // daemon reports `model: null` until the next prompt.
-                        app.chat_model = None;
+                let new_chat_id = client.chat_run_id().await;
+                if install_reset_reply(&mut app, live_area, new_chat_id, result) {
                         let c = Arc::clone(&client);
                         let tx = model_tx.clone();
                         tokio::spawn(async move {
@@ -2872,10 +2936,6 @@ async fn run_app(live_area: &mut LiveArea) -> io::Result<()> {
                             let result = query_chat_model(&c, session_generation).await;
                             let _ = tx.send(result);
                         });
-                    }
-                    Err(e) => {
-                        live_area.push_transcript_line(format!("error: {e}"));
-                    }
                 }
             }
 
@@ -2890,7 +2950,13 @@ async fn run_app(live_area: &mut LiveArea) -> io::Result<()> {
                     continue;
                 }
                 match result {
-                    Ok(model) => app.chat_model = model,
+                    Ok(model) => {
+                        let target = app.session_chat_target();
+                        live_area.set_target_chat_model(&target, model.clone());
+                        if app.selected_target == target {
+                            app.chat_model = model;
+                        }
+                    },
                     Err(e) => log::debug!("chat_model query failed: {e}"),
                 }
             }
@@ -2951,7 +3017,7 @@ async fn run_app(live_area: &mut LiveArea) -> io::Result<()> {
 
             Some((id, result)) = delivery_rx.recv() => {
                 if let Some(receipt) = app.finish_delivery(id, result) {
-                    live_area.show_receipt(receipt);
+                    live_area.show_receipt(&app, receipt);
                 }
             }
 
@@ -2962,7 +3028,7 @@ async fn run_app(live_area: &mut LiveArea) -> io::Result<()> {
 
             // ── Chat events ────────────────────────────────
             Some((event, turn, execution)) = chat_rx.recv() => {
-                apply_home_event(&mut app, live_area, &mut interrupt, event, turn, execution)?;
+                apply_session_chat_event(&mut app, live_area, &mut interrupt, event, turn, execution)?;
             }
 
         }
@@ -3233,9 +3299,8 @@ mod attachment_tests {
     ) {
         let mut app = App::new();
         let mut live = LiveArea::with_backend(ratatui::backend::TestBackend::new(100, 40), 100, 40);
-        let target = Target::StageExecution {
+        let target = Target::Run {
             run_id: "run".into(),
-            stage: "review".into(),
         };
         live.select_conversation(&mut app, target.clone());
         app.conversations.set_execution(
@@ -3303,90 +3368,87 @@ mod attachment_tests {
 
     #[test]
     fn aggregate_sibling_completion_and_reset_are_isolated() {
-        for stage in ["", "review"] {
-            let mut app = App::new();
-            let mut live =
-                LiveArea::with_backend(ratatui::backend::TestBackend::new(100, 40), 100, 40);
-            let target = Target::StageExecution {
-                run_id: "run".into(),
-                stage: stage.into(),
-            };
-            live.select_conversation(&mut app, target.clone());
-            let mut attachment = Attachment::default();
-            passive_sibling_frame(
-                &mut app,
-                &mut live,
-                &mut attachment,
-                &target,
-                "a",
-                1,
-                "stream_chunk",
-                "alpha",
-            );
-            passive_sibling_frame(
-                &mut app,
-                &mut live,
-                &mut attachment,
-                &target,
-                "b",
-                2,
-                "stream_chunk",
-                "beta",
-            );
-            let rendered = rendered_attachment(&mut live, &app);
-            assert_eq!(rendered.matches("alpha").count(), 1, "{rendered}");
-            assert_eq!(rendered.matches("beta").count(), 1, "{rendered}");
-            passive_sibling_frame(
-                &mut app,
-                &mut live,
-                &mut attachment,
-                &target,
-                "a",
-                3,
-                "done",
-                "alpha",
-            );
-            let rendered = rendered_attachment(&mut live, &app);
-            assert_eq!(rendered.matches("alpha").count(), 1, "{rendered}");
-            assert_eq!(rendered.matches("beta").count(), 1, "{rendered}");
-            let b = Target::Invocation {
-                run_id: "run".into(),
-                stage: "review".into(),
-                stage_run_id: "b".into(),
-            };
-            live.with_invocation_transcript(&target, &b, |transcript, _| {
-                assert_eq!(transcript.response_accumulator(), "beta");
-            });
-            passive_sibling_frame(
-                &mut app,
-                &mut live,
-                &mut attachment,
-                &target,
-                "a",
-                4,
-                "stream_reset",
-                "",
-            );
-            live.with_invocation_transcript(&target, &b, |transcript, _| {
-                assert_eq!(transcript.response_accumulator(), "beta");
-            });
-            passive_sibling_frame(
-                &mut app,
-                &mut live,
-                &mut attachment,
-                &target,
-                "b",
-                5,
-                "done",
-                "beta",
-            );
-            let rendered = rendered_attachment(&mut live, &app);
-            assert_eq!(rendered.matches("beta").count(), 1, "{rendered}");
-        }
+        let mut app = App::new();
+        let mut live = LiveArea::with_backend(ratatui::backend::TestBackend::new(100, 40), 100, 40);
+        let target = Target::Run {
+            run_id: "run".into(),
+        };
+        live.select_conversation(&mut app, target.clone());
+        let mut attachment = Attachment::default();
+        passive_sibling_frame(
+            &mut app,
+            &mut live,
+            &mut attachment,
+            &target,
+            "a",
+            1,
+            "stream_chunk",
+            "alpha",
+        );
+        passive_sibling_frame(
+            &mut app,
+            &mut live,
+            &mut attachment,
+            &target,
+            "b",
+            2,
+            "stream_chunk",
+            "beta",
+        );
+        let rendered = rendered_attachment(&mut live, &app);
+        assert_eq!(rendered.matches("alpha").count(), 1, "{rendered}");
+        assert_eq!(rendered.matches("beta").count(), 1, "{rendered}");
+        passive_sibling_frame(
+            &mut app,
+            &mut live,
+            &mut attachment,
+            &target,
+            "a",
+            3,
+            "done",
+            "alpha",
+        );
+        let rendered = rendered_attachment(&mut live, &app);
+        assert_eq!(rendered.matches("alpha").count(), 1, "{rendered}");
+        assert_eq!(rendered.matches("beta").count(), 1, "{rendered}");
+        let b = Target::Invocation {
+            run_id: "run".into(),
+            stage: "review".into(),
+            stage_run_id: "b".into(),
+        };
+        live.with_invocation_transcript(&target, &b, |transcript, _| {
+            assert_eq!(transcript.response_accumulator(), "beta");
+        });
+        passive_sibling_frame(
+            &mut app,
+            &mut live,
+            &mut attachment,
+            &target,
+            "a",
+            4,
+            "stream_reset",
+            "",
+        );
+        live.with_invocation_transcript(&target, &b, |transcript, _| {
+            assert_eq!(transcript.response_accumulator(), "beta");
+        });
+        passive_sibling_frame(
+            &mut app,
+            &mut live,
+            &mut attachment,
+            &target,
+            "b",
+            5,
+            "done",
+            "beta",
+        );
+        let rendered = rendered_attachment(&mut live, &app);
+        assert_eq!(rendered.matches("beta").count(), 1, "{rendered}");
     }
 
     #[test]
     fn exec_output_records_restore_newlines_including_empty_records() {
+        let app = App::new();
         let mut live = LiveArea::with_backend(ratatui::backend::TestBackend::new(100, 40), 100, 40);
         for (text, stderr) in [
             ("first", false),
@@ -3397,7 +3459,7 @@ mod attachment_tests {
         ] {
             render_execution_frame(
                 &mut live,
-                &Target::Home,
+                &app.session_chat_target(),
                 &serde_json::json!({
                     "type":"exec_output", "text":text, "is_stderr":stderr
                 }),
@@ -3423,7 +3485,7 @@ mod attachment_tests {
         let receipt = app
             .finish_delivery(id, Err("input disconnected".into()))
             .unwrap();
-        live.show_receipt(receipt);
+        live.show_receipt(&app, receipt);
         assert_eq!(app.input.text(), "keep this correction");
         let rendered = rendered_attachment(&mut live, &app);
         assert!(rendered.contains("correction: keep this correction"));
@@ -3490,7 +3552,7 @@ mod attachment_tests {
         attachment.invalidate(&mut app);
         // Selection release preserves pending delivery; its native receipt still settles.
         let receipt = app.finish_delivery(id, Ok(())).unwrap();
-        live.show_receipt(receipt);
+        live.show_receipt(&app, receipt);
         assert_eq!(app.input.text(), "original correction");
         assert_eq!(live.response_text(), "partial response");
         let rendered = rendered_attachment(&mut live, &app);
@@ -3504,7 +3566,7 @@ mod attachment_tests {
         let id = pending_correction(&mut app, &target, "unique correction");
         for _ in 0..2 {
             if let Some(receipt) = app.finish_delivery(id, Err("delivery rejected".into())) {
-                live.show_receipt(receipt);
+                live.show_receipt(&app, receipt);
             }
         }
         assert_eq!(app.input.text(), "unique correction");
@@ -3541,7 +3603,7 @@ mod attachment_tests {
         assert_eq!(app.input.text(), "keep this correction");
         assert!(rendered_attachment(&mut live, &app).contains("continue failed: cannot continue"));
         let receipt = app.finish_delivery(id, Ok(())).unwrap();
-        live.show_receipt(receipt);
+        live.show_receipt(&app, receipt);
         assert_eq!(app.input.text(), "keep this correction");
     }
 
@@ -3635,7 +3697,8 @@ mod attachment_tests {
         };
         passive_frame(&mut app, &mut live, &mut attachment, event(Some(1)));
         attachment.invalidate(&mut app);
-        live.select_conversation(&mut app, Target::Home);
+        let session_chat = app.session_chat_target();
+        live.select_conversation(&mut app, session_chat);
         live.select_conversation(&mut app, target.clone());
         attachment.target = Some(target);
         passive_frame(&mut app, &mut live, &mut attachment, event(Some(1)));
@@ -3692,13 +3755,9 @@ mod attachment_tests {
                 .count(),
             1
         );
-        let run_selector = Target::StageExecution {
-            run_id: "run".into(),
-            stage: String::new(),
-        };
         attachment.invalidate(&mut app);
-        attachment.target = Some(run_selector.clone());
-        live.select_conversation(&mut app, run_selector.clone());
+        attachment.target = Some(selector.clone());
+        live.select_conversation(&mut app, selector.clone());
         passive_frame(&mut app, &mut live, &mut attachment, event);
         assert_eq!(
             rendered_attachment(&mut live, &app)
@@ -3706,7 +3765,7 @@ mod attachment_tests {
                 .count(),
             1
         );
-        for target in [selector, identity, run_selector] {
+        for target in [selector, identity] {
             assert_eq!(attachment.observed_sequences[&target].0, vec![(7, 7)]);
         }
     }
@@ -3869,7 +3928,7 @@ mod attachment_tests {
             ),
         );
         let receipt = app.finish_delivery(id, Ok(())).unwrap();
-        live.show_receipt(receipt);
+        live.show_receipt(&app, receipt);
         assert_eq!(app.input.text(), "unique correction");
         app.clear_input();
         let rendered = rendered_attachment(&mut live, &app);
@@ -4233,57 +4292,62 @@ mod tests {
     // ── interrupt_press ──
 
     #[test]
-    fn home_completion_while_viewing_a_stage_retires_only_home() {
-        use super::{finish_home_request, LiveArea, Target};
+    fn session_chat_completion_while_viewing_a_stage_retires_only_session_chat() {
+        use super::{finish_session_chat_request, LiveArea, Target};
         use ratatui::backend::TestBackend;
 
         let mut app = App::new();
         let mut area = LiveArea::with_backend(TestBackend::new(80, 24), 80, 24);
         app.active_request = true;
-        let stage = Target::StageExecution {
+        let stage = Target::Invocation {
             run_id: "pipeline".into(),
             stage: "review".into(),
+            stage_run_id: "review-turn".into(),
         };
         area.select_conversation(&mut app, stage.clone());
         assert!(!app.active_request);
         app.active_request = true;
-        finish_home_request(&mut app, &mut area);
+        finish_session_chat_request(&mut app, &mut area);
         assert!(app.active_request, "the visible stage is unaffected");
-        area.select_conversation(&mut app, Target::Home);
-        assert!(!app.active_request, "home must not restore a stale request");
+        let target = app.session_chat_target();
+        area.select_conversation(&mut app, target);
+        assert!(
+            !app.active_request,
+            "session chat must not restore a stale request"
+        );
         area.select_conversation(&mut app, stage);
         assert!(app.active_request);
     }
 
     #[test]
-    fn switching_away_from_home_disarms_interrupt_escalation() {
-        use super::{HomeInterrupt, Target};
+    fn switching_away_from_session_chat_disarms_interrupt_escalation() {
+        use super::{SessionChatInterrupt, Target};
 
-        let mut interrupt = HomeInterrupt::default();
+        let mut interrupt = SessionChatInterrupt::default();
         let now = Instant::now();
         assert_eq!(interrupt.press(now), InterruptAction::SendSoft);
         interrupt.ended_turn = Some("old turn".into());
-        interrupt.disarm_if_stale(
-            &Target::StageExecution {
-                run_id: "pipeline".into(),
-                stage: "review".into(),
-            },
-            now,
-        );
+        let mut app = App::new();
+        app.selected_target = Target::Run {
+            run_id: "pipeline".into(),
+        };
+        interrupt.disarm_if_stale(&app, now);
         assert!(interrupt.ended_turn.is_none());
         assert!(!interrupt.in_window(now));
         assert_eq!(interrupt.press(now), InterruptAction::SendSoft);
     }
 
     #[test]
-    fn editor_allows_writable_correction_while_home_is_running() {
-        use super::{app::Execution, selected_home_turn_active, Submission, Target};
+    fn editor_allows_writable_correction_while_session_chat_is_running() {
+        use super::{app::Execution, selected_session_chat_turn_active, Submission, Target};
 
         let mut app = App::new();
-        app.conversations.begin_home_turn("home-turn".into());
-        let target = Target::StageExecution {
+        app.conversations
+            .begin_session_chat_turn("session-chat-turn".into());
+        let target = Target::Invocation {
             run_id: "pipeline".into(),
             stage: "review".into(),
+            stage_run_id: "review-turn".into(),
         };
         let execution = Execution {
             run_id: "pipeline".into(),
@@ -4296,38 +4360,42 @@ mod tests {
         app.replace_input("change course");
         for active in [false, true] {
             app.active_request = active;
-            assert!(!selected_home_turn_active(&app));
+            assert!(!selected_session_chat_turn_active(&app));
         }
         assert!(matches!(
             app.conversations.submit(&target, &app.input),
             Submission::Correction { execution: addressed, .. } if addressed == execution
         ));
-        assert_eq!(app.conversations.home_turn(), Some("home-turn"));
+        assert_eq!(
+            app.conversations.session_chat_turn(),
+            Some("session-chat-turn")
+        );
     }
 
     #[test]
-    fn composer_and_interrupts_use_home_owner_not_display_state() {
-        use super::selected_home_turn_active;
+    fn composer_and_interrupts_use_session_chat_owner_not_display_state() {
+        use super::selected_session_chat_turn_active;
 
         let mut app = App::new();
-        app.conversations.begin_home_turn("home-turn".into());
+        app.conversations
+            .begin_session_chat_turn("session-chat-turn".into());
         for active in [false, true] {
             app.active_request = active;
-            assert!(selected_home_turn_active(&app));
+            assert!(selected_session_chat_turn_active(&app));
         }
-        app.conversations.retire_home_turn();
+        app.conversations.retire_session_chat_turn();
         assert!(app.active_request);
-        assert!(!selected_home_turn_active(&app));
+        assert!(!selected_session_chat_turn_active(&app));
     }
 
     #[test]
-    fn hard_interrupt_retires_home_turn_without_dismissing_its_correction() {
-        use super::{app::Execution, clear_active_turn_ui, LiveArea, Submission, Target};
+    fn hard_interrupt_retires_session_chat_turn_without_dismissing_its_correction() {
+        use super::{app::Execution, clear_active_turn_ui, LiveArea, Submission};
         use ratatui::backend::TestBackend;
 
         let mut app = App::new();
         let mut area = LiveArea::with_backend(TestBackend::new(80, 24), 80, 24);
-        app.conversations.begin_home_turn("old".into());
+        app.conversations.begin_session_chat_turn("old".into());
         let execution = |turn: &str, nonce| Execution {
             run_id: "session".into(),
             stage_run_id: turn.into(),
@@ -4335,27 +4403,29 @@ mod tests {
         };
         app.active_request = true;
         app.conversations
-            .set_execution(Target::Home, Some(execution("old", 1)));
+            .set_execution(app.session_chat_target(), Some(execution("old", 1)));
         app.replace_input("change course");
         app.cursor_end();
 
         clear_active_turn_ui(&mut app, &mut area);
-        assert!(app.conversations.home_turn().is_none());
+        assert!(app.conversations.session_chat_turn().is_none());
         assert!(!app.active_request);
         assert_eq!(app.input.text(), "change course");
         assert_eq!(app.input_cursor, app.input.len());
         assert!(matches!(
-            app.conversations.submit(&Target::Home, &app.input),
-            Submission::HomePrompt
+            app.conversations
+                .submit(&app.session_chat_target(), &app.input),
+            Submission::SessionChatPrompt
         ));
 
         app.conversations
-            .set_execution(Target::Home, Some(execution("next", 2)));
+            .set_execution(app.session_chat_target(), Some(execution("next", 2)));
         assert!(matches!(
-            app.conversations.submit(&Target::Home, &app.input),
+            app.conversations
+                .submit(&app.session_chat_target(), &app.input),
             Submission::Correction { .. }
         ));
-        area.clear_target_input(&Target::Home, &mut app);
+        area.clear_target_input(&app.session_chat_target(), &mut app);
         assert!(app.input.is_empty());
     }
 

@@ -1,6 +1,8 @@
 use std::collections::HashMap;
 
 mod conversations;
+
+const PENDING_SESSION_ID: &str = "tui-session-pending";
 pub(crate) use super::protocol::Execution;
 pub(crate) use conversations::{Conversations, Receipt, Submission};
 
@@ -41,12 +43,12 @@ pub struct App {
     /// submitting a prompt (or starting a second reset) before the
     /// replacement session socket is installed.
     pub session_recreating: bool,
-    pub home_run_id: Option<String>,
+    pub chat_run_id: Option<String>,
     /// Active screen. Chat is the default; the other variants are full-screen
     /// views entered from slash commands and dismissed with `Esc`.
     pub screen: Screen,
-    /// The conversation target currently selected in the UI. The home chat is
-    /// the default; stage-execution targets are attached from run events.
+    /// The conversation target currently selected in the UI. The session chat is
+    /// the default; watch selects runs or exact invocations.
     pub selected_target: Target,
     conversation_statuses: HashMap<Target, ConversationStatus>,
     /// Routing metadata is independent of which target currently owns the input widget.
@@ -248,14 +250,12 @@ impl Screen {
 
 /// Identifies a conversation target in the TUI.
 ///
-/// The home chat has a stable identity across prompts and `/clear` cycles.
-/// A stage execution is keyed by run id and stage name.
+/// The session chat is an aggregate run; `/clear` replaces its run identity.
+/// An invocation is pinned by run id, stage, and stage-run id.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum Target {
-    /// The session's home chat conversation.
-    Home,
-    /// A selected stage execution from a run.
-    StageExecution { run_id: String, stage: String },
+    /// An aggregate run conversation, distinct from any invocation.
+    Run { run_id: String },
     /// A pinned invocation, never a replacement with the same stage name.
     Invocation {
         run_id: String,
@@ -289,19 +289,13 @@ impl Target {
     /// Short label for display in the info bar.
     pub fn label(&self) -> String {
         match self {
-            Target::Home => "chat".to_string(),
-            Target::StageExecution { run_id, stage } => format!("{run_id}:{stage}"),
+            Target::Run { run_id } => run_id.clone(),
             Target::Invocation {
                 run_id,
                 stage,
                 stage_run_id,
             } => format!("{run_id}:{stage}:{stage_run_id}"),
         }
-    }
-
-    /// Whether this target is the home chat.
-    pub fn is_home(&self) -> bool {
-        matches!(self, Target::Home)
     }
 }
 
@@ -326,9 +320,11 @@ impl App {
             following_log: None,
             active_request: false,
             session_recreating: false,
-            home_run_id: None,
+            chat_run_id: Some(PENDING_SESSION_ID.to_owned()),
             screen: Screen::Chat,
-            selected_target: Target::Home,
+            selected_target: Target::Run {
+                run_id: PENDING_SESSION_ID.to_owned(),
+            },
             conversation_statuses: HashMap::new(),
             conversations: Conversations::default(),
             watch_selection: None,
@@ -343,6 +339,53 @@ impl App {
         }
     }
 
+    /// The session reservation, with a local placeholder before startup installs it.
+    pub fn session_chat_target(&self) -> Target {
+        self.conversations.session_chat_target().clone()
+    }
+
+    pub fn is_session_chat(&self, target: &Target) -> bool {
+        target == self.conversations.session_chat_target()
+    }
+
+    /// Install a new session identity, retiring the previous session's ownership.
+    pub fn set_chat_run_id(&mut self, run_id: String) {
+        self.conversations.set_session_chat_target(Target::Run {
+            run_id: run_id.clone(),
+        });
+        self.chat_run_id = Some(run_id);
+    }
+
+    /// Install an authoritative enqueue identity without retiring the acknowledged turn.
+    pub fn migrate_chat_run_id(&mut self, run_id: String) {
+        let old = self.session_chat_target();
+        let new = Target::Run {
+            run_id: run_id.clone(),
+        };
+        if old == new {
+            return;
+        }
+        let status = self.conversation_status(&old);
+        self.conversation_statuses.remove(&old);
+        self.conversation_statuses.insert(new.clone(), status);
+        if self.selected_target == old {
+            if let Some((input, cursor)) = self.parked_inputs.remove(&new) {
+                self.input = input;
+                self.input_cursor = cursor;
+            }
+            self.selected_target = new.clone();
+        } else if let Some(draft) = self.parked_inputs.remove(&old) {
+            if self.selected_target != new {
+                self.parked_inputs.entry(new.clone()).or_insert(draft);
+            }
+        }
+        if self.watch_selection.as_deref() == self.chat_run_id.as_deref() {
+            self.watch_selection = Some(run_id.clone());
+        }
+        self.chat_run_id = Some(run_id);
+        self.conversations.migrate_session_chat_target(new);
+    }
+
     pub fn set_conversation_status(&mut self, target: Target, status: ConversationStatus) {
         self.conversation_statuses.insert(target, status);
     }
@@ -352,8 +395,8 @@ impl App {
             .get(target)
             .copied()
             .unwrap_or_else(|| {
-                if target.is_home() {
-                    if self.selected_target.is_home() && self.active_request {
+                if self.is_session_chat(target) {
+                    if self.is_session_chat(&self.selected_target) && self.active_request {
                         ConversationStatus::Running
                     } else {
                         ConversationStatus::Idle
@@ -857,6 +900,11 @@ impl App {
     /// running, so the table never points at nothing.
     pub fn watch_ids(&self) -> Vec<String> {
         let mut ids: Vec<String> = self.active_runs.keys().cloned().collect();
+        if let Some(id) = &self.chat_run_id {
+            if !self.active_runs.contains_key(id) {
+                ids.push(id.clone());
+            }
+        }
         ids.sort_by(|a, b| {
             let ra = self
                 .active_runs
@@ -874,7 +922,9 @@ impl App {
         let mut grouped: HashMap<&str, Vec<String>> = HashMap::new();
         let mut orphans = Vec::new();
         for (key, execution) in &self.live_executions {
-            if self.active_runs.contains_key(&execution.run_id) {
+            if self.active_runs.contains_key(&execution.run_id)
+                || self.chat_run_id.as_deref() == Some(execution.run_id.as_str())
+            {
                 grouped
                     .entry(&execution.run_id)
                     .or_default()
@@ -900,13 +950,9 @@ impl App {
         if let Some(execution) = self.live_executions.get(key) {
             return Some(execution.target());
         }
-        self.active_runs.get(key)?;
-        if self.home_run_id.as_deref() == Some(key) {
-            return Some(Target::Home);
-        }
-        Some(Target::StageExecution {
+        self.watch_run_id(key)?;
+        Some(Target::Run {
             run_id: key.to_owned(),
-            stage: String::new(),
         })
     }
 
@@ -914,7 +960,10 @@ impl App {
         self.live_executions
             .get(key)
             .map(|execution| execution.run_id.as_str())
-            .or_else(|| self.active_runs.contains_key(key).then_some(key))
+            .or_else(|| {
+                (self.active_runs.contains_key(key) || self.chat_run_id.as_deref() == Some(key))
+                    .then_some(key)
+            })
     }
 
     /// Ensure the watch selection points at a listed gremlin, choosing the
@@ -1436,26 +1485,89 @@ mod tests {
         app.watch_selection = Some("run".into());
         assert_eq!(
             app.watch_target(),
-            Some(super::Target::StageExecution {
+            Some(super::Target::Run {
                 run_id: "run".into(),
-                stage: String::new(),
             })
         );
     }
 
     #[test]
-    fn home_run_row_returns_home_but_invocation_stays_exact() {
+    fn session_chat_run_row_is_distinct_from_its_invocation() {
         let mut app = super::App::new();
-        app.home_run_id = Some("run".into());
+        app.set_chat_run_id("run".into());
         app.active_runs
             .insert("run".into(), super::ActiveRun::new("running"));
         app.watch_selection = Some("run".into());
-        assert_eq!(app.watch_target(), Some(super::Target::Home));
-        app.observe_live_pipeline_frame(&boundary("home-turn", true));
+        assert_eq!(app.watch_target(), Some(app.session_chat_target()));
+        assert!(app.is_session_chat(&app.watch_target().unwrap()));
+        app.observe_live_pipeline_frame(&boundary("session-chat-turn", true));
         let execution = app.live_executions.values().next().unwrap();
         let target = execution.target();
         app.watch_selection = Some(execution.key());
+        assert!(!app.is_session_chat(&target));
+        assert_ne!(target, app.session_chat_target());
         assert_eq!(app.watch_target(), Some(target));
+    }
+
+    #[test]
+    fn reserved_session_chat_run_is_listed_without_active_run_and_groups_children() {
+        let mut app = App::new();
+        app.set_chat_run_id("run".into());
+        app.active_runs.insert("z".into(), ActiveRun::new("done"));
+        app.observe_live_pipeline_frame(&boundary("turn", true));
+        let child = app.live_executions.values().next().unwrap().key();
+        assert!(!app.active_runs.contains_key("run"));
+        assert_eq!(
+            app.watch_ids(),
+            vec!["run".to_owned(), child.clone(), "z".to_owned()]
+        );
+        assert_eq!(app.watch_run_id("run"), Some("run"));
+        assert_eq!(app.watch_run_id(&child), Some("run"));
+        app.ensure_watch_selection();
+        assert_eq!(app.watch_target(), Some(app.session_chat_target()));
+        app.active_runs.insert("run".into(), ActiveRun::new("done"));
+        assert_eq!(app.watch_ids().iter().filter(|id| *id == "run").count(), 1);
+    }
+
+    #[test]
+    fn chat_run_setter_updates_routing_without_stealing_selection_or_draft() {
+        let mut app = App::new();
+        let initial = Target::Run {
+            run_id: String::new(),
+        };
+        assert_eq!(app.session_chat_target(), initial);
+        assert!(app.is_session_chat(&initial));
+        app.insert_char('x');
+        app.set_chat_run_id("chat".into());
+        assert_eq!(app.selected_target, initial);
+        assert_eq!(app.input.text(), "x");
+        let chat = app.session_chat_target();
+        assert_eq!(chat.label(), "chat");
+        assert!(!app.is_session_chat(&initial));
+        assert!(matches!(
+            app.conversations.submit(&chat, &app.input),
+            Submission::SessionChatPrompt
+        ));
+        let invocation = Target::Invocation {
+            run_id: "chat".into(),
+            stage: "agent".into(),
+            stage_run_id: "turn".into(),
+        };
+        assert!(!app.is_session_chat(&invocation));
+        assert_eq!(
+            app.conversation_status(&invocation),
+            ConversationStatus::ReadOnly
+        );
+        app.select_composer(invocation.clone());
+        app.insert_char('y');
+        app.set_chat_run_id("replacement".into());
+        assert_eq!(app.selected_target, invocation);
+        assert_eq!(app.input.text(), "y");
+        assert!(matches!(
+            app.conversations
+                .submit(&app.session_chat_target(), &app.input),
+            Submission::SessionChatPrompt
+        ));
     }
 
     #[test]
@@ -1814,13 +1926,11 @@ mod tests {
     fn conversation_status_persists_independently_per_target() {
         use super::{App, ConversationStatus as Status, Target};
         let mut app = App::new();
-        let a = Target::StageExecution {
-            run_id: "a".into(),
-            stage: "agent".into(),
-        };
-        let b = Target::StageExecution {
+        let a = Target::Run { run_id: "a".into() };
+        let b = Target::Invocation {
             run_id: "b".into(),
             stage: "exec".into(),
+            stage_run_id: "original".into(),
         };
         assert_eq!(app.conversation_status(&a), Status::ReadOnly);
         app.set_conversation_status(a.clone(), Status::Paused);
@@ -1832,80 +1942,86 @@ mod tests {
         assert_eq!(app.conversation_status(&b), Status::Running);
         app.select_composer(a.clone());
         assert_eq!(app.conversation_status(&a), Status::Ended);
-        assert_eq!(app.conversation_status(&Target::Home), Status::Idle);
+        assert_eq!(
+            app.conversation_status(&app.session_chat_target()),
+            Status::Idle
+        );
     }
 
     #[test]
-    fn home_status_defaults_to_request_state_and_accepts_explicit_updates() {
+    fn session_chat_status_defaults_to_request_state_and_accepts_explicit_updates() {
         use super::{App, ConversationStatus as Status, Target};
         let mut app = App::new();
-        assert_eq!(app.conversation_status(&Target::Home), Status::Idle);
+        let target = app.session_chat_target();
+        assert_eq!(app.conversation_status(&target), Status::Idle);
         app.active_request = true;
-        assert_eq!(app.conversation_status(&Target::Home), Status::Running);
+        assert_eq!(app.conversation_status(&target), Status::Running);
         app.active_request = false;
-        assert_eq!(app.conversation_status(&Target::Home), Status::Idle);
-        app.set_conversation_status(Target::Home, Status::Running);
-        app.select_composer(Target::StageExecution {
-            run_id: "a".into(),
-            stage: "agent".into(),
-        });
-        assert_eq!(app.conversation_status(&Target::Home), Status::Running);
-        app.set_conversation_status(Target::Home, Status::Idle);
-        assert_eq!(app.conversation_status(&Target::Home), Status::Idle);
+        assert_eq!(app.conversation_status(&target), Status::Idle);
+        app.set_conversation_status(target.clone(), Status::Running);
+        app.select_composer(Target::Run { run_id: "a".into() });
+        assert_eq!(app.conversation_status(&target), Status::Running);
+        app.set_conversation_status(target.clone(), Status::Idle);
+        assert_eq!(app.conversation_status(&target), Status::Idle);
     }
 
     use super::*;
 
     #[test]
-    fn newer_parked_edit_survives_a_successful_home_receipt() {
+    fn newer_parked_edit_survives_a_successful_session_chat_receipt() {
         let mut app = App::new();
         app.conversations.set_execution(
-            Target::Home,
+            app.session_chat_target(),
             Some(Execution {
                 run_id: "run".into(),
-                stage_run_id: "home".into(),
+                stage_run_id: "session-chat".into(),
                 nonce: 4,
             }),
         );
         app.insert_char('x');
-        let Submission::Correction { id, .. } = app.conversations.submit(&Target::Home, &app.input)
+        let Submission::Correction { id, .. } = app
+            .conversations
+            .submit(&app.session_chat_target(), &app.input)
         else {
             panic!("expected correction")
         };
         app.delete_before_cursor();
         app.insert_char('x');
-        app.select_composer(Target::StageExecution {
+        app.select_composer(Target::Invocation {
             run_id: "other".into(),
             stage: "build".into(),
+            stage_run_id: "original".into(),
         });
         app.insert_char('y');
         app.finish_delivery(id, Ok(())).unwrap();
         assert_eq!(app.input.text(), "y");
-        app.select_composer(Target::Home);
+        app.select_composer(app.session_chat_target());
         assert_eq!(app.input.text(), "x");
         assert_eq!(app.input_cursor, 1);
     }
 
     #[test]
-    fn cancel_search_submits_using_current_home_idle_state() {
+    fn cancel_search_submits_using_current_session_chat_idle_state() {
         let mut app = App::new();
         app.conversations.set_execution(
-            Target::Home,
+            app.session_chat_target(),
             Some(Execution {
-                run_id: "home".into(),
+                run_id: "session-chat".into(),
                 stage_run_id: "original".into(),
                 nonce: 5,
             }),
         );
         app.replace_input("original correction");
         app.enter_search();
-        app.conversations.set_execution(Target::Home, None);
+        app.conversations
+            .set_execution(app.session_chat_target(), None);
         app.search_push_char('x');
         app.cancel_search();
         assert_eq!(app.input.text(), "original correction");
         assert!(matches!(
-            app.conversations.submit(&Target::Home, &app.input),
-            Submission::HomePrompt
+            app.conversations
+                .submit(&app.session_chat_target(), &app.input),
+            Submission::SessionChatPrompt
         ));
     }
 

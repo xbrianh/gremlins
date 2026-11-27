@@ -50,12 +50,14 @@ pub struct RenderContext<'a> {
     /// Cached active chat gremlin model, daemon-derived.
     pub chat_model: Option<&'a str>,
     /// Short label of the currently selected conversation target (e.g. the
-    /// home chat's `chat` or a stage execution's `<run>:<stage>`).
+    /// session chat's `chat` or a stage execution's `<run>:<stage>`).
     pub target_label: String,
-    /// Whether the selected target is the session's home chat. When false the
-    /// info bar shows the target label instead of presenting the home chat
+    /// Whether the selected target is the session chat. When false the
+    /// info bar shows the target label instead of presenting the session chat
     /// model as if it belonged to the pipeline agent.
-    pub target_is_home: bool,
+    pub target_is_session_chat: bool,
+    /// Reserved session-chat run, including before daemon registration.
+    pub chat_run_id: Option<&'a str>,
     pub conversation_status: ConversationStatus,
     /// The daemon-derived run table (source of truth for the runs view).
     pub active_runs: &'a HashMap<String, ActiveRun>,
@@ -830,6 +832,16 @@ impl TranscriptWidget {
     /// Whether the streaming response is empty.
     pub fn response_is_empty(&self) -> bool {
         self.response_accumulator.is_empty()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn snapshot_text(&self) -> String {
+        self.scrollable
+            .visible_lines()
+            .iter()
+            .map(ToString::to_string)
+            .collect::<Vec<_>>()
+            .join("\n")
     }
 
     /// Borrow the raw response accumulator.
@@ -2371,7 +2383,7 @@ impl InputBarWidget {
 
     fn context_lines(ctx: &RenderContext) -> Vec<Line<'static>> {
         let mut lines = Self::full_lines(ctx.input);
-        let command_only = !ctx.target_is_home
+        let command_only = !ctx.target_is_session_chat
             && matches!(
                 ctx.conversation_status,
                 ConversationStatus::ReadOnly | ConversationStatus::Ended | ConversationStatus::Idle
@@ -2839,10 +2851,10 @@ impl LiveAreaWidget for InfoBarWidget {
         };
         spans.push(Span::styled(ctx.conversation_status.label(), status_style));
 
-        // The selected conversation target. A non-home target is shown
-        // prominently and the home chat model is not presented as if it
+        // The selected conversation target. A non-session-chat target is shown
+        // prominently and the session chat model is not presented as if it
         // belonged to the pipeline agent.
-        if !ctx.target_is_home {
+        if !ctx.target_is_session_chat {
             spans.push(Span::styled("  ", band));
             spans.push(Span::styled("target:", nickel));
             spans.push(Span::styled(" ", band));
@@ -4866,7 +4878,8 @@ mod tests {
             project_name: "",
             chat_model: None,
             target_label: String::new(),
-            target_is_home: true,
+            target_is_session_chat: true,
+            chat_run_id: None,
             conversation_status: ConversationStatus::Idle,
             active_runs: EMPTY.get_or_init(HashMap::new),
             watch_selection: None,
@@ -4907,7 +4920,7 @@ mod tests {
             ConversationStatus::Idle,
         ] {
             let mut ctx = input_ctx("", 0);
-            ctx.target_is_home = false;
+            ctx.target_is_session_chat = false;
             ctx.conversation_status = status;
             let mut bar = InputBarWidget::new();
             for width in [80, 12] {
@@ -4929,8 +4942,8 @@ mod tests {
     }
 
     #[test]
-    fn input_bar_home_and_interactive_agents_keep_composer() {
-        for home in [true, false] {
+    fn input_bar_session_chat_and_interactive_agents_keep_composer() {
+        for session_chat in [true, false] {
             for status in [
                 ConversationStatus::ReadOnly,
                 ConversationStatus::Ended,
@@ -4938,7 +4951,7 @@ mod tests {
                 ConversationStatus::Running,
                 ConversationStatus::Paused,
             ] {
-                if !home
+                if !session_chat
                     && !matches!(
                         status,
                         ConversationStatus::Running | ConversationStatus::Paused
@@ -4948,7 +4961,7 @@ mod tests {
                 }
                 for input in ["", "/help", "draft text"] {
                     let mut ctx = input_ctx(input, input.len());
-                    ctx.target_is_home = home;
+                    ctx.target_is_session_chat = session_chat;
                     ctx.conversation_status = status;
                     let area = Rect::new(0, 0, 80, 1);
                     let mut buf = Buffer::empty(area);
@@ -4977,7 +4990,7 @@ mod tests {
                 .chain(std::iter::once(input.len()))
             {
                 let mut ctx = input_ctx(input, cursor);
-                ctx.target_is_home = false;
+                ctx.target_is_session_chat = false;
                 ctx.conversation_status = ConversationStatus::ReadOnly;
                 ctx.completion_preview = Some(" suffix");
                 let mut bar = InputBarWidget::new();
@@ -5013,9 +5026,9 @@ mod tests {
     fn info_bar_renders_each_selected_conversation_status() {
         let area = Rect::new(0, 0, 160, 1);
         let mut ctx = input_ctx("", 0);
-        ctx.target_is_home = false;
+        ctx.target_is_session_chat = false;
         ctx.target_label = "run:agent".into();
-        ctx.chat_model = Some("home-only-model");
+        ctx.chat_model = Some("session_chat-only-model");
         let mut buf = Buffer::empty(area);
         for status in [
             ConversationStatus::ReadOnly,
@@ -5032,7 +5045,7 @@ mod tests {
                 "{row}"
             );
             assert!(row.contains("target: run:agent"), "{row}");
-            assert!(!row.contains("home-only-model"), "{row}");
+            assert!(!row.contains("session_chat-only-model"), "{row}");
         }
     }
 

@@ -1,20 +1,20 @@
-//! Passive home display transport, separate from the enqueue-only request socket.
+//! Passive session_chat display transport, separate from the enqueue-only request socket.
 use super::*;
 
 #[cfg(test)]
-#[path = "home_tests.rs"]
+#[path = "session_chat_tests.rs"]
 mod tests;
 
 #[cfg(test)]
-#[path = "home_reservation_tests.rs"]
+#[path = "session_chat_reservation_tests.rs"]
 mod reservation_tests;
 
 #[cfg(test)]
-#[path = "home_live_warning_tests.rs"]
+#[path = "session_chat_live_warning_tests.rs"]
 mod live_warning_tests;
 
 #[cfg(test)]
-#[path = "home_review_tests.rs"]
+#[path = "session_chat_review_tests.rs"]
 mod review_tests;
 
 struct Reader(tokio::task::JoinHandle<()>);
@@ -31,7 +31,7 @@ impl Drop for Reader {
     }
 }
 
-struct HomeWatchContext {
+struct SessionChatWatchContext {
     session_write: Arc<Mutex<WriteState>>,
     out: Arc<OutState>,
     generation: u64,
@@ -69,8 +69,8 @@ impl Drop for Submission {
             gate.frames.retain(|frame| {
                 !matches!(
                     frame["type"].as_str(),
-                    Some("lagged" | "history_gap" | "home_transport_warning")
-                ) && (home_turn(frame).is_none() || home_turn(frame) != rejected)
+                    Some("lagged" | "history_gap" | "session_chat_transport_warning")
+                ) && (session_chat_turn(frame).is_none() || session_chat_turn(frame) != rejected)
             });
             gate.rejected = rejected;
             gate.turn = self.2.clone();
@@ -96,7 +96,7 @@ impl Drop for Display {
 }
 
 impl DaemonClient {
-    pub(super) async fn send_home_or_session(
+    pub(super) async fn send_session_chat_or_session(
         &self,
         request: Value,
         generation: Option<u64>,
@@ -106,8 +106,8 @@ impl DaemonClient {
                 return Err("session was recreated".into());
             }
         }
-        let home = request["op"] == "chat" && request.get("target").is_none();
-        if !home {
+        let session_chat = request["op"] == "chat" && request.get("target").is_none();
+        if !session_chat {
             return match generation {
                 Some(generation) => {
                     self.session
@@ -125,12 +125,12 @@ impl DaemonClient {
             (
                 write.generation,
                 write.session_id.clone().unwrap_or_default(),
-                write.home_run_id.clone().unwrap_or_default(),
+                write.chat_run_id.clone().unwrap_or_default(),
             )
         };
         let turn = request["turn"].as_str().map(str::to_owned);
         let reusable = loop {
-            let guard = self.home_display.lock().await;
+            let guard = self.session_chat_display.lock().await;
             let Some(display) = guard.as_ref().filter(|display| {
                 display.generation == expected_generation
                     && display.run == id
@@ -159,9 +159,9 @@ impl DaemonClient {
                 ..WatchGate::default()
             }));
             let prepared = self
-                .prepare_home_gated(&id, false, Some(Arc::clone(&gate)))
+                .prepare_session_chat_gated(&id, false, Some(Arc::clone(&gate)))
                 .await;
-            self.install_home(
+            self.install_session_chat(
                 prepared,
                 expected_generation,
                 session_id.clone(),
@@ -172,12 +172,12 @@ impl DaemonClient {
             .await?;
         }
         let mut submission = loop {
-            let guard = self.home_display.lock().await;
+            let guard = self.session_chat_display.lock().await;
             let write = self.session.write.lock().await;
             if write.generation != expected_generation {
-                return Err("home display belongs to a retired session".into());
+                return Err("session_chat display belongs to a retired session".into());
             }
-            let display = guard.as_ref().ok_or("home display retired")?;
+            let display = guard.as_ref().ok_or("session_chat display retired")?;
             let ready = Arc::clone(&display.gate.lock().unwrap().ready);
             let notified = ready.notified();
             tokio::pin!(notified);
@@ -188,7 +188,7 @@ impl DaemonClient {
                     None
                 } else {
                     if gate.pending && reusable {
-                        return Err("home submission already pending".into());
+                        return Err("session_chat submission already pending".into());
                     }
                     let previous = gate.turn.clone();
                     gate.pending = true;
@@ -226,21 +226,21 @@ impl DaemonClient {
                 .as_str()
                 .is_some_and(|id| id != session_id)
         {
-            return Err("home acknowledgment belongs to a retired session".into());
+            return Err("session_chat acknowledgment belongs to a retired session".into());
         }
-        if response["type"] != "ok" {
-            return Err("unexpected home enqueue acknowledgment".into());
+        if response["type"] != "ok" || response["enqueued"] != true {
+            return Err("unexpected session_chat enqueue acknowledgment".into());
         }
-        let actual = response["id"]
+        let actual = response["chat_run_id"]
             .as_str()
             .filter(|s| !s.is_empty())
-            .ok_or_else(|| "home enqueue acknowledgment has no run id".to_owned())?
+            .ok_or_else(|| "session_chat enqueue acknowledgment has no run id".to_owned())?
             .to_owned();
-        write.home_run_id = Some(actual.clone());
+        write.chat_run_id = Some(actual.clone());
         let _ = self
             .out
             .raw_tx
-            .send(json!({"type":"home_run_identity", "id":actual,
+            .send(json!({"type":"session_chat_run_identity", "id":actual,
             "turn":turn, "session_id":session_id,
             "generation":expected_generation}));
         drop(write);
@@ -255,10 +255,10 @@ impl DaemonClient {
             submission.1.notify_one();
         } else {
             {
-                let mut display = self.home_display.lock().await;
+                let mut display = self.session_chat_display.lock().await;
                 let write = self.session.write.lock().await;
                 if write.generation != expected_generation {
-                    return Err("home display belongs to a retired session".into());
+                    return Err("session_chat display belongs to a retired session".into());
                 }
                 display.take();
             }
@@ -269,15 +269,15 @@ impl DaemonClient {
                 ..WatchGate::default()
             }));
             let stream = self
-                .prepare_home_gated(&actual, true, Some(Arc::clone(&gate)))
+                .prepare_session_chat_gated(&actual, true, Some(Arc::clone(&gate)))
                 .await;
-            self.install_home(stream, expected_generation, session_id, actual, turn, gate)
+            self.install_session_chat(stream, expected_generation, session_id, actual, turn, gate)
                 .await?;
         }
         Ok(response)
     }
 
-    async fn install_home(
+    async fn install_session_chat(
         &self,
         stream: Result<(mpsc::Receiver<Value>, Reader), String>,
         expected_generation: u64,
@@ -291,27 +291,27 @@ impl DaemonClient {
             Ok(stream) => stream,
             Err(error) => {
                 gate.lock().unwrap().disconnected = true;
-                initial_warning = Some(format!("home display unavailable: {error}"));
+                initial_warning = Some(format!("session_chat display unavailable: {error}"));
                 let (tx, rx) = mpsc::channel(1);
                 drop(tx);
                 (rx, Reader(tokio::spawn(async {})))
             }
         };
-        let mut display = self.home_display.lock().await;
+        let mut display = self.session_chat_display.lock().await;
         let write = self.session.write.lock().await;
         // Validate before publishing anything; on failure Reader's Drop closes
         // the candidate socket without touching an installed successor display.
         if write.generation != expected_generation
             || write.session_id.as_deref() != Some(&session_id)
         {
-            return Err("home display belongs to a retired session".into());
+            return Err("session_chat display belongs to a retired session".into());
         }
         if display.as_ref().is_some_and(|display| {
             let gate = display.gate.lock().unwrap();
             !display.forward.is_finished()
                 && (gate.pending || gate.recovering || !gate.disconnected)
         }) {
-            return Err("home watch already installed".into());
+            return Err("session_chat watch already installed".into());
         }
         let session_write = Arc::clone(&self.session.write);
         let out = Arc::clone(&self.out);
@@ -321,10 +321,10 @@ impl DaemonClient {
         let changed = Arc::new(tokio::sync::Notify::new());
         let recovery_run = actual.clone();
         let recovery_gate = Arc::clone(&gate);
-        let forward = tokio::spawn(forward_home_gated(
+        let forward = tokio::spawn(forward_session_chat_gated(
             rx,
             reader,
-            HomeWatchContext {
+            SessionChatWatchContext {
                 session_write,
                 out,
                 generation: expected_generation,
@@ -362,11 +362,11 @@ impl DaemonClient {
                             None,
                             None,
                             true,
-                            home_frame_receiver(true, Some(gate)),
+                            session_chat_frame_receiver(true, Some(gate)),
                         ),
                     )
                     .await
-                    .map_err(|_| "home watch acknowledgment timed out".to_owned())??;
+                    .map_err(|_| "session_chat watch acknowledgment timed out".to_owned())??;
                     Ok((rx, Reader(reader)))
                 }
             },
@@ -382,15 +382,15 @@ impl DaemonClient {
     }
 
     #[cfg(test)]
-    async fn prepare_home(
+    async fn prepare_session_chat(
         &self,
         id: &str,
         replay: bool,
     ) -> Result<(mpsc::Receiver<Value>, Reader), String> {
-        self.prepare_home_gated(id, replay, None).await
+        self.prepare_session_chat_gated(id, replay, None).await
     }
 
-    async fn prepare_home_gated(
+    async fn prepare_session_chat_gated(
         &self,
         id: &str,
         replay: bool,
@@ -407,30 +407,30 @@ impl DaemonClient {
                 None,
                 None,
                 replay,
-                home_frame_receiver(replay, gate),
+                session_chat_frame_receiver(replay, gate),
             ),
         )
         .await
-        .map_err(|_| "home watch acknowledgment timed out".to_owned())??;
+        .map_err(|_| "session_chat watch acknowledgment timed out".to_owned())??;
         Ok((rx, Reader(reader)))
     }
 }
 
 #[cfg(test)]
-async fn forward_home_stream<F, Fut>(
+async fn forward_session_chat_stream<F, Fut>(
     rx: mpsc::Receiver<Value>,
     reader: Reader,
-    context: HomeWatchContext,
+    context: SessionChatWatchContext,
     initial_warning: Option<String>,
     recover: F,
 ) where
     F: FnMut() -> Fut,
     Fut: std::future::Future<Output = Result<(mpsc::Receiver<Value>, Reader), String>>,
 {
-    forward_home_gated(rx, reader, context, initial_warning, None, recover).await;
+    forward_session_chat_gated(rx, reader, context, initial_warning, None, recover).await;
 }
 
-fn home_frame_receiver(
+fn session_chat_frame_receiver(
     mut replay: bool,
     gate: Option<Arc<std::sync::Mutex<WatchGate>>>,
 ) -> impl FnMut(Value) -> Option<Value> + Send {
@@ -440,7 +440,7 @@ fn home_frame_receiver(
         }
         if !replay
             && matches!(frame["type"].as_str(), Some("lagged" | "history_gap"))
-            && home_turn(&frame).is_none()
+            && session_chat_turn(&frame).is_none()
         {
             if let Some(gate) = &gate {
                 // Completed/idle turns have no warning owner. Drop these at
@@ -469,10 +469,10 @@ impl ReplayCursor {
     }
 }
 
-async fn forward_home_gated<F, Fut>(
+async fn forward_session_chat_gated<F, Fut>(
     mut rx: mpsc::Receiver<Value>,
     mut reader: Reader,
-    context: HomeWatchContext,
+    context: SessionChatWatchContext,
     initial_warning: Option<String>,
     gate: Option<Gate>,
     mut recover: F,
@@ -480,7 +480,7 @@ async fn forward_home_gated<F, Fut>(
     F: FnMut() -> Fut,
     Fut: std::future::Future<Output = Result<(mpsc::Receiver<Value>, Reader), String>>,
 {
-    let HomeWatchContext {
+    let SessionChatWatchContext {
         session_write,
         out,
         generation,
@@ -575,17 +575,17 @@ async fn forward_home_gated<F, Fut>(
                 }
                 let message = initial_warning
                     .as_deref()
-                    .unwrap_or("home display connection closed before turn completion");
+                    .unwrap_or("session_chat display connection closed before turn completion");
                 if let Some((gate, _)) = &gate {
                     let mut gate = gate.lock().unwrap();
                     if gate.pending {
                         let turn = gate.turn.clone();
-                        gate.frames.push_back(json!({"type":"home_transport_warning", "turn":turn, "message":message}));
+                        gate.frames.push_back(json!({"type":"session_chat_transport_warning", "turn":turn, "message":message}));
                     } else if gate.turn.is_some() {
-                        home_watch_warning(&out, gate.turn.clone(), message);
+                        session_chat_watch_warning(&out, gate.turn.clone(), message);
                     }
                 } else {
-                    home_watch_warning(&out, turn.clone(), message);
+                    session_chat_watch_warning(&out, turn.clone(), message);
                 }
                 warned = true;
             }
@@ -621,7 +621,7 @@ async fn forward_home_gated<F, Fut>(
                 recovery_turn = None;
             }
             if matches!(frame["type"].as_str(), Some("lagged" | "history_gap"))
-                && home_turn(&frame).is_none()
+                && session_chat_turn(&frame).is_none()
             {
                 match &recovery_turn {
                     Some(None) => continue,
@@ -643,7 +643,7 @@ async fn forward_home_gated<F, Fut>(
                 }
             }
         }
-        let frame_turn = home_turn(&frame);
+        let frame_turn = session_chat_turn(&frame);
         let active_turn = if let Some((gate, _)) = &gate {
             let mut gate = gate.lock().unwrap();
             if gate.pending {
@@ -688,16 +688,16 @@ async fn forward_home_gated<F, Fut>(
         {
             continue;
         }
-        if frame["type"] == "home_transport_warning" {
-            home_watch_warning(
+        if frame["type"] == "session_chat_transport_warning" {
+            session_chat_watch_warning(
                 &out,
                 active_turn.clone(),
                 frame["message"]
                     .as_str()
-                    .unwrap_or("home display unavailable"),
+                    .unwrap_or("session_chat display unavailable"),
             );
         } else {
-            forward_home(&out, frame, &run, active_turn.as_deref());
+            forward_session_chat(&out, frame, &run, active_turn.as_deref());
         }
         if turn_finished {
             finished_turn = active_turn.clone();
@@ -714,7 +714,7 @@ async fn forward_home_gated<F, Fut>(
     }
 }
 
-fn home_turn(frame: &Value) -> Option<String> {
+fn session_chat_turn(frame: &Value) -> Option<String> {
     frame["correlation_turn"]
         .as_str()
         .or_else(|| frame["turn"].as_str())
@@ -722,7 +722,7 @@ fn home_turn(frame: &Value) -> Option<String> {
         .map(str::to_owned)
 }
 
-fn home_watch_warning(out: &OutState, turn: Option<String>, message: &str) {
+fn session_chat_watch_warning(out: &OutState, turn: Option<String>, message: &str) {
     let _ = out.chat_tx.send((
         EventKind::SystemWarning {
             turn: None,
@@ -733,13 +733,13 @@ fn home_watch_warning(out: &OutState, turn: Option<String>, message: &str) {
     ));
 }
 
-fn forward_home(out: &OutState, frame: Value, run: &str, submitted_turn: Option<&str>) {
-    let turn = home_turn(&frame);
+fn forward_session_chat(out: &OutState, frame: Value, run: &str, submitted_turn: Option<&str>) {
+    let turn = session_chat_turn(&frame);
     if matches!(frame["type"].as_str(), Some("lagged" | "history_gap")) {
         let _ = out.chat_tx.send((
             EventKind::SystemWarning {
                 turn: None,
-                message: "home display history discontinuity: output may be missing".into(),
+                message: "session_chat display history discontinuity: output may be missing".into(),
             },
             // Gap frames describe the subscription, not an individual bus event.
             // Bind them before queueing so a later reset cannot adopt the warning.

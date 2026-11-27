@@ -7,12 +7,14 @@ Terminal UI for the `gremlins` CLI. Built on **ratatui** with **crossterm** for 
 | File | Role |
 |------|------|
 | `mod.rs` | Module root. `run()` entry point, `run_app()` event loop, bus-selected conversation routing, exact invocation resolution, lazy native input, and receipt handling, `format_socket_response()`. |
-| `app.rs` | Pure state (`App`). Active runs, chat id, full-screen marker (`Screen`), input history, cursor state. No I/O, no widget ownership. |
+| `app.rs` | Pure state (`App`). Active runs, `chat_run_id`, full-screen marker (`Screen`), input history, cursor state. No I/O, no widget ownership. |
 | `buffer.rs` | Display buffer: `LineBuffer` (styled FIFO, with drain-head and wrapping helpers). Plus `wrapped_height` and `line_wrapped_height` utilities. |
 | `markdown.rs` | Markdown-to-ratatui renderer. Turns a markdown string into `Vec<Line<'static>>` of styled spans via `pulldown-cmark` (tables, strikethrough, task lists). |
 | `screen.rs` | `LiveArea` — owns the main terminal screen, the typed widget `Scene` (`transcript`/`reasoning`/`input_bar`/`info_bar` fields plus a typed `ScreenView` enum), diff-driven double buffering, `commit_scrollback()` (renders overflow + `scroll_region_up`), raw-mode/cursor lifecycle. Also defines the full-screen `RunsView` body with its inline watch stream pane. |
 | `widgets.rs` | `LiveAreaWidget` trait + the shared recursive layout engine + concrete widgets: composite transcript (single styled FIFO + current-turn draft state + one embedded tool `StreamingWidget` child), the `StreamingWidget` primitive, input bar, info bar. Selected conversations share these widgets. |
 | `client.rs` | Persistent `DaemonClient`. Long-lived socket for request/response + unsolicited `DaemonEvent` broadcast. Also dedicated `follow_log()` and passive native `follow_run()` connections. |
+| `client/session_chat.rs` | Background session_chat bus subscription and replay/live display handoff, independent of selected-target watch. |
+| `session_chat_events.rs` | Session chat identity migration and turn-tagged event routing into its target transcript. |
 | `../input.rs` | Native exact-execution input transport. Binds lazily for commands/corrections and reports command receipts independently of bus output. |
 | `watch_replay.rs` | Watch history/live handoff: exact complete native replay; incomplete replay displays a persisted tail and all original native frames without deduplication, then follows the original subscription. |
 | `protocol.rs` | Shared bus selectors and exact stage_run_id identities. Selection is independent of native input binding. |
@@ -41,7 +43,7 @@ run()
       │    4. status_rx    — run-status refresh
       │    5. log_rx       — log-follow lines (dedicated connections)
       │    6. result_rx    — socket-op results
-      │    7. chat_rx      — home chat events with turn/stage_run_id identity
+      │    7. chat_rx      — session_chat events with turn/stage_run_id identity
       │    8. selected bus stream — replay/live invocation output
       │    9. delivery_rx  — correction delivery receipts
       │   10. reset_rx / model_rx — session reset and model-query results
@@ -61,14 +63,14 @@ returns `RunError::Reported` so the CLI exits nonzero without printing it again.
 - **Typed scene, per-frame type erasure.** `LiveArea` stores `Scene` (concrete `TranscriptWidget`, `InputBarWidget`, `InfoBarWidget`, and an `Option<ScreenView>`). Each frame takes the scene out, erases the selected fields to `&mut dyn LiveAreaWidget` for the layout engine, and puts it back. There is no concrete type reification or long-lived boxed-widget owner.
 - **Terminal scrollback promotion.** When the transcript FIFO exceeds its allocated rows, `TranscriptWidget::take_overflow()` drains the head and returns the overflow lines; `commit_scrollback()` renders them and calls `scroll_region_up` to push them into terminal scrollback. The pin-to-screen rows are the input and info bars only; while streaming, the top-level reasoning band and the transcript's embedded tool `StreamingWidget` slots are display-only and never reach scrollback. The FIFO is the sole overflow producer.
 - **Single styled FIFO + top-level reasoning band.** The transcript is one styled FIFO and is the only render source for the transcript region. Prompt, response, tool-call, and system lines are pushed into it as styled lines as they arrive. Prompt and response text are markdown-rendered; committed tool blocks (`◆` title + tail) are inserted at the response boundary via the uniform [`commit_tool_stream_block`] path. Live tool output renders as `StreamingWidget` children **below** the FIFO — not embedded between bands within it. When a tool arrives and the response accumulator has accumulated text, that text is **sealed** into the FIFO before the tool widget is created, so model text that arrived before the tool call always appears before the tool's `◆` line. Live reasoning stays out of the FIFO as a top-level bottom band pinned directly above the input bar (a fixed-height, tail-anchored `StreamingWidget` that collapses to zero when idle). At `finish_turn`, the transcript first flushes any uncommitted tool-call entries and rebuilds the response, then the scene commits only the reasoning title line as the final FIFO line of the turn; the reasoning body is display-only and cleared with the live band. Finished history reads prompt → sealed text blocks → committed tool blocks → response → reasoning title. In-progress streams stay display-only and never enter the FIFO or terminal scrollback; only the committed tool tails and the final reasoning title become permanent transcript history.
-- **Selected conversation, not a debug screen.** `Screen::Chat` shares one chat scene across `Target::Home`, `Target::StageExecution { run_id, stage }` selectors, and exact `Target::Invocation { run_id, stage, stage_run_id }` viewers. `LiveArea::select_conversation()` switches per-target render state; home keeps streaming in the background.
-- **Watch is a screen, inline logs remain.** `Screen::Runs` / `RunsView` renders the watch table with an optional inline live-log pane. `Ctrl+W` enters watch and opens/closes that pane; `Ctrl+O` remains its inline-pane alias. Enter selects the row's conversation in chat. Watch content never commits to chat scrollback.
+- **Selected conversation, not a debug screen.** `Screen::Chat` shares one chat scene across aggregate `Target::Run { run_id }` and exact `Target::Invocation { run_id, stage, stage_run_id }` viewers. `LiveArea::select_conversation()` switches per-target render state.
+- **Watch is a screen, inline logs remain.** `Screen::Runs` / `RunsView` renders the watch table with an optional inline live-log pane. `Ctrl+W` enters watch and opens/closes that pane; `Ctrl+O` remains its inline-pane alias. Enter is the sole conversation-selection action: a run row opens its aggregate `Target::Run`, while an invocation row opens its exact `Target::Invocation`. The reserved session_chat run row remains available even before it has an active run or invocation. Moving the highlight or toggling the inline pane does not select a chat conversation. Watch content never commits to chat scrollback.
 - **Uniform tool path.** Every tool — streaming or not — creates a `StreamingWidget` and commits via [`commit_tool_stream_block`]. Tools with an empty body commit a title-only block (functionally identical to the old diamond-line behavior); streaming tools commit their title plus the retained 5-row tail. `Read`/`Edit`/`Write`/`Glob`/`Grep` are no longer filtered — all tools participate uniformly. Live tool slots are `STREAM_MAX_ROWS`-capped, tail-anchored, lossy head-trimmed, ANSI-stripped, collapse to zero when idle, and never enter the transcript FIFO or terminal scrollback while streaming. The three-slice FIFO split (pre/events/tail) is gone; the FIFO renders as one contiguous tail-anchored block, with its rendered height tight to its content so live tool widgets sit directly beneath with no gap. **Sub-agent (`Task`) tool output is not forwarded:** nested loops run with `stream_events = None`, so their events never reach the parent TUI; `make_task_runner` therefore clears the inherited live-output sender (`child_ctx.tool_output = None`) so a sub-agent's chunks can't create a tool slot with no matching close event.
-- **Home chat uses the persistent client.** Chat requests use `DaemonClient`; home events retain turn/stage_run_id identity and update `Target::Home` even while another conversation is selected.
+- **Session chat uses the persistent client and a background subscription.** Chat requests use `DaemonClient`; its session_chat replay/live subscription is independent of the selected conversation's passive watch. Session chat events retain turn/stage_run_id identity and update `app.session_chat_target()` even while watch or another conversation is displayed. Returning through watch Enter reuses that subscription rather than opening a second selected-target follow.
 - **Run follow is passive watch.** `follow_run()` / `follow_watch()` send `{"op":"watch","scope":"run",...,"replay":true}` on an auxiliary session socket. The strict `watched` ack must match scope, run id, replay, and both optional selectors (`stage` / `stage_run_id`, explicitly null when absent). Buffered and subsequent native frames are forwarded unchanged. Watch never attaches for control or sends pause/message commands.
 - **Watch replay uses an atomic native cut, not content deduplication.** `watch_replay::replay_and_dedup()` collects at most 65,536 native snapshot frames through `replay_checkpoint`; `follow_run` has a bounded 256-frame socket queue. `history_gap` or an incomplete checkpoint triggers a one-shot persisted tail (500 lines), with a visible discontinuity/possible overlap warning, while preserving the same live subscription. Failed watch also uses disk-only persisted history, including after daemon restart; it never opens a replacement live log follow. Despite the helper name, this inline replay path performs no deduplication, sequence suppression, content matching, frozen anchor, occurrence budget, or replacement watch. Identical disk/native/live records remain visible. Replay completeness comes from `replay_checkpoint`, not an attach capability; native live frames carry emission sequences. Exec `.events` sidecars are ignored/not written and raw log metadata remains visible. Bounded disk tails assert no coverage; ordinary full log follow's persisted log-line cut remains separate. Agent stage history may include other executions; exact execution-scoped merging is deferred. See `docs/attachment-protocol.md` for journal limits and watermarks.
 - **Log follow uses a dedicated socket.** The `log` op with `follow:true` monopolizes its connection, so it gets its own (`client::follow_log`).
-- **Client owns transport; UI owns selection.** Watch Enter, `/attach`, and `/debug` select bus output without pausing execution or opening an input connection. Bus identity (`run_id`/`id`, `correlation_stage`/`stage`, `stage_run_id`) routes frames to exact invocation transcripts and matching run/stage selectors without requiring a start frame or nonce; per-target sequences suppress duplicate delivery using sorted merged inclusive ranges retained across close/reopen. `/debug <stage_run_id>` or `/debug <run> <stage_run_id>` resolves a concrete invocation; `/attach <run> <stage_run_id>` also selects one. `/attach` is only a user-facing selection command (`AttachHome` / `AttachStage`), never wire `op: "attach"`; the daemon rejects that retired op. Native input is separate and binds lazily on submission. Releasing local transports does not control execution.
+- **Client owns transport; UI owns selection.** Watch Enter selects bus output without pausing execution or opening an input connection. Bus identity (`run_id`/`id`, `correlation_stage`/`stage`, `stage_run_id`) routes frames to exact invocation transcripts and matching aggregate run targets without requiring a start frame or nonce; per-target sequences suppress duplicate delivery using sorted merged inclusive ranges retained across close/reopen. An aggregate run includes its invocations; an exact invocation rejects siblings and never follows a replacement execution merely because its stage name matches. Native input is separate and binds lazily on submission. Releasing local transports does not control execution.
 - **Request/response ordering is FIFO.** `DaemonClient::send_request` holds a write lock across enqueue + write so concurrent callers can't interleave.
 
 ## Event Loop Patterns
@@ -77,20 +79,35 @@ returns `RunError::Reported` so the CLI exits nonzero without printing it again.
 `dispatch()` returns `Some(CommandResult)` → event loop match arm handles each variant:
 - `Lines` → push to transcript
 - `SocketOp` → spawn a task that calls `client.send_request()`, sends result to `result_tx` (or starts a log follow for `op == "log"`)
-- `RestartChat` → clear current turn, abort chat task, clear history + input
+- `RestartChat` → use the guarded session reset path described below
 - `Quit` → break loop
 - `ShowHistory` / `TruncateHistory` → operate on `app.conversation_history`
 - `ShowRuns` → enter `Screen::Runs`
-- `Debug(selector)` → resolve the joined one- or two-argument concrete invocation selector in `mod.rs`, then select its bus conversation in `Screen::Chat`
 - Selected execution controls are intercepted by `mod.rs` before ordinary dispatch; `commands.rs` does not resolve execution identities.
 
-### Home chat flow
-Session creation/recreation returns a registry-reserved `home_run_id`, distinct from
-`sess-*`. The client installs it before processing watch rows, without waiting for
-`TurnStarted`; first chat creation consumes the reservation. A replacement enqueue acknowledgment installs the authoritative run ID immediately,
-without waiting for `TurnStarted`. Home follows that run through native bus replay/live
-handoff; retained-window gaps remain visible. Unsolicited chat-display frames are ignored.
-These steps apply to a new idle prompt on `Target::Home`; busy untargeted chat is rejected. Selected-stage text uses the correction path below. Targeted `chat` corrections, when used, share the exact inbox and supervisor controller claim with native input rather than queueing a new prompt.
+### Session chat flow
+Session creation/recreation returns a registry-reserved `chat_run_id`, distinct from
+`session_id` (`sess-*`). The client installs it before processing watch rows, without
+waiting for `TurnStarted`; first chat creation consumes the reservation. A replacement
+enqueue acknowledgment installs the authoritative run ID immediately, without waiting
+for `TurnStarted`, but does not steal selection from another conversation. Identity
+acknowledgments must match the current session generation and current or latest submitted
+turn; stale generations and unrelated turns are ignored. Session chat
+follows that run through its background native bus replay/live subscription;
+retained-window gaps remain visible. Unsolicited chat-display frames are ignored.
+These steps apply to a new idle prompt on `app.session_chat_target()`; busy untargeted
+chat is rejected. Selected-agent text uses the correction path below. Targeted `chat`
+corrections, when used, share the exact inbox and supervisor controller claim with
+native input rather than queueing a new prompt.
+
+Session reset is allowed only when the session_chat aggregate is selected and
+`app.session_recreating` is false. An invocation of the same run is not eligible.
+Reset retires the old session/turn state and clears its transcript, input, and skills;
+submissions are blocked while recreation is pending. A successful late reset reply
+updates `chat_run_id` but selects the replacement aggregate only if the old session_chat
+target is still selected. If the user switched away, their selection and composer stay
+put. Reset errors are written to the old session_chat transcript, not the currently
+selected conversation.
 
 1. User types plain text → Enter
 2. `live_area.submit_prompt()` pushes a separator and the markdown-rendered prompt into the FIFO, then pins the turn start; the top-level reasoning band and the embedded tool slots are cleared with the new prompt
@@ -113,13 +130,13 @@ These steps apply to a new idle prompt on `Target::Home`; busy untargeted chat i
 - `Bail` → log only
 
 ### Selected stage conversations
-- Watch Enter and slash selectors observe bus output without pause-on-entry. Run/stage selectors and exact invocation viewers share the chat scene; exec stages remain read-only.
+- Watch Enter alone selects conversations, observing bus output without pause-on-entry. Aggregate run targets and exact invocation viewers share the chat scene; exec stages remain read-only.
 - Matching tagged agent events identify an exact agent execution and enable its composer as a UI hint only. Descriptive `stage_type` is not a writable capability: the separate exact input bind can still reject stale executions, unsupported backends, or a competing controller. A selector alone is not an input handle.
-- Ordinary selected-agent text corrects that exact execution, never home chat or a replacement run. Native input binds lazily when a correction or control is submitted; queued prompts are busy, not input handles.
-- Bus output routes by identity and rejects sibling invocations. Home bus events always update `Target::Home`, even while another target is displayed.
+- Ordinary selected-agent text corrects that exact execution, never an untargeted session_chat prompt or a replacement run. Native input binds lazily when a correction or control is submitted; queued prompts are busy, not input handles.
+- Bus output routes by identity: aggregates accept matching invocations, while exact invocation viewers reject siblings. Session chat bus events always update `app.session_chat_target()`, even while another target is displayed.
 - Command receipts are separate from bus output. Track delivery against the submitted execution; stale receipts must not clear a successor execution's draft.
 - `/pause` pauses; `/step` and `/continue` single-step one turn. Bare `/resume-execution` resumes the selected execution autonomously. Selected `/quit` also resumes; `/quit <reason>` and `/bail <reason>` bail with that reason.
-- `/exit` and `/attach home` return home and release local input/selection without sending pause, resume, cancel, or other execution controls. Switching away does not cancel execution. Outside a selected execution, `/quit` exits the TUI.
+- To return to session chat, open watch and press Enter on its aggregate run row. Switching conversations releases local selection/input transports without sending pause, resume, cancel, or other execution controls. Switching away does not cancel execution. Outside a selected execution, `/quit` exits the TUI.
 Matching tagged agent events identify the exact input execution without requiring a
 start frame or capability announcement. Queued prompts are busy, not input handles;
 corrections use exact input and never fall back to chat. Command receipts are distinct

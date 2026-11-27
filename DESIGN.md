@@ -902,12 +902,13 @@ selection left to follow.
 
 #### 8.4.5 Selected conversation
 
-`Enter` in watch selects the run's bus output without pausing or opening an
-input connection. `/attach <id> [stage]` selects output directly; its optional
-selector can identify an exact invocation. `/debug <stage_run_id>` or
-`/debug <run> <stage_run_id>` selects a concrete invocation in the same chat
-scene, not a separate debug screen. Neither command pauses on entry. `/attach`
-is a TUI selection command, not wire `op: "attach"`, which is retired.
+Watch `Enter` is the only conversation-selection path. A run row opens its
+aggregate output; an invocation row selects that concrete invocation in the
+shared chat scene. Neither pauses execution nor opens an input connection.
+Moving the highlight or toggling inline logs does not select a conversation.
+The session chat run row remains available before its first turn; select it
+with Enter to return to session chat. `/exit` is not dispatched as a TUI command.
+Wire `op: "attach"` is retired.
 
 Tagged agent events enable the composer as a UI hint. Submission lazily binds
 separate exact execution input; stale targets, unsupported backends, or another
@@ -916,10 +917,12 @@ its inbox. Exec stages remain read-only. Display `stage_type` describes the
 invocation; it is not a writable capability.
 
 Explicit run controls retain their names: `/stop <id>` and `/resume <id>`
-(or `s`/`r` in watch). `/attach home` returns home; `Ctrl+T` switches between
-home and the last stage, keeping drafts. Leaving detaches rather than cancels.
-Home continues streaming in the background while a stage is selected. The
-inline watch pane remains on `Ctrl+W`, with `Ctrl+O` as an alias.
+(or `s`/`r` in watch). Switching through Watch Enter preserves per-target
+composer drafts and cursor positions, along with transcript and streaming
+render state. Leaving releases local input without resuming or cancelling the
+execution. Session chat continues streaming in the background while another
+conversation is selected. The inline watch pane remains on `Ctrl+W`, with
+`Ctrl+O` as an alias.
 
 ### 8.5 Widget lifecycle
 
@@ -998,7 +1001,7 @@ their own controls (or none). Key routing rules:
 3. Otherwise, dismiss the correction draft or clear the input without
    interrupting its execution. Navigation detaches rather than cancels.
 
-Explicit home interruption uses `Ctrl+C`: soft interruption first, then hard
+Explicit session chat turn interruption uses `Ctrl+C`: soft interruption first, then hard
 cancellation on a repeated press within one second. Outside an active request,
 repeated `Ctrl+C` within one second exits the TUI.
 
@@ -1224,7 +1227,7 @@ The TUI (or any front-end) first creates a session:
 ```
 
 The daemon replies with a session id, session socket name, and reserved
-`home_run_id`. New conversation prompts are sent on that session socket only
+`chat_run_id`. New conversation prompts are sent on that session socket only
 when idle:
 
 ```json
@@ -1232,7 +1235,7 @@ when idle:
 ```
 
 New prompts carry no history, transcript, or tool records. The daemon owns
-conversation context. The front-end uses `home_run_id` to observe bus output and
+conversation context. The front-end uses `chat_run_id` to observe bus output and
 exact invocation identity to submit active corrections through separate input.
 Untargeted prompts are not a correction path or a queue for a busy turn. When a
 session dies, its chat gremlin dies with it.
@@ -1308,7 +1311,7 @@ removed from the run map — rather than remaining inspectable.
 
 The TUI (§8) is one front-end for the chat backend. It creates a session,
 sends `{"op": "chat", "session_id": "sess-…", "text": "..."}` on that
-session socket when idle. It independently watches the announced home run's
+session socket when idle. It independently watches the announced session chat run's
 bus output and renders reasoning chunks, tool results, response text, and turn
 completion as transcript widgets. Active corrections lazily bind exact input
 instead of sending another untargeted prompt. The daemon remains the authority

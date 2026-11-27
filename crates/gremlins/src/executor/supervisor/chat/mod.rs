@@ -291,7 +291,7 @@ pub(crate) async fn handle_chat(
     }
 
     // ── Concurrent submission check ─────────────────────────────────
-    // Fast-path advisory check: reject a second home chat prompt while a
+    // Fast-path advisory check: reject a second session chat prompt while a
     // turn is still in-flight. The real atomic gate is `SetCurrentTurn`
     // inside `run_turn`, which runs under the session task's single
     // dispatcher — two concurrent submissions cannot both pass that
@@ -417,7 +417,7 @@ pub(crate) async fn handle_chat(
 
     // Acknowledge enqueue only. The bus carries output correlated with this
     // caller's token; an execution identity exists only when its stage starts.
-    let ack = serde_json::json!({"id": handle.id, "status": "streaming", "turn": turn, "req_id": request.get("req_id")});
+    let ack = serde_json::json!({"chat_run_id": handle.id, "enqueued": true, "turn": turn, "req_id": request.get("req_id")});
     let _ = writer.write_json_line(&ok_response(ack)).await;
 }
 
@@ -513,8 +513,8 @@ async fn spawn_fresh_chat_gremlin(
     project_root: &Path,
     env: &HashMap<String, String>,
 ) -> Result<ChatGremlinHandle, Value> {
-    let home_run_id = session_task.get_home_run_id().await;
-    let id = match &home_run_id {
+    let chat_run_id = session_task.get_chat_run_id().await;
+    let id = match &chat_run_id {
         Some(id) => id.clone(),
         None => registry.reserve_chat_id().await,
     };
@@ -532,7 +532,7 @@ async fn spawn_fresh_chat_gremlin(
     Ok(handle)
 }
 
-/// Return the session's reusable home, waiting for an installed turn to
+/// Return the session's reusable session chat, waiting for an installed turn to
 /// re-park or retaining the live task's identity during setup.
 pub(crate) async fn reusable_chat_gremlin_id(session_task: &SessionTaskHandle) -> Option<String> {
     loop {
@@ -560,7 +560,7 @@ pub(crate) async fn reusable_chat_gremlin_id(session_task: &SessionTaskHandle) -
             None => {
                 // The persistent task may own the gremlin during setup,
                 // before CurrentTurn is installed. Its live handle still owns
-                // the home; queue on it rather than creating a replacement.
+                // the session chat; queue on it rather than creating a replacement.
                 if let Some(handle) = session_task.get_chat_handle().await {
                     if !handle.is_finished() {
                         return Some(handle.id);

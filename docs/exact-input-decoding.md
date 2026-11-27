@@ -22,6 +22,13 @@ gremlins-drag crates/gremlins/src --model chatgpt/gpt-6-luna
 
 Raw reports are saved in `docs/exact-input-measurements/before.txt` and
 `after.txt`. These are source-tree measurements, not isolated-file scores.
+The raw reports are verbatim historical tool output. Legacy module-name matches
+in them are measurement labels, not current session-chat terminology; they are
+retained unchanged so the measurements remain accurate. The truncated historical
+`tests::home_bu` label denotes today's session-chat bus tests
+(`tests::session_chat_bus`); `tests::home_id` denotes session-chat identity tests
+(`tests::session_chat_identity`). These labels are historical evidence, not
+current navigation destinations.
 
 | Row | Own tokens before → after | Footprint before → after | Comprehensibility before → after | Drag before → after |
 |---|---:|---:|---:|---:|

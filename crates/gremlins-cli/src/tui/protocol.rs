@@ -60,13 +60,13 @@ mod tests {
 
     #[test]
     fn native_bus_identity_needs_no_debugger_metadata() {
-        let frame = json!({"type":"stream_chunk", "run_id":"home", "stage":"chat",
+        let frame = json!({"type":"stream_chunk", "run_id":"session_chat", "stage":"chat",
             "stage_run_id":"invocation", "sequence":12, "text":"hello"});
         let execution = Execution::from_bus_frame(&frame).unwrap();
         assert_eq!(
             execution.input_request("owner", "7"),
             json!({"op":"input",
-            "session_id":"owner", "id":"home", "stage_run_id":"invocation", "req_id":"7"})
+            "session_id":"owner", "id":"session_chat", "stage_run_id":"invocation", "req_id":"7"})
         );
         for key in ["run_id", "stage_run_id"] {
             for value in [Value::Null, json!(""), json!(" "), json!(9)] {

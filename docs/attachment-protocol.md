@@ -10,7 +10,12 @@ and test code independently. No runtime verification is claimed by this document
 global control socket and verified session auxiliary socket:
 `attach is retired; use watch or exact execution input`.
 There is no compatibility debugger controller, pause-on-entry lease, or successor
-handoff. TUI `/attach` is a local selection command, not the retired wire op.
+handoff. Watch Enter is the only TUI selection path: it observes a concrete
+invocation without pausing. The TUI has no `/exit` command. Selection itself
+neither pauses the invocation nor acquires execution input. Open Watch with
+`/watch`, move with Up/Down, then press Enter. Ordinary text corrects the selected
+exact agent execution; exec stages are read-only. Native input binds lazily on
+submission, and delivery receipts are separate from bus output.
 Producer-side `stage_boundary.rs` remains; `stage_stream` is retired.
 
 ## Exact execution input

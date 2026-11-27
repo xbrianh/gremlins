@@ -88,8 +88,29 @@ fn chat_done_usage(
     }
 }
 
-fn home_starting_usage(gremlin: &Gremlin) -> crate::clients::protocol::UsageStats {
-    if let Some(value) = gremlin.state.read_field("home_starting_usage") {
+/// Move persisted pre-rename balances together, before consulting the native journal.
+/// Removing the old keys makes this a one-time migration; new keys always win.
+fn migrate_session_chat_usage(gremlin: &Gremlin) {
+    let mut fields = serde_json::Map::new();
+    let mut delete = Vec::new();
+    for suffix in ["starting_usage", "cmd_usage", "outer_usage"] {
+        let old = format!("home_{suffix}");
+        let new = format!("session_chat_{suffix}");
+        if let Some(value) = gremlin.state.read_field(&old) {
+            if gremlin.state.read_field(&new).is_none() {
+                fields.insert(new, value);
+            }
+            delete.push(old);
+        }
+    }
+    if !delete.is_empty() {
+        gremlin.state.patch(&delete, &fields);
+    }
+}
+
+fn session_chat_starting_usage(gremlin: &Gremlin) -> crate::clients::protocol::UsageStats {
+    migrate_session_chat_usage(gremlin);
+    if let Some(value) = gremlin.state.read_field("session_chat_starting_usage") {
         return usage_baseline_from_state(Some(&value));
     }
     // Snapshot legacy balances before the first native collector creates a ledger.
@@ -97,14 +118,14 @@ fn home_starting_usage(gremlin: &Gremlin) -> crate::clients::protocol::UsageStat
         .then(|| {
             gremlin
                 .state
-                .read_field("home_outer_usage")
+                .read_field("session_chat_outer_usage")
                 .or_else(|| gremlin.state.read_field("token_usage"))
         })
         .flatten();
     let usage = usage_baseline_from_state(legacy.as_ref());
     gremlin.state.patch(
         &[],
-        serde_json::json!({"home_starting_usage": usage})
+        serde_json::json!({"session_chat_starting_usage": usage})
             .as_object()
             .unwrap(),
     );
@@ -112,24 +133,28 @@ fn home_starting_usage(gremlin: &Gremlin) -> crate::clients::protocol::UsageStat
 }
 
 /// Starting balance and command usage are separate from the corrected native ledger.
-fn home_native_usage(gremlin: &Gremlin) -> Result<crate::clients::protocol::UsageStats, RunError> {
-    let starting = home_starting_usage(gremlin);
-    let command = usage_baseline_from_state(gremlin.state.read_field("home_cmd_usage").as_ref());
+fn session_chat_native_usage(
+    gremlin: &Gremlin,
+) -> Result<crate::clients::protocol::UsageStats, RunError> {
+    let starting = session_chat_starting_usage(gremlin);
+    let command =
+        usage_baseline_from_state(gremlin.state.read_field("session_chat_cmd_usage").as_ref());
     let native = gremlin
         .state
         .store_ref()
         .outer_conversational_usage(gremlin.id.as_str())
-        .map_err(|error| RunError::Message(format!("home usage journal: {error}")))?;
+        .map_err(|error| RunError::Message(format!("session_chat usage journal: {error}")))?;
     let baseline = chat_done_usage(Some(&starting), Some(&command));
     Ok(chat_done_usage(baseline.as_ref(), Some(&native)).unwrap())
 }
 
-fn advance_home_cmd_usage(gremlin: &Gremlin, local: &crate::clients::protocol::UsageStats) {
-    let previous = usage_baseline_from_state(gremlin.state.read_field("home_cmd_usage").as_ref());
+fn advance_session_chat_cmd_usage(gremlin: &Gremlin, local: &crate::clients::protocol::UsageStats) {
+    let previous =
+        usage_baseline_from_state(gremlin.state.read_field("session_chat_cmd_usage").as_ref());
     let usage = chat_done_usage(Some(&previous), Some(local)).unwrap();
     gremlin.state.patch(
         &[],
-        serde_json::json!({"home_cmd_usage": usage})
+        serde_json::json!({"session_chat_cmd_usage": usage})
             .as_object()
             .unwrap(),
     );
@@ -157,7 +182,7 @@ fn record_cmd_usage(
         .filter_map(|(key, value)| value.map(|value| (key.to_string(), value as i64))),
     );
     if is_chat {
-        advance_home_cmd_usage(gremlin, usage);
+        advance_session_chat_cmd_usage(gremlin, usage);
     }
     gremlin.state.accumulate_token_usage(&delta);
     state::emit_stage_token_usage(gremlin.state.store_ref(), stage_path, &delta);
@@ -494,7 +519,7 @@ pub(crate) async fn run_agent(
 
     let is_native = client.provider() != "cmd";
     let usage_baseline = if is_chat {
-        Some(home_native_usage(gremlin)?)
+        Some(session_chat_native_usage(gremlin)?)
     } else {
         None
     };
@@ -598,11 +623,11 @@ pub(crate) async fn run_agent(
         accounting_result.map_err(|error| stage_failed(&prepared.name, error))?;
 
         // Persist even when the backend failed after reporting partial requests.
-        let native_home_usage = if is_chat && is_native {
-            let usage = home_native_usage(gremlin)?;
+        let native_session_chat_usage = if is_chat && is_native {
+            let usage = session_chat_native_usage(gremlin)?;
             gremlin.state.patch(
                 &[],
-                serde_json::json!({"home_outer_usage": usage})
+                serde_json::json!({"session_chat_outer_usage": usage})
                     .as_object()
                     .unwrap(),
             );
@@ -668,7 +693,7 @@ pub(crate) async fn run_agent(
             {
                 gremlin.state.patch(
                     &[],
-                    serde_json::json!({"home_outer_usage": usage})
+                    serde_json::json!({"session_chat_outer_usage": usage})
                         .as_object()
                         .unwrap(),
                 );
@@ -737,7 +762,7 @@ pub(crate) async fn run_agent(
                 EventKind::Done {
                     text: completed.text_result.unwrap_or_default(),
                     summary: completed.summary.unwrap_or_default(),
-                    usage: native_home_usage.or_else(|| {
+                    usage: native_session_chat_usage.or_else(|| {
                         chat_done_usage(usage_baseline.as_ref(), completed.token_usage.as_ref())
                     }),
                 },
@@ -1138,13 +1163,13 @@ mod tests {
 
     const CAPTURED: &str = "deliberate run_agent dispatch capture";
 
-    struct HomeUsageBackend {
+    struct SessionChatUsageBackend {
         fail: bool,
         baselines: Mutex<Vec<u64>>,
     }
 
     #[async_trait::async_trait]
-    impl Backend for HomeUsageBackend {
+    impl Backend for SessionChatUsageBackend {
         async fn run(
             &self,
             mut params: RunParams,
@@ -1192,7 +1217,7 @@ mod tests {
                         usage: ModelCallUsage {
                             request_id: format!("{}-{request}", corr.stage_run_id().unwrap()),
                             provider: "anthropic".into(),
-                            model: "home-test".into(),
+                            model: "session_chat-test".into(),
                             agent_id: if task { "[task.test]" } else { "" }.into(),
                             request_kind: String::new(),
                             reported: true,
@@ -1218,10 +1243,10 @@ mod tests {
                 .unwrap();
             params
                 .prepopulated_conversation
-                .finalize(1, "home reply", &[], None);
+                .finalize(1, "session_chat reply", &[], None);
             Ok(CompletedRun {
                 exit_code: 0,
-                text_result: Some("home reply".into()),
+                text_result: Some("session_chat reply".into()),
                 summary: None,
                 events: None,
                 cost_usd: None,
@@ -1238,11 +1263,11 @@ mod tests {
         }
 
         fn model(&self) -> &str {
-            "home-test"
+            "session_chat-test"
         }
     }
 
-    const HOME_CORRECTION: &str = "Use the corrected cobalt lighthouse coordinates.";
+    const SESSION_CHAT_CORRECTION: &str = "Use the corrected cobalt lighthouse coordinates.";
 
     struct NativeLoopBackend {
         baselines: Mutex<Vec<u64>>,
@@ -1279,7 +1304,7 @@ mod tests {
                         )
                         .expect("correction is pinned to this invocation A");
                     sender
-                        .try_send("correction-A".into(), HOME_CORRECTION.into())
+                        .try_send("correction-A".into(), SESSION_CHAT_CORRECTION.into())
                         .unwrap()
                 })
             } else {
@@ -1287,7 +1312,7 @@ mod tests {
                     let history =
                         serde_json::to_string(&params.prepopulated_conversation.messages())
                             .unwrap();
-                    assert_eq!(history.matches(HOME_CORRECTION).count(), 1);
+                    assert_eq!(history.matches(SESSION_CHAT_CORRECTION).count(), 1);
                 }
                 None
             };
@@ -1350,7 +1375,7 @@ mod tests {
                 let history =
                     serde_json::to_string(&result.conversation.as_ref().unwrap().messages())
                         .unwrap();
-                assert_eq!(history.matches(HOME_CORRECTION).count(), 1);
+                assert_eq!(history.matches(SESSION_CHAT_CORRECTION).count(), 1);
             }
             self.locals
                 .lock()
@@ -1365,7 +1390,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn home_real_loop_correction_replay_and_next_turn_usage() {
+    async fn session_chat_real_loop_correction_replay_and_next_turn_usage() {
         use crate::executor::stage_boundary::StageInvocation;
         let stage = AgentBuilder::new("chat-0001")
             .prompt(CHAT_A)
@@ -1376,7 +1401,7 @@ mod tests {
             &[],
             serde_json::json!({"kind": "chat"}).as_object().unwrap(),
         );
-        let spec = "anthropic/home-real-loop-usage";
+        let spec = "anthropic/session_chat-real-loop-usage";
         let backend = Arc::new(NativeLoopBackend {
             baselines: Mutex::new(vec![]),
             locals: Mutex::new(vec![]),
@@ -1444,7 +1469,7 @@ mod tests {
             assert_eq!(
                 serde_json::to_string(&history)
                     .unwrap()
-                    .matches(HOME_CORRECTION)
+                    .matches(SESSION_CHAT_CORRECTION)
                     .count(),
                 1
             );
@@ -1530,19 +1555,19 @@ mod tests {
                     rows_before
                 );
                 assert_eq!(
-                    home_native_usage(&gremlin).unwrap().prompt_tokens,
+                    session_chat_native_usage(&gremlin).unwrap().prompt_tokens,
                     Some(150)
                 );
                 // Reopen with the cached fallback deliberately absent.
                 gremlin.state.patch(
                     &[],
-                    serde_json::json!({"home_outer_usage": null})
+                    serde_json::json!({"session_chat_outer_usage": null})
                         .as_object()
                         .unwrap(),
                 );
                 gremlin.state = StateData::open("gr-test").unwrap();
                 assert_eq!(
-                    home_native_usage(&gremlin).unwrap().prompt_tokens,
+                    session_chat_native_usage(&gremlin).unwrap().prompt_tokens,
                     Some(150)
                 );
                 while rx.try_recv().is_ok() {}
@@ -1617,7 +1642,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn home_two_turn_usage_excludes_tasks_and_corrects_requests() {
+    async fn session_chat_two_turn_usage_excludes_tasks_and_corrects_requests() {
         use crate::executor::stage_boundary::StageInvocation;
         let stage = AgentBuilder::new("chat-0001")
             .prompt(CHAT_A)
@@ -1632,8 +1657,8 @@ mod tests {
             .as_object()
             .unwrap(),
         );
-        let spec = "anthropic/home-two-turn-usage";
-        let backend = Arc::new(HomeUsageBackend {
+        let spec = "anthropic/session_chat-two-turn-usage";
+        let backend = Arc::new(SessionChatUsageBackend {
             fail: false,
             baselines: Mutex::new(vec![]),
         });
@@ -1655,7 +1680,10 @@ mod tests {
                 900 + 106 * turn
             );
             assert_eq!(
-                gremlin.state.read_field("home_outer_usage").unwrap()["prompt_tokens"],
+                gremlin
+                    .state
+                    .read_field("session_chat_outer_usage")
+                    .unwrap()["prompt_tokens"],
                 900 + 6 * turn
             );
         }
@@ -1670,7 +1698,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn home_native_failure_flushes_corrected_and_task_usage_before_error() {
+    async fn session_chat_native_failure_flushes_corrected_and_task_usage_before_error() {
         use crate::executor::stage_boundary::StageInvocation;
         let stage = AgentBuilder::new("chat-0001")
             .prompt(CHAT_A)
@@ -1681,10 +1709,10 @@ mod tests {
             &[],
             serde_json::json!({"kind": "chat"}).as_object().unwrap(),
         );
-        let spec = "anthropic/home-failed-usage";
+        let spec = "anthropic/session_chat-failed-usage";
         install_test_backend(
             &ModelURI::parse(spec).unwrap().to_string(),
-            Arc::new(HomeUsageBackend {
+            Arc::new(SessionChatUsageBackend {
                 fail: true,
                 baselines: Mutex::new(vec![]),
             }),
@@ -1702,10 +1730,16 @@ mod tests {
             .unwrap_err();
         assert!(error.to_string().contains(CAPTURED), "{error}");
         assert_eq!(
-            gremlin.state.read_field("home_outer_usage").unwrap()["prompt_tokens"],
+            gremlin
+                .state
+                .read_field("session_chat_outer_usage")
+                .unwrap()["prompt_tokens"],
             6
         );
-        assert_eq!(home_native_usage(&gremlin).unwrap().prompt_tokens, Some(6));
+        assert_eq!(
+            session_chat_native_usage(&gremlin).unwrap().prompt_tokens,
+            Some(6)
+        );
         assert_eq!(
             gremlin.state.read_field("token_usage").unwrap()["prompt_tokens"],
             106
@@ -1716,12 +1750,12 @@ mod tests {
         // Reopening must recover the failed attempt without trusting the cache.
         gremlin.state.patch(
             &[],
-            serde_json::json!({"home_outer_usage": {"prompt_tokens": 999}})
+            serde_json::json!({"session_chat_outer_usage": {"prompt_tokens": 999}})
                 .as_object()
                 .unwrap(),
         );
         gremlin.state = StateData::open("gr-test").unwrap();
-        let retry = Arc::new(HomeUsageBackend {
+        let retry = Arc::new(SessionChatUsageBackend {
             fail: false,
             baselines: Mutex::new(vec![]),
         });
@@ -1732,7 +1766,10 @@ mod tests {
             .unwrap();
         assert_eq!(*retry.baselines.lock().unwrap(), [6]);
         assert_eq!(
-            gremlin.state.read_field("home_outer_usage").unwrap()["prompt_tokens"],
+            gremlin
+                .state
+                .read_field("session_chat_outer_usage")
+                .unwrap()["prompt_tokens"],
             12
         );
         assert_eq!(
@@ -1853,7 +1890,7 @@ mod tests {
         ) -> Result<CompletedRun, ClientError> {
             assert!(
                 params.defer_done,
-                "home-chat completion belongs to executor"
+                "session_chat completion belongs to executor"
             );
             let conversation = &mut params.prepopulated_conversation;
             conversation.set_next_prompt(&params.prompt);
@@ -1934,7 +1971,7 @@ mod tests {
             serde_json::json!({"kind": "chat"}).as_object().unwrap(),
         );
         let spec = "anthropic/native-chat-commit-failure";
-        let backend = Arc::new(HomeUsageBackend {
+        let backend = Arc::new(SessionChatUsageBackend {
             fail: false,
             baselines: Mutex::new(vec![]),
         });
@@ -2001,9 +2038,9 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn home_legacy_native_cmd_native_preserves_separate_balances() {
+    async fn session_chat_legacy_native_cmd_native_preserves_separate_balances() {
         use crate::executor::stage_boundary::StageInvocation;
-        for legacy_field in ["home_outer_usage", "token_usage"] {
+        for legacy_field in ["session_chat_outer_usage", "token_usage"] {
             let stage = AgentBuilder::new("chat-0001")
                 .prompt(CHAT_A)
                 .build()
@@ -2013,8 +2050,8 @@ mod tests {
                 serde_json::json!({"kind": "chat", "token_usage": {"prompt_tokens": 900}});
             fields[legacy_field] = serde_json::json!({"prompt_tokens": 40});
             gremlin.state.patch(&[], fields.as_object().unwrap());
-            let spec = format!("anthropic/home-transition-{legacy_field}");
-            let backend = Arc::new(HomeUsageBackend {
+            let spec = format!("anthropic/session_chat-transition-{legacy_field}");
+            let backend = Arc::new(SessionChatUsageBackend {
                 fail: false,
                 baselines: Mutex::new(vec![]),
             });
@@ -2022,7 +2059,7 @@ mod tests {
                 &ModelURI::parse(&spec).unwrap().to_string(),
                 backend.clone(),
             );
-            let cmd = format!("cmd/home-transition-{legacy_field}");
+            let cmd = format!("cmd/session_chat-transition-{legacy_field}");
             install_test_backend(&cmd, Arc::new(CmdUsageBackend));
             let (_guard, mut rx) = gremlins_magic_bus::subscribe_run(gremlin.id.as_str());
             for (turn, model) in [(1, spec.as_str()), (2, cmd.as_str()), (3, spec.as_str())] {
@@ -2041,14 +2078,20 @@ mod tests {
             }
             assert_eq!(*backend.baselines.lock().unwrap(), [40, 57]);
             assert_eq!(
-                gremlin.state.read_field("home_starting_usage").unwrap()["prompt_tokens"],
+                gremlin
+                    .state
+                    .read_field("session_chat_starting_usage")
+                    .unwrap()["prompt_tokens"],
                 40
             );
             assert_eq!(
-                gremlin.state.read_field("home_cmd_usage").unwrap()["prompt_tokens"],
+                gremlin.state.read_field("session_chat_cmd_usage").unwrap()["prompt_tokens"],
                 11
             );
-            assert_eq!(home_native_usage(&gremlin).unwrap().prompt_tokens, Some(63));
+            assert_eq!(
+                session_chat_native_usage(&gremlin).unwrap().prompt_tokens,
+                Some(63)
+            );
             let mut terminal = vec![];
             while let Ok(event) = rx.try_recv() {
                 if let EventKind::Done { usage, .. } = event.kind() {
@@ -2059,8 +2102,44 @@ mod tests {
         }
     }
 
+    #[test]
+    fn session_chat_usage_migration_preserves_new_keys_and_is_idempotent() {
+        let stage = AgentBuilder::new("chat-0001")
+            .prompt(CHAT_A)
+            .build()
+            .unwrap();
+        let (_sandbox, gremlin) = test_gremlin(stage);
+        let mut fields = serde_json::Map::new();
+        for suffix in ["starting_usage", "cmd_usage", "outer_usage"] {
+            fields.insert(
+                format!("home_{suffix}"),
+                serde_json::json!({"prompt_tokens": 999}),
+            );
+            fields.insert(
+                format!("session_chat_{suffix}"),
+                serde_json::json!({"prompt_tokens": 7}),
+            );
+        }
+        gremlin.state.patch(&[], &fields);
+        migrate_session_chat_usage(&gremlin);
+        migrate_session_chat_usage(&gremlin);
+        for suffix in ["starting_usage", "cmd_usage", "outer_usage"] {
+            assert!(gremlin
+                .state
+                .read_field(&format!("home_{suffix}"))
+                .is_none());
+            assert_eq!(
+                gremlin
+                    .state
+                    .read_field(&format!("session_chat_{suffix}"))
+                    .unwrap(),
+                serde_json::json!({"prompt_tokens": 7})
+            );
+        }
+    }
+
     #[tokio::test]
-    async fn home_terminal_excludes_explicit_compaction_and_ledger_blocks_legacy_import() {
+    async fn session_chat_migrates_home_balances_with_existing_native_journal() {
         use crate::executor::accounting::UsageRecord;
         use crate::executor::stage_boundary::StageInvocation;
         let stage = AgentBuilder::new("chat-0001")
@@ -2070,7 +2149,109 @@ mod tests {
         let (_sandbox, mut gremlin) = test_gremlin(stage);
         gremlin.state.patch(
             &[],
-            serde_json::json!({"kind": "chat", "home_outer_usage": {"prompt_tokens": 900}})
+            serde_json::json!({
+                "kind": "chat",
+                "token_usage": {"prompt_tokens": 900},
+                "home_starting_usage": {"prompt_tokens": 40},
+                "home_cmd_usage": {"prompt_tokens": 11},
+                "home_outer_usage": {"prompt_tokens": 57}
+            })
+            .as_object()
+            .unwrap(),
+        );
+        let record = UsageRecord {
+            corr_id: gremlins_magic_bus::CorrId::new()
+                .with_run(gremlin.id.as_str())
+                .with_stage("chat-previous")
+                .with_stage_run_id("chat-previous"),
+            stage_path: "chat-previous".into(),
+            usage: serde_json::from_value(serde_json::json!({
+                "request_id": "previous", "provider": "test", "model": "test",
+                "agent_id": "", "request_kind": "", "reported": true,
+                "completed": true, "raw": {}, "usage": {"turns": 1, "prompt_tokens": 6}
+            }))
+            .unwrap(),
+        };
+        gremlin
+            .state
+            .store_ref()
+            .native_accounting(Some(&record))
+            .unwrap();
+        assert!(gremlin.state.store_ref().exists("native_accounting.json"));
+        assert_eq!(
+            session_chat_native_usage(&gremlin).unwrap().prompt_tokens,
+            Some(57)
+        );
+        for (suffix, tokens) in [
+            ("starting_usage", 40),
+            ("cmd_usage", 11),
+            ("outer_usage", 57),
+        ] {
+            assert!(gremlin
+                .state
+                .read_field(&format!("home_{suffix}"))
+                .is_none());
+            assert_eq!(
+                gremlin
+                    .state
+                    .read_field(&format!("session_chat_{suffix}"))
+                    .unwrap()["prompt_tokens"],
+                tokens
+            );
+        }
+        let spec = "anthropic/session_chat-home-migration";
+        let backend = Arc::new(SessionChatUsageBackend {
+            fail: false,
+            baselines: Mutex::new(vec![]),
+        });
+        install_test_backend(&ModelURI::parse(spec).unwrap().to_string(), backend.clone());
+        let cmd = "cmd/session_chat-home-migration";
+        install_test_backend(cmd, Arc::new(CmdUsageBackend));
+        let (_guard, mut rx) = gremlins_magic_bus::subscribe_run(gremlin.id.as_str());
+        for (turn, model) in [(1, spec), (2, cmd), (3, spec)] {
+            gremlin.model_override = Some(model.into());
+            gremlin.client = Client::parse(model).unwrap();
+            let node = chat_node(turn, CHAT_A).await;
+            let invocation = StageInvocation::enter(gremlin.id.as_str(), node.name(), "agent");
+            run_agent(&node, &mut gremlin, &invocation, "", "", None, None)
+                .await
+                .unwrap();
+            if turn == 2 {
+                persist_chat_conversation_turn(&gremlin, turn, &[Message::user(CHAT_A)])
+                    .await
+                    .unwrap();
+            }
+        }
+        assert_eq!(*backend.baselines.lock().unwrap(), [57, 74]);
+        assert_eq!(
+            gremlin.state.read_field("session_chat_cmd_usage").unwrap()["prompt_tokens"],
+            22
+        );
+        let mut terminal = vec![];
+        while let Ok(event) = rx.try_recv() {
+            if let EventKind::Done { usage, .. } = event.kind() {
+                terminal.push(usage.as_ref().unwrap().prompt_tokens.unwrap());
+            }
+        }
+        assert_eq!(terminal, [63, 74, 80]);
+        assert_eq!(
+            session_chat_native_usage(&gremlin).unwrap().prompt_tokens,
+            Some(80)
+        );
+    }
+
+    #[tokio::test]
+    async fn session_chat_terminal_excludes_explicit_compaction_and_ledger_blocks_legacy_import() {
+        use crate::executor::accounting::UsageRecord;
+        use crate::executor::stage_boundary::StageInvocation;
+        let stage = AgentBuilder::new("chat-0001")
+            .prompt(CHAT_A)
+            .build()
+            .unwrap();
+        let (_sandbox, mut gremlin) = test_gremlin(stage);
+        gremlin.state.patch(
+            &[],
+            serde_json::json!({"kind": "chat", "session_chat_outer_usage": {"prompt_tokens": 900}})
                 .as_object()
                 .unwrap(),
         );
@@ -2093,10 +2274,10 @@ mod tests {
             .store_ref()
             .native_accounting(Some(&record))
             .unwrap();
-        let spec = "anthropic/home-compaction-terminal";
+        let spec = "anthropic/session_chat-compaction-terminal";
         install_test_backend(
             &ModelURI::parse(spec).unwrap().to_string(),
-            Arc::new(HomeUsageBackend {
+            Arc::new(SessionChatUsageBackend {
                 fail: false,
                 baselines: Mutex::new(vec![]),
             }),
@@ -2136,7 +2317,7 @@ mod tests {
         let prior = serde_json::json!({"turns": 4, "prompt_tokens": 100, "completion_tokens": 20});
         gremlin.state.patch(
             &[],
-            serde_json::json!({"kind": "chat", "token_usage": prior, "home_outer_usage": prior})
+            serde_json::json!({"kind": "chat", "token_usage": prior, "session_chat_outer_usage": prior})
                 .as_object()
                 .unwrap(),
         );
@@ -2252,7 +2433,7 @@ mod tests {
             &[],
             serde_json::json!({
                 "kind": "chat", "token_usage": prior_run,
-                "home_cmd_usage": prior_cmd, "home_outer_usage": prior_outer
+                "session_chat_cmd_usage": prior_cmd, "session_chat_outer_usage": prior_outer
             })
             .as_object()
             .unwrap(),
@@ -2284,7 +2465,10 @@ mod tests {
             );
         }
         assert_eq!(
-            gremlin.state.read_field("home_outer_usage").unwrap(),
+            gremlin
+                .state
+                .read_field("session_chat_outer_usage")
+                .unwrap(),
             prior_outer
         );
         let expected_run = if snapshots {
@@ -2308,7 +2492,7 @@ mod tests {
             expected_run
         );
         assert_eq!(
-            gremlin.state.read_field("home_cmd_usage").unwrap(),
+            gremlin.state.read_field("session_chat_cmd_usage").unwrap(),
             expected_cmd
         );
         let rows_blob = gremlin
@@ -2394,7 +2578,7 @@ mod tests {
         if is_chat {
             gremlin.state.patch(
                 &[],
-                serde_json::json!({"kind": "chat", "home_outer_usage": {
+                serde_json::json!({"kind": "chat", "session_chat_outer_usage": {
                     "turns": 3, "prompt_tokens": 17, "completion_tokens": 0
                 }})
                 .as_object()
@@ -2425,7 +2609,10 @@ mod tests {
         );
         if is_chat {
             assert_eq!(
-                gremlin.state.read_field("home_outer_usage").unwrap()["prompt_tokens"],
+                gremlin
+                    .state
+                    .read_field("session_chat_outer_usage")
+                    .unwrap()["prompt_tokens"],
                 17
             );
         }

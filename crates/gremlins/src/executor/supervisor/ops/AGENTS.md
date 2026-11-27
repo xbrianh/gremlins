@@ -11,7 +11,7 @@ the coordinating factory that creates a new TUI session.
 
 | File | Role |
 |---|---|
-| `mod.rs` | Re-exports all handlers from sub-modules. Contains `handle_create_session`: binds a per-session Unix socket, spawns a session task (`SessionState` / `SessionTaskHandle`), reserves the home run id, and starts the session listener. |
+| `mod.rs` | Re-exports all handlers from sub-modules. Contains `handle_create_session`: binds a per-session Unix socket, spawns a session task (`SessionState` / `SessionTaskHandle`), reserves the session chat run id (`chat_run_id`), and starts the session listener. |
 | `control.rs` | Lifecycle-mutating ops: `handle_launch`, `handle_stop`, `handle_resume`, `handle_rm`, `handle_session_stop`, `stop_session_chat_gremlin`. Also launch helpers: `parse_stage_inputs`, `resolve_filepath_source_values`, `validate_launch_inputs`, `load_definition_snapshot`, and `parallel_runtime_keys`. |
 | `query.rs` | Read-only state inspection ops: `handle_ls`, `handle_status`, `handle_info`, `handle_artifact` (read + write path), `handle_snapshot`. Also `resolve_store_for_id` (resolve a state store from live run map or disk) and `extract_token_cost_fields`. |
 | `model.rs` | TUI model configuration ops: `handle_model` (show/set/clear the TUI chat model override), `handle_chat_model` (read the effective chat model for a session), `handle_compact` (compact conversation history). |

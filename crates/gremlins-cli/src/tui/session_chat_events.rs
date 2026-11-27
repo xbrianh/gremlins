@@ -1,14 +1,17 @@
 use std::{io, time::Instant};
 
 use super::{
-    app::{App, Target},
-    finish_home_request, new_reasoning_band, protocol,
-    screen::LiveArea,
-    stats_title, HomeInterrupt, REASONING_COMPLETED_TITLE, REASONING_PLACEHOLDER_TITLE,
+    app::App, finish_session_chat_request, new_reasoning_band, protocol, screen::LiveArea,
+    stats_title, SessionChatInterrupt, REASONING_COMPLETED_TITLE, REASONING_PLACEHOLDER_TITLE,
 };
 
-pub(super) fn apply_home_identity(app: &mut App, raw: &serde_json::Value, session_generation: u64) {
-    if raw.get("type").and_then(|v| v.as_str()) != Some("home_run_identity")
+pub(super) fn apply_session_chat_identity<B: ratatui::backend::Backend>(
+    app: &mut App,
+    live_area: &mut LiveArea<B>,
+    raw: &serde_json::Value,
+    session_generation: u64,
+) {
+    if raw.get("type").and_then(|v| v.as_str()) != Some("session_chat_run_identity")
         || raw.get("generation").and_then(|v| v.as_u64()) != Some(session_generation)
     {
         return;
@@ -18,8 +21,8 @@ pub(super) fn apply_home_identity(app: &mut App, raw: &serde_json::Value, sessio
     // when display completion wins the race with the acknowledgment.
     let Some(active) = app
         .conversations
-        .home_turn()
-        .or_else(|| app.conversations.latest_home_turn())
+        .session_chat_turn()
+        .or_else(|| app.conversations.latest_session_chat_turn())
         .filter(|turn| !turn.is_empty())
     else {
         return;
@@ -32,21 +35,30 @@ pub(super) fn apply_home_identity(app: &mut App, raw: &serde_json::Value, sessio
         .and_then(|v| v.as_str())
         .filter(|id| !id.is_empty())
     {
-        app.home_run_id = Some(id.to_owned());
+        let old_target = app.session_chat_target();
+        let new_target = super::app::Target::Run {
+            run_id: id.to_owned(),
+        };
+        live_area.sync_app_state(app);
+        live_area.migrate_target(&old_target, new_target.clone());
+        app.migrate_chat_run_id(id.to_owned());
+        if app.selected_target == new_target {
+            live_area.copy_app_state_to(app);
+        }
     }
 }
 
-pub(super) fn apply_home_event<B: ratatui::backend::Backend>(
+pub(super) fn apply_session_chat_event<B: ratatui::backend::Backend>(
     app: &mut App,
     live_area: &mut LiveArea<B>,
-    interrupt: &mut HomeInterrupt,
+    interrupt: &mut SessionChatInterrupt,
     event: gremlins_magic_bus::EventKind,
     turn: Option<String>,
     execution: Option<protocol::Execution>,
 ) -> io::Result<()> {
-    let home = Target::Home;
+    let session_chat = app.session_chat_target();
     // Filter every event, including task progress, before touching the transcript.
-    let expected = app.conversations.home_turn();
+    let expected = app.conversations.session_chat_turn();
     if !turn
         .as_deref()
         .is_some_and(|turn| !turn.is_empty() && Some(turn) == expected)
@@ -57,10 +69,11 @@ pub(super) fn apply_home_event<B: ratatui::backend::Backend>(
     // Execution identity must be installed before any rendering, not just on TurnStarted.
     if let Some(turn) = turn
         .as_deref()
-        .filter(|turn| !turn.is_empty() && app.conversations.home_turn() == Some(*turn))
+        .filter(|turn| !turn.is_empty() && app.conversations.session_chat_turn() == Some(*turn))
     {
         if execution.is_some() {
-            app.conversations.home_turn_started(turn, execution.clone());
+            app.conversations
+                .session_chat_turn_started(turn, execution.clone());
         }
     }
 
@@ -86,7 +99,7 @@ pub(super) fn apply_home_event<B: ratatui::backend::Backend>(
         let totals_json = totals
             .as_ref()
             .map(|s| serde_json::to_value(s).unwrap_or(serde_json::Value::Null));
-        live_area.with_target_transcript(&home, |transcript, _| {
+        live_area.with_target_transcript(&session_chat, |transcript, _| {
             transcript.push_task_progress(
                 parent_id,
                 kind,
@@ -106,13 +119,13 @@ pub(super) fn apply_home_event<B: ratatui::backend::Backend>(
         }
         gremlins_magic_bus::EventKind::StreamChunk { text, .. } => {
             log::debug!("StreamChunk len={}", text.len());
-            live_area.with_target_transcript(&home, |transcript, _| {
+            live_area.with_target_transcript(&session_chat, |transcript, _| {
                 transcript.push_response(&text);
             });
         }
         gremlins_magic_bus::EventKind::ReasoningChunk { text, .. } => {
             log::debug!("ReasoningChunk len={}", text.len());
-            live_area.with_target_transcript(&home, |_, reasoning| {
+            live_area.with_target_transcript(&session_chat, |_, reasoning| {
                 if reasoning.title_is_empty() {
                     reasoning.set_title(REASONING_PLACEHOLDER_TITLE);
                 }
@@ -130,7 +143,7 @@ pub(super) fn apply_home_event<B: ratatui::backend::Backend>(
                 "ToolOutputChunk id={id} name={name} call={call} len={}",
                 text.len()
             );
-            live_area.with_target_transcript(&home, |transcript, _| {
+            live_area.with_target_transcript(&session_chat, |transcript, _| {
                 transcript.push_tool_output_chunk(&id, &call, &text);
             });
         }
@@ -142,7 +155,7 @@ pub(super) fn apply_home_event<B: ratatui::backend::Backend>(
             ..
         } => {
             log::debug!("ToolResult id={id} output_len={}", output.len());
-            live_area.with_target_transcript(&home, |transcript, _| {
+            live_area.with_target_transcript(&session_chat, |transcript, _| {
                 transcript.reconcile_tool_result(&id, &call, &output);
             });
         }
@@ -158,7 +171,7 @@ pub(super) fn apply_home_event<B: ratatui::backend::Backend>(
                 text.len(),
                 tool_calls
             );
-            live_area.with_target_transcript(&home, |transcript, reasoning| {
+            live_area.with_target_transcript(&session_chat, |transcript, reasoning| {
                 transcript.clear_tool_output();
                 transcript.reconcile_response(&text);
                 transcript.reconcile_tool_calls(&tool_calls);
@@ -180,9 +193,9 @@ pub(super) fn apply_home_event<B: ratatui::backend::Backend>(
                 "Done text_len={} summary_len={} has_current_turn={}",
                 text.len(),
                 summary.len(),
-                live_area.target_has_current_turn(&home)
+                live_area.target_has_current_turn(&session_chat)
             );
-            live_area.with_target_transcript(&home, |transcript, reasoning| {
+            live_area.with_target_transcript(&session_chat, |transcript, reasoning| {
                 if !transcript.has_current_turn() {
                     return;
                 }
@@ -201,16 +214,16 @@ pub(super) fn apply_home_event<B: ratatui::backend::Backend>(
                 transcript.commit_reasoning_title(stream);
                 transcript.clear_tool_output();
             });
-            finish_home_request(app, live_area);
+            finish_session_chat_request(app, live_area);
             live_area.compose(app)?;
         }
         gremlins_magic_bus::EventKind::Ended { reason, .. } => {
             // Transcript absence is not owner absence: a submitted turn can end
             // before any transcript turn exists. The owner filter above is authoritative.
-            let ended_turn = app.conversations.home_turn().map(str::to_owned);
-            finish_home_request(app, live_area);
+            let ended_turn = app.conversations.session_chat_turn().map(str::to_owned);
+            finish_session_chat_request(app, live_area);
             let msg = format!("chat ended: {reason}");
-            live_area.with_target_transcript(&home, |transcript, reasoning| {
+            live_area.with_target_transcript(&session_chat, |transcript, reasoning| {
                 let had_turn = transcript.has_current_turn();
                 let stream = std::mem::replace(reasoning, new_reasoning_band());
                 transcript.finish_turn();
@@ -230,9 +243,9 @@ pub(super) fn apply_home_event<B: ratatui::backend::Backend>(
         }
         gremlins_magic_bus::EventKind::Error { message: msg, .. } => {
             // Submission can fail before execution creates a transcript turn.
-            finish_home_request(app, live_area);
+            finish_session_chat_request(app, live_area);
             let full = format!("chat error: {msg}");
-            live_area.with_target_transcript(&home, |transcript, reasoning| {
+            live_area.with_target_transcript(&session_chat, |transcript, reasoning| {
                 let stream = std::mem::replace(reasoning, new_reasoning_band());
                 let had_turn = transcript.has_current_turn();
                 transcript.finish_turn();
@@ -245,11 +258,11 @@ pub(super) fn apply_home_event<B: ratatui::backend::Backend>(
             live_area.compose(app)?;
         }
         gremlins_magic_bus::EventKind::SystemWarning { message: msg, .. } => {
-            if !live_area.target_has_current_turn(&home) {
+            if !live_area.target_has_current_turn(&session_chat) {
                 return Ok(());
             }
             let full = format!("⚠ {msg}");
-            live_area.with_target_transcript(&home, |transcript, _| {
+            live_area.with_target_transcript(&session_chat, |transcript, _| {
                 transcript.push_transcript_line(full);
             });
         }

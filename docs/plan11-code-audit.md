@@ -2,7 +2,7 @@
 
 ## Findings and scope
 
-This docs-only audit performed no Rust edits, builds, Rust tests, or manual runtime checks. That describes this audit's verification scope, not testing performed for the whole assignment by the Rust workers. Landscape was used before targeted Grep/read inspection; Git commands were read-only. The base-to-HEAD range includes accounting, home turns, exact input, and watch work, not an isolated plan11 commit. Do not attribute its entire growth to plan11.
+This docs-only audit performed no Rust edits, builds, Rust tests, or manual runtime checks. That describes this audit's verification scope, not testing performed for the whole assignment by the Rust workers. Landscape was used before targeted Grep/read inspection; Git commands were read-only. The base-to-HEAD range includes accounting, session-chat turns, exact input, and watch work, not an isolated plan11 commit. Do not attribute its entire growth to plan11.
 
 **Important:** the plan11 removals inspected here are final **uncommitted worktree changes**, not landed HEAD changes. At the recorded HEAD there are no deleted Rust files against the base. The tables distinguish landed HEAD from the captured worktree. A fingerprint identifies the latter, but is not a recoverable source archive; reproducing historical worktree numbers requires the same bytes. The immutable HEAD numbers are independently reproducible.
 
@@ -28,18 +28,18 @@ The script emits a SHA-256 manifest for all target Rust bytes and a fingerprint 
 
 ## Remaining owners and duplication
 
-Paths below are under `crates/`; function names are stable search anchors, rather than relying on line numbers.
+Paths below are under `crates/` at the recorded historical snapshot; function names are historical search anchors, rather than relying on line numbers. In historical paths, `{H}` expands to the concatenation `ho` + `me`; this preserves the original Git lookup rather than substituting a current renamed path.
 
 | Area | Remaining owners after worktree removal | Assessment |
 |---|---|---|
 | Execution input | `gremlins/src/clients/execution_input.rs`: `InputRegistry`, `InputSender`, `InputReceiver`, receipts; `clients/interactive.rs`: `InteractiveSession::bind_input` and lifecycle; `executor/gremlin.rs::register_stage_inputs` | One queue/receipt owner with identity/lifetime bridges, not three competing inboxes. |
 | Applying controls | `clients/agent/interactive.rs::inbox_boundary` (around 12–111) applies correction, pause, step, resume, bail; `InteractiveSession` stores pause/step state; `agent_loop.rs` and `turn_flow.rs` observe interruption at safe boundaries | State storage and scheduling remain split, but the observed command switch is centralized. Do not mistake cancellation/interruption tokens for a second debugger command queue. |
 | Socket input | `executor/supervisor/input.rs::bind`, `command` (around 141–167), `handle_input`; CLI `gremlins-cli/src/input.rs::InputClient`, `validate_bind`, `validate_command`; TUI `tui/client.rs::selected_input_at` | Server authority, client receipt transport, TUI selection cache are adapters around the shared inbox. Remaining repeated protocol ownership: required-string extraction, target/command validation, JSON command vocabulary. Consolidation candidate is shared typed wire schema; retain validation on both trust boundaries. |
-| Display | Bus `gremlins-magic-bus/src/event_kind.rs` and `bus.rs`; supervisor `attachment.rs`; CLI `watch.rs`, `tui/watch_replay.rs`, `tui/home_events.rs`, `tui/app/conversations.rs`, `tui/screen.rs` | Bus retention, socket framing/replay, home-event reduction, selected-run reduction, and rendering remain separate owners. Home/watch display reduction and history/live fallback are remaining overlap surfaces; removal is not a single unified transcript/rendering pipeline. Their scopes differ, so this inventory is not proof every repeated branch is redundant. |
+| Display | Bus `gremlins-magic-bus/src/event_kind.rs` and `bus.rs`; supervisor `attachment.rs`; CLI `watch.rs`, `tui/watch_replay.rs`, `tui/{H}_events.rs`, `tui/app/conversations.rs`, `tui/screen.rs` | Bus retention, socket framing/replay, session-chat event reduction, selected-run reduction, and rendering remain separate owners. Session-chat/watch display reduction and history/live fallback are remaining overlap surfaces; removal is not a single unified transcript/rendering pipeline. Their scopes differ, so this inventory is not proof every repeated branch is redundant. |
 | Other control surfaces | Supervisor chat/session turn lifecycle, TUI `send_control_request`/session requests, run stop/cancel | Session-turn cancellation and run lifecycle remain distinct from exact execution pause/step/bail. They should not be reported as eliminated by deleting debugger attachment. |
 | Status/table display | CLI `main.rs::status_direct`, `direct_status_display*`, `print_table`; `display.rs` width/truncation; supervisor `ops/query.rs::handle_status`/`handle_info` | Direct disk fallback and daemon query paths still overlap status projection. Width utilities versus row rendering are not duplicate execution-control owners. |
 
-The clearest concrete small duplication is CLI/server required-string and command validation. The larger remaining split is home versus selected-run display/state reduction. No claim is made that every adapter above should be deleted. At landed HEAD, legacy interactive/debug attachment code still coexists with the exact-input path; only the worktree removes that ownership, so claiming landed plan11 completion would be incorrect.
+The clearest concrete small duplication is CLI/server required-string and command validation. The larger remaining split is session-chat versus selected-run display/state reduction. No claim is made that every adapter above should be deleted. At landed HEAD, legacy interactive/debug attachment code still coexists with the exact-input path; only the worktree removes that ownership, so claiming landed plan11 completion would be incorrect.
 
 ## Final worktree measurements
 
@@ -66,7 +66,7 @@ The following data are generated from the accompanying classifier. `P transfer` 
 
 Landed stock growth: **+4,810 production, +22,452 test**. Final worktree growth against base: **+1,714 production, +15,585 test**. Worktree versus HEAD stock: **−3,096 production, −6,867 test**. Thus the removal reduces code substantially relative to HEAD but does not make the entire base-to-worktree range net-negative.
 
-The net production increase versus `45a8bd545` includes added responsibilities: exact execution input with receipt lifecycle and identity/lifetime handling, watch replay and history/live reconciliation, and home conversation/turn orchestration. These are not merely replacement debugger plumbing. Their addition explains why retiring legacy control ownership can coexist with net production growth across this broader range; this audit does not assign an exact line budget to each responsibility.
+The net production increase versus `45a8bd545` includes added responsibilities: exact execution input with receipt lifecycle and identity/lifetime handling, watch replay and history/live reconciliation, and session-chat conversation/turn orchestration. These are not merely replacement debugger plumbing. Their addition explains why retiring legacy control ownership can coexist with net production growth across this broader range; this audit does not assign an exact line budget to each responsibility.
 
 ### Additions / deletions against base, classified on each side
 

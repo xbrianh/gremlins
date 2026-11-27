@@ -64,8 +64,8 @@ pub(crate) async fn handle_create_session(
         }
     };
 
-    let home_run_id = registry.reserve_chat_id().await;
-    if !session_handle.reserve_home_run_id(&home_run_id).await {
+    let chat_run_id = registry.reserve_chat_id().await;
+    if !session_handle.reserve_chat_run_id(&chat_run_id).await {
         session_handle.teardown(false).await;
         return error_response("session closed");
     }
@@ -88,7 +88,7 @@ pub(crate) async fn handle_create_session(
 
     ok_response(serde_json::json!({
         "session_id": session_id,
-        "home_run_id": home_run_id,
+        "chat_run_id": chat_run_id,
         "socket": format!("{session_id}.sock"),
     }))
 }

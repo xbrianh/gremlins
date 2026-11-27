@@ -5338,8 +5338,8 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn home_chat_defers_done_but_returns_finalized_run() {
-        let run_id = "deferred-home-chat-done";
+    async fn session_chat_defers_done_but_returns_finalized_run() {
+        let run_id = "deferred-session-chat-done";
         let (_guard, mut rx) = gremlins_magic_bus::subscribe_run(run_id);
         let model = rig_core::test_utils::MockCompletionModel::from_stream_turns([[
             rig_core::test_utils::MockStreamEvent::text("finished"),

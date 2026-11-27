@@ -16,7 +16,7 @@ async fn exercise_idle_live_warning(kind: &str) {
     timeout(Duration::from_secs(5), async {
         let (stream, peer) = UnixStream::pair().unwrap();
         let (client, _session_peers) = DaemonClient::fake_with_aux_streams(
-            json!({"session_id":"owner", "home_run_id":"home"}),
+            json!({"session_id":"owner", "chat_run_id":"session_chat"}),
             vec![],
         );
         // A has finished. No forwarder may drain the socket reader's queue
@@ -28,8 +28,8 @@ async fn exercise_idle_live_warning(kind: &str) {
         }));
         let marker_seen = Arc::new(tokio::sync::Notify::new());
         let seen = Arc::clone(&marker_seen);
-        let mut receive = home_frame_receiver(false, Some(Arc::clone(&gate)));
-        let watch = follow_watch_mapped(stream, "owner", "home", None, None, false, move |frame| {
+        let mut receive = session_chat_frame_receiver(false, Some(Arc::clone(&gate)));
+        let watch = follow_watch_mapped(stream, "owner", "session_chat", None, None, false, move |frame| {
             let marker = frame["type"] == "stream_chunk" && frame["text"] == "idle marker";
             let mapped = receive(frame);
             if marker {
@@ -44,7 +44,7 @@ async fn exercise_idle_live_warning(kind: &str) {
             .unwrap();
         socket::write_json_line(
             peer.get_mut(),
-            &json!({"type":"stream_chunk", "run_id":"home", "turn":"B", "text":"idle marker"}),
+            &json!({"type":"stream_chunk", "run_id":"session_chat", "turn":"B", "text":"idle marker"}),
         )
         .await
         .unwrap();
@@ -62,10 +62,10 @@ async fn exercise_idle_live_warning(kind: &str) {
             state.pending = true;
         }
         let (chat_tx, mut output) = mpsc::unbounded_channel();
-        let forward = tokio::spawn(forward_home_gated(
+        let forward = tokio::spawn(forward_session_chat_gated(
             rx,
             Reader(reader),
-            HomeWatchContext {
+            SessionChatWatchContext {
                 session_write: Arc::clone(&client.session.write),
                 out: Arc::new(OutState {
                     chat_tx,
@@ -73,7 +73,7 @@ async fn exercise_idle_live_warning(kind: &str) {
                     raw_tx: mpsc::unbounded_channel().0,
                 }),
                 generation: 0,
-                run: "home".into(),
+                run: "session_chat".into(),
                 turn: Some("B".into()),
             },
             None,
@@ -102,7 +102,7 @@ async fn exercise_idle_live_warning(kind: &str) {
         let (event, turn, execution) = output.recv().await.unwrap();
         assert!(
             matches!(event, EventKind::SystemWarning { turn: None, ref message }
-            if message == "home display history discontinuity: output may be missing")
+            if message == "session_chat display history discontinuity: output may be missing")
         );
         assert_eq!(turn.as_deref(), Some("B"));
         assert_eq!(execution, None);
@@ -123,13 +123,13 @@ async fn acknowledge_live_watch(peer: UnixStream) -> BufReader<UnixStream> {
     let request = socket::read_json_line(&mut peer).await.unwrap().unwrap();
     assert_eq!(
         request,
-        json!({"op":"watch", "scope":"run", "id":"home",
+        json!({"op":"watch", "scope":"run", "id":"session_chat",
         "session_id":"owner", "replay":false})
     );
     socket::write_json_line(
         peer.get_mut(),
         &json!({"type":"watched", "scope":"run",
-        "id":"home", "stage":null, "stage_run_id":null, "replay":false}),
+        "id":"session_chat", "stage":null, "stage_run_id":null, "replay":false}),
     )
     .await
     .unwrap();

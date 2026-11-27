@@ -367,7 +367,7 @@ mod tests {
         };
         let (native, peer) = UnixStream::pair().unwrap();
         let (client, [_control, session]) = DaemonClient::fake_with_aux_streams(
-            json!({"session_id":"owner", "home_run_id":"home"}),
+            json!({"session_id":"owner", "chat_run_id":"session_chat"}),
             vec![native],
         );
         let client = Arc::new(client);
@@ -454,7 +454,7 @@ mod tests {
         };
         let (native, peer) = UnixStream::pair().unwrap();
         let (client, [_control, session]) = DaemonClient::fake_with_aux_streams(
-            json!({"session_id":"owner", "home_run_id":"home"}),
+            json!({"session_id":"owner", "chat_run_id":"session_chat"}),
             vec![native],
         );
         let client = Arc::new(client);
@@ -539,7 +539,7 @@ mod tests {
         let (native, peer) = UnixStream::pair().unwrap();
         let (replacement, replacement_peer) = UnixStream::pair().unwrap();
         let (client, [_control, session]) = DaemonClient::fake_with_aux_streams(
-            json!({"session_id":"owner", "home_run_id":"home"}),
+            json!({"session_id":"owner", "chat_run_id":"session_chat"}),
             vec![native, replacement],
         );
         let client = Arc::new(client);

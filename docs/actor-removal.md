@@ -16,8 +16,9 @@ committed HEAD from concurrent uncommitted removal changes.
   an idle-session prompt only. Session cancellation and persisted-run lifecycle
   operations remain distinct.
 - Old wire `attach` is rejected on global and verified session auxiliary sockets.
-  There is no pause-on-entry debugger lease or successor fallback. TUI `/attach`
-  remains a selection command, not a daemon operation.
+  There is no pause-on-entry debugger lease or successor fallback. Watch Enter
+  is the only TUI selection path: it observes a concrete invocation without
+  pausing. Selection does not acquire input; the TUI has no `/exit` command.
 - Producer stage boundaries remain; legacy stage-stream and debugger helpers do
   not define the display/input path.
 

@@ -238,8 +238,9 @@ mod tests {
             "/resume",
             "/log",
             "/watch",
-            "/debug",
-            "/attach",
+            "/skills",
+            "/skill",
+            "/compact",
             "/model",
             "/chat",
             "/clear",
@@ -276,8 +277,8 @@ mod tests {
 
         for row in [
             "| `/artifact <id> --list` / `/artifact <id> <uri>` | none — TUI-only |",
-            "| `/attach` / `/debug` | none — TUI-only selectors; CLI `gremlins debug SOURCE INVOCATION` sends input, not selection |",
             "| `/model` | none — TUI-only |",
+            "| `/compact` | none — TUI-only |",
             "| `/chat` | none — TUI-only |",
             "| `/clear` / `/new` | none — TUI-only |",
             "| `/help` | none — TUI-only |",
@@ -311,22 +312,27 @@ mod tests {
         let ctrl_c = prompt
             .lines()
             .find(|line| line.starts_with("- `Ctrl+C` —"))
-            .expect("must document the home interrupt keybinding");
+            .expect("must document the session chat interrupt keybinding");
         assert!(
-            ctrl_c.contains("during an active home request, soft interrupt first and hard cancel on a repeat within one second"),
-            "home interruption must be soft first, escalating to hard cancel only on a timely repeat"
+            ctrl_c.contains("during an active session chat turn, soft interrupt first and hard cancel on a repeat within one second"),
+            "session chat interruption must be soft first, escalating to hard cancel only on a timely repeat"
         );
         let interaction = prompt.split_whitespace().collect::<Vec<_>>().join(" ");
         for required in [
-            "`/watch` Enter, `/attach`, and `/debug` select bus output without pausing execution or opening an input connection",
+            "Watch Enter is the only selection path; it observes bus output without pausing execution or opening an input connection",
+            "A run row opens aggregate output, and an invocation row selects that concrete invocation in the shared chat scene",
+            "Highlight movement and inline log toggles do not select conversations",
+            "The session chat run row is available before its first turn; select it to return to session chat",
             "Native input binds lazily on submission; command receipts report delivery separately from bus output",
             "Selection is not input authority",
             "Selected-execution controls are `/pause` to pause, `/step` or `/continue` to single-step one turn",
             "bare `/resume-execution` or `/quit` to resume autonomously",
             "`/quit <reason>` or `/bail <reason>` bails the selected execution",
             "CLI `/continue` resumes autonomously and CLI `/quit [reason]` always bails",
-            "`/exit`, `/attach home`, or switching away releases local selection without sending execution controls; home keeps streaming in the background while a stage is selected",
-            "`/attach` is a TUI selector, not a wire attachment operation",
+            "Switching conversations through Watch Enter releases local input without sending execution controls; it neither resumes nor cancels execution",
+            "Session chat keeps streaming in the background while another conversation is selected",
+            "Composer drafts and cursor positions are preserved per conversation target",
+            "`/exit` is not a TUI command; return via the session chat row in Watch.",
         ] {
             assert!(
                 interaction.contains(required),

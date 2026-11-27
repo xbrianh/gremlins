@@ -8,15 +8,15 @@
 //! * one **session socket** (`sess-<id>.sock`) for chat and other
 //!   session-scoped ops
 //!
-//! Daemon broadcasts use the control socket. Home chat requests are ack-only;
+//! Daemon broadcasts use the control socket. SessionChat requests are ack-only;
 //! a dedicated passive bus watch supplies display events. Each request socket
 //! owns its own response FIFO and background reader.
 
-mod home;
+mod session_chat;
 
 #[cfg(test)]
-#[path = "client/home_shutdown_tests.rs"]
-mod home_shutdown_tests;
+#[path = "client/session_chat_shutdown_tests.rs"]
+mod session_chat_shutdown_tests;
 
 use std::collections::{HashMap, VecDeque};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -31,7 +31,7 @@ use tokio::io::BufReader;
 use tokio::net::unix::{OwnedReadHalf, OwnedWriteHalf};
 use tokio::sync::{mpsc, oneshot, Mutex};
 
-/// A home event, its wire turn tag, and its exact agent execution when advertised.
+/// A session_chat event, its wire turn tag, and its exact agent execution when advertised.
 pub(super) type ChatEvent = (EventKind, Option<String>, Option<Execution>);
 
 /// Outbound side of a single daemon socket connection.
@@ -65,8 +65,8 @@ struct WriteState {
     write_half: OwnedWriteHalf,
     /// `Some` for the session connection; `None` for the control socket.
     session_id: Option<String>,
-    /// Registry-reserved home identity belonging to the same session socket.
-    home_run_id: Option<String>,
+    /// Registry-reserved session_chat identity belonging to the same session socket.
+    chat_run_id: Option<String>,
     /// Monotonic generation of the installed session. Incremented each time
     /// [`Connection::restart`] swaps in a replacement session socket.
     generation: u64,
@@ -85,17 +85,17 @@ impl Connection {
         reader: BufReader<OwnedReadHalf>,
         write_half: OwnedWriteHalf,
         session_id: String,
-        home_run_id: String,
+        chat_run_id: String,
         out: Arc<OutState>,
     ) -> Self {
-        Self::new(reader, write_half, Some(session_id), Some(home_run_id), out)
+        Self::new(reader, write_half, Some(session_id), Some(chat_run_id), out)
     }
 
     fn new(
         reader: BufReader<OwnedReadHalf>,
         write_half: OwnedWriteHalf,
         session_id: Option<String>,
-        home_run_id: Option<String>,
+        chat_run_id: Option<String>,
         out: Arc<OutState>,
     ) -> Self {
         let responses: Arc<Mutex<VecDeque<oneshot::Sender<Value>>>> =
@@ -110,7 +110,7 @@ impl Connection {
             write: Arc::new(Mutex::new(WriteState {
                 write_half,
                 session_id,
-                home_run_id,
+                chat_run_id,
                 generation: 0,
             })),
             responses,
@@ -199,7 +199,7 @@ impl Connection {
         reader: BufReader<OwnedReadHalf>,
         write_half: OwnedWriteHalf,
         new_session_id: String,
-        new_home_run_id: String,
+        new_chat_run_id: String,
     ) {
         // Abort and await the old reader first. Awaiting guarantees its
         // terminal queue clear can no longer race the new connection's
@@ -216,7 +216,7 @@ impl Connection {
         let mut write = self.write.lock().await;
         write.write_half = write_half;
         write.session_id = Some(new_session_id);
-        write.home_run_id = Some(new_home_run_id);
+        write.chat_run_id = Some(new_chat_run_id);
         write.generation += 1;
         self.responses.lock().await.clear();
 
@@ -273,7 +273,7 @@ pub struct DaemonClient {
     /// Serializes session recreation so a `/clear` can never race another
     /// session operation's restart and drop un-acked waiters.
     session_recreate: Mutex<()>,
-    home_display: Mutex<Option<home::Display>>,
+    session_chat_display: Mutex<Option<session_chat::Display>>,
     selected_inputs: StdMutex<SelectedInputs>,
     input_epoch: AtomicU64,
     #[cfg(test)]
@@ -292,13 +292,31 @@ impl DaemonClient {
         response: Value,
         streams: Vec<tokio::net::UnixStream>,
     ) -> (Self, [tokio::net::UnixStream; 2]) {
-        let (session_id, home_run_id) = parse_session_setup(&response).unwrap();
+        let (client, peers, _, _, _) = Self::fake_with_aux_streams_and_channels(response, streams);
+        (client, peers)
+    }
+
+    #[cfg(test)]
+    pub(super) fn fake_with_aux_streams_and_channels(
+        response: Value,
+        streams: Vec<tokio::net::UnixStream>,
+    ) -> (
+        Self,
+        [tokio::net::UnixStream; 2],
+        mpsc::UnboundedReceiver<EventKind>,
+        mpsc::UnboundedReceiver<ChatEvent>,
+        mpsc::UnboundedReceiver<Value>,
+    ) {
+        let (session_id, chat_run_id) = parse_session_setup(&response).unwrap();
         let (control, control_peer) = tokio::net::UnixStream::pair().unwrap();
         let (session, session_peer) = tokio::net::UnixStream::pair().unwrap();
+        let (event_tx, event_rx) = mpsc::unbounded_channel();
+        let (chat_tx, chat_rx) = mpsc::unbounded_channel();
+        let (raw_tx, raw_rx) = mpsc::unbounded_channel();
         let out = Arc::new(OutState {
-            event_tx: mpsc::unbounded_channel().0,
-            chat_tx: mpsc::unbounded_channel().0,
-            raw_tx: mpsc::unbounded_channel().0,
+            event_tx,
+            chat_tx,
+            raw_tx,
         });
         let (control_read, control_write) = control.into_split();
         let (session_read, session_write) = session.into_split();
@@ -313,17 +331,20 @@ impl DaemonClient {
                     BufReader::new(session_read),
                     session_write,
                     session_id,
-                    home_run_id,
+                    chat_run_id,
                     Arc::clone(&out),
                 ),
                 out,
                 session_recreate: Mutex::new(()),
-                home_display: Mutex::new(None),
+                session_chat_display: Mutex::new(None),
                 selected_inputs: StdMutex::new(HashMap::new()),
                 input_epoch: AtomicU64::new(0),
                 aux_streams: Arc::new(Mutex::new(Some(streams.into()))),
             },
             [control_peer, session_peer],
+            event_rx,
+            chat_rx,
+            raw_rx,
         )
     }
 
@@ -333,15 +354,15 @@ impl DaemonClient {
         self.session.current_session_id().await
     }
 
-    /// The registry-reserved home run id paired with the current session socket.
-    pub async fn home_run_id(&self) -> String {
+    /// The registry-reserved session_chat run id paired with the current session socket.
+    pub async fn chat_run_id(&self) -> String {
         self.session
             .write
             .lock()
             .await
-            .home_run_id
+            .chat_run_id
             .clone()
-            .expect("session connection has a home run id")
+            .expect("session connection has a session_chat run id")
     }
 
     /// The generation of the current session socket. Callers capture this
@@ -364,7 +385,7 @@ impl DaemonClient {
     /// bearing the old id to the new socket.
     pub async fn send_session_request(&self, request: Value) -> Result<Value, String> {
         let _guard = self.session_recreate.lock().await;
-        self.send_home_or_session(request, None).await
+        self.send_session_chat_or_session(request, None).await
     }
 
     /// Send a session request only if the connection still belongs to
@@ -384,7 +405,7 @@ impl DaemonClient {
         // that was submitted against a retired session instead of writing it
         // to the old (already-closed) socket or stamping it with the new id.
         let _recreate_guard = self.session_recreate.lock().await;
-        self.send_home_or_session(request, Some(expected_generation))
+        self.send_session_chat_or_session(request, Some(expected_generation))
             .await
     }
 
@@ -638,30 +659,30 @@ impl DaemonClient {
         let _recreate_guard = self.session_recreate.lock().await;
 
         self.invalidate_inputs();
-        self.home_display.lock().await.take();
+        self.session_chat_display.lock().await.take();
         let close_request = serde_json::json!({"op": "close_session"});
         let _ = self.session.send_on_session(close_request).await?;
 
         let create_request = serde_json::json!({"op": "create_session"});
         let resp = self.control.send(create_request).await?;
-        let (new_session_id, new_home_run_id) = parse_session_setup(&resp)?;
+        let (new_session_id, new_chat_run_id) = parse_session_setup(&resp)?;
 
         let state_root = gremlins::config::state_root();
         let stream = socket::connect_session_socket(&state_root, &new_session_id).await?;
         let (read_half, write_half) = stream.into_split();
         let reader = BufReader::new(read_half);
         self.session
-            .restart(reader, write_half, new_session_id, new_home_run_id)
+            .restart(reader, write_half, new_session_id, new_chat_run_id)
             .await;
         Ok(())
     }
 
-    /// Retire pending home acquisitions and abort the background readers.
+    /// Retire pending session_chat acquisitions and abort the background readers.
     pub async fn shutdown(&self) {
         {
-            // Match install_home's lock order so a late watch acknowledgment
+            // Match install_session_chat's lock order so a late watch acknowledgment
             // cannot publish a display after shutdown, even if none exists yet.
-            let mut display = self.home_display.lock().await;
+            let mut display = self.session_chat_display.lock().await;
             let mut write = self.session.write.lock().await;
             write.generation += 1;
             display.take();
@@ -764,7 +785,7 @@ fn parse_session_setup(response: &Value) -> Result<(String, String), String> {
             .map(str::to_owned)
             .ok_or_else(|| format!("create_session response missing '{field}'"))
     };
-    Ok((required("session_id")?, required("home_run_id")?))
+    Ok((required("session_id")?, required("chat_run_id")?))
 }
 
 /// Connect to the executor daemon, create a session, and return the client
@@ -805,7 +826,7 @@ pub async fn connect() -> Result<
         Some(v) => v,
         None => return Err("executor closed connection during create_session".to_string()),
     };
-    let (session_id, home_run_id) = parse_session_setup(&create_resp)?;
+    let (session_id, chat_run_id) = parse_session_setup(&create_resp)?;
 
     let control = Connection::new_control(control_reader, control_write_half, Arc::clone(&out));
 
@@ -818,7 +839,7 @@ pub async fn connect() -> Result<
         session_reader,
         session_write_half,
         session_id,
-        home_run_id,
+        chat_run_id,
         Arc::clone(&out),
     );
 
@@ -828,7 +849,7 @@ pub async fn connect() -> Result<
             session,
             out,
             session_recreate: Mutex::new(()),
-            home_display: Mutex::new(None),
+            session_chat_display: Mutex::new(None),
             selected_inputs: StdMutex::new(HashMap::new()),
             input_epoch: AtomicU64::new(0),
             #[cfg(test)]
@@ -889,7 +910,7 @@ async fn read_loop(
                     }
                 };
                 if can_route_to_chat(&event) {
-                    // Home display comes exclusively from its passive bus watch.
+                    // SessionChat display comes exclusively from its passive bus watch.
                     // Retire legacy frames without consuming a response waiter.
                 } else {
                     // Bare error/system_warning — treat as a response.
@@ -1070,7 +1091,7 @@ mod run_follow_tests {
         for wrong_field in [None, Some("stage"), Some("stage_run_id")] {
             let (stream, peer) = UnixStream::pair().unwrap();
             let (client, [control, session]) = DaemonClient::fake_with_aux_streams(
-                json!({"session_id":"current-owner", "home_run_id":"home"}),
+                json!({"session_id":"current-owner", "chat_run_id":"session_chat"}),
                 vec![stream],
             );
             let client = Arc::new(client);
@@ -1204,7 +1225,7 @@ mod replay_fallback_tests {
         let (native, native_peer) = UnixStream::pair().unwrap();
         let (replacement, replacement_peer) = UnixStream::pair().unwrap();
         let (client, [control, session]) = DaemonClient::fake_with_aux_streams(
-            json!({"session_id":"owner", "home_run_id":"home"}),
+            json!({"session_id":"owner", "chat_run_id":"session_chat"}),
             vec![native, replacement],
         );
         let client = Arc::new(client);
@@ -1356,7 +1377,7 @@ mod replay_fallback_tests {
         let (stream, peer) = UnixStream::pair().unwrap();
         let (replacement, replacement_peer) = UnixStream::pair().unwrap();
         let (client, [control, session]) = DaemonClient::fake_with_aux_streams(
-            json!({"session_id":"owner", "home_run_id":"home"}),
+            json!({"session_id":"owner", "chat_run_id":"session_chat"}),
             vec![stream, replacement],
         );
         let client = Arc::new(client);
@@ -1633,19 +1654,19 @@ mod session_identity_tests {
     use super::*;
 
     #[test]
-    fn setup_requires_authoritative_home_identity() {
+    fn setup_requires_authoritative_session_chat_identity() {
         assert_eq!(
-            parse_session_setup(&json!({"session_id": "s", "home_run_id": "reserved-42"})),
+            parse_session_setup(&json!({"session_id": "s", "chat_run_id": "reserved-42"})),
             Ok(("s".into(), "reserved-42".into()))
         );
-        for home in [Value::Null, json!(42)] {
+        for session_chat in [Value::Null, json!(42)] {
             assert_eq!(
-                parse_session_setup(&json!({"session_id": "s", "home_run_id": home})),
-                Err("create_session response missing 'home_run_id'".into())
+                parse_session_setup(&json!({"session_id": "s", "chat_run_id": session_chat})),
+                Err("create_session response missing 'chat_run_id'".into())
             );
         }
         assert!(parse_session_setup(&json!({"session_id": "s"})).is_err());
-        assert!(parse_session_setup(&json!({"home_run_id": "reserved-42"})).is_err());
+        assert!(parse_session_setup(&json!({"chat_run_id": "reserved-42"})).is_err());
         assert_eq!(
             parse_session_setup(&json!({"type": "error", "message": "reservation failed"})),
             Err("reservation failed".into())
@@ -1655,22 +1676,22 @@ mod session_identity_tests {
     #[tokio::test]
     async fn restart_replaces_socket_and_both_identities() {
         let (client, _peers) = DaemonClient::fake_with_identity(json!({
-            "session_id": "old-session", "home_run_id": "reserved-old"
+            "session_id": "old-session", "chat_run_id": "reserved-old"
         }));
         assert_eq!(client.session_id().await, "old-session");
-        assert_eq!(client.home_run_id().await, "reserved-old");
+        assert_eq!(client.chat_run_id().await, "reserved-old");
         let (stream, peer) = tokio::net::UnixStream::pair().unwrap();
         let (read, write) = stream.into_split();
-        let (session_id, home_run_id) = parse_session_setup(&json!({
-            "session_id": "new-session", "home_run_id": "registry-new"
+        let (session_id, chat_run_id) = parse_session_setup(&json!({
+            "session_id": "new-session", "chat_run_id": "registry-new"
         }))
         .unwrap();
         client
             .session
-            .restart(BufReader::new(read), write, session_id, home_run_id)
+            .restart(BufReader::new(read), write, session_id, chat_run_id)
             .await;
         assert_eq!(client.session_id().await, "new-session");
-        assert_eq!(client.home_run_id().await, "registry-new");
+        assert_eq!(client.chat_run_id().await, "registry-new");
         assert_eq!(client.session_generation().await, 1);
         assert!(client
             .send_session_request_for_generation(json!({"op": "status"}), 0)
@@ -1708,7 +1729,7 @@ mod correction_tests {
             raw_tx: mpsc::unbounded_channel().0,
         });
         let reader = tokio::spawn(read_loop(BufReader::new(reader), out, Arc::default()));
-        socket::write_json_line(&mut peer, &json!({"type":"turn_started", "chat_turn":"owner-turn", "id":"home", "stage_run_id":"exec-home", "nonce":23})).await.unwrap();
+        socket::write_json_line(&mut peer, &json!({"type":"turn_started", "chat_turn":"owner-turn", "id":"session_chat", "stage_run_id":"exec-session_chat", "nonce":23})).await.unwrap();
         drop(peer);
         reader.await.unwrap();
         assert!(chat_rx.recv().await.is_none());
@@ -1726,7 +1747,7 @@ mod correction_tests {
             };
             let (stream, peer) = UnixStream::pair().unwrap();
             let (client, _peers) = DaemonClient::fake_with_aux_streams(
-                json!({"session_id":"owner", "home_run_id":"home"}),
+                json!({"session_id":"owner", "chat_run_id":"session_chat"}),
                 vec![stream],
             );
             let epoch = client.input_epoch();
@@ -1761,7 +1782,7 @@ mod correction_tests {
             let (old_stream, old_peer) = UnixStream::pair().unwrap();
             let (new_stream, new_peer) = UnixStream::pair().unwrap();
             let (client, _peers) = DaemonClient::fake_with_aux_streams(
-                json!({"session_id":"owner", "home_run_id":"home"}),
+                json!({"session_id":"owner", "chat_run_id":"session_chat"}),
                 vec![old_stream, new_stream],
             );
             let client = Arc::new(client);
@@ -1897,7 +1918,7 @@ mod correction_tests {
                 };
                 let (stream, peer) = UnixStream::pair().unwrap();
                 let (client, _peers) = DaemonClient::fake_with_aux_streams(
-                    json!({"session_id":"owner", "home_run_id":"home"}),
+                    json!({"session_id":"owner", "chat_run_id":"session_chat"}),
                     vec![stream],
                 );
                 let client = Arc::new(client);
@@ -1970,7 +1991,7 @@ mod correction_tests {
             };
             let (stream, peer) = UnixStream::pair().unwrap();
             let (client, _peers) = DaemonClient::fake_with_aux_streams(
-                json!({"session_id":"owner", "home_run_id":"home"}),
+                json!({"session_id":"owner", "chat_run_id":"session_chat"}),
                 vec![stream],
             );
             let client = Arc::new(client);
@@ -2011,7 +2032,7 @@ mod correction_tests {
             let (old_stream, old_peer) = UnixStream::pair().unwrap();
             let (new_stream, new_peer) = UnixStream::pair().unwrap();
             let (client, _peers) = DaemonClient::fake_with_aux_streams(
-                json!({"session_id":"owner", "home_run_id":"home"}),
+                json!({"session_id":"owner", "chat_run_id":"session_chat"}),
                 vec![old_stream, new_stream],
             );
             let client = Arc::new(client);
@@ -2095,7 +2116,7 @@ mod correction_tests {
             };
             let (stream, peer) = UnixStream::pair().unwrap();
             let (client, peers) = DaemonClient::fake_with_aux_streams(
-                json!({"session_id":"owner", "home_run_id":"home"}),
+                json!({"session_id":"owner", "chat_run_id":"session_chat"}),
                 vec![stream],
             );
             let client = Arc::new(client);
@@ -2182,7 +2203,7 @@ mod correction_tests {
             };
             let (stream, peer) = UnixStream::pair().unwrap();
             let (client, [_control, _session]) = DaemonClient::fake_with_aux_streams(
-                json!({"session_id":"owner", "home_run_id":"home"}),
+                json!({"session_id":"owner", "chat_run_id":"session_chat"}),
                 vec![stream],
             );
             let server = tokio::spawn(async move {

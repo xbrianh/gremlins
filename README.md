@@ -132,21 +132,27 @@ cargo build
 
 ## TUI selected conversation
 
-In `/watch`, select a run with `j`/`k` or the arrow keys and press `Enter`
-to observe its conversation. The execution keeps running unaided; selecting
-it does not pause it. `/attach <id> [stage]` selects a stage directly.
-`/debug <stage_run_id>` or `/debug <run> <stage_run_id>` selects a concrete
-invocation in the same chat, without pause-on-entry. Interactive agent stages
-accept input; exec stages are read-only. The TUI `/debug` selector is separate
-from the exact-ID, input-only CLI debug command below.
+In `/watch`, move with `j`/`k` or the arrow keys and press `Enter` to
+select a conversation. Watch Enter is the only selection path: a run row
+opens aggregate run output, and an invocation row selects that concrete
+invocation. Selection does not pause execution or open input. Select the
+session chat run row to return to session chat; it is available even before
+its first turn. The CLI `gremlins debug` command below is separate: it sends
+exact invocation input, not TUI selection.
 
 Ordinary text in the selected chat corrects the **same execution** through exact
 input; it does not implicitly resume, launch a replacement, or start a separate
 chat turn. Explicit run
 controls remain `/stop <id>` and `/resume <id>` (or `s`/`r` in watch).
-`/attach home` returns home; `Ctrl+T` switches between home and the last stage,
-preserving drafts. Leaving a stage detaches, not cancels. The home conversation
-continues streaming in the background while another conversation is selected.
+Switch conversations through Watch Enter; composer drafts and cursor positions
+are preserved per target. Leaving releases local input, not the execution:
+it neither resumes nor cancels it. Session chat continues streaming in the
+background while another conversation is selected. `/exit` is not a TUI
+command; return through the session chat row in Watch.
+
+An exact agent invocation enables the composer as a UI hint. Input binds lazily
+on submission and can still reject stale targets, unsupported backends, or a
+competing controller. Exec stages are read-only.
 
 The inline watch log pane remains separate: `Ctrl+W` (or `Ctrl+O`) toggles it
 inside `/watch`; `Ctrl+W` from chat enters watch. `Esc` closes the pane first,
@@ -222,8 +228,8 @@ the same inbox and short-lived claim; untargeted session chat is a new prompt on
 while idle, and is rejected while a turn is in progress.
 
 The old daemon wire `attach` operation is rejected on both global and verified
-session auxiliary sockets. The TUI `/attach` command above only selects a view;
-it does not restore legacy debugger attachment. See the
+session auxiliary sockets. Watch selection does not restore legacy debugger
+attachment. See the
 [protocol reference](docs/attachment-protocol.md) and
 [code-size/ownership audit](docs/plan11-code-audit.md).
 

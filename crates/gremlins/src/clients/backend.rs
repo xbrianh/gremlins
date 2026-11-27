@@ -14,7 +14,7 @@ use rig_core::driver::DynModel;
 use rig_core::operation::Completion;
 
 pub struct RunParams {
-    /// The executor publishes home-chat Done only after committing outputs.
+    /// The executor publishes session chat Done only after committing outputs.
     pub(crate) defer_done: bool,
     /// Persisted chat usage added only to terminal/progress event totals.
     pub(crate) usage_baseline: Option<super::protocol::UsageStats>,

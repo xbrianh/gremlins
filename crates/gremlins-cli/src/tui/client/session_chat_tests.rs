@@ -16,11 +16,11 @@ fn replay_cursor_stays_constant_size_across_completed_turns() {
 }
 
 #[tokio::test]
-async fn home_persistent_socket_gates_rejected_and_accepted_turns() {
+async fn session_chat_persistent_socket_gates_rejected_and_accepted_turns() {
     let (stream, peer) = UnixStream::pair().unwrap();
     let (spare, _spare_peer) = UnixStream::pair().unwrap();
     let (mut client, [_control, session]) = DaemonClient::fake_with_aux_streams(
-        json!({"session_id":"owner", "home_run_id":"home"}),
+        json!({"session_id":"owner", "chat_run_id":"session_chat"}),
         vec![stream, spare],
     );
     let (chat_tx, mut output) = mpsc::unbounded_channel();
@@ -43,7 +43,7 @@ async fn home_persistent_socket_gates_rejected_and_accepted_turns() {
             socket::write_json_line(
                 observer.get_mut(),
                 &json!({
-                    "type":"stream_chunk", "run_id":"home", "turn":turn,
+                    "type":"stream_chunk", "run_id":"session_chat", "turn":turn,
                     "text":format!("early {turn}")
                 }),
             )
@@ -55,7 +55,7 @@ async fn home_persistent_socket_gates_rejected_and_accepted_turns() {
                     .is_err(),
                 "output escaped before {turn} acknowledgment"
             );
-            let ack = json!({"type":"ok", "id":"home"});
+            let ack = json!({"type":"ok", "chat_run_id":"session_chat", "enqueued":true});
             socket::write_json_line(session.get_mut(), &ack)
                 .await
                 .unwrap();
@@ -67,7 +67,7 @@ async fn home_persistent_socket_gates_rejected_and_accepted_turns() {
             );
             socket::write_json_line(
                 observer.get_mut(),
-                &json!({"type":"ended", "run_id":"home", "turn":"A"}),
+                &json!({"type":"ended", "run_id":"session_chat", "turn":"A"}),
             )
             .await
             .unwrap();
@@ -83,7 +83,7 @@ async fn home_persistent_socket_gates_rejected_and_accepted_turns() {
             socket::write_json_line(
                 observer.get_mut(),
                 &json!({
-                    "type":"done", "run_id":"home", "turn":turn,
+                    "type":"done", "run_id":"session_chat", "turn":turn,
                     "text":format!("done {turn}"), "summary":""
                 }),
             )
@@ -96,7 +96,7 @@ async fn home_persistent_socket_gates_rejected_and_accepted_turns() {
             assert_eq!(event["text"], format!("done {turn}"));
             socket::write_json_line(
                 observer.get_mut(),
-                &json!({"type":"ended", "run_id":"home", "turn":"A"}),
+                &json!({"type":"ended", "run_id":"session_chat", "turn":"A"}),
             )
             .await
             .unwrap();
@@ -134,7 +134,7 @@ async fn home_persistent_socket_gates_rejected_and_accepted_turns() {
             chats += 1;
             assert_eq!(request["op"], "chat");
             assert_eq!(request["turn"], turn);
-            socket::write_json_line(observer.get_mut(), &json!({"type":"stream_chunk", "run_id":"home", "turn":turn, "text":format!("early {turn}")})).await.unwrap();
+            socket::write_json_line(observer.get_mut(), &json!({"type":"stream_chunk", "run_id":"session_chat", "turn":turn, "text":format!("early {turn}")})).await.unwrap();
             assert!(
                 tokio::time::timeout(std::time::Duration::from_millis(30), output.recv())
                     .await
@@ -145,7 +145,7 @@ async fn home_persistent_socket_gates_rejected_and_accepted_turns() {
                 &if turn == "rejected" {
                     json!({"type":"error", "message":"rejected"})
                 } else {
-                    json!({"type":"ok", "id":"home"})
+                    json!({"type":"ok", "chat_run_id":"session_chat", "enqueued":true})
                 },
             )
             .await
@@ -158,7 +158,7 @@ async fn home_persistent_socket_gates_rejected_and_accepted_turns() {
             assert_eq!(serde_json::to_value(event).unwrap()["text"], "early B");
             socket::write_json_line(
                 observer.get_mut(),
-                &json!({"type":"ended", "run_id":"home", "turn":"A", "reason":"finished"}),
+                &json!({"type":"ended", "run_id":"session_chat", "turn":"A", "reason":"finished"}),
             )
             .await
             .unwrap();
@@ -167,7 +167,7 @@ async fn home_persistent_socket_gates_rejected_and_accepted_turns() {
             assert!(matches!(event, EventKind::Ended { .. }));
             {
                 let (turn, text) = ("B", "done B");
-                socket::write_json_line(observer.get_mut(), &json!({"type":"done", "run_id":"home", "turn":turn, "text":text, "summary":""})).await.unwrap();
+                socket::write_json_line(observer.get_mut(), &json!({"type":"done", "run_id":"session_chat", "turn":turn, "text":text, "summary":""})).await.unwrap();
                 let (event, actual_turn, _) = output.recv().await.unwrap();
                 assert_eq!(actual_turn.as_deref(), Some(turn));
                 let event = serde_json::to_value(event).unwrap();
@@ -213,11 +213,11 @@ async fn home_persistent_socket_gates_rejected_and_accepted_turns() {
 }
 
 #[tokio::test]
-async fn home_ended_reacquires_live_watch_and_shutdown_closes_reader() {
+async fn session_chat_ended_reacquires_live_watch_and_shutdown_closes_reader() {
     let (first, first_peer) = UnixStream::pair().unwrap();
     let (second, second_peer) = UnixStream::pair().unwrap();
     let (client, [_control, session]) = DaemonClient::fake_with_aux_streams(
-        json!({"session_id":"owner", "home_run_id":"home"}),
+        json!({"session_id":"owner", "chat_run_id":"session_chat"}),
         vec![first, second],
     );
     let server = async {
@@ -227,13 +227,16 @@ async fn home_ended_reacquires_live_watch_and_shutdown_closes_reader() {
             let request = socket::read_json_line(&mut session).await.unwrap().unwrap();
             assert_eq!(request["op"], "chat");
             assert_eq!(request["turn"], turn);
-            socket::write_json_line(session.get_mut(), &json!({"type":"ok", "id":"home"}))
-                .await
-                .unwrap();
+            socket::write_json_line(
+                session.get_mut(),
+                &json!({"type":"ok", "chat_run_id":"session_chat", "enqueued":true}),
+            )
+            .await
+            .unwrap();
             if turn == "A" {
                 socket::write_json_line(
                     observer.get_mut(),
-                    &json!({"type":"ended", "run_id":"home"}),
+                    &json!({"type":"ended", "run_id":"session_chat"}),
                 )
                 .await
                 .unwrap();
@@ -251,7 +254,7 @@ async fn home_ended_reacquires_live_watch_and_shutdown_closes_reader() {
             .unwrap();
         loop {
             if client
-                .home_display
+                .session_chat_display
                 .lock()
                 .await
                 .as_ref()
@@ -269,7 +272,7 @@ async fn home_ended_reacquires_live_watch_and_shutdown_closes_reader() {
             .unwrap();
         assert!(client.aux_streams.lock().await.as_ref().unwrap().is_empty());
         client.shutdown().await;
-        assert!(client.home_display.lock().await.is_none());
+        assert!(client.session_chat_display.lock().await.is_none());
     };
     tokio::time::timeout(std::time::Duration::from_secs(2), async {
         tokio::join!(server, driver)
@@ -282,7 +285,7 @@ async fn home_ended_reacquires_live_watch_and_shutdown_closes_reader() {
 async fn stale_prepare_cannot_retire_successor_display() {
     let (stream, peer) = UnixStream::pair().unwrap();
     let (client, [_control, _session]) = DaemonClient::fake_with_aux_streams(
-        json!({"session_id":"owner", "home_run_id":"home"}),
+        json!({"session_id":"owner", "chat_run_id":"session_chat"}),
         vec![stream],
     );
     let successor = tokio::spawn(std::future::pending::<()>());
@@ -290,7 +293,7 @@ async fn stale_prepare_cannot_retire_successor_display() {
     let server = async {
         let mut observer = watch(peer, true).await;
         {
-            let mut display = client.home_display.lock().await;
+            let mut display = client.session_chat_display.lock().await;
             client.session.write.lock().await.generation = 1;
             *display = Some(Display {
                 forward: successor,
@@ -312,16 +315,16 @@ async fn stale_prepare_cannot_retire_successor_display() {
     .await
     .unwrap();
     assert!(result.unwrap_err().contains("retired session"));
-    assert!(client.home_display.lock().await.is_some());
+    assert!(client.session_chat_display.lock().await.is_some());
     assert!(!successor_abort.is_finished());
     client.shutdown().await;
 }
 
 #[tokio::test]
-async fn live_only_home_watch_rejects_replay_ack_and_closes_reader() {
+async fn live_only_session_chat_watch_rejects_replay_ack_and_closes_reader() {
     let (stream, peer) = UnixStream::pair().unwrap();
     let (client, _peers) = DaemonClient::fake_with_aux_streams(
-        json!({"session_id":"owner", "home_run_id":"home"}),
+        json!({"session_id":"owner", "chat_run_id":"session_chat"}),
         vec![stream],
     );
     let server = async {
@@ -331,14 +334,14 @@ async fn live_only_home_watch_rejects_replay_ack_and_closes_reader() {
         socket::write_json_line(
             peer.get_mut(),
             &json!({"type":"watched", "scope":"run",
-            "id":"home", "stage":null, "stage_run_id":null, "replay":true}),
+            "id":"session_chat", "stage":null, "stage_run_id":null, "replay":true}),
         )
         .await
         .unwrap();
         assert!(socket::read_json_line(&mut peer).await.unwrap().is_none());
     };
     let (result, ()) = tokio::time::timeout(std::time::Duration::from_secs(2), async {
-        tokio::join!(client.prepare_home("home", false), server)
+        tokio::join!(client.prepare_session_chat("session_chat", false), server)
     })
     .await
     .unwrap();
@@ -347,15 +350,21 @@ async fn live_only_home_watch_rejects_replay_ack_and_closes_reader() {
 }
 
 #[tokio::test]
-async fn malformed_home_ack_releases_pending_submission() {
+async fn malformed_session_chat_ack_releases_pending_submission() {
     for ack in [
         json!({"type":"unexpected"}),
         json!({"type":"ok"}),
-        json!({"type":"ok", "id":"home", "session_id":"retired"}),
+        json!({"type":"ok", "id":"session_chat"}),
+        json!({"type":"ok", "id":"session_chat", "enqueued":true}),
+        json!({"type":"ok", "chat_run_id":"session_chat"}),
+        json!({"type":"ok", "chat_run_id":"session_chat", "enqueued":false}),
+        json!({"type":"ok", "chat_run_id":"session_chat", "enqueued":"true"}),
+        json!({"type":"ok", "chat_run_id":"", "enqueued":true}),
+        json!({"type":"ok", "chat_run_id":"session_chat", "enqueued":true, "session_id":"retired"}),
     ] {
         let (stream, peer) = UnixStream::pair().unwrap();
         let (client, [_control, session]) = DaemonClient::fake_with_aux_streams(
-            json!({"session_id":"owner", "home_run_id":"home"}),
+            json!({"session_id":"owner", "chat_run_id":"session_chat"}),
             vec![stream],
         );
         let server = async {
@@ -382,7 +391,7 @@ async fn malformed_home_ack_releases_pending_submission() {
         assert!(result.is_err());
         assert!(
             !client
-                .home_display
+                .session_chat_display
                 .lock()
                 .await
                 .as_ref()
@@ -397,7 +406,7 @@ async fn malformed_home_ack_releases_pending_submission() {
 }
 
 #[tokio::test]
-async fn home_watch_failure_and_eof_recover_by_replay_without_resubmission() {
+async fn session_chat_watch_failure_and_eof_recover_by_replay_without_resubmission() {
     for (reject, exhaust_initial_watches) in [(true, false), (false, false), (true, true)] {
         let (initial, initial_peer) = UnixStream::pair().unwrap();
         let (recovery, recovery_peer) = UnixStream::pair().unwrap();
@@ -411,7 +420,7 @@ async fn home_watch_failure_and_eof_recover_by_replay_without_resubmission() {
             vec![initial, recovery]
         };
         let (mut client, [_control, session]) = DaemonClient::fake_with_aux_streams(
-            json!({"session_id":"owner", "home_run_id":"home"}),
+            json!({"session_id":"owner", "chat_run_id":"session_chat"}),
             streams,
         );
         let (tx, mut rx) = mpsc::unbounded_channel();
@@ -429,7 +438,7 @@ async fn home_watch_failure_and_eof_recover_by_replay_without_resubmission() {
             );
             socket::write_json_line(
                 session.get_mut(),
-                &json!({"type":"ok", "id": if reject { "replacement" } else { "home" }}),
+                &json!({"type":"ok", "chat_run_id": if reject { "replacement" } else { "session_chat" }, "enqueued":true}),
             )
             .await
             .unwrap();
@@ -444,7 +453,11 @@ async fn home_watch_failure_and_eof_recover_by_replay_without_resubmission() {
             for peer in failed_watches {
                 watch_run(peer, "replacement", true, false).await;
             }
-            let run = if reject { "replacement" } else { "home" };
+            let run = if reject {
+                "replacement"
+            } else {
+                "session_chat"
+            };
             let mut recovery = watch_run(recovery_peer, run, true, true).await;
             socket::write_json_line(
                 recovery.get_mut(),
@@ -457,9 +470,12 @@ async fn home_watch_failure_and_eof_recover_by_replay_without_resubmission() {
             let next = socket::read_json_line(&mut session).await.unwrap().unwrap();
             assert_eq!(next["op"], "chat");
             assert_eq!(next["turn"], "next");
-            socket::write_json_line(session.get_mut(), &json!({"type":"ok", "id":run}))
-                .await
-                .unwrap();
+            socket::write_json_line(
+                session.get_mut(),
+                &json!({"type":"ok", "chat_run_id":run, "enqueued":true}),
+            )
+            .await
+            .unwrap();
             socket::write_json_line(
                 recovery.get_mut(),
                 &json!({"type":"done",
@@ -521,32 +537,33 @@ async fn home_watch_failure_and_eof_recover_by_replay_without_resubmission() {
 }
 
 #[tokio::test]
-async fn home_recovery_retries_failures_and_deduplicates_replayed_sequences() {
+async fn session_chat_recovery_retries_failures_and_deduplicates_replayed_sequences() {
     for initial_failure in [false, true] {
         let (tx, rx) = mpsc::channel(4);
-        let chunk = json!({"type":"stream_chunk", "text":"once", "run_id":"home",
+        let chunk = json!({"type":"stream_chunk", "text":"once", "run_id":"session_chat",
             "turn":"turn", "sequence":42});
         if !initial_failure {
             tx.send(chunk.clone()).await.unwrap();
         }
         drop(tx);
         let (out_tx, mut output) = mpsc::unbounded_channel();
-        let (client, _peers) =
-            DaemonClient::fake_with_identity(json!({"session_id":"owner", "home_run_id":"home"}));
+        let (client, _peers) = DaemonClient::fake_with_identity(
+            json!({"session_id":"owner", "chat_run_id":"session_chat"}),
+        );
         let out = Arc::new(OutState {
             chat_tx: out_tx,
             event_tx: mpsc::unbounded_channel().0,
             raw_tx: mpsc::unbounded_channel().0,
         });
         let mut attempts = 0;
-        let forward = tokio::spawn(forward_home_stream(
+        let forward = tokio::spawn(forward_session_chat_stream(
             rx,
             Reader(tokio::spawn(async {})),
-            HomeWatchContext {
+            SessionChatWatchContext {
                 session_write: Arc::clone(&client.session.write),
                 out,
                 generation: 0,
-                run: "home".into(),
+                run: "session_chat".into(),
                 turn: Some("turn".into()),
             },
             None,
@@ -561,10 +578,10 @@ async fn home_recovery_retries_failures_and_deduplicates_replayed_sequences() {
                     tx.send(chunk.clone()).await.unwrap();
                     tx.send(chunk).await.unwrap();
                     tx.send(json!({"type":"done", "text":"finished", "summary":"",
-                        "run_id":"home", "turn":"turn", "sequence":43}))
+                        "run_id":"session_chat", "turn":"turn", "sequence":43}))
                         .await
                         .unwrap();
-                    tx.send(json!({"type":"ended", "run_id":"home"}))
+                    tx.send(json!({"type":"ended", "run_id":"session_chat"}))
                         .await
                         .unwrap();
                     Ok((rx, Reader(tokio::spawn(async {}))))
@@ -589,12 +606,12 @@ async fn home_recovery_retries_failures_and_deduplicates_replayed_sequences() {
 }
 
 #[tokio::test]
-async fn healthy_home_a_then_b_recovers_missing_output_and_completes_once() {
+async fn healthy_session_chat_a_then_b_recovers_missing_output_and_completes_once() {
     let (initial, initial_peer) = UnixStream::pair().unwrap();
     let (recovery, recovery_peer) = UnixStream::pair().unwrap();
     let (spare, _spare_peer) = UnixStream::pair().unwrap();
     let (mut client, [_control, session]) = DaemonClient::fake_with_aux_streams(
-        json!({"session_id":"owner", "home_run_id":"home"}),
+        json!({"session_id":"owner", "chat_run_id":"session_chat"}),
         vec![initial, recovery, spare],
     );
     let (chat_tx, mut output) = mpsc::unbounded_channel();
@@ -613,13 +630,16 @@ async fn healthy_home_a_then_b_recovers_missing_output_and_completes_once() {
             let request = socket::read_json_line(&mut session).await.unwrap().unwrap();
             assert_eq!(request["op"], "chat");
             assert_eq!(request["turn"], turn);
-            socket::write_json_line(session.get_mut(), &json!({"type":"ok", "id":"home"}))
-                .await
-                .unwrap();
+            socket::write_json_line(
+                session.get_mut(),
+                &json!({"type":"ok", "chat_run_id":"session_chat", "enqueued":true}),
+            )
+            .await
+            .unwrap();
             socket::write_json_line(
                 observer.get_mut(),
                 &json!({"type":"stream_chunk",
-                "run_id":"home", "turn":turn, "sequence":seq, "text":format!("live {turn}")}),
+                "run_id":"session_chat", "turn":turn, "sequence":seq, "text":format!("live {turn}")}),
             )
             .await
             .unwrap();
@@ -633,7 +653,7 @@ async fn healthy_home_a_then_b_recovers_missing_output_and_completes_once() {
                 socket::write_json_line(
                     observer.get_mut(),
                     &json!({"type":"done",
-                    "run_id":"home", "turn":"A", "sequence":2, "text":"done A", "summary":""}),
+                    "run_id":"session_chat", "turn":"A", "sequence":2, "text":"done A", "summary":""}),
                 )
                 .await
                 .unwrap();
@@ -644,14 +664,14 @@ async fn healthy_home_a_then_b_recovers_missing_output_and_completes_once() {
             }
         }
         drop(observer);
-        let mut recovery = watch_run(recovery_peer, "home", true, true).await;
+        let mut recovery = watch_run(recovery_peer, "session_chat", true, true).await;
         for frame in [
-            json!({"type":"stream_chunk", "run_id":"home", "turn":"B", "sequence":3, "text":"live B"}),
+            json!({"type":"stream_chunk", "run_id":"session_chat", "turn":"B", "sequence":3, "text":"live B"}),
             json!({"type":"history_gap"}),
-            json!({"type":"stream_chunk", "run_id":"home", "turn":"B", "sequence":4, "text":"missing B"}),
-            json!({"type":"done", "run_id":"home", "turn":"B", "sequence":5, "text":"done B", "summary":""}),
-            json!({"type":"done", "run_id":"home", "turn":"B", "sequence":5, "text":"done B", "summary":""}),
-            json!({"type":"ended", "run_id":"home"}),
+            json!({"type":"stream_chunk", "run_id":"session_chat", "turn":"B", "sequence":4, "text":"missing B"}),
+            json!({"type":"done", "run_id":"session_chat", "turn":"B", "sequence":5, "text":"done B", "summary":""}),
+            json!({"type":"done", "run_id":"session_chat", "turn":"B", "sequence":5, "text":"done B", "summary":""}),
+            json!({"type":"ended", "run_id":"session_chat"}),
         ] {
             socket::write_json_line(recovery.get_mut(), &frame)
                 .await
@@ -713,12 +733,12 @@ async fn healthy_home_a_then_b_recovers_missing_output_and_completes_once() {
 }
 
 #[tokio::test]
-async fn home_idle_peer_loss_recovers_without_warning_on_next_prompt() {
+async fn session_chat_idle_peer_loss_recovers_without_warning_on_next_prompt() {
     let (initial, initial_peer) = UnixStream::pair().unwrap();
     let (recovery, recovery_peer) = UnixStream::pair().unwrap();
     let (spare, _spare_peer) = UnixStream::pair().unwrap();
     let (mut client, [_control, session]) = DaemonClient::fake_with_aux_streams(
-        json!({"session_id":"owner", "home_run_id":"home"}),
+        json!({"session_id":"owner", "chat_run_id":"session_chat"}),
         vec![initial, recovery, spare],
     );
     let (chat_tx, mut output) = mpsc::unbounded_channel();
@@ -737,13 +757,16 @@ async fn home_idle_peer_loss_recovers_without_warning_on_next_prompt() {
             request,
             json!({"op":"chat", "turn":"A", "session_id":"owner"})
         );
-        socket::write_json_line(session.get_mut(), &json!({"type":"ok", "id":"home"}))
-            .await
-            .unwrap();
+        socket::write_json_line(
+            session.get_mut(),
+            &json!({"type":"ok", "chat_run_id":"session_chat", "enqueued":true}),
+        )
+        .await
+        .unwrap();
         socket::write_json_line(
             observer.get_mut(),
             &json!({"type":"done",
-            "run_id":"home", "turn":"A", "sequence":1, "text":"done A", "summary":""}),
+            "run_id":"session_chat", "turn":"A", "sequence":1, "text":"done A", "summary":""}),
         )
         .await
         .unwrap();
@@ -772,7 +795,7 @@ async fn home_idle_peer_loss_recovers_without_warning_on_next_prompt() {
         socket::write_json_line(
             recovery.get_mut(),
             &json!({"type":"watched",
-            "scope":"run", "id":"home", "replay":true,
+            "scope":"run", "id":"session_chat", "replay":true,
             "stage":null, "stage_run_id":null}),
         )
         .await
@@ -783,18 +806,21 @@ async fn home_idle_peer_loss_recovers_without_warning_on_next_prompt() {
             request,
             json!({"op":"chat", "turn":"B", "session_id":"owner"})
         );
-        socket::write_json_line(session.get_mut(), &json!({"type":"ok", "id":"home"}))
-            .await
-            .unwrap();
+        socket::write_json_line(
+            session.get_mut(),
+            &json!({"type":"ok", "chat_run_id":"session_chat", "enqueued":true}),
+        )
+        .await
+        .unwrap();
         for frame in [
             // These belong to the idle acquisition, but arrive only after B's
             // enqueue. They must not acquire B's turn at receiver-drain time.
             json!({"type":"history_gap"}),
             json!({"type":"lagged"}),
-            json!({"type":"replay_checkpoint", "id":"home"}),
-            json!({"type":"stream_chunk", "run_id":"home", "turn":"B",
+            json!({"type":"replay_checkpoint", "id":"session_chat"}),
+            json!({"type":"stream_chunk", "run_id":"session_chat", "turn":"B",
                 "sequence":3, "text":"live B"}),
-            json!({"type":"done", "run_id":"home", "turn":"B",
+            json!({"type":"done", "run_id":"session_chat", "turn":"B",
                 "sequence":4, "text":"done B", "summary":""}),
         ] {
             socket::write_json_line(recovery.get_mut(), &frame)
@@ -829,7 +855,7 @@ async fn home_idle_peer_loss_recovers_without_warning_on_next_prompt() {
             .unwrap();
         finished_rx.await.unwrap();
         client.shutdown().await;
-        assert!(client.home_display.lock().await.is_none());
+        assert!(client.session_chat_display.lock().await.is_none());
     };
     tokio::time::timeout(std::time::Duration::from_secs(3), async {
         tokio::join!(server, driver);
@@ -846,20 +872,20 @@ async fn home_idle_peer_loss_recovers_without_warning_on_next_prompt() {
 
 #[tokio::test]
 async fn generation_reset_during_recovery_handshake_suppresses_late_output() {
-    pending_home_recovery(false).await;
+    pending_session_chat_recovery(false).await;
 }
 
 #[tokio::test]
-async fn shutdown_cancels_pending_home_recovery_retry() {
-    pending_home_recovery(true).await;
+async fn shutdown_cancels_pending_session_chat_recovery_retry() {
+    pending_session_chat_recovery(true).await;
 }
 
-async fn pending_home_recovery(shutdown: bool) {
+async fn pending_session_chat_recovery(shutdown: bool) {
     let (initial, initial_peer) = UnixStream::pair().unwrap();
     let (recovery, recovery_peer) = UnixStream::pair().unwrap();
     let (spare, _spare_peer) = UnixStream::pair().unwrap();
     let (mut client, [_control, session]) = DaemonClient::fake_with_aux_streams(
-        json!({"session_id":"owner", "home_run_id":"home"}),
+        json!({"session_id":"owner", "chat_run_id":"session_chat"}),
         vec![initial, recovery, spare],
     );
     let (chat_tx, mut chat_rx) = mpsc::unbounded_channel();
@@ -876,9 +902,12 @@ async fn pending_home_recovery(shutdown: bool) {
         let observer = watch(initial_peer, true).await;
         let mut session = BufReader::new(session);
         socket::read_json_line(&mut session).await.unwrap().unwrap();
-        socket::write_json_line(session.get_mut(), &json!({"type":"ok", "id":"home"}))
-            .await
-            .unwrap();
+        socket::write_json_line(
+            session.get_mut(),
+            &json!({"type":"ok", "chat_run_id":"session_chat", "enqueued":true}),
+        )
+        .await
+        .unwrap();
         drop(observer);
         let mut recovery = BufReader::new(recovery_peer);
         let request = socket::read_json_line(&mut recovery)
@@ -887,17 +916,17 @@ async fn pending_home_recovery(shutdown: bool) {
             .unwrap();
         assert_eq!(
             request,
-            json!({"op":"watch", "scope":"run", "id":"home",
+            json!({"op":"watch", "scope":"run", "id":"session_chat",
             "session_id":"owner", "replay":true})
         );
         waiting_tx.send(()).unwrap();
         release_rx.await.unwrap();
         if !shutdown {
             let frames = [
-                json!({"type":"watched", "scope":"run", "id":"home", "stage":null,
+                json!({"type":"watched", "scope":"run", "id":"session_chat", "stage":null,
                     "stage_run_id":null, "replay":true}),
-                json!({"type":"stream_chunk", "run_id":"home", "turn":"old", "text":"late"}),
-                json!({"type":"done", "run_id":"home", "turn":"old", "text":"late", "summary":""}),
+                json!({"type":"stream_chunk", "run_id":"session_chat", "turn":"old", "text":"late"}),
+                json!({"type":"done", "run_id":"session_chat", "turn":"old", "text":"late", "summary":""}),
             ];
             let wire: String = frames.iter().map(|frame| format!("{frame}\n")).collect();
             tokio::io::AsyncWriteExt::write_all(recovery.get_mut(), wire.as_bytes())
@@ -915,11 +944,14 @@ async fn pending_home_recovery(shutdown: bool) {
             .await
             .unwrap();
         waiting_rx.await.unwrap();
-        assert_eq!(raw_rx.recv().await.unwrap()["type"], "home_run_identity");
+        assert_eq!(
+            raw_rx.recv().await.unwrap()["type"],
+            "session_chat_run_identity"
+        );
         let (warning, _, _) = chat_rx.recv().await.unwrap();
         assert!(matches!(warning, EventKind::SystemWarning { .. }));
         let forward = client
-            .home_display
+            .session_chat_display
             .lock()
             .await
             .as_ref()
@@ -928,12 +960,12 @@ async fn pending_home_recovery(shutdown: bool) {
             .abort_handle();
         if shutdown {
             client.shutdown().await;
-            assert!(client.home_display.lock().await.is_none());
+            assert!(client.session_chat_display.lock().await.is_none());
         } else {
             let mut write = client.session.write.lock().await;
             write.generation = 1;
             write.session_id = Some("new-owner".into());
-            write.home_run_id = Some("new-home".into());
+            write.chat_run_id = Some("new-session_chat".into());
         }
         release_tx.send(()).unwrap();
         while !forward.is_finished() {
@@ -957,7 +989,7 @@ async fn pending_home_recovery(shutdown: bool) {
 }
 
 async fn watch(peer: UnixStream, live: bool) -> BufReader<UnixStream> {
-    watch_run(peer, "home", false, live).await
+    watch_run(peer, "session_chat", false, live).await
 }
 
 async fn watch_run(
@@ -984,10 +1016,10 @@ async fn watch_run(
 }
 
 #[tokio::test]
-async fn stale_enqueue_ack_cannot_replace_home_identity() {
+async fn stale_enqueue_ack_cannot_replace_session_chat_identity() {
     let (stream, peer) = UnixStream::pair().unwrap();
     let (client, [_control, session]) = DaemonClient::fake_with_aux_streams(
-        json!({"session_id":"owner", "home_run_id":"home"}),
+        json!({"session_id":"owner", "chat_run_id":"session_chat"}),
         vec![stream],
     );
     let server = tokio::spawn(async move {
@@ -996,7 +1028,7 @@ async fn stale_enqueue_ack_cannot_replace_home_identity() {
         socket::read_json_line(&mut session).await.unwrap().unwrap();
         socket::write_json_line(
             session.get_mut(),
-            &json!({"type":"ok", "id":"stale-home", "session_id":"retired"}),
+            &json!({"type":"ok", "chat_run_id":"stale-session_chat", "enqueued":true, "session_id":"retired"}),
         )
         .await
         .unwrap();
@@ -1006,7 +1038,7 @@ async fn stale_enqueue_ack_cannot_replace_home_identity() {
         .await
         .unwrap_err();
     assert!(error.contains("retired session"));
-    assert_eq!(client.home_run_id().await, "home");
+    assert_eq!(client.chat_run_id().await, "session_chat");
     assert!(client
         .send_session_request_for_generation(json!({"op":"chat"}), 1)
         .await
@@ -1016,20 +1048,20 @@ async fn stale_enqueue_ack_cannot_replace_home_identity() {
 }
 
 #[tokio::test]
-async fn generation_reset_while_replacement_prepare_home_awaits_rejects_display() {
-    generation_reset_during_home_enqueue(true).await;
+async fn generation_reset_while_replacement_prepare_session_chat_awaits_rejects_display() {
+    generation_reset_during_session_chat_enqueue(true).await;
 }
 
 #[tokio::test]
-async fn generation_reset_before_enqueue_ack_preserves_new_home_identity() {
-    generation_reset_during_home_enqueue(false).await;
+async fn generation_reset_before_enqueue_ack_preserves_new_session_chat_identity() {
+    generation_reset_during_session_chat_enqueue(false).await;
 }
 
-async fn generation_reset_during_home_enqueue(during_prepare: bool) {
+async fn generation_reset_during_session_chat_enqueue(during_prepare: bool) {
     let (initial, initial_peer) = UnixStream::pair().unwrap();
     let (replacement, replacement_peer) = UnixStream::pair().unwrap();
     let (mut client, [_control, session]) = DaemonClient::fake_with_aux_streams(
-        json!({"session_id":"owner", "home_run_id":"home"}),
+        json!({"session_id":"owner", "chat_run_id":"session_chat"}),
         vec![initial, replacement],
     );
     let (chat_tx, mut chat_rx) = mpsc::unbounded_channel();
@@ -1053,7 +1085,7 @@ async fn generation_reset_during_home_enqueue(during_prepare: bool) {
             release_rx.await.unwrap();
             socket::write_json_line(
                 session.get_mut(),
-                &json!({"type":"ok", "id":"replacement", "session_id":"owner"}),
+                &json!({"type":"ok", "chat_run_id":"replacement", "enqueued":true, "session_id":"owner"}),
             )
             .await
             .unwrap();
@@ -1061,7 +1093,7 @@ async fn generation_reset_during_home_enqueue(during_prepare: bool) {
         }
         socket::write_json_line(
             session.get_mut(),
-            &json!({"type":"ok", "id":"replacement", "session_id":"owner"}),
+            &json!({"type":"ok", "chat_run_id":"replacement", "enqueued":true, "session_id":"owner"}),
         )
         .await
         .unwrap();
@@ -1093,20 +1125,23 @@ async fn generation_reset_during_home_enqueue(during_prepare: bool) {
     let reset = async {
         waiting_rx.await.unwrap();
         if during_prepare {
-            assert_eq!(client.home_run_id().await, "replacement");
+            assert_eq!(client.chat_run_id().await, "replacement");
             assert_eq!(
                 raw_rx.recv().await.unwrap(),
-                json!({"type":"home_run_identity", "id":"replacement",
+                json!({"type":"session_chat_run_identity", "id":"replacement",
                     "turn":"old-turn", "session_id":"owner", "generation":0})
             );
         }
-        assert_eq!(client.home_display.lock().await.is_none(), during_prepare);
+        assert_eq!(
+            client.session_chat_display.lock().await.is_none(),
+            during_prepare
+        );
         {
             // Match the atomic identity publication performed by session reset.
             let mut write = client.session.write.lock().await;
             write.generation = 1;
             write.session_id = Some("new-owner".into());
-            write.home_run_id = Some("new-home".into());
+            write.chat_run_id = Some("new-session_chat".into());
         }
         release_tx.send(()).unwrap();
     };
@@ -1123,17 +1158,20 @@ async fn generation_reset_during_home_enqueue(during_prepare: bool) {
     assert_eq!(
         error,
         if during_prepare {
-            "home display belongs to a retired session"
+            "session_chat display belongs to a retired session"
         } else {
-            "home acknowledgment belongs to a retired session"
+            "session_chat acknowledgment belongs to a retired session"
         }
     );
-    assert_eq!(client.home_display.lock().await.is_none(), during_prepare);
+    assert_eq!(
+        client.session_chat_display.lock().await.is_none(),
+        during_prepare
+    );
     {
         let write = client.session.write.lock().await;
         assert_eq!(write.generation, 1);
         assert_eq!(write.session_id.as_deref(), Some("new-owner"));
-        assert_eq!(write.home_run_id.as_deref(), Some("new-home"));
+        assert_eq!(write.chat_run_id.as_deref(), Some("new-session_chat"));
     }
     assert!(chat_rx.try_recv().is_err(), "retired output was forwarded");
     assert!(raw_rx.try_recv().is_err(), "retired identity was published");
@@ -1145,7 +1183,7 @@ async fn exercise(first: bool) {
     let (b, b_peer) = UnixStream::pair().unwrap();
     let streams = if first { vec![a, b] } else { vec![a] };
     let (client, [_control, session]) = DaemonClient::fake_with_aux_streams(
-        json!({"session_id":"owner", "home_run_id":"home"}),
+        json!({"session_id":"owner", "chat_run_id":"session_chat"}),
         streams,
     );
     let (tx, mut rx) = mpsc::unbounded_channel();
@@ -1165,21 +1203,21 @@ async fn exercise(first: bool) {
         if first {
             socket::write_json_line(
                 session.get_mut(),
-                &json!({"type":"ok", "id":"home", "status":"streaming"}),
+                &json!({"type":"ok", "chat_run_id":"session_chat", "enqueued":true}),
             )
             .await
             .unwrap();
-            observer = watch_run(b_peer, "home", true, true).await;
+            observer = watch_run(b_peer, "session_chat", true, true).await;
             socket::write_json_line(observer.get_mut(), &json!({"type":"history_gap"}))
                 .await
                 .unwrap();
         }
         for frame in [
-            json!({"type":"turn_started", "stage_type":"agent", "stage_run_id":"execution", "run_id":"home", "turn":"old-turn", "correlation_turn":"new-turn"}),
-            json!({"type":"stream_chunk", "text":"child", "run_id":"home/child", "turn":"new-turn"}),
-            json!({"type":"stream_chunk", "text":"answer", "run_id":"home", "turn":"new-turn"}),
-            json!({"type":"done", "text":"answer", "summary":"", "run_id":"home", "turn":"new-turn"}),
-            json!({"type":"ended", "run_id":"home"}),
+            json!({"type":"turn_started", "stage_type":"agent", "stage_run_id":"execution", "run_id":"session_chat", "turn":"old-turn", "correlation_turn":"new-turn"}),
+            json!({"type":"stream_chunk", "text":"child", "run_id":"session_chat/child", "turn":"new-turn"}),
+            json!({"type":"stream_chunk", "text":"answer", "run_id":"session_chat", "turn":"new-turn"}),
+            json!({"type":"done", "text":"answer", "summary":"", "run_id":"session_chat", "turn":"new-turn"}),
+            json!({"type":"ended", "run_id":"session_chat"}),
         ] {
             socket::write_json_line(observer.get_mut(), &frame)
                 .await
@@ -1188,7 +1226,7 @@ async fn exercise(first: bool) {
         if !first {
             socket::write_json_line(
                 session.get_mut(),
-                &json!({"type":"ok", "id":"home", "status":"streaming"}),
+                &json!({"type":"ok", "chat_run_id":"session_chat", "enqueued":true}),
             )
             .await
             .unwrap();
@@ -1237,7 +1275,7 @@ async fn exercise(first: bool) {
 }
 
 #[tokio::test]
-async fn home_live_only_watch_accepts_early_output_without_replay_checkpoint() {
+async fn session_chat_live_only_watch_accepts_early_output_without_replay_checkpoint() {
     exercise(false).await;
 }
 
@@ -1247,7 +1285,7 @@ async fn first_watch_failure_recovers_with_replay_and_genuine_gap() {
 }
 
 #[test]
-fn forward_home_preserves_agent_execution_and_wire_turn_without_start() {
+fn forward_session_chat_preserves_agent_execution_and_wire_turn_without_start() {
     let (tx, mut rx) = mpsc::unbounded_channel();
     let out = OutState {
         chat_tx: tx,
@@ -1255,16 +1293,16 @@ fn forward_home_preserves_agent_execution_and_wire_turn_without_start() {
         raw_tx: mpsc::unbounded_channel().0,
     };
     let frame = json!({"type":"stream_chunk", "text":"answer",
-        "run_id":"home", "stage_type":"agent", "correlation_stage":"chat", "stage_run_id":"exec",
+        "run_id":"session_chat", "stage_type":"agent", "correlation_stage":"chat", "stage_run_id":"exec",
         "sequence":42, "turn":"old-turn", "correlation_turn":"correlated-turn"});
-    forward_home(&out, frame.clone(), "home", Some("submitted-turn"));
+    forward_session_chat(&out, frame.clone(), "session_chat", Some("submitted-turn"));
     let (event, turn, execution) = rx.try_recv().unwrap();
     assert_eq!(serde_json::to_value(event).unwrap()["type"], "stream_chunk");
     assert_eq!(turn.as_deref(), Some("correlated-turn"));
     assert_eq!(
         execution,
         Some(Execution {
-            run_id: "home".into(),
+            run_id: "session_chat".into(),
             stage_run_id: "exec".into(),
             nonce: 0,
         })
@@ -1273,12 +1311,12 @@ fn forward_home_preserves_agent_execution_and_wire_turn_without_start() {
 }
 
 #[tokio::test]
-async fn home_enqueue_replacement_watch_failure_retains_ack_and_warns() {
+async fn session_chat_enqueue_replacement_watch_failure_retains_ack_and_warns() {
     exercise_transport_warning(true).await;
 }
 
 #[tokio::test]
-async fn home_display_eof_warns_instead_of_error() {
+async fn session_chat_display_eof_warns_instead_of_error() {
     exercise_transport_warning(false).await;
 }
 
@@ -1286,7 +1324,7 @@ async fn exercise_transport_warning(reject_watch: bool) {
     let (initial, initial_peer) = UnixStream::pair().unwrap();
     let (replacement, replacement_peer) = UnixStream::pair().unwrap();
     let (mut client, [_control, session]) = DaemonClient::fake_with_aux_streams(
-        json!({"session_id":"owner", "home_run_id":"home"}),
+        json!({"session_id":"owner", "chat_run_id":"session_chat"}),
         vec![initial, replacement],
     );
     let (tx, mut rx) = mpsc::unbounded_channel();
@@ -1296,7 +1334,8 @@ async fn exercise_transport_warning(reject_watch: bool) {
         event_tx: mpsc::unbounded_channel().0,
         raw_tx,
     });
-    let ack = json!({"type":"ok", "id":"replacement", "status":"streaming", "session_id":"owner"});
+    let ack =
+        json!({"type":"ok", "chat_run_id":"replacement", "enqueued":true, "session_id":"owner"});
     let expected_ack = ack.clone();
     let server = tokio::spawn(async move {
         let _initial = watch(initial_peer, true).await;
@@ -1321,10 +1360,10 @@ async fn exercise_transport_warning(reject_watch: bool) {
     .unwrap()
     .unwrap();
     assert_eq!(response, expected_ack);
-    assert_eq!(client.home_run_id().await, "replacement");
+    assert_eq!(client.chat_run_id().await, "replacement");
     assert_eq!(
         raw_rx.try_recv().unwrap(),
-        json!({"type":"home_run_identity", "id":"replacement",
+        json!({"type":"session_chat_run_identity", "id":"replacement",
             "turn":"new-turn", "session_id":"owner", "generation":0})
     );
     let (event, turn, execution) =
@@ -1337,13 +1376,13 @@ async fn exercise_transport_warning(reject_watch: bool) {
             assert_eq!(turn, None);
             if reject_watch {
                 assert!(
-                    message.starts_with("home display unavailable:"),
+                    message.starts_with("session_chat display unavailable:"),
                     "{message}"
                 );
             } else {
                 assert_eq!(
                     message,
-                    "home display connection closed before turn completion"
+                    "session_chat display connection closed before turn completion"
                 );
             }
         }
@@ -1358,18 +1397,18 @@ async fn exercise_transport_warning(reject_watch: bool) {
 }
 
 #[test]
-fn forward_home_nonagent_has_no_execution() {
+fn forward_session_chat_nonagent_has_no_execution() {
     let (tx, mut rx) = mpsc::unbounded_channel();
     let out = OutState {
         chat_tx: tx,
         event_tx: mpsc::unbounded_channel().0,
         raw_tx: mpsc::unbounded_channel().0,
     };
-    forward_home(
+    forward_session_chat(
         &out,
         json!({"type":"stream_chunk", "text":"answer", "stage_type":"shell",
-        "run_id":"home", "stage_run_id":"exec", "nonce":7, "turn":"old-turn"}),
-        "home",
+        "run_id":"session_chat", "stage_run_id":"exec", "nonce":7, "turn":"old-turn"}),
+        "session_chat",
         Some("submitted-turn"),
     );
     let (event, turn, execution) = rx.try_recv().unwrap();
@@ -1380,17 +1419,17 @@ fn forward_home_nonagent_has_no_execution() {
 }
 
 #[test]
-fn forward_home_history_gap_warns() {
+fn forward_session_chat_history_gap_warns() {
     let (tx, mut rx) = mpsc::unbounded_channel();
     let out = OutState {
         chat_tx: tx,
         event_tx: mpsc::unbounded_channel().0,
         raw_tx: mpsc::unbounded_channel().0,
     };
-    forward_home(
+    forward_session_chat(
         &out,
         json!({"type":"history_gap", "turn":"old-turn"}),
-        "home",
+        "session_chat",
         Some("submitted-turn"),
     );
     let (event, turn, execution) = rx.try_recv().unwrap();
@@ -1399,7 +1438,7 @@ fn forward_home_history_gap_warns() {
             assert_eq!(turn, None);
             assert_eq!(
                 message,
-                "home display history discontinuity: output may be missing"
+                "session_chat display history discontinuity: output may be missing"
             );
         }
         other => panic!("expected history warning, got {other:?}"),
@@ -1422,13 +1461,13 @@ async fn turnless_transport_gaps_render_only_in_the_submitted_turn() {
 
 async fn exercise_queued_gap(kind: &str, buffered: bool, reset: bool) {
     use super::super::super::{
-        home_events::apply_home_event, App, HomeInterrupt, LiveArea, Target,
+        session_chat_events::apply_session_chat_event, App, LiveArea, SessionChatInterrupt,
     };
     use ratatui::backend::TestBackend;
 
     let (stream, peer) = UnixStream::pair().unwrap();
     let (mut client, [_control, session]) = DaemonClient::fake_with_aux_streams(
-        json!({"session_id":"owner", "home_run_id":"home"}),
+        json!({"session_id":"owner", "chat_run_id":"session_chat"}),
         vec![stream],
     );
     let (tx, mut rx) = mpsc::unbounded_channel();
@@ -1450,9 +1489,12 @@ async fn exercise_queued_gap(kind: &str, buffered: bool, reset: bool) {
         let mut session = BufReader::new(session);
         let request = socket::read_json_line(&mut session).await.unwrap().unwrap();
         assert_eq!(request["turn"], "1");
-        socket::write_json_line(session.get_mut(), &json!({"type":"ok", "id":"home"}))
-            .await
-            .unwrap();
+        socket::write_json_line(
+            session.get_mut(),
+            &json!({"type":"ok", "chat_run_id":"session_chat", "enqueued":true}),
+        )
+        .await
+        .unwrap();
         if !buffered {
             socket::write_json_line(observer.get_mut(), &gap)
                 .await
@@ -1478,23 +1520,23 @@ async fn exercise_queued_gap(kind: &str, buffered: bool, reset: bool) {
 
     let mut app = App::new();
     let mut area = LiveArea::with_backend(TestBackend::new(100, 24), 100, 24);
-    let mut interrupt = HomeInterrupt::default();
-    app.conversations.begin_home_turn("1".into());
+    let mut interrupt = SessionChatInterrupt::default();
+    app.conversations.begin_session_chat_turn("1".into());
     area.submit_prompt("old prompt".into());
     if reset {
         area.clear_current_turn();
         area.clear_transcript();
-        app.conversations.retire_home_session();
-        interrupt = HomeInterrupt::default();
+        app.conversations.retire_session_chat_session();
+        interrupt = SessionChatInterrupt::default();
         // /clear increments turn_gen; the next submission increments it again.
-        app.conversations.begin_home_turn("3".into());
+        app.conversations.begin_session_chat_turn("3".into());
         area.submit_prompt("new prompt".into());
     }
     let (event, turn, execution) = rx.try_recv().unwrap();
     assert!(matches!(event, EventKind::SystemWarning { .. }));
     assert_eq!(turn.as_deref(), Some("1"));
-    apply_home_event(&mut app, &mut area, &mut interrupt, event, turn, execution).unwrap();
-    assert!(area.target_has_current_turn(&Target::Home));
+    apply_session_chat_event(&mut app, &mut area, &mut interrupt, event, turn, execution).unwrap();
+    assert!(area.target_has_current_turn(&app.session_chat_target()));
     area.compose(&app).unwrap();
     let rendered = area
         .backend()
@@ -1504,7 +1546,7 @@ async fn exercise_queued_gap(kind: &str, buffered: bool, reset: bool) {
         .map(|cell| cell.symbol())
         .collect::<String>();
     assert_eq!(
-        rendered.contains("home display history discontinuity"),
+        rendered.contains("session_chat display history discontinuity"),
         !reset,
         "kind={kind}, buffered={buffered}, reset={reset}: {rendered}"
     );
@@ -1515,12 +1557,12 @@ async fn exercise_queued_gap(kind: &str, buffered: bool, reset: bool) {
 }
 
 #[tokio::test]
-async fn home_enqueue_replacement_updates_identity_and_replays_agent_execution() {
+async fn session_chat_enqueue_replacement_updates_identity_and_replays_agent_execution() {
     exercise_replacement(false).await;
 }
 
 #[tokio::test]
-async fn home_enqueue_replacement_selected_history_gap_warns() {
+async fn session_chat_enqueue_replacement_selected_history_gap_warns() {
     exercise_replacement(true).await;
 }
 
@@ -1528,7 +1570,7 @@ async fn exercise_replacement(selected_gap: bool) {
     let (a, a_peer) = UnixStream::pair().unwrap();
     let (b, b_peer) = UnixStream::pair().unwrap();
     let (mut client, [_control, session]) = DaemonClient::fake_with_aux_streams(
-        json!({"session_id":"owner", "home_run_id":"home"}),
+        json!({"session_id":"owner", "chat_run_id":"session_chat"}),
         vec![a, b],
     );
     let (tx, mut rx) = mpsc::unbounded_channel();
@@ -1546,7 +1588,7 @@ async fn exercise_replacement(selected_gap: bool) {
         socket::write_json_line(
             initial.get_mut(),
             &json!({"type":"stream_chunk",
-            "text":"discarded stream", "run_id":"home", "correlation_turn":"new-turn"}),
+            "text":"discarded stream", "run_id":"session_chat", "correlation_turn":"new-turn"}),
         )
         .await
         .unwrap();
@@ -1556,7 +1598,7 @@ async fn exercise_replacement(selected_gap: bool) {
         assert_eq!(req["turn"], "new-turn");
         socket::write_json_line(
             session.get_mut(),
-            &json!({"type":"ok", "id":"replacement", "status":"streaming"}),
+            &json!({"type":"ok", "chat_run_id":"replacement", "enqueued":true}),
         )
         .await
         .unwrap();
@@ -1594,15 +1636,15 @@ async fn exercise_replacement(selected_gap: bool) {
     .await
     .unwrap()
     .unwrap();
-    assert_eq!(response["id"], "replacement");
-    assert_eq!(client.home_run_id().await, "replacement");
+    assert_eq!(response["chat_run_id"], "replacement");
+    assert_eq!(client.chat_run_id().await, "replacement");
     let identity = tokio::time::timeout(std::time::Duration::from_secs(2), raw_rx.recv())
         .await
         .unwrap()
         .unwrap();
     assert_eq!(
         identity,
-        json!({"type":"home_run_identity", "id":"replacement",
+        json!({"type":"session_chat_run_identity", "id":"replacement",
         "turn":"new-turn", "session_id":"owner", "generation":0})
     );
     if selected_gap {
@@ -1616,7 +1658,7 @@ async fn exercise_replacement(selected_gap: bool) {
                 assert_eq!(turn, None);
                 assert_eq!(
                     message,
-                    "home display history discontinuity: output may be missing"
+                    "session_chat display history discontinuity: output may be missing"
                 );
             }
             other => panic!("expected selected history warning, got {other:?}"),

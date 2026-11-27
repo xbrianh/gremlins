@@ -2,14 +2,14 @@
 
 mod correction_chat;
 mod exact_input;
-mod home_bus;
-mod home_identity;
 mod paused_chat;
 mod resume_context;
 mod resume_dispatch;
 mod resume_history;
 mod resume_model;
 mod resume_runtime_default;
+mod session_chat_bus;
+mod session_chat_identity;
 
 use super::chat::{add_usage_stats, usage_stats_from_state};
 use super::{
@@ -890,7 +890,9 @@ async fn chat_turn_refreshes_env_and_falls_back_to_base_snapshot() {
     )
     .await;
     let ack = read_until_type(&mut reader, "ok").await;
-    let id = ack["id"].as_str().unwrap().to_string();
+    assert_eq!(ack["enqueued"], true);
+    assert!(ack.get("id").is_none());
+    let id = ack["chat_run_id"].as_str().unwrap().to_string();
     {
         let env = wait_for_chat_gremlin_actor(&session_task, &id, |g| g.env.clone()).await;
         assert_eq!(
@@ -910,7 +912,10 @@ async fn chat_turn_refreshes_env_and_falls_back_to_base_snapshot() {
         &session_task,
     )
     .await;
-    read_until_type(&mut reader, "ok").await;
+    let ack = read_until_type(&mut reader, "ok").await;
+    assert_eq!(ack["enqueued"], true);
+    assert_eq!(ack["chat_run_id"], id);
+    assert!(ack.get("id").is_none());
     {
         let env = wait_for_chat_gremlin_actor(&session_task, &id, |g| g.env.clone()).await;
         assert_eq!(
@@ -921,7 +926,10 @@ async fn chat_turn_refreshes_env_and_falls_back_to_base_snapshot() {
 
     // Absent env: fall back to the daemon's base process snapshot.
     super::handle_chat(&chat("3", None), &writer, &actor_tx, &session_task).await;
-    read_until_type(&mut reader, "ok").await;
+    let ack = read_until_type(&mut reader, "ok").await;
+    assert_eq!(ack["enqueued"], true);
+    assert_eq!(ack["chat_run_id"], id);
+    assert!(ack.get("id").is_none());
     {
         let env = wait_for_chat_gremlin_actor(&session_task, &id, |g| g.env.clone()).await;
         assert_eq!(
@@ -963,7 +971,9 @@ async fn chat_reuse_rebuilds_client_after_model_change() {
     // First turn seeds the chat gremlin with the default model.
     super::handle_chat(&chat("1"), &writer, &actor_tx, &session_task).await;
     let ack = read_until_type(&mut reader, "ok").await;
-    let id = ack["id"].as_str().unwrap().to_string();
+    assert_eq!(ack["enqueued"], true);
+    assert!(ack.get("id").is_none());
+    let id = ack["chat_run_id"].as_str().unwrap().to_string();
     let before = wait_for_chat_gremlin_actor(&session_task, &id, |g| g.client.clone()).await;
     assert_eq!(before, Client::parse("cmd/echo").unwrap());
     assert_eq!(
@@ -978,7 +988,10 @@ async fn chat_reuse_rebuilds_client_after_model_change() {
     assert_eq!(set["source"], "tui.json");
 
     super::handle_chat(&chat("2"), &writer, &actor_tx, &session_task).await;
-    read_until_type(&mut reader, "ok").await;
+    let ack = read_until_type(&mut reader, "ok").await;
+    assert_eq!(ack["enqueued"], true);
+    assert_eq!(ack["chat_run_id"], id);
+    assert!(ack.get("id").is_none());
     let after = wait_for_chat_gremlin_actor(&session_task, &id, |g| g.client.clone()).await;
     assert_eq!(after, Client::parse("cmd/true").unwrap());
     assert_eq!(
@@ -1023,7 +1036,9 @@ async fn chat_model_is_session_scoped_and_reads_parked_gremlin() {
     )
     .await;
     let ack = read_until_type(&mut reader, "ok").await;
-    let id = ack["id"].as_str().unwrap().to_string();
+    assert_eq!(ack["enqueued"], true);
+    assert!(ack.get("id").is_none());
+    let id = ack["chat_run_id"].as_str().unwrap().to_string();
     assert_eq!(
         wait_for_chat_gremlin_actor(&session_task_a, &id, |g| g.state.read_str("model")).await,
         "cmd/echo"
@@ -1064,7 +1079,9 @@ async fn chat_model_reports_null_when_model_field_is_empty() {
     )
     .await;
     let ack = read_until_type(&mut reader, "ok").await;
-    let id = ack["id"].as_str().unwrap().to_string();
+    assert_eq!(ack["enqueued"], true);
+    assert!(ack.get("id").is_none());
+    let id = ack["chat_run_id"].as_str().unwrap().to_string();
     assert_eq!(
         wait_for_chat_gremlin_actor(&session_task, &id, |g| g.state.read_str("model")).await,
         "cmd/echo"
@@ -1108,7 +1125,9 @@ async fn chat_model_falls_back_to_run_map_while_turn_is_in_flight() {
     )
     .await;
     let ack = read_until_type(&mut reader, "ok").await;
-    let id = ack["id"].as_str().unwrap().to_string();
+    assert_eq!(ack["enqueued"], true);
+    assert!(ack.get("id").is_none());
+    let id = ack["chat_run_id"].as_str().unwrap().to_string();
     assert_eq!(
         wait_for_chat_gremlin_actor(&session_task, &id, |g| g.state.read_str("model")).await,
         "cmd/echo"
@@ -1170,7 +1189,9 @@ default-model-by-stage:
     )
     .await;
     let ack = read_until_type(&mut reader, "ok").await;
-    let id = ack["id"].as_str().unwrap().to_string();
+    assert_eq!(ack["enqueued"], true);
+    assert!(ack.get("id").is_none());
+    let id = ack["chat_run_id"].as_str().unwrap().to_string();
 
     // The chat gremlin's definition carries the TUI-resolved model.
     // Chat definitions are never serialized as YAML, so we verify
@@ -1212,8 +1233,9 @@ model-profiles:
 
     super::handle_chat(&request, &writer, &actor_tx, &session_task).await;
     let ack = read_until_type(&mut reader, "ok").await;
-    assert_eq!(ack["status"], "streaming");
-    assert!(!ack["id"].as_str().unwrap().is_empty());
+    assert_eq!(ack["enqueued"], true);
+    assert!(!ack["chat_run_id"].as_str().unwrap().is_empty());
+    assert!(ack.get("id").is_none());
 
     teardown_session(&session_task).await;
 }

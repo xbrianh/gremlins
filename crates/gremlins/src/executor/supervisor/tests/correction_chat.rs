@@ -66,7 +66,7 @@ async fn next_start(events: &mut ReceiverHalf<EventKind>) -> DispatchEvent<Event
     tokio::time::timeout(Duration::from_secs(10), async {
         loop {
             let Recv::Event(event) = events.recv().await else {
-                panic!("home bus closed or lagged")
+                panic!("session_chat bus closed or lagged")
             };
             if matches!(event.kind(), EventKind::TurnStarted { .. }) {
                 return event;
@@ -74,7 +74,7 @@ async fn next_start(events: &mut ReceiverHalf<EventKind>) -> DispatchEvent<Event
         }
     })
     .await
-    .expect("home turn start timed out")
+    .expect("session_chat turn start timed out")
 }
 
 async fn assert_no_start(events: &mut ReceiverHalf<EventKind>) {
@@ -155,9 +155,11 @@ async fn second_prompt_is_gated_and_each_start_matches_live_snapshot_then_become
     .unwrap();
     let (registry, _) = spawn_test_actor().await;
     let (id, session) = create_session(&registry).await;
-    let home_id = registry.reserve_chat_id().await;
-    assert!(session.reserve_home_run_id(&home_id).await);
-    let (sub, mut events) = subscribe_run(&home_id);
+    let chat_run_id = registry.reserve_chat_id().await;
+    assert!(!chat_run_id.is_empty());
+    assert!(session.reserve_chat_run_id(&chat_run_id).await);
+    assert_eq!(session.get_chat_run_id().await, Some(chat_run_id.clone()));
+    let (sub, mut events) = subscribe_run(&chat_run_id);
     let _guard = BusSubGuard::new(sub);
     let socket_dir = tempfile::tempdir().unwrap();
     let socket_path = socket_dir.path().join("session.sock");
@@ -183,13 +185,15 @@ async fn second_prompt_is_gated_and_each_start_matches_live_snapshot_then_become
     assert_eq!(ack["type"], "ok");
     assert!(ack.get("nonce").is_none());
     assert!(ack.get("stage_run_id").is_none());
-    assert_eq!(ack["id"], home_id);
+    assert_eq!(ack["chat_run_id"], chat_run_id);
+    assert_eq!(ack["enqueued"], true);
+    assert!(ack.get("id").is_none());
     let first_started = next_start(&mut events).await;
     let (_, held) = pending_request(&provider).await;
     let first = assert_start_snapshot(&registry, &session, &first_started, "first").await;
-    let (interactive, _, _) = registry.get_run_interactive(&home_id).await.unwrap();
+    let (interactive, _, _) = registry.get_run_interactive(&chat_run_id).await.unwrap();
     let (actual, _) = interactive
-        .resolve_input(&home_id, first["stage_run_id"].as_str().unwrap(), None)
+        .resolve_input(&chat_run_id, first["stage_run_id"].as_str().unwrap(), None)
         .expect("first announced execution must bind the live input");
     assert_eq!(actual.stage_run_id, first["stage_run_id"].as_str().unwrap());
     assert_eq!(
@@ -215,7 +219,9 @@ async fn second_prompt_is_gated_and_each_start_matches_live_snapshot_then_become
         .expect("accepted second prompt must reach the start gate");
     let response = frame(&mut reader).await;
     assert_eq!(response["type"], "ok", "{response}");
-    assert_eq!(response["id"], first["id"]);
+    assert_eq!(response["chat_run_id"], first["id"]);
+    assert_eq!(response["enqueued"], true);
+    assert!(response.get("id").is_none());
     assert!(response.get("nonce").is_none());
     assert!(response.get("stage_run_id").is_none());
     assert_no_start(&mut events).await;
@@ -264,10 +270,10 @@ async fn second_prompt_is_gated_and_each_start_matches_live_snapshot_then_become
     let (_, held) = pending_request(&provider).await;
     let second = assert_start_snapshot(&registry, &session, &second_started, "second").await;
     assert_ne!(first["nonce"], second["nonce"]);
-    let (interactive, _, _) = registry.get_run_interactive(&home_id).await.unwrap();
+    let (interactive, _, _) = registry.get_run_interactive(&chat_run_id).await.unwrap();
 
     let (actual, _) = interactive
-        .resolve_input(&home_id, second["stage_run_id"].as_str().unwrap(), None)
+        .resolve_input(&chat_run_id, second["stage_run_id"].as_str().unwrap(), None)
         .expect("announced execution must bind the live input");
     assert_eq!(
         actual.stage_run_id,

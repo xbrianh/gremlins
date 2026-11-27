@@ -11,7 +11,7 @@ The inspected worktree uses:
 - Targeted chat through the same input bind/inbox; untargeted chat only for an
   idle session's next prompt.
 - Rejection of old wire `attach` on global and verified session auxiliary sockets.
-  TUI `/attach` remains a selection command only.
+  TUI selection uses Watch → Up/Down → Enter only, without pausing.
 
 See [the protocol](../../docs/attachment-protocol.md) for current behavior and
 [the audit](../../docs/plan11-code-audit.md) for separate production/test deltas

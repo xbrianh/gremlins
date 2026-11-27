@@ -3,17 +3,17 @@ use std::time::Duration;
 use tokio::net::UnixStream;
 
 #[tokio::test]
-async fn rejected_home_reservation_does_not_block_next_enqueue_for_same_id() {
+async fn rejected_session_chat_reservation_does_not_block_next_enqueue_for_same_id() {
     rejected_reservation("reserved", false).await;
 }
 
 #[tokio::test]
-async fn rejected_home_reservation_does_not_block_next_enqueue_for_replacement_id() {
+async fn rejected_session_chat_reservation_does_not_block_next_enqueue_for_replacement_id() {
     rejected_reservation("replacement", false).await;
 }
 
 #[tokio::test]
-async fn rejected_home_reservation_retries_live_watch_and_captures_early_output() {
+async fn rejected_session_chat_reservation_retries_live_watch_and_captures_early_output() {
     rejected_reservation("reserved", true).await;
 }
 
@@ -22,7 +22,7 @@ async fn rejected_reservation(acknowledged: &str, healthy_retry: bool) {
     let (retry, retry_peer) = UnixStream::pair().unwrap();
     let (replay, replay_peer) = UnixStream::pair().unwrap();
     let (mut client, [_control, session]) = DaemonClient::fake_with_aux_streams(
-        json!({"session_id":"owner", "home_run_id":"reserved"}),
+        json!({"session_id":"owner", "chat_run_id":"reserved"}),
         vec![initial],
     );
     let (chat_tx, mut output) = mpsc::unbounded_channel();
@@ -127,7 +127,7 @@ async fn rejected_reservation(acknowledged: &str, healthy_retry: bool) {
         }
         socket::write_json_line(
             session.get_mut(),
-            &json!({"type":"ok", "id":acknowledged, "session_id":"owner"}),
+            &json!({"type":"ok", "chat_run_id":acknowledged, "enqueued":true, "session_id":"owner"}),
         )
         .await
         .unwrap();
@@ -185,16 +185,15 @@ async fn rejected_reservation(acknowledged: &str, healthy_retry: bool) {
             first_received_rx.await.unwrap();
             tokio::time::timeout(Duration::from_secs(1), async {
                 loop {
-                    let eof_processed =
-                        client
-                            .home_display
-                            .lock()
-                            .await
-                            .as_ref()
-                            .is_some_and(|display| {
-                                let gate = display.gate.lock().unwrap();
-                                gate.pending && gate.disconnected && !gate.recovering
-                            });
+                    let eof_processed = client
+                        .session_chat_display
+                        .lock()
+                        .await
+                        .as_ref()
+                        .is_some_and(|display| {
+                            let gate = display.gate.lock().unwrap();
+                            gate.pending && gate.disconnected && !gate.recovering
+                        });
                     if eof_processed {
                         break;
                     }
@@ -214,7 +213,7 @@ async fn rejected_reservation(acknowledged: &str, healthy_retry: bool) {
             "rejection published an identity"
         );
         {
-            let display = client.home_display.lock().await;
+            let display = client.session_chat_display.lock().await;
             let display = display.as_ref().unwrap();
             let gate = display.gate.lock().unwrap();
             assert!(gate.disconnected, "failed watch remained connected");
@@ -239,7 +238,7 @@ async fn rejected_reservation(acknowledged: &str, healthy_retry: bool) {
                 tokio::time::timeout(Duration::from_secs(1), async {
                     loop {
                         let buffered = {
-                            let display = client.home_display.lock().await;
+                            let display = client.session_chat_display.lock().await;
                             let gate = display.as_ref().unwrap().gate.lock().unwrap();
                             gate.pending && gate.frames.iter().any(|frame| frame["type"] == "done")
                         };
@@ -262,11 +261,12 @@ async fn rejected_reservation(acknowledged: &str, healthy_retry: bool) {
         let (accepted, ()) = tokio::join!(accepted, check_early_output);
         let accepted = accepted.unwrap();
         assert_eq!(accepted["type"], "ok");
-        assert_eq!(accepted["id"], acknowledged);
-        assert_eq!(client.home_run_id().await, acknowledged);
+        assert_eq!(accepted["chat_run_id"], acknowledged);
+        assert_eq!(accepted["enqueued"], true);
+        assert_eq!(client.chat_run_id().await, acknowledged);
         assert_eq!(
             identities.recv().await.unwrap(),
-            json!({"type":"home_run_identity", "id":acknowledged,
+            json!({"type":"session_chat_run_identity", "id":acknowledged,
                 "turn":"accepted-turn", "session_id":"owner", "generation":0})
         );
         replayed_rx.await.unwrap();

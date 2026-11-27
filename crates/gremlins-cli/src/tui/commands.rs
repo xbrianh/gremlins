@@ -14,21 +14,11 @@ pub enum CommandResult {
     },
     /// Enter the full-screen gremlins watch table.
     ShowRuns,
-    /// Select a concrete invocation; the event loop resolves the joined selector.
-    Debug(String),
     /// Activate a skill by name. The TUI event loop adds it to the in-memory
     /// active set and includes it in the next chat request.
     ActivateSkill(String),
     /// List discovered skills grouped by source.
     ListSkills,
-    /// Switch the conversation target back to the home chat.
-    AttachHome,
-    /// Attach to a stage execution: switch the conversation target to the
-    /// given run's current stage, named stage, or exact stage_run_id.
-    AttachStage {
-        run_id: String,
-        stage: Option<String>,
-    },
 }
 
 /// Parse `input` (minus the leading `/`) and dispatch.
@@ -210,18 +200,9 @@ pub fn dispatch(input: &str) -> Option<CommandResult> {
                 Some(CommandResult::ShowRuns)
             } else {
                 Some(CommandResult::Lines(vec![
-                    "usage: /watch — Up/Down select; Enter observes its chat; Ctrl+W or Ctrl+O toggles its live log".to_string(),
+                    "usage: /watch — Up/Down move; Enter selects its chat (the only selection path); Ctrl+W or Ctrl+O toggles its live log".to_string(),
                 ]))
             }
-        }
-        "debug" => {
-            if !(1..=2).contains(&args.len()) || args.iter().any(|arg| arg.is_empty()) {
-                return Some(CommandResult::Lines(vec![
-                    "> /debug".to_string(),
-                    "usage: /debug <stage_run_id> | /debug <run> <stage_run_id> — select a concrete invocation".to_string(),
-                ]));
-            }
-            Some(CommandResult::Debug(args.join(" ")))
         }
         "model" => {
             if args.is_empty() {
@@ -257,16 +238,6 @@ pub fn dispatch(input: &str) -> Option<CommandResult> {
             op: "compact".to_string(),
             payload: serde_json::json!({"op": "compact"}),
         }),
-        "attach" => match args.first().copied() {
-            None | Some("home") => Some(CommandResult::AttachHome),
-            Some(id) => {
-                let stage = (!args[1..].is_empty()).then(|| args[1..].join(" "));
-                Some(CommandResult::AttachStage {
-                    run_id: id.to_string(),
-                    stage,
-                })
-            }
-        },
         _ => Some(CommandResult::Lines(vec![format!(
             "unknown command: /{cmd} — type /help for available commands"
         )])),
@@ -313,40 +284,34 @@ fn help_text() -> Vec<String> {
         "  /stop <id>       — stop a gremlin".to_string(),
         "  /resume <id>     — resume a gremlin".to_string(),
         "  /log <id>        — show gremlin log".to_string(),
-        "  /watch           — show runs; ↑/↓ select, Enter observes chat, Ctrl+W/Ctrl+O toggles log"
+        "  /watch           — show runs; ↑/↓ move, Enter selects chat, Ctrl+W/Ctrl+O toggles log"
             .to_string(),
-        "  /debug <stage_run_id> | /debug <run> <stage_run_id> — select a concrete invocation".to_string(),
         "  /model           — show, set (/model <spec>), or clear (/model clear) the TUI chat model"
             .to_string(),
         "  /skills          — list available operator skills".to_string(),
         "  /skill <name>    — activate a skill for the chat session".to_string(),
         "  /compact         — compact conversation history to reduce context usage".to_string(),
-        "  /attach [run] [stage|stage_run_id] — select bus output; /attach home returns home"
-            .to_string(),
         "  /chat            — chat is always active (type directly)".to_string(),
         "selected conversation:".to_string(),
-        "  Watch Enter observes without pausing; the execution keeps running unaided.".to_string(),
+        "  Watch Enter is the only selection path; it observes a concrete invocation without pausing.".to_string(),
         "  Bus selection does not pause or open input; an exact agent invocation enables the composer.".to_string(),
         "  Native input binds lazily on submission; receipts report delivery separately from bus output.".to_string(),
         "  Ordinary text corrects the exact agent execution; exec stages are read-only.".to_string(),
-        "  /attach home releases local selection only; no execution controls are sent. Home keeps streaming.".to_string(),
         "  /pause           — pause the selected execution.".to_string(),
         "  /step, /continue — single-step the selected execution (one turn).".to_string(),
         "  /resume-execution — resume the selected execution autonomously (bare command only).".to_string(),
         "  /quit            — resume the selected execution autonomously.".to_string(),
         "  /quit <reason>   — bail the selected execution with a reason.".to_string(),
         "  /bail <reason>   — alias for /quit <reason>.".to_string(),
-        "  /exit            — return home and release local input; no execution controls are sent.".to_string(),
         "  Explicit run controls: /stop <id>, /resume <id> (watch: s/r).".to_string(),
-        "  /clear, /new     — restart chat".to_string(),
+        "  /clear, /new     — restart only the selected session chat".to_string(),
         "  /help            — show this help".to_string(),
         "  /quit            — outside a selected execution, exit the TUI".to_string(),
         "".to_string(),
         "chat auto-compaction is disabled (GREMLINS_COMPACTION_THRESHOLD_TOKENS=18446744073709551615);".to_string(),
         "  set GREMLINS_COMPACTION_THRESHOLD_TOKENS=<tokens> to enable it".to_string(),
         "keybindings:".to_string(),
-        "  Ctrl+C           — active home: soft interrupt, repeat within 1s hard cancels; otherwise repeat to exit".to_string(),
-        "  Ctrl+T           — switch between home and the last attached stage, keeping both drafts".to_string(),
+        "  Ctrl+C           — active session chat: soft interrupt, repeat within 1s hard cancels; otherwise repeat to exit".to_string(),
         "  Ctrl+D (empty)   — exit".to_string(),
         "  Ctrl+L           — redraw screen".to_string(),
         "  Ctrl+W           — enter the watch screen; in /watch: toggle the selected gremlin's live log"
@@ -354,7 +319,7 @@ fn help_text() -> Vec<String> {
         "  Ctrl+O           — in /watch: open or close the selected gremlin's live log"
             .to_string(),
         "  j/k/Up/Down      — in /watch: move the gremlin selection".to_string(),
-        "  Enter            — start an idle home turn, or send a correction to the selected execution".to_string(),
+        "  Enter            — start an idle session chat turn, or send a correction to the selected execution".to_string(),
         "  Esc              — dismiss a correction draft without interrupting its turn".to_string(),
         "  Enter             — in /watch: observe the selected gremlin's chat without pausing"
             .to_string(),
@@ -392,12 +357,10 @@ mod tests {
             "/resume",
             "/log",
             "/watch",
-            "/debug",
             "/model",
             "/skills",
             "/skill",
             "/compact",
-            "/attach",
             "/chat",
             "/clear",
             "/new",
@@ -408,7 +371,6 @@ mod tests {
             "/step",
             "/resume-execution",
             "/bail",
-            "/exit",
         ];
 
         for cmd in help_names {
@@ -420,8 +382,9 @@ mod tests {
     }
 
     #[test]
-    fn help_text_distinguishes_selected_controls_from_home_and_run_controls() {
+    fn help_text_distinguishes_selected_controls_from_session_chat_and_run_controls() {
         let text = help_text().join("\n");
+        assert!(!text.contains("session_chat"));
         for expected in [
             "/step, /continue — single-step the selected execution (one turn)",
             "/pause           — pause the selected execution",
@@ -429,9 +392,11 @@ mod tests {
             "/quit            — resume the selected execution autonomously",
             "/quit <reason>   — bail the selected execution with a reason",
             "/bail <reason>   — alias for /quit <reason>",
-            "/exit            — return home and release local input; no execution controls are sent",
             "/quit            — outside a selected execution, exit the TUI",
             "Explicit run controls: /stop <id>, /resume <id> (watch: s/r)",
+            "/clear, /new     — restart only the selected session chat",
+            "active session chat:",
+            "idle session chat turn",
         ] {
             assert!(text.contains(expected), "/help must explain {expected}");
         }
@@ -445,64 +410,6 @@ mod tests {
     }
 
     #[test]
-    fn debug_accepts_exact_invocation_selectors() {
-        for (input, expected) in [
-            ("/debug stage-123", "stage-123"),
-            ("/debug run-123 stage-456", "run-123 stage-456"),
-            (r#"/debug "stage-123""#, "stage-123"),
-            ("/debug 'run-123' 'stage-456'", "run-123 stage-456"),
-            (r#"/debug \"\""#, r#""""#),
-        ] {
-            assert!(
-                matches!(dispatch(input), Some(CommandResult::Debug(selector)) if selector == expected)
-            );
-        }
-    }
-
-    #[test]
-    fn debug_rejects_missing_extra_or_quoted_empty_selectors() {
-        for input in [
-            "/debug",
-            "/debug run stage extra",
-            "/debug ''",
-            r#"/debug """#,
-            "/debug '' stage-456",
-            r#"/debug run-123 """#,
-            "/debug '' ''",
-        ] {
-            let Some(CommandResult::Lines(lines)) = dispatch(input) else {
-                panic!("expected concrete invocation usage for {input}");
-            };
-            assert!(lines.join("\n").contains("/debug <run> <stage_run_id>"));
-        }
-    }
-
-    #[test]
-    fn debug_quoted_empty_and_escaped_quotes_are_distinct_arguments() {
-        assert_eq!(shlex::split(r#"debug """#).unwrap(), vec!["debug", ""]);
-        assert_eq!(shlex::split("debug ''").unwrap(), vec!["debug", ""]);
-        assert_eq!(
-            shlex::split(r#"debug \"\""#).unwrap(),
-            vec!["debug", r#""""#]
-        );
-    }
-
-    #[test]
-    fn attach_preserves_exact_invocation_for_event_loop_resolution() {
-        assert!(matches!(dispatch("/attach run-123 stage-456"),
-            Some(CommandResult::AttachStage { run_id, stage: Some(stage) })
-            if run_id == "run-123" && stage == "stage-456"));
-        assert!(matches!(
-            dispatch("/attach run review A"),
-            Some(CommandResult::AttachStage { run_id, stage: Some(stage) })
-            if run_id == "run" && stage == "review A"));
-        assert!(matches!(
-            dispatch("/attach home"),
-            Some(CommandResult::AttachHome)
-        ));
-    }
-
-    #[test]
     fn help_describes_bus_selection_and_lazy_input() {
         let text = help_text().join("\n");
         for expected in [
@@ -510,7 +417,7 @@ mod tests {
             "exact agent invocation enables the composer",
             "binds lazily",
             "receipts",
-            "no execution controls are sent",
+            "Watch Enter is the only selection path",
         ] {
             assert!(text.contains(expected), "missing {expected}");
         }

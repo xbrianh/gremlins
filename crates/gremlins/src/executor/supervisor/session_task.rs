@@ -53,8 +53,8 @@ pub(crate) struct SessionState {
     /// because an in-flight turn temporarily removes its gremlin from the map
     /// without relinquishing ownership.
     pub chat_ids: HashSet<String>,
-    /// Reserved identity for the first fresh home chat, owned through `chat_ids`.
-    pub reserved_home_run_id: Option<String>,
+    /// Reserved identity for the first fresh session chat, owned through `chat_ids`.
+    pub reserved_chat_run_id: Option<String>,
     /// The in-flight chat turn, if any.
     pub current_turn: Option<CurrentTurn>,
     /// Auxiliary socket tasks (log follow, debug) opened on the session
@@ -86,7 +86,7 @@ impl SessionState {
             listener_task: None,
             chat_gremlins: HashMap::new(),
             chat_ids: HashSet::new(),
-            reserved_home_run_id: None,
+            reserved_chat_run_id: None,
             current_turn: None,
             aux_sockets: Vec::new(),
             closed: false,
@@ -98,7 +98,7 @@ impl SessionState {
         }
     }
 
-    /// True when the session can accept a new home chat prompt:
+    /// True when the session can accept a new session chat prompt:
     /// no turn is in-flight. A fresh gremlin can be created if
     /// none is parked yet (first prompt).
     fn is_idle_for_chat(&self) -> bool {
@@ -133,7 +133,7 @@ impl SessionState {
         // session — the turn task signals `done` through its own `Arc`.
         let turn_done = self.cancel_turn(None);
 
-        self.reserved_home_run_id = None;
+        self.reserved_chat_run_id = None;
         let chat_ids: Vec<String> = self.chat_ids.drain().collect();
         let chat_gremlins = std::mem::take(&mut self.chat_gremlins);
         let aux_sockets = std::mem::take(&mut self.aux_sockets);
@@ -289,7 +289,7 @@ pub(crate) enum SessionTaskMsg {
     IsClosed {
         respond: oneshot::Sender<bool>,
     },
-    /// Check whether the session is idle for a new home chat prompt.
+    /// Check whether the session is idle for a new session chat prompt.
     IsIdleForChat {
         respond: oneshot::Sender<bool>,
     },
@@ -297,11 +297,11 @@ pub(crate) enum SessionTaskMsg {
     MarkClosed {
         respond: oneshot::Sender<()>,
     },
-    ReserveHomeRunId {
+    ReserveChatRunId {
         id: String,
         respond: oneshot::Sender<bool>,
     },
-    GetHomeRunId {
+    GetChatRunId {
         respond: oneshot::Sender<Option<String>>,
     },
     AddChatId {
@@ -554,11 +554,11 @@ impl SessionTaskHandle {
         rx.await.unwrap_or(false)
     }
 
-    pub(crate) async fn reserve_home_run_id(&self, id: &str) -> bool {
+    pub(crate) async fn reserve_chat_run_id(&self, id: &str) -> bool {
         let (respond, rx) = oneshot::channel();
         if self
             .tx
-            .send(SessionTaskMsg::ReserveHomeRunId {
+            .send(SessionTaskMsg::ReserveChatRunId {
                 id: id.to_string(),
                 respond,
             })
@@ -570,10 +570,10 @@ impl SessionTaskHandle {
     }
 
     /// Read the reservation without consuming it; successful parking commits it.
-    pub(crate) async fn get_home_run_id(&self) -> Option<String> {
+    pub(crate) async fn get_chat_run_id(&self) -> Option<String> {
         let (respond, rx) = oneshot::channel();
         self.tx
-            .send(SessionTaskMsg::GetHomeRunId { respond })
+            .send(SessionTaskMsg::GetChatRunId { respond })
             .ok()?;
         rx.await.ok().flatten()
     }
@@ -772,7 +772,7 @@ impl SessionTaskHandle {
     }
 
     /// `true` when the session is idle (chat gremlin parked, no turn
-    /// in-flight) and can accept a new home chat prompt.
+    /// in-flight) and can accept a new session chat prompt.
     pub(crate) async fn is_idle_for_chat(&self) -> bool {
         let (respond, rx) = oneshot::channel();
         if self
@@ -838,9 +838,9 @@ async fn run_session_task(
                 // a control-side stop or a racing teardown) can be processed
                 // while we wait and invalidate the earlier check.
                 let reinserted = if live && state.chat_ids.contains(&id) {
-                    // Commit the home identity only once registration succeeds.
-                    if state.reserved_home_run_id.as_deref() == Some(id.as_str()) {
-                        state.reserved_home_run_id = None;
+                    // Commit the session chat identity only once registration succeeds.
+                    if state.reserved_chat_run_id.as_deref() == Some(id.as_str()) {
+                        state.reserved_chat_run_id = None;
                     }
                     state.chat_gremlins.insert(id, gremlin);
                     true
@@ -905,18 +905,18 @@ async fn run_session_task(
                 let _ = respond.send(());
             }
 
-            SessionTaskMsg::ReserveHomeRunId { id, respond } => {
+            SessionTaskMsg::ReserveChatRunId { id, respond } => {
                 let accepted =
-                    !state.closed && !state.torn_down && state.reserved_home_run_id.is_none();
+                    !state.closed && !state.torn_down && state.reserved_chat_run_id.is_none();
                 if accepted {
                     state.chat_ids.insert(id.clone());
-                    state.reserved_home_run_id = Some(id);
+                    state.reserved_chat_run_id = Some(id);
                 }
                 let _ = respond.send(accepted);
             }
 
-            SessionTaskMsg::GetHomeRunId { respond } => {
-                let _ = respond.send(state.reserved_home_run_id.clone());
+            SessionTaskMsg::GetChatRunId { respond } => {
+                let _ = respond.send(state.reserved_chat_run_id.clone());
             }
 
             SessionTaskMsg::AddChatId { id, respond } => {
@@ -928,8 +928,8 @@ async fn run_session_task(
             }
 
             SessionTaskMsg::RemoveChatId { id, respond } => {
-                if state.reserved_home_run_id.as_deref() == Some(&id) {
-                    state.reserved_home_run_id = None;
+                if state.reserved_chat_run_id.as_deref() == Some(&id) {
+                    state.reserved_chat_run_id = None;
                 }
                 let _ = respond.send(state.chat_ids.remove(&id));
             }

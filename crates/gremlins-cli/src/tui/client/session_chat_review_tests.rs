@@ -31,14 +31,15 @@ fn disarmed_submission_does_not_clear_newer_pending_turn() {
 
 #[test]
 fn rejection_removes_turn_ended_and_chunks_but_retains_run_ended() {
-    let run_ended = json!({"type":"ended", "run_id":"home"});
-    let previous_chunk = json!({"type":"stream_chunk", "run_id":"home", "turn":"A", "text":"keep"});
+    let run_ended = json!({"type":"ended", "run_id":"session_chat"});
+    let previous_chunk =
+        json!({"type":"stream_chunk", "run_id":"session_chat", "turn":"A", "text":"keep"});
     let gate = Arc::new(std::sync::Mutex::new(WatchGate {
         pending: true,
         turn: Some("B".into()),
         frames: VecDeque::from([
-            json!({"type":"stream_chunk", "run_id":"home", "turn":"B", "text":"discard"}),
-            json!({"type":"ended", "run_id":"home", "correlation_turn":"B"}),
+            json!({"type":"stream_chunk", "run_id":"session_chat", "turn":"B", "text":"discard"}),
+            json!({"type":"ended", "run_id":"session_chat", "correlation_turn":"B"}),
             run_ended.clone(),
             previous_chunk.clone(),
         ]),
@@ -63,7 +64,7 @@ fn rejection_removes_turn_ended_and_chunks_but_retains_run_ended() {
 async fn initial_replacement_replay_warning_stays_with_completed_turn_until_checkpoint() {
     timeout(Duration::from_secs(5), async {
         let (client, _peers) = DaemonClient::fake_with_aux_streams(
-            json!({"session_id":"owner", "home_run_id":"home"}),
+            json!({"session_id":"owner", "chat_run_id":"session_chat"}),
             vec![],
         );
         let gate = Arc::new(std::sync::Mutex::new(WatchGate {
@@ -74,10 +75,10 @@ async fn initial_replacement_replay_warning_stays_with_completed_turn_until_chec
         let changed = Arc::new(tokio::sync::Notify::new());
         let (tx, rx) = mpsc::channel(16);
         let (chat_tx, mut output) = mpsc::unbounded_channel();
-        let forward = tokio::spawn(forward_home_gated(
+        let forward = tokio::spawn(forward_session_chat_gated(
             rx,
             Reader(tokio::spawn(std::future::pending())),
-            HomeWatchContext {
+            SessionChatWatchContext {
                 turn: Some("A".into()),
                 ..review_context(&client, chat_tx)
             },
@@ -85,7 +86,7 @@ async fn initial_replacement_replay_warning_stays_with_completed_turn_until_chec
             Some((Arc::clone(&gate), Arc::clone(&changed))),
             || async { panic!("open replacement stream must not recover") },
         ));
-        tx.send(json!({"type":"done", "run_id":"home", "turn":"A", "text":"done", "summary":""}))
+        tx.send(json!({"type":"done", "run_id":"session_chat", "turn":"A", "text":"done", "summary":""}))
             .await
             .unwrap();
         let (event, turn, _) = output.recv().await.unwrap();
@@ -101,7 +102,7 @@ async fn initial_replacement_replay_warning_stays_with_completed_turn_until_chec
             json!({"type":"history_gap"}),
             json!({"type":"replay_checkpoint"}),
             json!({"type":"lagged"}),
-            json!({"type":"stream_chunk", "run_id":"home", "turn":"B", "text":"barrier"}),
+            json!({"type":"stream_chunk", "run_id":"session_chat", "turn":"B", "text":"barrier"}),
         ] {
             tx.send(frame).await.unwrap();
         }
@@ -136,7 +137,7 @@ async fn initial_replacement_replay_warning_stays_with_completed_turn_until_chec
 #[tokio::test]
 async fn failed_idle_recovery_retires_forward_task() {
     let (client, _peers) = DaemonClient::fake_with_aux_streams(
-        json!({"session_id":"owner", "home_run_id":"home"}),
+        json!({"session_id":"owner", "chat_run_id":"session_chat"}),
         vec![],
     );
     let gate = Arc::new(std::sync::Mutex::new(WatchGate {
@@ -149,7 +150,7 @@ async fn failed_idle_recovery_retires_forward_task() {
     let (chat_tx, mut output) = mpsc::unbounded_channel();
     let attempts = Arc::new(std::sync::atomic::AtomicUsize::new(0));
     let recover_attempts = Arc::clone(&attempts);
-    let forward = tokio::spawn(forward_home_gated(
+    let forward = tokio::spawn(forward_session_chat_gated(
         rx,
         Reader(tokio::spawn(std::future::pending())),
         review_context(&client, chat_tx),
@@ -179,8 +180,8 @@ async fn failed_idle_recovery_retires_forward_task() {
 fn review_context(
     client: &DaemonClient,
     chat_tx: mpsc::UnboundedSender<ChatEvent>,
-) -> HomeWatchContext {
-    HomeWatchContext {
+) -> SessionChatWatchContext {
+    SessionChatWatchContext {
         session_write: Arc::clone(&client.session.write),
         out: Arc::new(OutState {
             chat_tx,
@@ -188,7 +189,7 @@ fn review_context(
             raw_tx: mpsc::unbounded_channel().0,
         }),
         generation: 0,
-        run: "home".into(),
+        run: "session_chat".into(),
         turn: None,
     }
 }

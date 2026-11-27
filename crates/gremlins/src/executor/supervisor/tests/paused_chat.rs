@@ -45,13 +45,21 @@ async fn expect_cancellation(events: &mut ReceiverHalf<EventKind>, id: &str, rea
     .expect("a paused turn must end without further input");
 }
 
-async fn expect_ack(chat: &mut BufReader<OwnedReadHalf>) -> serde_json::Value {
+async fn expect_ok(chat: &mut BufReader<OwnedReadHalf>) -> serde_json::Value {
     let ack = timeout(WAIT, read_json_line(chat))
         .await
         .expect("request acknowledgement timed out")
         .unwrap()
         .expect("chat closed");
     assert_eq!(ack["type"], "ok", "{ack}");
+    ack
+}
+
+async fn expect_ack(chat: &mut BufReader<OwnedReadHalf>) -> serde_json::Value {
+    let ack = expect_ok(chat).await;
+    assert!(!ack["chat_run_id"].as_str().unwrap().is_empty(), "{ack}");
+    assert_eq!(ack["enqueued"], true, "{ack}");
+    assert!(ack.get("id").is_none(), "{ack}");
     ack
 }
 
@@ -107,7 +115,7 @@ async fn cancel_paused_chat(mode: &str, lose_chat_writer: bool) {
     let ack = expect_ack(&mut chat).await;
     assert!(ack.get("stage_run_id").is_none(), "{ack}");
     assert!(ack.get("nonce").is_none(), "{ack}");
-    let id = ack["id"].as_str().unwrap();
+    let id = ack["chat_run_id"].as_str().unwrap();
     let (first, _held) = pending_request(&provider).await;
     assert!(first["messages"].to_string().contains(FIRST), "{first}");
 
@@ -198,7 +206,7 @@ async fn cancel_paused_chat(mode: &str, lose_chat_writer: bool) {
     } else {
         "interrupted"
     };
-    expect_ack(&mut chat).await;
+    expect_ok(&mut chat).await;
     expect_cancellation(&mut events, id, reason).await;
     expect_quiet(&mut chat).await;
     // Input revocation is separate from the classified bus outcome.
@@ -226,7 +234,7 @@ async fn cancel_paused_chat(mode: &str, lose_chat_writer: bool) {
         write_json_line(&mut write, &prompt("next", FOLLOWUP))
             .await
             .unwrap();
-        assert_eq!(expect_ack(&mut chat).await["id"], id);
+        assert_eq!(expect_ack(&mut chat).await["chat_run_id"], id);
         let (request, held) = pending_request(&provider).await;
         let restarted = session.get_current_turn().await.expect("restarted turn");
         assert_ne!(restarted.stage_run_id.as_deref(), Some(execution.as_str()));

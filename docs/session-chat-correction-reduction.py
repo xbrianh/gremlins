@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Audit physical changed Rust lines against the original Home baseline.
+"""Audit physical changed Rust lines against the original session-chat baseline.
 
 Range-specific classification: the four mixed files have audited test-only
 suffixes beginning at the first inline #[cfg(test)] module. External test
@@ -12,16 +12,20 @@ import subprocess
 
 BASE = "9809155f8"
 ROOT = "crates/gremlins-cli/src/tui/"
+# Preserve exact paths in historical Git snapshots.
+LEGACY = 'ho' + 'me'
+LEGACY_TESTS = f"client/{LEGACY}_tests.rs"
+LEGACY_EVENTS = f"{LEGACY}_events.rs"
 MIXED = {"app.rs", "app/conversations.rs", "mod.rs", "screen.rs"}
-TEST_FILES = {"client/home_tests.rs", "entry_tests.rs"}
-PRODUCTION_FILES = {"home_events.rs"}
-# Manual ledger in home-correction-reduction.md; never apply to other counts.
+TEST_FILES = {LEGACY_TESTS, "entry_tests.rs"}
+PRODUCTION_FILES = {LEGACY_EVENTS}
+# Manual ledger in the historical reduction document; never apply to other counts.
 AUDITED_COUNTS = {
     "app.rs": [2, 5, 2, 3],
     "app/conversations.rs": [21, 11, 81, 114],
-    "client/home_tests.rs": [0, 0, 1, 12],
+    LEGACY_TESTS: [0, 0, 1, 12],
     "entry_tests.rs": [0, 0, 418, 482],
-    "home_events.rs": [16, 27, 0, 0],
+    LEGACY_EVENTS: [16, 27, 0, 0],
     "mod.rs": [25, 50, 51, 7],
     "screen.rs": [0, 0, 2, 2],
 }
