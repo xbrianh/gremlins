@@ -37,7 +37,15 @@ mod checks;
 
 `tests.rs` contained an isolated production function. `support/checks.rs`
 contained a test and an ungated `mod child;` declaration, backed by
-`support/checks/child.rs`.
+`support/child.rs`. Because `checks` uses `#[path]`, its external child is
+resolved relative to `support/`, not `support/checks/`.
+
+Repeated `structure` and `dependencies` with this corrected fixture using
+`cargo-modules 0.28.0`, holding `-p ownership-probe --lib --no-default-features
+--no-fns --no-traits --no-types` fixed and toggling only `--cfg-test`.
+The production outputs contained only the root and `isolated`; the test-enabled
+outputs also contained `checks` and `checks::child`, including the
+`checks -> checks::child` ownership edge. Neither output supplied source paths.
 
 With the library target and features fixed:
 
