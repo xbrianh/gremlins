@@ -26,11 +26,94 @@ use ratatui::{
     widgets::{Paragraph, Widget, Wrap},
 };
 
+use unicode_segmentation::UnicodeSegmentation;
+use unicode_width::UnicodeWidthStr;
+
 use crate::tui::app::{ActiveRun, ConversationStatus};
 use crate::tui::buffer::{line_wrapped_height, tail_window, wrapped_height, LineBuffer};
 use crate::tui::markdown;
 use crate::tui::motif::{self, glyph};
 use crate::tui::theme::DEFAULT_THEME;
+/// Stable identifiers and optional human-readable conversation descriptions.
+#[derive(Default)]
+pub struct ConversationIdentity {
+    pub run_id: String,
+    pub definition: Option<String>,
+    pub stage: Option<String>,
+    pub stage_run_id: Option<String>,
+}
+
+impl ConversationIdentity {
+    fn label_with(&self, fitted_definition: &str, fitted_stage: &str) -> String {
+        let mut label = String::from("Gremlin: ");
+        if !fitted_definition.is_empty() {
+            label.push_str(fitted_definition);
+            label.push_str(" · ");
+        }
+        label.push_str(&self.run_id);
+        if !fitted_stage.is_empty() || self.stage_run_id.is_some() {
+            label.push_str(" / ");
+            label.push_str(fitted_stage);
+            if let Some(id) = &self.stage_run_id {
+                if !fitted_stage.is_empty() {
+                    label.push_str(" · ");
+                }
+                label.push_str(id);
+            }
+        }
+        label
+    }
+
+    /// Sacrifice descriptions before allowing the terminal to clip stable IDs.
+    fn fitted_label(&self, width: usize) -> String {
+        // Cache grapheme boundaries and cumulative widths in one pass per description.
+        // Removing a suffix then costs O(1), without splitting a grapheme or
+        // repeatedly rebuilding and measuring the label.
+        fn prefixes(text: &str) -> Vec<(usize, usize)> {
+            let mut columns = 0;
+            text.grapheme_indices(true)
+                .map(|(start, grapheme)| {
+                    columns += grapheme.width();
+                    (start + grapheme.len(), columns)
+                })
+                .collect()
+        }
+
+        fn columns(prefixes: &[(usize, usize)]) -> usize {
+            prefixes.last().map_or(0, |&(_, width)| width + 3)
+        }
+
+        let definition = self.definition.as_deref().unwrap_or("").trim();
+        let stage = self.stage.as_deref().unwrap_or("").trim();
+        let mut definition_prefixes = prefixes(definition);
+        let mut stage_prefixes = prefixes(stage);
+        let fixed_width = self.label_with("", "").width();
+
+        // Shrink the longer description first. Only choose nonempty prefixes:
+        // even zero-column graphemes must make progress on a narrow terminal.
+        while fixed_width + columns(&definition_prefixes) + columns(&stage_prefixes) > width {
+            if definition_prefixes.is_empty() && stage_prefixes.is_empty() {
+                break;
+            }
+            if stage_prefixes.is_empty()
+                || (!definition_prefixes.is_empty()
+                    && columns(&definition_prefixes) >= columns(&stage_prefixes))
+            {
+                definition_prefixes.pop();
+            } else {
+                stage_prefixes.pop();
+            }
+        }
+
+        let definition_end = definition_prefixes.last().map_or(0, |&(end, _)| end);
+        let stage_end = stage_prefixes.last().map_or(0, |&(end, _)| end);
+        self.label_with(
+            definition[..definition_end].trim_end(),
+            stage[..stage_end].trim_end(),
+        )
+    }
+}
+
 /// Shared read-only state handed to each widget's [`LiveAreaWidget::render`]
 /// and [`LiveAreaWidget::min_height`].
 ///
@@ -49,12 +132,11 @@ pub struct RenderContext<'a> {
     pub project_name: &'a str,
     /// Cached active chat gremlin model, daemon-derived.
     pub chat_model: Option<&'a str>,
-    /// Short label of the currently selected conversation target (e.g. the
-    /// session chat's `chat` or a stage execution's `<run>:<stage>`).
-    pub target_label: String,
-    /// Whether the selected target is the session chat. When false the
-    /// info bar shows the target label instead of presenting the session chat
-    /// model as if it belonged to the pipeline agent.
+    /// Identity of the currently selected conversation.
+    pub identity: ConversationIdentity,
+    /// Whether the dedicated watch screen is active.
+    pub watch_screen: bool,
+    /// Whether the selected target is the session chat (also controls input).
     pub target_is_session_chat: bool,
     /// Reserved session-chat run, including before daemon registration.
     pub chat_run_id: Option<&'a str>,
@@ -2798,6 +2880,10 @@ impl LiveAreaWidget for InfoBarWidget {
         1
     }
 
+    fn max_height(&self, _width: u16, _ctx: &RenderContext) -> u16 {
+        1
+    }
+
     fn render(&mut self, area: Rect, buf: &mut Buffer, ctx: &RenderContext) {
         // Clear the region first so a shorter frame cannot leave stale cells
         // (mirrors the transcript's clear loop; the info bar paints a
@@ -2815,7 +2901,6 @@ impl LiveAreaWidget for InfoBarWidget {
         let gold = band
             .fg(DEFAULT_THEME.heading_primary)
             .add_modifier(Modifier::BOLD);
-        let red = band.fg(DEFAULT_THEME.danger);
         let nickel = band.fg(DEFAULT_THEME.subtle);
         let chrome = band.fg(DEFAULT_THEME.chrome);
         let ivory = band.fg(DEFAULT_THEME.ivory);
@@ -2829,19 +2914,9 @@ impl LiveAreaWidget for InfoBarWidget {
             .count();
         let count_style = if running > 0 { malachite } else { brass };
 
-        let mut spans = vec![
-            Span::styled("◆ ", red),
-            Span::styled("GREMLINS", gold),
-            Span::styled(" ◆", red),
-            Span::styled("  ", band),
-            Span::styled(format!("{} running", ctx.gremlin_count), count_style),
-            Span::styled("  ", band),
-            Span::styled("project:", nickel),
-            Span::styled(" ", band),
-            Span::styled(ctx.project_name.to_string(), chrome),
-        ];
-
-        spans.push(Span::styled("  status: ", nickel));
+        // Keep optional information in whole segments, in priority order.
+        let mut segments = Vec::new();
+        let mut spans = vec![Span::styled("  status: ", nickel)];
         let status_style = match ctx.conversation_status {
             ConversationStatus::Running => malachite,
             ConversationStatus::Paused => gold,
@@ -2851,46 +2926,65 @@ impl LiveAreaWidget for InfoBarWidget {
         };
         spans.push(Span::styled(ctx.conversation_status.label(), status_style));
 
-        // The selected conversation target. A non-session-chat target is shown
-        // prominently and the session chat model is not presented as if it
-        // belonged to the pipeline agent.
-        if !ctx.target_is_session_chat {
-            spans.push(Span::styled("  ", band));
-            spans.push(Span::styled("target:", nickel));
-            spans.push(Span::styled(" ", band));
-            spans.push(Span::styled(
-                ctx.target_label.clone(),
-                ivory.add_modifier(Modifier::BOLD),
-            ));
-        } else if let Some(model) = ctx.chat_model {
-            spans.push(Span::styled("  ", band));
-            spans.push(Span::styled("model:", nickel));
-            spans.push(Span::styled(" ", band));
-            spans.push(Span::styled(model.to_string(), chrome));
+        segments.push(spans);
+
+        if !ctx.watch_screen && ctx.target_is_session_chat {
+            if let Some(model) = ctx.chat_model {
+                segments.push(vec![
+                    Span::styled("  model: ", nickel),
+                    Span::styled(model.to_string(), chrome),
+                ]);
+            }
+        }
+        segments.push(vec![
+            Span::styled("  project: ", nickel),
+            Span::styled(ctx.project_name.to_string(), chrome),
+        ]);
+        segments.push(vec![Span::styled(
+            format!("  {} running", ctx.gremlin_count),
+            count_style,
+        )]);
+
+        if !ctx.watch_screen {
+            if let Some(id) = ctx.following_log {
+                let mut spans = Vec::new();
+                spans.push(Span::styled("  ", band));
+                spans.push(Span::styled(
+                    format!("following: {id}"),
+                    Style::default()
+                        .fg(DEFAULT_THEME.ivory)
+                        .bg(DEFAULT_THEME.danger)
+                        .add_modifier(Modifier::BOLD),
+                ));
+                segments.push(spans);
+            }
+
+            segments.push(vec![
+                Span::styled("  ", band),
+                Span::styled(glyph::COLUMN, gold),
+                Span::styled("  ", band),
+                Span::styled("Ctrl+G", malachite),
+                Span::styled(" editor  ", ivory),
+                Span::styled("Tab", malachite),
+                Span::styled(" filepath  ", ivory),
+                Span::styled("/help", malachite),
+            ]);
         }
 
-        if let Some(id) = ctx.following_log {
-            spans.push(Span::styled("  ", band));
-            spans.push(Span::styled(
-                format!("following: {id}"),
-                Style::default()
-                    .fg(DEFAULT_THEME.ivory)
-                    .bg(DEFAULT_THEME.danger)
-                    .add_modifier(Modifier::BOLD),
-            ));
+        // Trailing info never takes space away from a complete identity.
+        let identity = ctx.identity.fitted_label(area.width as usize);
+        let mut used = Line::from(identity.as_str()).width();
+        let mut spans = vec![Span::styled(identity, gold)];
+        for segment in segments {
+            let width = Line::from(segment.clone()).width();
+            if used + width > area.width as usize {
+                break;
+            }
+            used += width;
+            spans.extend(segment);
         }
-
-        spans.push(Span::styled("  ", band));
-        spans.push(Span::styled(glyph::COLUMN, gold));
-        spans.push(Span::styled("  ", band));
-        spans.push(Span::styled("Ctrl+G", malachite));
-        spans.push(Span::styled(" editor  ", ivory));
-        spans.push(Span::styled("Tab", malachite));
-        spans.push(Span::styled(" filepath  ", ivory));
-        spans.push(Span::styled("/help", malachite));
-
         let paragraph = Paragraph::new(Line::from(spans)).style(band);
-        paragraph.render(area, buf);
+        paragraph.render(Rect::new(area.x, area.y, area.width, 1), buf);
     }
 }
 
@@ -4877,7 +4971,8 @@ mod tests {
             gremlin_count: "0",
             project_name: "",
             chat_model: None,
-            target_label: String::new(),
+            identity: ConversationIdentity::default(),
+            watch_screen: false,
             target_is_session_chat: true,
             chat_run_id: None,
             conversation_status: ConversationStatus::Idle,
@@ -5022,12 +5117,154 @@ mod tests {
         }
     }
 
+    fn example_identity() -> ConversationIdentity {
+        ConversationIdentity {
+            run_id: "run-123".into(),
+            definition: Some("pipeline".into()),
+            stage: Some("build".into()),
+            stage_run_id: Some("stage-456".into()),
+        }
+    }
+
+    #[test]
+    fn identity_formats_optional_descriptions_without_dangling_separators() {
+        let mut identity = example_identity();
+        assert_eq!(
+            identity.fitted_label(200),
+            "Gremlin: pipeline · run-123 / build · stage-456"
+        );
+        identity.definition = Some("   ".into());
+        identity.stage = Some(String::new());
+        assert_eq!(identity.fitted_label(200), "Gremlin: run-123 / stage-456");
+        identity.stage_run_id = None;
+        assert_eq!(identity.fitted_label(200), "Gremlin: run-123");
+        identity.stage = Some("build".into());
+        assert_eq!(identity.fitted_label(200), "Gremlin: run-123 / build");
+    }
+
+    #[test]
+    fn identity_fitting_preserves_both_ids_before_clipping() {
+        let mut identity = example_identity();
+        identity.definition = Some("界😀".repeat(50));
+        identity.stage = Some("長い工程".repeat(50));
+        let minimal = "Gremlin: run-123 / stage-456";
+        let minimum_width = Line::from(minimal).width();
+        for width in [minimum_width, minimum_width + 5, 60] {
+            let label = identity.fitted_label(width);
+            assert!(label.contains("run-123"), "{label}");
+            assert!(label.contains("stage-456"), "{label}");
+            assert!(Line::from(label.as_str()).width() <= width, "{label}");
+        }
+        assert_eq!(identity.fitted_label(minimum_width), minimal);
+        assert_eq!(identity.fitted_label(1), minimal);
+    }
+
+    #[test]
+    fn identity_fitting_handles_zero_width_stage_on_narrow_terminals() {
+        let identity = ConversationIdentity {
+            run_id: "run".into(),
+            stage: Some("\u{0301}".into()),
+            stage_run_id: Some("invocation".into()),
+            ..Default::default()
+        };
+        assert_eq!(identity.fitted_label(1), "Gremlin: run / invocation");
+    }
+
+    #[test]
+    fn identity_fitting_keeps_graphemes_intact() {
+        let mut identity = ConversationIdentity {
+            run_id: "run".into(),
+            definition: Some("👩‍💻e\u{0301}".repeat(10_000)),
+            ..Default::default()
+        };
+        assert_eq!(identity.fitted_label(17), "Gremlin: 👩‍💻 · run");
+        identity.definition = Some("e\u{0301}".repeat(10_000));
+        assert_eq!(identity.fitted_label(16), "Gremlin: e\u{0301} · run");
+    }
+
+    #[test]
+    fn info_bar_keeps_follow_indicator_when_shortcuts_do_not_fit() {
+        let mut ctx = input_ctx("", 0);
+        ctx.identity.run_id = "run".into();
+        ctx.following_log = Some("followed-run");
+        let expected = "Gremlin: run  status: idle  project:   0 running  following: followed-run";
+        let width = expected.width() as u16;
+        let area = Rect::new(0, 0, width, 1);
+        let mut buf = Buffer::empty(area);
+        InfoBarWidget.render(area, &mut buf, &ctx);
+        assert_eq!(rendered_rows(&buf, width, 1)[0], expected);
+    }
+
+    #[test]
+    fn info_bar_drops_trailing_info_before_shortening_identity() {
+        let mut ctx = input_ctx("", 0);
+        ctx.identity = example_identity();
+        ctx.chat_model = Some("model-name");
+        let label = ctx.identity.fitted_label(200);
+        let width = Line::from(label.as_str()).width() as u16;
+        let area = Rect::new(0, 0, width, 1);
+        let mut buf = Buffer::empty(area);
+        InfoBarWidget.render(area, &mut buf, &ctx);
+        assert_eq!(rendered_rows(&buf, width, 1)[0], label);
+
+        ctx.identity.definition = Some("very long definition ".repeat(20));
+        ctx.identity.stage = Some("very long stage ".repeat(20));
+        InfoBarWidget.render(area, &mut buf, &ctx);
+        let row = &rendered_rows(&buf, width, 1)[0];
+        assert!(row.contains("run-123"), "{row}");
+        assert!(row.contains("stage-456"), "{row}");
+        assert!(!row.contains("status:"), "{row}");
+    }
+
+    #[test]
+    fn info_bar_wide_chat_and_watch_share_identity_and_stay_one_row() {
+        let mut ctx = input_ctx("", 0);
+        ctx.identity = example_identity();
+        ctx.chat_model = Some("chat-model");
+        ctx.following_log = Some("followed-run");
+        ctx.project_name = "project-name";
+        let area = Rect::new(0, 0, 250, 3);
+        for watch in [false, true] {
+            ctx.watch_screen = watch;
+            let mut bar = InfoBarWidget;
+            assert_eq!(bar.min_height(area.width, &ctx), 1);
+            assert_eq!(bar.desired_height(area.width, &ctx), 1);
+            assert_eq!(bar.max_height(area.width, &ctx), 1);
+            let mut buf = Buffer::empty(area);
+            bar.render(area, &mut buf, &ctx);
+            let rows = rendered_rows(&buf, area.width, area.height);
+            let row = &rows[0];
+            assert!(row.starts_with("Gremlin: pipeline · run-123 / build · stage-456"));
+            assert!(row.contains("status:"));
+            assert!(row.contains("project-name"));
+            assert!(row.contains("0 running"));
+            for hint in [
+                "model:",
+                "chat-model",
+                "following:",
+                "Ctrl+G",
+                "Tab",
+                "/help",
+            ] {
+                assert_eq!(row.contains(hint), !watch, "{row}");
+            }
+            assert!(rows[1..].iter().all(|row| row.trim().is_empty()));
+        }
+        for width in [0, 1, 8] {
+            let area = Rect::new(0, 0, width, 2);
+            let mut buf = Buffer::empty(area);
+            InfoBarWidget.render(area, &mut buf, &ctx);
+            assert!(rendered_rows(&buf, width, 2)[1].trim().is_empty());
+        }
+    }
+
     #[test]
     fn info_bar_renders_each_selected_conversation_status() {
         let area = Rect::new(0, 0, 160, 1);
         let mut ctx = input_ctx("", 0);
         ctx.target_is_session_chat = false;
-        ctx.target_label = "run:agent".into();
+        ctx.identity.run_id = "run".into();
+        ctx.identity.stage = Some("agent".into());
         ctx.chat_model = Some("session_chat-only-model");
         let mut buf = Buffer::empty(area);
         for status in [
@@ -5044,7 +5281,7 @@ mod tests {
                 row.contains(&format!("status: {}", status.label())),
                 "{row}"
             );
-            assert!(row.contains("target: run:agent"), "{row}");
+            assert!(row.starts_with("Gremlin: run / agent"), "{row}");
             assert!(!row.contains("session_chat-only-model"), "{row}");
         }
     }

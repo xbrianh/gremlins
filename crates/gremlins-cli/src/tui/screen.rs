@@ -36,8 +36,8 @@ use crate::tui::buffer::{line_wrapped_height, wrapped_height};
 use crate::tui::motif;
 use crate::tui::theme::DEFAULT_THEME;
 use crate::tui::widgets::{
-    layout_widgets, render_wrapped_tail, HistorySearchRender, InfoBarWidget, InputBarWidget,
-    LiveAreaWidget, RenderContext, StreamingWidget, TranscriptWidget,
+    layout_widgets, render_wrapped_tail, ConversationIdentity, HistorySearchRender, InfoBarWidget,
+    InputBarWidget, LiveAreaWidget, RenderContext, StreamingWidget, TranscriptWidget,
 };
 use crate::tui::{REASONING_COMPLETED_TITLE, REASONING_PLACEHOLDER_TITLE};
 
@@ -410,6 +410,21 @@ impl<B: Backend> LiveArea<B> {
     }
 
     fn render_context<'a>(&self, app: &'a App, gremlin_count: &'a str) -> RenderContext<'a> {
+        let (run_id, stage, stage_run_id) = match &app.selected_target {
+            crate::tui::app::Target::Run { run_id } => (run_id, None, None),
+            crate::tui::app::Target::Invocation {
+                run_id,
+                stage,
+                stage_run_id,
+            } => (run_id, Some(stage.clone()), Some(stage_run_id.clone())),
+        };
+        let definition = if app.chat_run_id.as_ref() == Some(run_id) {
+            Some("chat".to_string())
+        } else {
+            app.active_runs
+                .get(run_id)
+                .map(|run| run.definition.clone())
+        };
         RenderContext {
             input: app.input.text(),
             cursor: app.input_cursor,
@@ -417,7 +432,13 @@ impl<B: Backend> LiveArea<B> {
             gremlin_count,
             project_name: app.project_name_str(),
             chat_model: app.chat_model.as_deref(),
-            target_label: app.selected_target.label(),
+            identity: ConversationIdentity {
+                run_id: run_id.clone(),
+                definition,
+                stage,
+                stage_run_id,
+            },
+            watch_screen: !app.screen.is_chat(),
             target_is_session_chat: app.is_session_chat(&app.selected_target),
             chat_run_id: app.chat_run_id.as_deref(),
             conversation_status: app.conversation_status(&app.selected_target),
@@ -491,7 +512,7 @@ impl<B: Backend> LiveArea<B> {
         // desync, fall back to composing chat instead of panicking in raw
         // mode (a missed pairing in a future edit must not take the
         // terminal down).
-        let mut widget: &mut dyn LiveAreaWidget = match scene.screen_view.as_mut() {
+        let widget: &mut dyn LiveAreaWidget = match scene.screen_view.as_mut() {
             Some(view) => match view {
                 ScreenView::Runs(w) => w,
             },
@@ -500,10 +521,10 @@ impl<B: Backend> LiveArea<B> {
                 return self.compose_chat(scene, app);
             }
         };
-        let widgets = std::slice::from_mut(&mut widget);
-        let layout = layout_widgets(&mut *widgets, width, self.rows, &ctx);
-        self.reserved_rows = 0;
-        self.finish_compose(&mut *widgets, &layout.heights, layout.overflow, &ctx, false)
+        let mut widgets: [&mut dyn LiveAreaWidget; 2] = [widget, &mut scene.info_bar];
+        let layout = layout_widgets(&mut widgets, width, self.rows, &ctx);
+        self.reserved_rows = layout.heights.last().copied().unwrap_or(0);
+        self.finish_compose(&mut widgets, &layout.heights, layout.overflow, &ctx, false)
     }
 
     /// Paint the widgets whose layout has already been resolved and commit
@@ -2345,6 +2366,121 @@ mod tests {
         LiveArea::with_backend(TestBackend::new(cols, rows), cols, rows)
     }
 
+    fn bottom_row(live: &LiveArea<TestBackend>) -> String {
+        let buf = live.backend().buffer();
+        (0..buf.area.width)
+            .map(|x| buf[(x, buf.area.height - 1)].symbol())
+            .collect::<String>()
+            .trim_end()
+            .to_string()
+    }
+
+    #[test]
+    fn selected_identity_survives_missing_metadata_and_follow_failure() {
+        use crate::tui::app::Target;
+        let mut app = App::new();
+        app.migrate_chat_run_id("reserved-chat".into());
+        let mut live = new_live(160, 20);
+        live.compose(&app).unwrap();
+        assert!(bottom_row(&live).starts_with("Gremlin: chat · reserved-chat"));
+        for id in ["headless-a", "headless-b"] {
+            let mut run = ActiveRun::new("running");
+            run.definition = "same-definition".into();
+            app.active_runs.insert(id.into(), run);
+            live.select_conversation(&mut app, Target::Run { run_id: id.into() });
+            live.compose(&app).unwrap();
+            assert!(bottom_row(&live).starts_with(&format!("Gremlin: same-definition · {id}")));
+        }
+        for id in ["invocation-a", "invocation-b"] {
+            live.select_conversation(
+                &mut app,
+                Target::Invocation {
+                    run_id: "reserved-chat".into(),
+                    stage: "agent".into(),
+                    stage_run_id: id.into(),
+                },
+            );
+            live.compose(&app).unwrap();
+            assert!(bottom_row(&live)
+                .starts_with(&format!("Gremlin: chat · reserved-chat / agent · {id}")));
+        }
+        live.select_conversation(
+            &mut app,
+            Target::Invocation {
+                run_id: "headless-b".into(),
+                stage: String::new(),
+                stage_run_id: "exact-b".into(),
+            },
+        );
+        app.active_runs.clear();
+        app.watch_follow_error = Some("failed follow".into());
+        live.compose(&app).unwrap();
+        assert!(bottom_row(&live).starts_with("Gremlin: headless-b / exact-b"));
+    }
+
+    #[test]
+    fn watch_identity_tracks_selection_not_inline_preview_and_replacements() {
+        use crate::tui::app::Target;
+        let mut app = App::new();
+        app.migrate_chat_run_id("chat-a".into());
+        let mut live = new_live(120, 24);
+        let mut run = ActiveRun::new("running");
+        run.definition = "pipeline".into();
+        app.active_runs.insert("run-b".into(), run);
+        live.compose(&app).unwrap();
+        for commit in [false, true] {
+            app.show_runs();
+            live.show_runs();
+            app.watch_selection = Some("run-b".into());
+            app.watch_following = Some("run-b".into());
+            for _ in 0..100 {
+                live.push_watch_line("B_ONLY_PREVIEW".into());
+            }
+            live.compose(&app).unwrap();
+            assert!(bottom_row(&live).starts_with("Gremlin: chat · chat-a"));
+            assert!(dump_buffer(live.backend().buffer()).contains("B_ONLY_PREVIEW"));
+            assert!(!bottom_row(&live).contains("B_ONLY_PREVIEW"));
+            assert!(backend_scrollback(live.backend()).is_empty());
+            if commit {
+                let target = app.watch_target().unwrap();
+                live.select_conversation(&mut app, target);
+            }
+            app.exit_screen();
+            live.exit_screen_view();
+            live.compose(&app).unwrap();
+            let expected = if commit {
+                "Gremlin: pipeline · run-b"
+            } else {
+                "Gremlin: chat · chat-a"
+            };
+            assert!(bottom_row(&live).starts_with(expected));
+            assert!(!dump_buffer(live.backend().buffer()).contains("B_ONLY_PREVIEW"));
+        }
+        app.show_runs();
+        live.show_runs();
+        live.compose(&app).unwrap();
+        assert!(bottom_row(&live).starts_with("Gremlin: pipeline · run-b"));
+        app.migrate_chat_run_id("chat-new".into());
+        live.compose(&app).unwrap();
+        assert!(bottom_row(&live).starts_with("Gremlin: pipeline · run-b"));
+        live.select_conversation(
+            &mut app,
+            Target::Run {
+                run_id: "chat-new".into(),
+            },
+        );
+        live.compose(&app).unwrap();
+        assert!(bottom_row(&live).starts_with("Gremlin: chat · chat-new"));
+        app.migrate_chat_run_id("chat-newer".into());
+        live.compose(&app).unwrap();
+        assert!(bottom_row(&live).starts_with("Gremlin: chat · chat-newer"));
+        app.exit_screen();
+        live.exit_screen_view();
+        live.compose(&app).unwrap();
+        assert!(bottom_row(&live).starts_with("Gremlin: chat · chat-newer"));
+        assert!(backend_scrollback(live.backend()).is_empty());
+    }
+
     #[test]
     fn migrate_target_preserves_live_and_parked_conversation_state() {
         use crate::tui::app::{ConversationStatus, Target};
@@ -3236,7 +3372,7 @@ mod tests {
         else {
             unreachable!("checked above");
         };
-        let info = lines.iter().position(|l| l.contains("◆ GREMLINS")).unwrap();
+        let info = lines.iter().position(|l| l.contains("Gremlin:")).unwrap();
         let input = lines.iter().rposition(|l| l.contains("»")).unwrap();
         assert!(
             prompt < response
@@ -3276,7 +3412,7 @@ mod tests {
         let (Some(prompt), Some(reasoning), Some(response)) = (prompt, reasoning, response) else {
             unreachable!("checked above");
         };
-        let info = lines.iter().position(|l| l.contains("◆ GREMLINS")).unwrap();
+        let info = lines.iter().position(|l| l.contains("Gremlin:")).unwrap();
         let input = lines.iter().rposition(|l| l.contains("»")).unwrap();
         assert!(
             prompt < response
@@ -3673,7 +3809,7 @@ mod tests {
         // The two fixed bars must still be rendered even when the content
         // area has zero height.
         assert!(
-            visible.contains("GREMLINS"),
+            visible.contains("Gremlin:"),
             "Info bar should be visible.\nBuffer:\n{visible}"
         );
         assert!(

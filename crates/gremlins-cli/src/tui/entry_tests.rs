@@ -191,6 +191,93 @@ impl Fixture {
 }
 
 #[tokio::test]
+async fn watch_enter_commits_identity_only_after_preview_is_selected() {
+    let mut f = Fixture::with_watch_socket(1);
+    f.session_chat();
+    let a = f.app.selected_target.clone();
+    f.app
+        .upsert_run_from_ls(&json!({"id":"run-b", "status":"running", "definition":"pipeline"}));
+    assert!(f
+        .rendered()
+        .lines()
+        .last()
+        .unwrap()
+        .starts_with("Gremlin: chat · session_chat"));
+
+    f.app.show_runs();
+    f.live.show_runs();
+    f.app.watch_selection = Some("run-b".into());
+    f.app.watch_following = Some("run-b".into());
+    f.live.push_watch_line("B_ONLY_PREVIEW".into());
+    let watch = f.rendered();
+    assert_eq!(f.app.watch_selection.as_deref(), Some("run-b"));
+    assert!(watch.contains("selected: run-b"));
+    assert!(watch.contains('▶'));
+    assert!(watch.contains("B_ONLY_PREVIEW"));
+    assert!(watch
+        .lines()
+        .last()
+        .unwrap()
+        .starts_with("Gremlin: chat · session_chat"));
+    assert_eq!(f.app.selected_target, a);
+
+    close_watch_follow(&mut f.app, &mut f.live, &mut f.follow);
+    f.app.exit_screen();
+    f.live.exit_screen_view();
+    let chat = f.rendered();
+    assert_eq!(f.app.screen, Screen::Chat);
+    assert_eq!(f.app.selected_target, a);
+    assert!(chat
+        .lines()
+        .last()
+        .unwrap()
+        .starts_with("Gremlin: chat · session_chat"));
+    assert!(!chat.contains("B_ONLY_PREVIEW"));
+
+    f.app.show_runs();
+    f.live.show_runs();
+    f.app.watch_selection = Some("run-b".into());
+    assert!(f
+        .rendered()
+        .lines()
+        .last()
+        .unwrap()
+        .starts_with("Gremlin: chat · session_chat"));
+    f.enter_run("run-b");
+    assert_eq!(f.app.screen, Screen::Chat);
+    assert_eq!(
+        f.app.selected_target,
+        Target::Run {
+            run_id: "run-b".into()
+        }
+    );
+    let chat = f.rendered();
+    assert!(chat
+        .lines()
+        .last()
+        .unwrap()
+        .starts_with("Gremlin: pipeline · run-b"));
+    assert!(!chat.contains("B_ONLY_PREVIEW"));
+
+    // No acknowledgment or output has arrived on B's selected watch yet.
+    let mut peer = f.peer().await;
+    assert_eq!(
+        read(&mut peer).await,
+        json!({"op":"watch", "scope":"run", "id":"run-b", "session_id":"test", "replay":true})
+    );
+    f.app.show_runs();
+    f.live.show_runs();
+    assert!(f
+        .rendered()
+        .lines()
+        .last()
+        .unwrap()
+        .starts_with("Gremlin: pipeline · run-b"));
+    f.assert_unsent();
+    f.client.shutdown().await;
+}
+
+#[tokio::test]
 async fn reserved_session_chat_row_is_enterable_before_first_run_snapshot() {
     let mut f = Fixture::new();
     install_session_chat(&mut f.app, &f.client).await;

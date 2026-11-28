@@ -147,7 +147,7 @@ from bus output and cannot clear a successor execution's draft.
 `LiveArea::compose(&app)` takes the typed `Scene` out and runs the recursive
 layout engine over an ordered `Vec<&mut dyn LiveAreaWidget>`. For chat the
 order is transcript, reasoning, input bar, info bar; for any non-chat screen
-it is only the active `ScreenView` body. The engine performs `finalize →
+it is the active `ScreenView` body followed by the shared one-row info bar. The engine performs `finalize →
 measure → allocate → drain overflow → paint`. Allocated widths are passed
 down as arguments (`finalize(width)`, `min_height(width, …)`, etc.); a
 container owns margin policy and hands children the already-reduced inner
@@ -172,9 +172,11 @@ inner margin. Only the transcript FIFO drains overflow lines for
 `LiveArea::commit_scrollback()`; each `StreamingWidget` self-trims and
 returns no overflow.
 
-When a non-chat screen is active, `LiveArea` composes only that screen's
-typed `ScreenView` body across the whole terminal; the chat scene
-(transcript, input, info bars) is occluded and no overflow is committed.
+When Watch is active, `LiveArea` composes its typed `ScreenView` body above
+the shared info bar; the chat transcript and input are occluded and no overflow
+is committed. Both layouts derive the bar identity from `App.selected_target`
+on every render, independently of Watch's highlight and inline log source.
+Descriptive names shrink before stable IDs, and trailing information drops first.
 
 ## Adding a New Slash Command
 

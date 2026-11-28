@@ -23,6 +23,7 @@ ratatui = { version = "0.30", default-features = false, features = ["crossterm",
 crossterm = "0.29"
 tempfile = "3"
 unicode-width = "0.2"
+unicode-segmentation = "1"
 shlex = "1"
 pulldown-cmark = "0.13"
 syntect = { version = "5", default-features = false, features = ["parsing", "default-syntaxes", "default-themes", "regex-onig"] }

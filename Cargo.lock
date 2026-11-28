@@ -1273,6 +1273,7 @@ dependencies = [
  "syntect",
  "tempfile",
  "tokio",
+ "unicode-segmentation",
  "unicode-width",
 ]
 
