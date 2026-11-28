@@ -614,10 +614,7 @@ async fn full_inbox_rejects_without_queued_and_connection_remains_usable() {
     let f = Fixture::new(false).await;
     let (mut inbox, _r) = f.inbox("build", "full-1");
     let sender = f.inputs.sender(&identity("build", "full-1")).unwrap();
-    let mut receipts = Vec::new();
-    for i in 0..INPUT_CAPACITY {
-        receipts.push(sender.try_send(i.to_string(), "fill".into()).unwrap());
-    }
+    let _receipts = super::fill_execution_inbox(&sender);
     let mut peer = Peer::global(&f.registry, request("build", "full-1")).await;
     bound(&mut peer, "build", "full-1").await;
     peer.send(json!({"cmd":"message","text":"revision","req_id":"overflow"}))

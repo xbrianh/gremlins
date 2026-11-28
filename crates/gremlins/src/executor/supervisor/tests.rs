@@ -35,6 +35,18 @@ use super::session_task::SessionTaskHandle;
 
 mod log_isolation;
 
+fn fill_execution_inbox(
+    sender: &crate::clients::execution_input::InputSender,
+) -> Vec<crate::clients::execution_input::Receipt> {
+    (0..crate::clients::execution_input::INPUT_CAPACITY)
+        .map(|index| {
+            sender
+                .try_send(format!("fill-{index}"), "fill".into())
+                .unwrap()
+        })
+        .collect()
+}
+
 fn model(spec: &str) -> ModelURI {
     ModelURI::parse(spec).unwrap()
 }

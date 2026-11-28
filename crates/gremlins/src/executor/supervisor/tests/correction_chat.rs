@@ -973,15 +973,7 @@ async fn full_execution_inbox_rejects_correction_without_queued_ack() {
     let bound = super::super::input::bind(&target, &registry, Some(&session))
         .await
         .unwrap();
-    let mut receipts = Vec::new();
-    for index in 0..crate::clients::execution_input::INPUT_CAPACITY {
-        receipts.push(
-            bound
-                .sender
-                .try_send(format!("fill-{index}"), "fill".into())
-                .unwrap(),
-        );
-    }
+    let _receipts = super::fill_execution_inbox(&bound.sender);
     drop(bound);
     send_chat(
         &mut write,
@@ -1005,91 +997,59 @@ async fn full_execution_inbox_rejects_correction_without_queued_ack() {
 }
 
 #[tokio::test]
-async fn close_session_with_held_correction_leaves_independent_target_bindable() {
-    tokio::time::timeout(Duration::from_secs(10), async {
-        let (_sandbox, project, _) = sandbox_dirs(None);
-        let (registry, _) = spawn_test_actor().await;
-        let (mut reader, mut write, session, task) = main_socket(&registry).await;
-        let id = "pipeline-close-correction";
-        let mut pipeline = correction_pipeline(&registry, &project, id).await;
-        let target = pipeline_target(id, &pipeline);
-        let end = pipeline.target.end_signal();
-        send_chat(
-            &mut write,
-            json!({"op": "chat", "text": "Held revision",
+async fn main_disconnect_with_held_correction_leaves_independent_target_bindable() {
+    for disconnect in ["close_session", "eof"] {
+        tokio::time::timeout(Duration::from_secs(10), async {
+            let (_sandbox, project, _) = sandbox_dirs(None);
+            let (registry, _) = spawn_test_actor().await;
+            let (mut reader, mut write, session, task) = main_socket(&registry).await;
+            let id = "pipeline-disconnect-correction";
+            let mut pipeline = correction_pipeline(&registry, &project, id).await;
+            let target = pipeline_target(id, &pipeline);
+            let end = pipeline.target.end_signal();
+            send_chat(
+                &mut write,
+                json!({"op": "chat", "text": "Held revision",
             "req_id": "held", "target": target}),
-        )
-        .await;
-        let ack = frame(&mut reader).await;
-        assert_correction_frame(&ack, &target, "held", "ok");
-        assert_eq!(ack["status"], "queued");
-        let held = receive_correction(&mut pipeline.receiver).await;
-        assert!(session.get_current_turn().await.is_none());
-        assert!(session.get_chat_handle().await.is_none());
-        assert!(session.get_chat_ids().await.is_empty());
-        assert_no_frame(&mut reader).await;
+            )
+            .await;
+            let ack = frame(&mut reader).await;
+            assert_correction_frame(&ack, &target, "held", "ok");
+            assert_eq!(ack["status"], "queued");
+            let held = receive_correction(&mut pipeline.receiver).await;
+            assert!(session.get_current_turn().await.is_none());
+            assert!(session.get_chat_handle().await.is_none());
+            assert!(session.get_chat_ids().await.is_empty());
+            // Neither disconnect may wait for incorporation. Keep the correction
+            // alive through MAIN exit and rebinding the independent target.
+            if disconnect == "close_session" {
+                assert_no_frame(&mut reader).await;
+                send_chat(&mut write, json!({"op": "close_session"})).await;
+                assert_eq!(frame(&mut reader).await["type"], "ok");
+            } else {
+                drop(write);
+            }
+            tokio::time::timeout(Duration::from_secs(5), task)
+                .await
+                .unwrap_or_else(|_| panic!("MAIN {disconnect} waited for correction incorporation"))
+                .unwrap();
+            assert!(
+                !end.is_ended(),
+                "MAIN disconnect ended independent execution"
+            );
+            assert!(registry.contains_run(id).await);
+            let bound = super::super::input::bind(&target, &registry, Some(&session))
+                .await
+                .expect("MAIN disconnect retained input controller claim");
+            drop(bound);
+            assert!(!pipeline.receiver.pending());
+            assert!(!pipeline.execution.execution_ended());
 
-        // Closing this unrelated MAIN session must not wait for incorporation.
-        // Keep both the socket and the correction alive through the ack and exit.
-        send_chat(&mut write, json!({"op": "close_session"})).await;
-        assert_eq!(frame(&mut reader).await["type"], "ok");
-        tokio::time::timeout(Duration::from_secs(5), task)
-            .await
-            .expect("close_session waited for correction incorporation")
-            .unwrap();
-        assert!(!end.is_ended(), "MAIN close ended independent execution");
-        assert!(registry.contains_run(id).await);
-        let bound = super::super::input::bind(&target, &registry, Some(&session))
-            .await
-            .expect("MAIN close retained input controller claim");
-        drop(bound);
-        assert!(!pipeline.receiver.pending());
-        assert!(!pipeline.execution.execution_ended());
-
-        drop(held);
-        pipeline.revoker.revoke();
-        registry.stop_run(id).await.unwrap();
-    })
-    .await
-    .expect("close_session must respond while incorporation is withheld");
-}
-
-#[tokio::test]
-async fn main_socket_eof_with_held_correction_leaves_independent_target_bindable() {
-    tokio::time::timeout(Duration::from_secs(10), async {
-        let (_sandbox, project, _) = sandbox_dirs(None);
-        let (registry, _) = spawn_test_actor().await;
-        let (mut reader, mut write, session, task) = main_socket(&registry).await;
-        let id = "pipeline-eof-correction";
-        let mut pipeline = correction_pipeline(&registry, &project, id).await;
-        let target = pipeline_target(id, &pipeline);
-        let end = pipeline.target.end_signal();
-        send_chat(
-            &mut write,
-            json!({"op": "chat", "text": "Held revision",
-            "req_id": "held", "target": target}),
-        )
-        .await;
-        let ack = frame(&mut reader).await;
-        assert_correction_frame(&ack, &target, "held", "ok");
-        assert_eq!(ack["status"], "queued");
-        let held = receive_correction(&mut pipeline.receiver).await;
-        drop(write);
-        task.await.unwrap();
-        assert!(!end.is_ended(), "MAIN teardown ended independent execution");
-        assert!(registry.contains_run(id).await);
-        let bound = super::super::input::bind(&target, &registry, Some(&session))
-            .await
-            .expect("MAIN EOF retained input controller claim");
-        drop(bound);
-        assert!(!pipeline.receiver.pending());
-        assert!(!pipeline.execution.execution_ended());
-        // A spawned receipt waiter may survive EOF. Do not require delivery to
-        // have been invalidated; only MAIN exit and independent input matter.
-        drop(held);
-        pipeline.revoker.revoke();
-        registry.stop_run(id).await.unwrap();
-    })
-    .await
-    .expect("MAIN EOF must not wait for incorporation");
+            drop(held);
+            pipeline.revoker.revoke();
+            registry.stop_run(id).await.unwrap();
+        })
+        .await
+        .unwrap_or_else(|_| panic!("MAIN {disconnect} must exit while incorporation is withheld"));
+    }
 }
