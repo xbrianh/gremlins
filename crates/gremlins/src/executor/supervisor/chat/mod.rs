@@ -38,6 +38,7 @@ use crate::definition::ChatDefinition;
 use crate::executor::gremlin::{validate_gremlin_id, Gremlin};
 use crate::executor::state;
 
+use super::input_rules;
 use super::run_registry::RunRegistry;
 use super::session_task::SessionTaskHandle;
 use super::{error_response, ok_response};
@@ -87,14 +88,6 @@ pub(crate) fn resolve_chat_env(
     }
 }
 
-fn chat_error(request: &Value, message: &str) -> Value {
-    let mut response = error_response(message);
-    if let Some(req_id) = request.get("req_id") {
-        response["req_id"] = req_id.clone();
-    }
-    response
-}
-
 pub(crate) async fn handle_chat(
     request: &Value,
     writer: &SharedWriter,
@@ -103,42 +96,16 @@ pub(crate) async fn handle_chat(
 ) {
     log::debug!("handle_chat: received chat request");
 
-    if [
-        "id",
-        "nonce",
-        "stage",
-        "stage_id",
-        "execution_id",
-        "stage_run_id",
-    ]
-    .iter()
-    .any(|key| request.get(key).is_some())
-    {
+    if let Err(message) = input_rules::chat_preflight(request) {
         let _ = writer
-            .write_json_line(&chat_error(
-                request,
-                "top-level stage-run selectors are not supported; use target with id, nonce, and stage_run_id",
-            ))
+            .write_json_line(&input_rules::enqueue_error(request, &message))
             .await;
-        return;
-    }
-    if let Some(error) = super::attachment::retired_target_error(request) {
-        let mut error = error;
-        if let Some(req_id) = request.get("req_id") {
-            error["req_id"] = req_id.clone();
-        }
-        let _ = writer.write_json_line(&error).await;
         return;
     }
 
     // The daemon owns the conversation; the session owns the gremlin. The
     // front-end never sends a gremlin id — it only addresses the session.
     let text = request.get("text").and_then(|v| v.as_str()).unwrap_or("");
-    if text.is_empty() {
-        let resp = chat_error(request, "missing 'text' field");
-        let _ = writer.write_json_line(&resp).await;
-        return;
-    }
     // Optional repository-context snapshot captured by the TUI. Kept separate
     // from `text` and appended to the system prompt as low-trust metadata.
     let context = request
@@ -186,107 +153,20 @@ pub(crate) async fn handle_chat(
     // in-flight execution without starting a new turn. The message goes
     // through the exact execution's input inbox — never through the
     // session's persistent chat-gremlin task queue.
-    if let Some(target) = request.get("target") {
-        let Some(target_obj) = target.as_object() else {
-            let _ = writer
-                .write_json_line(&chat_error(request, "target must be an object"))
-                .await;
-            return;
-        };
-        let target_id = target_obj.get("id").and_then(Value::as_str).unwrap_or("");
-        if target_id.is_empty() {
-            let _ = writer
-                .write_json_line(&chat_error(request, "target.id is required"))
-                .await;
-            return;
-        }
-        let target_nonce = target_obj.get("nonce").and_then(Value::as_u64).unwrap_or(0);
-        if target_nonce == 0 {
-            let _ = writer
-                .write_json_line(&chat_error(request, "target.nonce is required"))
-                .await;
-            return;
-        }
-        let Some(client_stage_run_id) = target_obj
-            .get("stage_run_id")
-            .and_then(Value::as_str)
-            .filter(|id| !id.trim().is_empty())
-            .map(str::to_owned)
-        else {
-            let _ = writer
-                .write_json_line(&chat_error(request, "target.stage_run_id is required"))
-                .await;
-            return;
-        };
-        let bound = match super::input::bind(request, registry, Some(session_task)).await {
-            Ok(bound) => bound,
-            Err(message) => {
-                let message = if message == "chat input requires its owning session" {
-                    format!("target {target_id}: not owned by this session")
-                } else {
-                    message
-                };
-                let _ = writer.write_json_line(&chat_error(request, &message)).await;
-                return;
-            }
-        };
-        let req_id = request
-            .get("req_id")
-            .and_then(Value::as_str)
-            .map(String::from);
-        let enqueue = bound
-            .sender
-            .try_send(req_id.clone().unwrap_or_default(), text.to_owned());
-        let identity = bound.identity.clone();
-        drop(bound);
-        let receipt = match enqueue {
-            Ok(receipt) => receipt,
-            Err(error) => {
-                let _ = writer
-                    .write_json_line(&chat_error(request, &error.to_string()))
-                    .await;
-                return;
-            }
-        };
-
-        // Acknowledge enqueue before any asynchronous receipt notification.
-        let response = ok_response(serde_json::json!({
-            "id": identity.run_id,
-            "status": "queued",
-            "nonce": target_nonce,
-            "stage_run_id": client_stage_run_id,
-            "req_id": req_id,
-        }));
-        if writer.write_json_line(&response).await.is_err() {
-            return;
-        }
-        let writer = writer.clone();
-        tokio::spawn(async move {
-            // A confirmed delivery remains authoritative even after execution ends.
-            let delivery = tokio::select! {
-                _ = writer.closed() => return,
-                result = receipt => result.unwrap_or(Delivery::NotDelivered),
-            };
-            let payload = if delivery == Delivery::Delivered {
-                serde_json::json!({
-                    "type": "delivered",
-                    "id": identity.run_id,
-                    "nonce": target_nonce,
-                    "stage_run_id": client_stage_run_id,
-                    "req_id": req_id,
-                })
-            } else {
-                serde_json::json!({
-                    "type": "correction_dropped",
-                    "id": identity.run_id,
-                    "stage_run_id": client_stage_run_id,
-                    "req_id": req_id,
-                    "reason": "agent exited before incorporation",
-                })
-            };
-            let _ = writer.write_json_line(&payload).await;
-        });
-
+    if request.get("target").is_some() {
+        let output = writer.clone();
+        let closed = writer.clone();
+        targeted_chat_io(
+            request,
+            registry,
+            session_task,
+            move |frame| {
+                let output = output.clone();
+                async move { output.write_json_line(&frame).await }
+            },
+            async move { closed.closed().await },
+        )
+        .await;
         return;
     }
 
@@ -419,6 +299,69 @@ pub(crate) async fn handle_chat(
     // caller's token; an execution identity exists only when its stage starts.
     let ack = serde_json::json!({"chat_run_id": handle.id, "enqueued": true, "turn": turn, "req_id": request.get("req_id")});
     let _ = writer.write_json_line(&ok_response(ack)).await;
+}
+
+pub(super) async fn targeted_chat_io<W, F, C>(
+    request: &Value,
+    registry: &Arc<RunRegistry>,
+    session_task: &SessionTaskHandle,
+    write: W,
+    closed: C,
+) where
+    W: Fn(Value) -> F + Send + 'static,
+    F: std::future::Future<Output = Result<(), String>> + Send,
+    C: std::future::Future<Output = ()> + Send + 'static,
+{
+    let bound = match super::input_state::bind(request, registry, Some(session_task)).await {
+        Ok(bound) => bound,
+        Err(frame) => {
+            let _ = write(frame).await;
+            return;
+        }
+    };
+    let identity = bound.identity.clone();
+    let enqueue = super::input_flow::enqueue_and_release(bound, |bound| {
+        bound.sender.try_send(
+            request
+                .get("req_id")
+                .and_then(Value::as_str)
+                .unwrap_or("")
+                .to_owned(),
+            request
+                .get("text")
+                .and_then(Value::as_str)
+                .unwrap_or("")
+                .to_owned(),
+        )
+    });
+    let receipt = match enqueue {
+        Ok(receipt) => receipt,
+        Err(error) => {
+            let _ = write(input_rules::enqueue_error(request, &error.to_string())).await;
+            return;
+        }
+    };
+    if write(input_rules::chat_queued(request, &identity))
+        .await
+        .is_err()
+    {
+        return;
+    }
+    // Retain only wire correlation fields, not correction text or context.
+    let delivered = input_rules::chat_settled(request, &identity, Delivery::Delivered);
+    let dropped = input_rules::chat_settled(request, &identity, Delivery::NotDelivered);
+    tokio::spawn(async move {
+        let delivery = tokio::select! {
+            _ = closed => return,
+            result = receipt => result.unwrap_or(Delivery::NotDelivered),
+        };
+        let frame = if delivery == Delivery::Delivered {
+            delivered
+        } else {
+            dropped
+        };
+        let _ = write(frame).await;
+    });
 }
 
 /// Resolve the session's chat gremlin handle — reuse, resume, or fresh.
