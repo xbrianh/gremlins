@@ -9,7 +9,7 @@ RUSTC_WRAPPER =
 CARGO_TARGET_DIR = $(shell pwd)/target
 CARGO_HOME = $(shell pwd)/.cargo-home
 
-.PHONY: test test-cli test-bus check fmt fmt-check clippy build release autoformat test-overlay-tools
+.PHONY: test test-cli test-bus check fmt fmt-check clippy build release autoformat test-overlay-tools check-session-chat-lines
 
 # --- Test ---
 
@@ -26,6 +26,10 @@ test-bus:
 
 check: fmt-check clippy
 	cargo check
+
+check-session-chat-lines:
+	python3 -B -m unittest discover -s docs -p 'test_session_chat_lines.py'
+	python3 -B docs/check-session-chat-lines.py
 
 # --- Format ---
 

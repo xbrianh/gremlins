@@ -6,6 +6,7 @@ use tokio::net::UnixStream;
 struct Fixture {
     app: App,
     live: LiveArea<TestBackend>,
+    session: crate::daemon_client::DaemonSession,
     client: Arc<client::DaemonClient>,
     peers: [UnixStream; 2],
     attachment: Attachment,
@@ -16,11 +17,21 @@ struct Fixture {
 }
 
 impl Fixture {
+    fn own_client(client: client::DaemonClient) -> crate::daemon_client::DaemonSession {
+        crate::daemon_client::DaemonSession::from_client(
+            client,
+            mpsc::unbounded_channel().1,
+            mpsc::unbounded_channel().1,
+            mpsc::unbounded_channel().1,
+        )
+    }
+
     fn new() -> Self {
         let (client, peers) = client::DaemonClient::fake_with_identity(
             json!({"session_id":"test", "chat_run_id":"session_chat"}),
         );
         let (tx, rx) = mpsc::unbounded_channel();
+        let session = Self::own_client(client);
         Self {
             app: {
                 let mut app = App::new();
@@ -29,7 +40,8 @@ impl Fixture {
                 app
             },
             live: LiveArea::with_backend(TestBackend::new(80, 24), 80, 24),
-            client: Arc::new(client),
+            client: session.client().clone(),
+            session,
             peers,
             attachment: Attachment::default(),
             tx,
@@ -63,7 +75,8 @@ impl Fixture {
             json!({"session_id":"test", "chat_run_id":"session_chat"}),
             streams,
         );
-        f.client = Arc::new(client);
+        f.session = Self::own_client(client);
+        f.client = f.session.client().clone();
         f.peers = peers;
         f
     }
@@ -789,7 +802,7 @@ async fn watch_enter_exact_invocation_outside_retention_is_passive_and_isolates_
     input.replace_all("must not become correction");
     assert!(!matches!(
         f.app.conversations.submit(&target, &input),
-        Submission::Correction { .. }
+        ComposerAction::Correction { .. }
     ));
     for command in ["/continue", "/bail stop"] {
         assert!(f.control(command));
@@ -1184,9 +1197,12 @@ impl Fixture {
             [control.into_inner(), session]
         };
         let (connected, peers) = tokio::join!(client::connect(), server);
-        let (client, _events, chat, raw) = connected.unwrap();
-        self.client.shutdown().await;
-        self.client = Arc::new(client);
+        let (client, events, chat, raw) = connected.unwrap();
+        self.session.close().await;
+        self.session = crate::daemon_client::DaemonSession::from_client(client, events, chat, raw);
+        self.client = self.session.client().clone();
+        let chat = self.session.take_chat_rx();
+        let raw = self.session.take_raw_rx();
         self.peers = peers;
         (chat, raw)
     }
@@ -1297,7 +1313,7 @@ async fn session_chat_stale_task_progress_cannot_render_or_rebind_replacement() 
             },
             &f.app.input
         ),
-        Submission::Blocked { .. }
+        ComposerAction::Blocked { .. }
     ));
     f.assert_unsent();
 }
@@ -1396,7 +1412,7 @@ async fn session_chat_late_terminals_cannot_finish_or_rebind_active_replacement(
         assert!(!f.rendered().contains("STALE"));
     }
     assert!(
-        matches!(f.app.conversations.submit(&Target::Run { run_id: "session_chat".into() }, &f.app.input), Submission::Correction { execution, .. } if execution == b)
+        matches!(f.app.conversations.submit(&Target::Run { run_id: "session_chat".into() }, &f.app.input), ComposerAction::Correction { execution, .. } if execution == b)
     );
     f.assert_unsent();
 }
@@ -1420,7 +1436,7 @@ async fn session_chat_events_require_nonempty_matching_turn_before_any_mutation(
                 json!({"type":"tool_result","id":"tool","name":"Read","call":"Read(x)","output":"UNBOUND"}),
                 json!({"type":"task_progress","parent_id":"task","chain":"x","kind":"Scout","call":"Task(x)","reasoning":"UNBOUND","text":"UNBOUND"}),
                 json!({"type":"turn_complete","turn":1,"text":"UNBOUND","tool_calls":[]}),
-                json!({"type":"system_warning","message":"UNBOUND"}),
+                json!({"type":"system_warning","message":"turnless warning"}),
                 json!({"type":"done","text":"UNBOUND","summary":"UNBOUND"}),
                 json!({"type":"ended","reason":"UNBOUND"}),
                 json!({"type":"error","message":"UNBOUND"}),
@@ -1429,7 +1445,7 @@ async fn session_chat_events_require_nonempty_matching_turn_before_any_mutation(
                     &mut f.app,
                     &mut f.live,
                     &mut interrupt,
-                    serde_json::from_value(event).unwrap(),
+                    serde_json::from_value(event.clone()).unwrap(),
                     event_turn.map(str::to_owned),
                     Some(session_chat_execution()),
                 )
@@ -1440,7 +1456,11 @@ async fn session_chat_events_require_nonempty_matching_turn_before_any_mutation(
                     run_id: "session_chat".into()
                 }));
                 assert_eq!(f.app.input.text(), "queued correction");
-                assert!(!f.rendered().contains("UNBOUND"));
+                let rendered = f.rendered();
+                assert!(!rendered.contains("UNBOUND"));
+                if event["type"] == "system_warning" {
+                    assert!(!rendered.contains("turnless warning"));
+                }
                 let submitted = f.app.conversations.submit(
                     &Target::Run {
                         run_id: "session_chat".into(),
@@ -1448,9 +1468,9 @@ async fn session_chat_events_require_nonempty_matching_turn_before_any_mutation(
                     &f.app.input,
                 );
                 if active_id.is_none() {
-                    assert_eq!(submitted, Submission::SessionChatPrompt);
+                    assert_eq!(submitted, ComposerAction::SessionChatPrompt);
                 } else {
-                    assert!(matches!(submitted, Submission::Blocked(_)));
+                    assert!(matches!(submitted, ComposerAction::Blocked(_)));
                 }
             }
             f.assert_unsent();
@@ -1704,17 +1724,14 @@ async fn session_chat_background_stream_and_done_stay_in_session_chat_without_su
 }
 
 #[tokio::test]
-async fn session_chat_live_preenqueue_and_replacement_replay_render_early_output_once() {
+async fn session_chat_authoritative_identity_and_display_events_render_output_once() {
     for replacement in [false, true] {
         let id = if replacement {
             "replacement"
         } else {
             "session_chat"
         };
-        let mut f = Fixture::with_socket();
-        let (mut chat, mut raw) = f.connect_session_chat_queues().await;
-        install_session_chat(&mut f.app, &f.client).await;
-        assert_eq!(f.app.chat_run_id.as_deref(), Some("session_chat"));
+        let mut f = Fixture::new();
         if replacement {
             // Model a prompt owned by the replacement reservation. Changing
             // reservations retires the previous conversation's turn.
@@ -1723,62 +1740,8 @@ async fn session_chat_live_preenqueue_and_replacement_replay_render_early_output
             f.live.select_conversation(&mut f.app, target);
         }
         f.start_session_chat("1");
-        let client = Arc::clone(&f.client);
-        let enqueue = tokio::spawn(async move {
-            client
-                .send_session_request_for_generation(
-                    json!({"op":"chat", "text":"replacement prompt", "turn":"1"}),
-                    0,
-                )
-                .await
-                .unwrap()
-        });
-        // Existing history may be incomplete: replay:false must enqueue without
-        // receiving old history, a history_gap, or any replay checkpoint.
-        let mut initial = f.session_chat_peer("session_chat", false).await;
-        if !replacement {
-            socket::write_json_line(initial.get_mut(), &json!({"type":"stream_chunk","text":"preack replacement text","run_id":"session_chat","correlation_turn":"1","stage_type":"agent","stage_run_id":"early-exec"})).await.unwrap();
-        }
-        let mut session = BufReader::new(&mut f.peers[1]);
-        let request = read(&mut session).await;
-        assert_eq!(request["op"], "chat");
-        assert_eq!(request["turn"], "1");
-        // Replacement output predates this ack and is recovered by atomic replay.
-        reply(
-            &mut session,
-            json!({"type":"ok","chat_run_id":id,"enqueued":true,"session_id":"test"}),
-        )
-        .await;
-        let mut output = if replacement {
-            f.session_chat_peer(id, true).await
-        } else {
-            initial
-        };
-        let mut frames = if replacement {
-            vec![
-                json!({"type":"history_gap","run_id":"replacement"}),
-                json!({"type":"stream_chunk","text":"OLD RUN MUST NOT RENDER","run_id":"session_chat","correlation_turn":"old","stage_type":"agent","stage_run_id":"old-exec"}),
-                json!({"type":"stream_chunk","text":"preack replacement text","run_id":"replacement","correlation_turn":"1","stage_type":"agent","stage_run_id":"early-exec"}),
-                json!({"type":"replay_checkpoint"}),
-            ]
-        } else {
-            Vec::new()
-        };
-        frames.push(json!({"type":"done","text":"preack replacement text final","summary":"UNUSED SUMMARY","run_id":id,"correlation_turn":"1","stage_type":"agent","stage_run_id":"early-exec"}));
-        let wire: String = frames.iter().map(|frame| format!("{frame}\n")).collect();
-        tokio::io::AsyncWriteExt::write_all(output.get_mut(), wire.as_bytes())
-            .await
-            .unwrap();
-        assert_eq!(enqueue.await.unwrap()["chat_run_id"], id);
-        let identity = tokio::time::timeout(Duration::from_secs(2), raw.recv())
-            .await
-            .unwrap()
-            .unwrap();
-        assert_eq!(
-            identity,
-            json!({"type":"session_chat_run_identity", "id":id,
-        "turn":"1", "session_id":"test", "generation":0})
-        );
+        let identity = json!({"type":"session_chat_run_identity", "id":id,
+            "turn":"1", "session_id":"test", "generation":0});
         apply_session_chat_identity(
             &mut f.app,
             &mut f.live,
@@ -1787,42 +1750,29 @@ async fn session_chat_live_preenqueue_and_replacement_replay_render_early_output
         );
         assert!(f.app.active_request);
         assert_eq!(f.app.conversations.session_chat_turn(), Some("1"));
-        let mut kinds = Vec::new();
-        while f.app.conversations.session_chat_turn().is_some() {
-            let (event, turn, execution) =
-                tokio::time::timeout(Duration::from_secs(2), chat.recv())
-                    .await
-                    .unwrap()
-                    .unwrap();
-            kinds.push(
-                serde_json::to_value(&event).unwrap()["type"]
-                    .as_str()
-                    .unwrap()
-                    .to_owned(),
+        // Client tests own gap detection and replay filtering; UI receives display events.
+        if replacement {
+            f.session_chat_event(
+                "1",
+                json!({"type":"system_warning",
+                "message":"session_chat display history discontinuity"}),
+                None,
             );
-            apply_session_chat_event(
-                &mut f.app,
-                &mut f.live,
-                &mut SessionChatInterrupt::default(),
-                event,
-                turn,
-                execution,
-            )
-            .unwrap();
-            if kinds.last().map(String::as_str) == Some("system_warning") {
-                assert!(f.app.active_request); // A display gap is not turn failure.
-                assert_eq!(f.app.conversations.session_chat_turn(), Some("1"));
-            }
+            assert!(f.app.active_request);
+            assert_eq!(f.app.conversations.session_chat_turn(), Some("1"));
         }
-        assert_eq!(
-            kinds,
-            if replacement {
-                vec!["system_warning", "stream_chunk", "done"]
-            } else {
-                vec!["stream_chunk", "done"]
-            }
+        let execution = protocol::Execution {
+            run_id: id.into(),
+            stage_run_id: "early-exec".into(),
+            nonce: 0,
+        };
+        f.session_chat_output("1", "preack replacement text", execution.clone());
+        f.session_chat_event(
+            "1",
+            json!({"type":"done",
+            "text":"preack replacement text final","summary":"UNUSED SUMMARY"}),
+            Some(execution),
         );
-        assert!(chat.try_recv().is_err());
         let rendered = f.rendered();
         assert_eq!(
             rendered
@@ -1841,18 +1791,18 @@ async fn session_chat_live_preenqueue_and_replacement_replay_render_early_output
             1,
             "{rendered}"
         );
-        assert!(!rendered.contains("OLD RUN MUST NOT RENDER"));
+        assert!(!f.live.target_has_current_turn(&f.app.session_chat_target()));
         assert!(!rendered.contains("UNUSED SUMMARY"));
         assert_eq!(f.app.chat_run_id.as_deref(), Some(id));
         assert!(f.app.conversations.session_chat_turn().is_none());
         assert!(!f.app.active_request);
-        f.assert_no_fallback().await;
+        f.assert_unsent();
         f.client.shutdown().await;
     }
 }
 
 #[tokio::test]
-async fn session_chat_two_turn_completion_routes_parked_text_as_fresh_prompts() {
+async fn session_chat_terminal_presentation_allows_fresh_turn_without_losing_drafts() {
     for mode in [
         "visible",
         "parked",
@@ -1863,61 +1813,36 @@ async fn session_chat_two_turn_completion_routes_parked_text_as_fresh_prompts() 
         "starting-correction",
         "enqueue-rejection",
     ] {
-        let mut f = Fixture::with_socket();
-        let (mut chat, _raw) = f.connect_session_chat_queues().await;
+        let mut f = Fixture::new();
         let (tx, mut rx) = mpsc::unbounded_channel();
-        let mut generation = 0;
         f.app.replace_input("first prompt");
         assert!(!f.submit(&tx));
         assert_eq!(f.app.input.text(), "first prompt");
-        assert!(rx.try_recv().is_err());
-        f.assert_unsent();
-        f.send_prompt(&mut generation);
-        let mut observer = f.session_chat_peer("session_chat", false).await;
-        let mut session = BufReader::new(&mut f.peers[1]);
-        let first = read(&mut session).await;
-        assert_eq!(first["op"], "chat");
-        assert_eq!(first["turn"], "1");
-        assert!(first.get("target").is_none());
-        assert_eq!(first["text"], "first prompt");
-        assert_eq!(first["session_id"], "test");
-        drop(session);
-        if mode == "starting-correction" || mode == "enqueue-rejection" {
-            f.app.replace_input("second prompt");
-            assert!(f.submit(&tx));
-            assert_eq!(f.app.input.text(), "second prompt");
-            assert!(rx.try_recv().is_err());
-            f.assert_no_fallback().await;
-        }
-        let mut session = BufReader::new(&mut f.peers[1]);
-        if mode == "enqueue-rejection" {
-            reply(
-                &mut session,
-                json!({"type":"error","message":"socket enqueue rejected"}),
-            )
-            .await;
-        } else {
-            reply(
-                &mut session,
-                json!({"type":"ok","chat_run_id":"session_chat","enqueued":true,"session_id":"test"}),
-            )
-            .await;
-            assert_eq!(read(&mut session).await["op"], "chat_model");
-            reply(&mut session, json!({"type":"ok","model":null})).await;
-        }
-        drop(session);
-        if mode != "failure" && mode != "starting-correction" && mode != "enqueue-rejection" {
+        f.start_session_chat("A");
+        let starting = matches!(
+            mode,
+            "failure" | "starting-correction" | "enqueue-rejection"
+        );
+        let draft = matches!(
+            mode,
+            "parked" | "correction" | "starting-correction" | "enqueue-rejection"
+        );
+        if !starting {
             f.session_chat_event(
-                "1",
+                "A",
                 json!({"type":"reasoning_chunk","text":"working"}),
                 Some(session_chat_execution()),
             );
-            if mode != "visible" && mode != "parked" {
-                f.session_chat_event("1", json!({"type":"tool_result","id":"read","name":"Read","call":"Read(x)","output":"final tool result"}), Some(session_chat_execution()));
-            }
+            f.session_chat_event("A", json!({"type":"tool_result","id":"read","name":"Read","call":"Read(x)","output":"final tool result"}), Some(session_chat_execution()));
         }
-        if mode == "correction" || mode == "parked" {
+        if draft {
             f.app.replace_input("second prompt");
+        }
+        if matches!(mode, "starting-correction" | "enqueue-rejection") {
+            assert!(f.submit(&tx));
+            assert_eq!(f.app.input.text(), "second prompt");
+            assert!(rx.try_recv().is_err());
+            f.assert_unsent();
         }
         if mode == "parked" {
             f.live.select_conversation(
@@ -1931,253 +1856,168 @@ async fn session_chat_two_turn_completion_routes_parked_text_as_fresh_prompts() 
         if mode.starts_with("missing") {
             f.live.clear_current_turn();
         }
-        let terminal = if mode == "failure" || mode == "starting-correction" {
-            json!({"type":"error","message":"pre-stage setup failed"})
-        } else if mode == "missing-ended" {
-            json!({"type":"ended","reason":"finished"})
-        } else {
-            json!({"type":"done","text":"first final","summary":""})
-        };
-        if mode == "visible" || mode == "parked" {
-            for mut frame in [
-                json!({"type":"tool_result","id":"read","name":"Read","call":"Read(x)","output":"final tool result"}),
-                terminal,
-            ] {
-                frame["run_id"] = json!("session_chat");
-                frame["correlation_turn"] = json!("1");
-                frame["stage_type"] = json!("agent");
-                frame["stage_run_id"] = json!("exec-A");
-                socket::write_json_line(observer.get_mut(), &frame)
-                    .await
-                    .unwrap();
-                let (event, turn, execution) =
-                    tokio::time::timeout(Duration::from_secs(2), chat.recv())
-                        .await
-                        .unwrap()
-                        .unwrap();
-                apply_session_chat_event(
-                    &mut f.app,
-                    &mut f.live,
-                    &mut SessionChatInterrupt::default(),
-                    event,
-                    turn,
-                    execution,
-                )
-                .unwrap();
+        let terminal = match mode {
+            "failure" | "starting-correction" => {
+                json!({"type":"error","message":"pre-stage setup failed"})
             }
-        } else if mode == "enqueue-rejection" {
-            let (event, turn, execution) =
-                tokio::time::timeout(Duration::from_secs(2), chat.recv())
-                    .await
-                    .unwrap()
-                    .unwrap();
-            assert_eq!(serde_json::to_value(&event).unwrap()["type"], "error");
-            assert_eq!(turn.as_deref(), Some("1"));
-            assert!(execution.is_none());
-            apply_session_chat_event(
-                &mut f.app,
-                &mut f.live,
-                &mut SessionChatInterrupt::default(),
-                event,
-                turn,
-                execution,
-            )
-            .unwrap();
-            assert!(f.rendered().contains("socket enqueue rejected"));
-            assert!(chat.try_recv().is_err());
-        } else {
-            f.session_chat_event("1", terminal, None);
-        }
+            "enqueue-rejection" => json!({"type":"error","message":"socket enqueue rejected"}),
+            "missing-ended" => json!({"type":"ended","reason":"finished"}),
+            _ => json!({"type":"done","text":"first final","summary":"UNUSED A SUMMARY"}),
+        };
+        f.session_chat_event("A", terminal, None);
         if mode == "parked" {
             assert_eq!(f.app.input.text(), "unrelated draft");
-            f.live.select_conversation(
-                &mut f.app,
-                Target::Run {
-                    run_id: "session_chat".into(),
-                },
-            );
-            // Selecting a stage and returning must neither close nor replace
-            // the SessionChat display socket, even when SessionChat finishes while parked.
-            assert!(tokio::time::timeout(
-                Duration::from_millis(30),
-                socket::read_json_line(&mut observer)
-            )
-            .await
-            .is_err());
-            f.assert_no_fallback().await;
+            assert!(!f.rendered().contains("first final"));
+            let target = f.app.session_chat_target();
+            f.live.select_conversation(&mut f.app, target);
         }
+        assert!(f.app.conversations.session_chat_turn().is_none(), "{mode}");
+        assert!(!f.app.active_request, "{mode}");
         assert!(
-            f.app.conversations.session_chat_turn().is_none(),
-            "{mode}: terminal did not retire turn"
+            !f.live.target_has_current_turn(&f.app.session_chat_target()),
+            "{mode}"
         );
-        assert!(
-            !f.app.active_request,
-            "{mode}: terminal left request active"
-        );
-        let parked_text =
-            mode.ends_with("correction") || mode == "enqueue-rejection" || mode == "parked";
-        if parked_text {
-            assert_eq!(f.app.input.text(), "second prompt");
+        if draft {
+            assert_eq!(f.app.input.text(), "second prompt", "{mode}");
         } else {
-            assert!(f.app.input.is_empty(), "{mode}: composer was not consumed");
+            assert!(f.app.input.is_empty(), "{mode}");
             f.app.replace_input("second prompt");
         }
-        if !mode.starts_with("missing")
-            && mode != "failure"
-            && !mode.ends_with("correction")
-            && mode != "enqueue-rejection"
-        {
-            assert!(f.rendered().contains(REASONING_COMPLETED_TITLE));
-            assert!(f.rendered().contains("first final"));
-            assert!(f.rendered().contains("final tool result"));
-        }
-        if mode == "failure" {
-            assert!(f.rendered().contains("pre-stage setup failed"));
-        }
-        let prompt = "second prompt";
-        assert!(!f.submit(&tx), "{mode}: fresh prompt refused");
-        f.send_prompt(&mut generation);
-        // A fresh turn reuses the existing SessionChat watch, including after parking
-        // SessionChat behind a stage and returning or rejecting the first enqueue.
-        assert!(tokio::time::timeout(
-            Duration::from_millis(30),
-            f.socket.as_ref().unwrap().0.accept()
-        )
-        .await
-        .is_err());
-        let mut session = BufReader::new(&mut f.peers[1]);
-        let second = read(&mut session).await;
-        assert_eq!(second["op"], "chat");
-        assert_eq!(second["text"], prompt);
-        assert_eq!(second["turn"], "2");
-        assert_ne!(second["turn"], first["turn"]);
-        assert!(second.get("target").is_none());
-        assert!(second.get("stage_run_id").is_none());
-        let accepted_b = mode == "visible" || mode == "parked";
-        if accepted_b {
-            socket::write_json_line(observer.get_mut(), &json!({"type":"stream_chunk","run_id":"session_chat","correlation_turn":"2","stage_type":"agent","stage_run_id":"exec-B","text":"second early"})).await.unwrap();
-            assert!(
-                tokio::time::timeout(Duration::from_millis(30), chat.recv())
-                    .await
-                    .is_err(),
-                "{mode}: B output escaped before enqueue acknowledgment"
-            );
-        }
-        reply(
-            &mut session,
-            if accepted_b {
-                json!({"type":"ok","chat_run_id":"session_chat","enqueued":true,"session_id":"test"})
-            } else {
-                json!({"type":"error","message":"fixture complete"})
-            },
-        )
-        .await;
-        if accepted_b {
-            assert_eq!(read(&mut session).await["op"], "chat_model");
-            reply(&mut session, json!({"type":"ok","model":null})).await;
-        }
-        assert!(tokio::time::timeout(
-            Duration::from_millis(30),
-            socket::read_json_line(&mut session)
-        )
-        .await
-        .is_err());
-        drop(session);
-        if accepted_b {
-            let (event, turn, execution) =
-                tokio::time::timeout(Duration::from_secs(2), chat.recv())
-                    .await
-                    .unwrap()
-                    .unwrap();
-            assert_eq!(turn.as_deref(), Some("2"));
-            assert_eq!(
-                serde_json::to_value(&event).unwrap()["text"],
-                "second early"
-            );
-            assert_eq!(execution.as_ref().unwrap().stage_run_id, "exec-B");
-            apply_session_chat_event(
-                &mut f.app,
-                &mut f.live,
-                &mut SessionChatInterrupt::default(),
-                event,
-                turn,
-                execution,
-            )
-            .unwrap();
-            assert_eq!(f.rendered().matches("second early").count(), 1);
-            assert!(f.app.active_request);
-            assert!(f.live.target_has_current_turn(&Target::Run {
-                run_id: "session_chat".into()
-            }));
-
-            // A valid late A terminal must not retire B or its persistent watch.
-            socket::write_json_line(
-                observer.get_mut(),
-                &json!({"type":"ended","run_id":"session_chat","correlation_turn":"1","reason":"finished"}),
-            )
-            .await
-            .unwrap();
-            // A subsequent B chunk is a wire-order barrier for the late terminal.
-            socket::write_json_line(observer.get_mut(), &json!({"type":"stream_chunk","run_id":"session_chat","correlation_turn":"2","stage_type":"agent","stage_run_id":"exec-B","text":" continues"})).await.unwrap();
-            loop {
-                let (event, turn, execution) =
-                    tokio::time::timeout(Duration::from_secs(2), chat.recv())
-                        .await
-                        .unwrap()
-                        .unwrap();
-                let is_b = turn.as_deref() == Some("2");
-                if is_b {
-                    assert_eq!(
-                        serde_json::to_value(&event).unwrap()["type"],
-                        "stream_chunk"
-                    );
-                } else {
-                    assert_eq!(turn.as_deref(), Some("1"));
-                    assert_eq!(serde_json::to_value(&event).unwrap()["type"], "ended");
-                }
-                apply_session_chat_event(
-                    &mut f.app,
-                    &mut f.live,
-                    &mut SessionChatInterrupt::default(),
-                    event,
-                    turn,
-                    execution,
-                )
-                .unwrap();
-                assert_eq!(f.app.conversations.session_chat_turn(), Some("2"));
-                assert!(f.app.active_request);
-                assert!(f.live.target_has_current_turn(&Target::Run {
-                    run_id: "session_chat".into()
-                }));
-                if is_b {
-                    break;
-                }
+        let rendered = f.rendered();
+        if !starting && !mode.starts_with("missing") {
+            for text in [
+                REASONING_COMPLETED_TITLE,
+                "first final",
+                "final tool result",
+            ] {
+                assert_eq!(rendered.matches(text).count(), 1, "{mode}: {rendered}");
             }
-            assert_eq!(f.rendered().matches("second early continues").count(), 1);
         }
+        if matches!(mode, "failure" | "starting-correction") {
+            assert!(rendered.contains("pre-stage setup failed"));
+        }
+        if mode == "enqueue-rejection" {
+            assert!(rendered.contains("socket enqueue rejected"));
+        }
+        assert!(!rendered.contains("UNUSED A SUMMARY"));
+        assert!(!f.submit(&tx), "{mode}: fresh prompt refused");
+        assert_eq!(f.app.input.text(), "second prompt");
+        f.start_session_chat("B");
+        let b = protocol::Execution {
+            run_id: "session_chat".into(),
+            stage_run_id: "exec-B".into(),
+            nonce: 24,
+        };
+        f.session_chat_output("B", "second early", b.clone());
+        assert_eq!(f.rendered().matches("second early").count(), 1);
+        f.app.replace_input("third prompt");
         for terminal in [
             json!({"type":"done","text":"STALE","summary":""}),
             json!({"type":"ended","reason":"STALE"}),
             json!({"type":"error","message":"STALE"}),
         ] {
-            f.session_chat_event("1", terminal, Some(session_chat_execution()));
-            assert_eq!(f.app.conversations.session_chat_turn(), Some("2"));
-        }
-        f.app.replace_input("third prompt");
-        if !accepted_b {
-            assert!(f.submit(&tx));
+            f.session_chat_event("A", terminal, Some(session_chat_execution()));
+            assert_eq!(f.app.conversations.session_chat_turn(), Some("B"));
+            assert!(f.app.active_request);
+            assert!(f.live.target_has_current_turn(&f.app.session_chat_target()));
             assert_eq!(f.app.input.text(), "third prompt");
         }
+        f.session_chat_output("B", " continues", b.clone());
+        f.session_chat_event("B", json!({"type":"done","text":"second early continues final","summary":"UNUSED B SUMMARY"}), Some(b));
+        assert!(f.app.conversations.session_chat_turn().is_none());
+        assert!(!f.app.active_request);
+        assert!(!f.live.target_has_current_turn(&f.app.session_chat_target()));
+        assert_eq!(f.app.input.text(), "third prompt");
+        let rendered = f.rendered();
+        assert_eq!(
+            rendered.matches("second early").count(),
+            1,
+            "{mode}: {rendered}"
+        );
+        assert_eq!(
+            rendered.matches("second early continues final").count(),
+            1,
+            "{mode}: {rendered}"
+        );
+        assert!(!rendered.contains("STALE"));
+        assert!(!rendered.contains("UNUSED B SUMMARY"));
+        if !starting && !mode.starts_with("missing") {
+            for text in ["first final", "final tool result"] {
+                assert_eq!(rendered.matches(text).count(), 1, "{mode}: {rendered}");
+            }
+        }
         assert!(rx.try_recv().is_err());
-        if accepted_b {
-            socket::write_json_line(observer.get_mut(), &json!({"type":"done","run_id":"session_chat","correlation_turn":"2","stage_type":"agent","stage_run_id":"exec-B","text":"second early continues final","summary":"UNUSED B SUMMARY"})).await.unwrap();
+        f.assert_unsent();
+        f.client.shutdown().await;
+    }
+}
+
+#[tokio::test]
+async fn session_chat_prompt_to_render_reuses_watch_across_parked_turns() {
+    // One end-to-end seam: prompt enqueue -> persistent watch -> rendered turns.
+    let mut f = Fixture::with_socket();
+    let (mut chat, _raw) = f.connect_session_chat_queues().await;
+    let (tx, mut rx) = mpsc::unbounded_channel();
+    let mut generation = 0;
+    f.app.replace_input("first prompt");
+    assert!(!f.submit(&tx));
+    assert_eq!(f.app.input.text(), "first prompt");
+    assert!(rx.try_recv().is_err());
+    f.assert_unsent();
+    f.send_prompt(&mut generation);
+    let mut observer = f.session_chat_peer("session_chat", false).await;
+    let mut session = BufReader::new(&mut f.peers[1]);
+    let first = read(&mut session).await;
+    assert_eq!(first["op"], "chat");
+    assert_eq!(first["turn"], "1");
+    assert!(first.get("target").is_none());
+    assert_eq!(first["text"], "first prompt");
+    assert_eq!(first["session_id"], "test");
+    drop(session);
+    let mut session = BufReader::new(&mut f.peers[1]);
+    {
+        reply(
+            &mut session,
+            json!({"type":"ok","chat_run_id":"session_chat","enqueued":true,"session_id":"test"}),
+        )
+        .await;
+        assert_eq!(read(&mut session).await["op"], "chat_model");
+        reply(&mut session, json!({"type":"ok","model":null})).await;
+    }
+    drop(session);
+    f.session_chat_event(
+        "1",
+        json!({"type":"reasoning_chunk","text":"working"}),
+        Some(session_chat_execution()),
+    );
+    f.app.replace_input("second prompt");
+    {
+        f.live.select_conversation(
+            &mut f.app,
+            Target::Run {
+                run_id: "other".into(),
+            },
+        );
+        f.app.replace_input("unrelated draft");
+    }
+    let terminal = json!({"type":"done","text":"first final","summary":""});
+    {
+        for mut frame in [
+            json!({"type":"tool_result","id":"read","name":"Read","call":"Read(x)","output":"final tool result"}),
+            terminal,
+        ] {
+            frame["run_id"] = json!("session_chat");
+            frame["correlation_turn"] = json!("1");
+            frame["stage_type"] = json!("agent");
+            frame["stage_run_id"] = json!("exec-A");
+            socket::write_json_line(observer.get_mut(), &frame)
+                .await
+                .unwrap();
             let (event, turn, execution) =
                 tokio::time::timeout(Duration::from_secs(2), chat.recv())
                     .await
                     .unwrap()
                     .unwrap();
-            assert_eq!(turn.as_deref(), Some("2"));
-            assert_eq!(serde_json::to_value(&event).unwrap()["type"], "done");
             apply_session_chat_event(
                 &mut f.app,
                 &mut f.live,
@@ -2187,34 +2027,197 @@ async fn session_chat_two_turn_completion_routes_parked_text_as_fresh_prompts() 
                 execution,
             )
             .unwrap();
-            assert!(f.app.conversations.session_chat_turn().is_none());
-            assert!(!f.app.active_request);
-            assert!(!f.live.target_has_current_turn(&Target::Run {
-                run_id: "session_chat".into()
-            }));
-            assert_eq!(f.app.input.text(), "third prompt");
-            let rendered = f.rendered();
-            for text in [
-                "first final",
-                "final tool result",
-                "second early",
-                "second early continues final",
-            ] {
-                assert_eq!(rendered.matches(text).count(), 1, "{mode}: {rendered}");
-            }
-            assert!(!rendered.contains("STALE"), "{rendered}");
-            assert!(!rendered.contains("UNUSED B SUMMARY"), "{rendered}");
-            assert!(chat.try_recv().is_err());
-            assert!(tokio::time::timeout(
-                Duration::from_millis(30),
-                socket::read_json_line(&mut observer)
+        }
+    }
+    {
+        assert_eq!(f.app.input.text(), "unrelated draft");
+        f.live.select_conversation(
+            &mut f.app,
+            Target::Run {
+                run_id: "session_chat".into(),
+            },
+        );
+        // Selecting a stage and returning must neither close nor replace
+        // the SessionChat display socket, even when SessionChat finishes while parked.
+        assert!(tokio::time::timeout(
+            Duration::from_millis(30),
+            socket::read_json_line(&mut observer)
+        )
+        .await
+        .is_err());
+        f.assert_no_fallback().await;
+    }
+    assert!(f.app.conversations.session_chat_turn().is_none());
+    assert!(!f.app.active_request);
+    assert_eq!(f.app.input.text(), "second prompt");
+    assert!(f.rendered().contains(REASONING_COMPLETED_TITLE));
+    assert!(f.rendered().contains("first final"));
+    assert!(f.rendered().contains("final tool result"));
+    let prompt = "second prompt";
+    assert!(!f.submit(&tx), "fresh prompt refused");
+    f.send_prompt(&mut generation);
+    // A fresh turn reuses the existing SessionChat watch, including after parking
+    // SessionChat behind another conversation and returning.
+    assert!(tokio::time::timeout(
+        Duration::from_millis(30),
+        f.socket.as_ref().unwrap().0.accept()
+    )
+    .await
+    .is_err());
+    let mut session = BufReader::new(&mut f.peers[1]);
+    let second = read(&mut session).await;
+    assert_eq!(second["op"], "chat");
+    assert_eq!(second["text"], prompt);
+    assert_eq!(second["turn"], "2");
+    assert_ne!(second["turn"], first["turn"]);
+    assert!(second.get("target").is_none());
+    assert!(second.get("stage_run_id").is_none());
+    {
+        socket::write_json_line(observer.get_mut(), &json!({"type":"stream_chunk","run_id":"session_chat","correlation_turn":"2","stage_type":"agent","stage_run_id":"exec-B","text":"second early"})).await.unwrap();
+        // Transport buffering is covered by daemon-client tests. Consume the
+        // reply below through the same queue whether it arrives before or after ack.
+    }
+    reply(
+        &mut session,
+        json!({"type":"ok","chat_run_id":"session_chat","enqueued":true,"session_id":"test"}),
+    )
+    .await;
+    {
+        assert_eq!(read(&mut session).await["op"], "chat_model");
+        reply(&mut session, json!({"type":"ok","model":null})).await;
+    }
+    assert!(tokio::time::timeout(
+        Duration::from_millis(30),
+        socket::read_json_line(&mut session)
+    )
+    .await
+    .is_err());
+    drop(session);
+    {
+        let (event, turn, execution) = tokio::time::timeout(Duration::from_secs(2), chat.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(turn.as_deref(), Some("2"));
+        assert_eq!(
+            serde_json::to_value(&event).unwrap()["text"],
+            "second early"
+        );
+        assert_eq!(execution.as_ref().unwrap().stage_run_id, "exec-B");
+        apply_session_chat_event(
+            &mut f.app,
+            &mut f.live,
+            &mut SessionChatInterrupt::default(),
+            event,
+            turn,
+            execution,
+        )
+        .unwrap();
+        assert_eq!(f.rendered().matches("second early").count(), 1);
+        assert!(f.app.active_request);
+        assert!(f.live.target_has_current_turn(&Target::Run {
+            run_id: "session_chat".into()
+        }));
+
+        // A valid late A terminal must not retire B or its persistent watch.
+        socket::write_json_line(
+                observer.get_mut(),
+                &json!({"type":"ended","run_id":"session_chat","correlation_turn":"1","reason":"finished"}),
             )
             .await
-            .is_err());
+            .unwrap();
+        // A subsequent B chunk is a wire-order barrier for the late terminal.
+        socket::write_json_line(observer.get_mut(), &json!({"type":"stream_chunk","run_id":"session_chat","correlation_turn":"2","stage_type":"agent","stage_run_id":"exec-B","text":" continues"})).await.unwrap();
+        loop {
+            let (event, turn, execution) =
+                tokio::time::timeout(Duration::from_secs(2), chat.recv())
+                    .await
+                    .unwrap()
+                    .unwrap();
+            let is_b = turn.as_deref() == Some("2");
+            if is_b {
+                assert_eq!(
+                    serde_json::to_value(&event).unwrap()["type"],
+                    "stream_chunk"
+                );
+            } else {
+                assert_eq!(turn.as_deref(), Some("1"));
+                assert_eq!(serde_json::to_value(&event).unwrap()["type"], "ended");
+            }
+            apply_session_chat_event(
+                &mut f.app,
+                &mut f.live,
+                &mut SessionChatInterrupt::default(),
+                event,
+                turn,
+                execution,
+            )
+            .unwrap();
+            assert_eq!(f.app.conversations.session_chat_turn(), Some("2"));
+            assert!(f.app.active_request);
+            assert!(f.live.target_has_current_turn(&Target::Run {
+                run_id: "session_chat".into()
+            }));
+            if is_b {
+                break;
+            }
         }
-        f.assert_no_fallback().await;
-        f.client.shutdown().await;
+        assert_eq!(f.rendered().matches("second early continues").count(), 1);
     }
+    for terminal in [
+        json!({"type":"done","text":"STALE","summary":""}),
+        json!({"type":"ended","reason":"STALE"}),
+        json!({"type":"error","message":"STALE"}),
+    ] {
+        f.session_chat_event("1", terminal, Some(session_chat_execution()));
+        assert_eq!(f.app.conversations.session_chat_turn(), Some("2"));
+    }
+    f.app.replace_input("third prompt");
+    assert!(rx.try_recv().is_err());
+    {
+        socket::write_json_line(observer.get_mut(), &json!({"type":"done","run_id":"session_chat","correlation_turn":"2","stage_type":"agent","stage_run_id":"exec-B","text":"second early continues final","summary":"UNUSED B SUMMARY"})).await.unwrap();
+        let (event, turn, execution) = tokio::time::timeout(Duration::from_secs(2), chat.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(turn.as_deref(), Some("2"));
+        assert_eq!(serde_json::to_value(&event).unwrap()["type"], "done");
+        apply_session_chat_event(
+            &mut f.app,
+            &mut f.live,
+            &mut SessionChatInterrupt::default(),
+            event,
+            turn,
+            execution,
+        )
+        .unwrap();
+        assert!(f.app.conversations.session_chat_turn().is_none());
+        assert!(!f.app.active_request);
+        assert!(!f.live.target_has_current_turn(&Target::Run {
+            run_id: "session_chat".into()
+        }));
+        assert_eq!(f.app.input.text(), "third prompt");
+        let rendered = f.rendered();
+        for text in [
+            "first final",
+            "final tool result",
+            "second early",
+            "second early continues final",
+        ] {
+            assert_eq!(rendered.matches(text).count(), 1, "{rendered}");
+        }
+        assert!(!rendered.contains("STALE"), "{rendered}");
+        assert!(!rendered.contains("UNUSED B SUMMARY"), "{rendered}");
+        assert!(chat.try_recv().is_err());
+        assert!(tokio::time::timeout(
+            Duration::from_millis(30),
+            socket::read_json_line(&mut observer)
+        )
+        .await
+        .is_err());
+    }
+    f.assert_no_fallback().await;
+    f.client.shutdown().await;
 }
 
 #[tokio::test]
@@ -2290,9 +2293,8 @@ async fn session_chat_native_input_rejection_and_delivery_are_not_bus_responses(
 }
 
 #[tokio::test]
-async fn session_chat_queued_a_non_delivery_preserves_identity_after_normal_b_submission() {
-    let mut f = Fixture::with_socket();
-    let (mut chat, mut raw) = f.connect_session_chat_queues().await;
+async fn session_chat_queued_a_non_delivery_preserves_identity_after_b_submission() {
+    let mut f = Fixture::with_watch_socket(1);
     let (tx, mut rx) = mpsc::unbounded_channel();
     f.start_session_chat("A");
     f.session_chat_bus(json!({"type":"stream_chunk","text":"A output",
@@ -2317,56 +2319,18 @@ async fn session_chat_queued_a_non_delivery_preserves_identity_after_normal_b_su
     assert!(f.app.input.is_empty());
     f.app.replace_input("normal B prompt");
     assert!(!f.submit(&tx));
-    // Exercise the normal prompt entry point, rather than manufacturing begin_session_chat_turn.
-    let mut generation = 1;
-    f.send_prompt(&mut generation);
-    let mut observer = f.session_chat_peer("session_chat", false).await;
-    let mut session = BufReader::new(&mut f.peers[1]);
-    let b = read(&mut session).await;
-    assert_eq!(b["op"], "chat");
-    assert_eq!(b["text"], "normal B prompt");
-    assert_eq!(b["turn"], "2");
-    assert!(b.get("target").is_none());
-    reply(
-        &mut session,
-        json!({"type":"ok","chat_run_id":"session_chat","enqueued":true,"session_id":"test"}),
-    )
-    .await;
-    assert_eq!(read(&mut session).await["op"], "chat_model");
-    reply(&mut session, json!({"type":"ok","model":null})).await;
-    drop(session);
-    let identity = tokio::time::timeout(Duration::from_secs(2), raw.recv())
-        .await
-        .unwrap()
-        .unwrap();
-    assert_eq!(identity["type"], "session_chat_run_identity");
-    assert_eq!(identity["turn"], "2");
+    // Prompt transport is covered by the wiring test; this seam owns late receipts.
+    f.start_session_chat("2");
+    let identity = json!({"type":"session_chat_run_identity", "id":"session_chat",
+        "turn":"2", "session_id":"test", "generation":0});
     apply_session_chat_identity(
         &mut f.app,
         &mut f.live,
         &identity,
         f.client.session_generation().await,
     );
-    reply(
-        &mut observer,
-        json!({"type":"stream_chunk","text":"B successfully started",
-        "run_id":"session_chat","stage_run_id":"native-B","stage_type":"agent","correlation_turn":"2"}),
-    )
-    .await;
-    let (event, turn, execution) = tokio::time::timeout(Duration::from_secs(2), chat.recv())
-        .await
-        .unwrap()
-        .unwrap();
-    assert_eq!(execution.as_ref().unwrap().stage_run_id, "native-B");
-    apply_session_chat_event(
-        &mut f.app,
-        &mut f.live,
-        &mut SessionChatInterrupt::default(),
-        event,
-        turn,
-        execution,
-    )
-    .unwrap();
+    f.session_chat_bus(json!({"type":"stream_chunk","text":"B successfully started",
+        "run_id":"session_chat","stage_run_id":"native-B","stage_type":"agent","correlation_turn":"2"}));
     assert!(f.app.active_request);
     assert!(f.rendered().contains("B successfully started"));
     f.app.replace_input("B draft must survive");
@@ -2388,7 +2352,6 @@ async fn session_chat_queued_a_non_delivery_preserves_identity_after_normal_b_su
     assert!(f.app.active_request);
     assert!(!rendered.contains("B setup pending"));
     assert!(rx.try_recv().is_err());
-    assert!(chat.try_recv().is_err());
     // No automatic retry to B's now-live execution, nor a fallback chat.
     let mut session = BufReader::new(&mut f.peers[1]);
     assert!(tokio::time::timeout(

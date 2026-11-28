@@ -1,3 +1,9 @@
+pub(crate) mod chat;
+mod stream;
+
+#[cfg(test)]
+mod chat_integration_tests;
+
 use std::sync::Arc;
 
 use gremlins_magic_bus::EventKind;
@@ -11,6 +17,7 @@ use crate::tui::client::{self, ChatEvent, DaemonClient};
 /// delegates operations to the existing `DaemonClient`.
 pub(crate) struct DaemonSession {
     client: Arc<DaemonClient>,
+    chat_watch: Arc<chat::ChatWatch>,
     event_rx: Option<mpsc::UnboundedReceiver<EventKind>>,
     chat_rx: Option<mpsc::UnboundedReceiver<ChatEvent>>,
     raw_rx: Option<mpsc::UnboundedReceiver<Value>>,
@@ -29,8 +36,12 @@ impl DaemonSession {
         chat_rx: mpsc::UnboundedReceiver<ChatEvent>,
         raw_rx: mpsc::UnboundedReceiver<Value>,
     ) -> Self {
+        let client = Arc::new(client);
+        let chat_watch = Arc::new(chat::ChatWatch::new(&client));
+        *client.chat_watch.lock().unwrap() = Arc::downgrade(&chat_watch);
         Self {
-            client: Arc::new(client),
+            client,
+            chat_watch,
             event_rx: Some(event_rx),
             chat_rx: Some(chat_rx),
             raw_rx: Some(raw_rx),
@@ -80,6 +91,7 @@ impl DaemonSession {
         self.event_rx.take();
         self.chat_rx.take();
         self.raw_rx.take();
+        self.chat_watch.close().await;
         self.client.release_inputs();
         self.client.shutdown().await;
         self.closed = true;

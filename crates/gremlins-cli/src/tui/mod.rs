@@ -57,7 +57,7 @@ use tokio::sync::mpsc;
 
 use crate::display;
 
-use app::{App, ConversationStatus, Screen, Submission, Target};
+use app::{App, ComposerAction, ConversationStatus, Screen, Target};
 use commands::{dispatch, CommandResult};
 use editor::{open_editor, ReaderChannels, SuspendHandle};
 use input_buffer::InputBuffer;
@@ -244,12 +244,12 @@ fn route_submission<B: ratatui::backend::Backend>(
         return true;
     }
     match app.conversations.submit(&app.selected_target, &app.input) {
-        Submission::SessionChatPrompt => false,
-        Submission::Blocked(message) => {
+        ComposerAction::SessionChatPrompt => false,
+        ComposerAction::Blocked(message) => {
             live.push_transcript_line(message.to_string());
             true
         }
-        Submission::Correction {
+        ComposerAction::Correction {
             id,
             execution,
             text,
@@ -3321,7 +3321,8 @@ mod attachment_tests {
 
     fn pending_correction(app: &mut App, target: &Target, text: &str) -> u64 {
         app.replace_input(text);
-        let Submission::Correction { id, .. } = app.conversations.submit(target, &app.input) else {
+        let ComposerAction::Correction { id, .. } = app.conversations.submit(target, &app.input)
+        else {
             panic!("expected correction")
         };
         id
@@ -4340,7 +4341,7 @@ mod tests {
 
     #[test]
     fn editor_allows_writable_correction_while_session_chat_is_running() {
-        use super::{app::Execution, selected_session_chat_turn_active, Submission, Target};
+        use super::{app::Execution, selected_session_chat_turn_active, ComposerAction, Target};
 
         let mut app = App::new();
         app.conversations
@@ -4365,7 +4366,7 @@ mod tests {
         }
         assert!(matches!(
             app.conversations.submit(&target, &app.input),
-            Submission::Correction { execution: addressed, .. } if addressed == execution
+            ComposerAction::Correction { execution: addressed, .. } if addressed == execution
         ));
         assert_eq!(
             app.conversations.session_chat_turn(),
@@ -4391,7 +4392,7 @@ mod tests {
 
     #[test]
     fn hard_interrupt_retires_session_chat_turn_without_dismissing_its_correction() {
-        use super::{app::Execution, clear_active_turn_ui, LiveArea, Submission};
+        use super::{app::Execution, clear_active_turn_ui, ComposerAction, LiveArea};
         use ratatui::backend::TestBackend;
 
         let mut app = App::new();
@@ -4416,7 +4417,7 @@ mod tests {
         assert!(matches!(
             app.conversations
                 .submit(&app.session_chat_target(), &app.input),
-            Submission::SessionChatPrompt
+            ComposerAction::SessionChatPrompt
         ));
 
         app.conversations
@@ -4424,7 +4425,7 @@ mod tests {
         assert!(matches!(
             app.conversations
                 .submit(&app.session_chat_target(), &app.input),
-            Submission::Correction { .. }
+            ComposerAction::Correction { .. }
         ));
         area.clear_target_input(&app.session_chat_target(), &mut app);
         assert!(app.input.is_empty());

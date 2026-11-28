@@ -2744,6 +2744,7 @@ mod tests {
         use crate::tui::app::{ActiveRun, LiveExecution};
 
         let mut app = App::new();
+        app.chat_run_id = None;
         app.active_runs
             .insert("a".into(), ActiveRun::new("running"));
         app.active_runs.insert("b".into(), ActiveRun::new("done"));
@@ -2792,7 +2793,7 @@ mod tests {
 
     #[test]
     fn receipt_preserves_history_search_and_composer() {
-        use crate::tui::app::{Execution, Submission};
+        use crate::tui::app::{ComposerAction, Execution};
 
         for success in [true, false] {
             let mut live = new_live(90, 20);
@@ -2808,7 +2809,7 @@ mod tests {
             );
             app.input.replace_all("session_chat correction");
             app.input_cursor = 4;
-            let Submission::Correction { id, .. } =
+            let ComposerAction::Correction { id, .. } =
                 app.conversations.submit(&session_chat, &app.input)
             else {
                 panic!("expected correction")
@@ -2843,7 +2844,7 @@ mod tests {
 
     #[test]
     fn background_receipt_preserves_composers_and_updates_only_its_transcript() {
-        use crate::tui::app::{Execution, Submission, Target};
+        use crate::tui::app::{ComposerAction, Execution, Target};
         for success in [true, false] {
             let mut live = new_live(90, 20);
             let mut app = App::new();
@@ -2858,7 +2859,7 @@ mod tests {
                 }),
             );
             app.replace_input("session_chat correction");
-            let Submission::Correction { id, .. } =
+            let ComposerAction::Correction { id, .. } =
                 app.conversations.submit(&session_chat, &app.input)
             else {
                 panic!("expected correction")
@@ -4293,6 +4294,7 @@ mod tests {
     fn empty_watch_table_renders_empty_state() {
         let mut live = new_live(40, 8);
         let mut app = App::new();
+        app.chat_run_id = None;
 
         app.screen = Screen::Runs;
         live.show_runs();
@@ -4334,6 +4336,7 @@ mod tests {
 
         let mut live = new_live(160, 20);
         let mut app = App::new();
+        app.chat_run_id = None;
         app.active_runs
             .insert("runner".into(), ActiveRun::new("running"));
         app.active_runs
@@ -4384,7 +4387,7 @@ mod tests {
         assert!(visible.contains("1 running · 2 total"));
 
         app.watch_selection = Some("inv-b".into());
-        let mut live = new_live(160, 5);
+        let mut live = new_live(160, 6);
         live.show_runs();
         live.compose(&app).unwrap();
         let visible = dump_buffer(live.backend().buffer());

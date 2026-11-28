@@ -1,7 +1,8 @@
 use super::{
     app::{App, ConversationStatus, Target},
     screen::LiveArea,
-    session_chat_events::apply_session_chat_identity,
+    session_chat_events::{apply_session_chat_event, apply_session_chat_identity},
+    SessionChatInterrupt,
 };
 use ratatui::backend::TestBackend;
 use serde_json::json;
@@ -28,6 +29,101 @@ fn rendered(app: &App, live: &mut LiveArea<TestBackend>) -> String {
         })
         .collect::<Vec<_>>()
         .join("\n")
+}
+
+#[test]
+fn late_earlier_turn_done_does_not_end_current_turn() {
+    let mut app = App::new();
+    let target = app.session_chat_target();
+    let mut live = live_area(&app);
+    app.conversations.begin_session_chat_turn("earlier".into());
+    app.conversations.retire_session_chat_turn();
+    app.conversations.begin_session_chat_turn("current".into());
+    app.set_conversation_status(target.clone(), ConversationStatus::Running);
+    app.active_request = true;
+    live.submit_prompt("current prompt".into());
+    live.push_response("current response");
+
+    apply_session_chat_event(
+        &mut app,
+        &mut live,
+        &mut SessionChatInterrupt::default(),
+        gremlins_magic_bus::EventKind::Done {
+            text: "stale completion".into(),
+            summary: "stale summary".into(),
+            usage: None,
+        },
+        Some("earlier".into()),
+        None,
+    )
+    .unwrap();
+
+    assert_eq!(app.conversations.session_chat_turn(), Some("current"));
+    assert!(app.active_request);
+    assert_eq!(
+        app.conversation_status(&target),
+        ConversationStatus::Running
+    );
+    assert!(live.target_has_current_turn(&target));
+    let text = rendered(&app, &mut live);
+    assert!(text.contains("current prompt"));
+    assert!(text.contains("current response"));
+    assert!(!text.contains("stale completion"));
+    assert!(!text.contains("stale summary"));
+}
+
+#[test]
+fn turnless_warning_is_displayed_independent_of_active_turn() {
+    for active in [false, true] {
+        let mut app = App::new();
+        let target = app.session_chat_target();
+        let mut live = live_area(&app);
+        if active {
+            app.conversations.begin_session_chat_turn("current".into());
+            app.set_conversation_status(target.clone(), ConversationStatus::Running);
+            app.active_request = true;
+            live.submit_prompt("current prompt".into());
+            live.push_response("current response");
+        }
+        let status = app.conversation_status(&target);
+        live.select_conversation(&mut app, run("other"));
+        app.replace_input("other draft");
+
+        apply_session_chat_event(
+            &mut app,
+            &mut live,
+            &mut SessionChatInterrupt::default(),
+            gremlins_magic_bus::EventKind::SystemWarning {
+                message: crate::daemon_client::chat::DISCONTINUITY_NOTICE.into(),
+                turn: None,
+            },
+            None,
+            None,
+        )
+        .unwrap();
+
+        assert_eq!(app.selected_target, run("other"));
+        assert_eq!(app.input.text(), "other draft");
+        assert!(
+            !rendered(&app, &mut live).contains(crate::daemon_client::chat::DISCONTINUITY_NOTICE)
+        );
+        assert_eq!(
+            app.conversations.session_chat_turn(),
+            active.then_some("current")
+        );
+        assert_eq!(app.conversation_status(&target), status);
+        assert_eq!(live.target_has_current_turn(&target), active);
+        live.select_conversation(&mut app, target);
+        let text = rendered(&app, &mut live);
+        assert!(
+            text.contains(crate::daemon_client::chat::DISCONTINUITY_NOTICE),
+            "{text}"
+        );
+        if active {
+            assert!(app.active_request);
+            assert!(text.contains("current response"));
+        }
+    }
 }
 
 #[test]

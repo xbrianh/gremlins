@@ -4,7 +4,7 @@ use super::{Execution, InputBuffer, Target};
 use std::collections::HashMap;
 
 #[derive(Debug, Eq, PartialEq)]
-pub(crate) enum Submission {
+pub(crate) enum ComposerAction {
     SessionChatPrompt,
     Correction {
         id: u64,
@@ -135,15 +135,15 @@ impl Conversations {
         self.live.get(target).cloned()
     }
 
-    pub fn submit(&mut self, target: &Target, input: &InputBuffer) -> Submission {
+    pub fn submit(&mut self, target: &Target, input: &InputBuffer) -> ComposerAction {
         if input.is_empty() {
-            return Submission::Blocked("empty draft");
+            return ComposerAction::Blocked("empty draft");
         }
         let Some(execution) = self.live.get(target) else {
             return if target == &self.session_chat_target && self.starting_session_chat.is_none() {
-                Submission::SessionChatPrompt
+                ComposerAction::SessionChatPrompt
             } else {
-                Submission::Blocked("this conversation has no writable execution")
+                ComposerAction::Blocked("this conversation has no writable execution")
             };
         };
         if self
@@ -151,7 +151,7 @@ impl Conversations {
             .values()
             .any(|pending| &pending.execution == execution)
         {
-            return Submission::Blocked("delivery is pending for this execution");
+            return ComposerAction::Blocked("delivery is pending for this execution");
         }
         self.sequence += 1;
         let id = self.sequence;
@@ -165,7 +165,7 @@ impl Conversations {
                 text: text.clone(),
             },
         );
-        Submission::Correction {
+        ComposerAction::Correction {
             id,
             execution,
             text,
@@ -250,7 +250,7 @@ mod tests {
         input: &InputBuffer,
         expected: &Execution,
     ) -> u64 {
-        let Submission::Correction {
+        let ComposerAction::Correction {
             id,
             execution,
             text,
@@ -286,18 +286,18 @@ mod tests {
         let text = input("hello");
         assert_eq!(
             state.submit(&session_chat(), &text),
-            Submission::SessionChatPrompt
+            ComposerAction::SessionChatPrompt
         );
         state.begin_session_chat_turn("turn".into());
         assert_eq!(state.session_chat_turn(), Some("turn"));
         assert!(matches!(
             state.submit(&session_chat(), &text),
-            Submission::Blocked(_)
+            ComposerAction::Blocked(_)
         ));
         state.session_chat_turn_started("other", Some(execution(1)));
         assert!(matches!(
             state.submit(&session_chat(), &text),
-            Submission::Blocked(_)
+            ComposerAction::Blocked(_)
         ));
         state.session_chat_turn_started("turn", Some(execution(2)));
         state.session_chat_turn_started("turn", None);
@@ -306,7 +306,7 @@ mod tests {
         state.session_chat_turn_started("turn", Some(execution(2)));
         assert_eq!(
             state.submit(&session_chat(), &text),
-            Submission::SessionChatPrompt
+            ComposerAction::SessionChatPrompt
         );
         assert!(state.finish(id, Ok(())).is_some());
 
@@ -325,11 +325,11 @@ mod tests {
         let id = correction(&mut state, &stage(), &text, &execution(1));
         assert!(matches!(
             state.submit(&stage(), &text),
-            Submission::Blocked(_)
+            ComposerAction::Blocked(_)
         ));
         assert!(matches!(
             state.submit(&session_chat(), &text),
-            Submission::Blocked(_)
+            ComposerAction::Blocked(_)
         ));
         state.set_execution(session_chat(), Some(execution(2)));
         let session_chat_id = correction(&mut state, &session_chat(), &text, &execution(2));
@@ -367,7 +367,7 @@ mod tests {
             assert!(state.finish(detached_id, result).is_none());
             assert_eq!(
                 state.submit(&stage(), &text),
-                Submission::Blocked("delivery is pending for this execution")
+                ComposerAction::Blocked("delivery is pending for this execution")
             );
         }
         assert!(state.finish(next, Ok(())).is_some());
@@ -401,14 +401,17 @@ mod tests {
         assert_eq!(state.live.get(&replacement), Some(&execution(2)));
         assert_eq!(
             state.submit(&replacement, &text),
-            Submission::Blocked("delivery is pending for this execution")
+            ComposerAction::Blocked("delivery is pending for this execution")
         );
         let receipt = state.finish(id, Ok(())).unwrap();
         assert_eq!(receipt.target, replacement);
         assert_eq!(receipt.text, "edit [execution runner/stage-2 nonce 2]");
         assert_eq!(state.finish(other_id, Ok(())).unwrap().target, stage());
         correction(&mut state, &replacement, &text, &execution(2));
-        assert!(matches!(state.submit(&old, &text), Submission::Blocked(_)));
+        assert!(matches!(
+            state.submit(&old, &text),
+            ComposerAction::Blocked(_)
+        ));
     }
 
     #[test]
@@ -429,13 +432,13 @@ mod tests {
                 state.session_chat_turn_started("turn", Some(execution(2)));
                 assert_eq!(
                     state.submit(&replacement, &input("next")),
-                    Submission::SessionChatPrompt
+                    ComposerAction::SessionChatPrompt
                 );
             } else {
                 assert_eq!(state.session_chat_turn(), Some("turn"));
                 assert!(matches!(
                     state.submit(&replacement, &input("next")),
-                    Submission::Blocked(_)
+                    ComposerAction::Blocked(_)
                 ));
                 state.session_chat_turn_started("turn", Some(execution(2)));
                 correction(&mut state, &replacement, &input("edit"), &execution(2));
@@ -465,11 +468,11 @@ mod tests {
         state.session_chat_turn_started("old-turn", Some(execution(2)));
         assert_eq!(
             state.submit(&replacement, &text),
-            Submission::SessionChatPrompt
+            ComposerAction::SessionChatPrompt
         );
         assert!(matches!(
             state.submit(&session_chat(), &text),
-            Submission::Blocked(_)
+            ComposerAction::Blocked(_)
         ));
         state.begin_session_chat_turn("new-turn".into());
         state.set_execution(session_chat(), None);
@@ -491,12 +494,12 @@ mod tests {
         state.set_execution(target.clone(), Some(execution(2)));
         assert!(matches!(
             state.submit(&target, &input("edit")),
-            Submission::Blocked(_)
+            ComposerAction::Blocked(_)
         ));
         state.set_execution(target.clone(), Some(execution(1)));
         assert!(matches!(
             state.submit(&target, &input("")),
-            Submission::Blocked(_)
+            ComposerAction::Blocked(_)
         ));
         for mismatch in [
             execution(2),
@@ -510,7 +513,7 @@ mod tests {
             state.set_execution(target.clone(), Some(mismatch));
             assert_eq!(
                 state.submit(&target, &input("new edit")),
-                Submission::Blocked("this conversation has no writable execution")
+                ComposerAction::Blocked("this conversation has no writable execution")
             );
             let receipt = state.finish(id, Ok(())).unwrap();
             assert_eq!(receipt.target, target);
@@ -518,7 +521,7 @@ mod tests {
             assert_eq!(receipt.result, Ok(()));
             assert_eq!(
                 state.submit(&target, &input("new edit")),
-                Submission::Blocked("this conversation has no writable execution")
+                ComposerAction::Blocked("this conversation has no writable execution")
             );
         }
     }

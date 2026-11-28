@@ -57,7 +57,19 @@ pub(super) fn apply_session_chat_event<B: ratatui::backend::Backend>(
     execution: Option<protocol::Execution>,
 ) -> io::Result<()> {
     let session_chat = app.session_chat_target();
-    // Filter every event, including task progress, before touching the transcript.
+    if turn.is_none() {
+        if let gremlins_magic_bus::EventKind::SystemWarning { message, .. } = &event {
+            if message != crate::daemon_client::chat::DISCONTINUITY_NOTICE {
+                return Ok(());
+            }
+            live_area.with_target_transcript(&session_chat, |transcript, _| {
+                transcript.push_transcript_line(format!("⚠ {message}"));
+            });
+            return Ok(());
+        }
+    }
+
+    // Filter turn-scoped events, including task progress, before touching the transcript.
     let expected = app.conversations.session_chat_turn();
     if !turn
         .as_deref()
@@ -242,7 +254,7 @@ pub(super) fn apply_session_chat_event<B: ratatui::backend::Backend>(
             live_area.compose(app)?;
         }
         gremlins_magic_bus::EventKind::Error { message: msg, .. } => {
-            // Submission can fail before execution creates a transcript turn.
+            // submission can fail before execution creates a transcript turn.
             finish_session_chat_request(app, live_area);
             let full = format!("chat error: {msg}");
             live_area.with_target_transcript(&session_chat, |transcript, reasoning| {

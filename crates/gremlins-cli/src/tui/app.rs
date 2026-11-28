@@ -4,7 +4,7 @@ mod conversations;
 
 const PENDING_SESSION_ID: &str = "tui-session-pending";
 pub(crate) use super::protocol::Execution;
-pub(crate) use conversations::{Conversations, Receipt, Submission};
+pub(crate) use conversations::{ComposerAction, Conversations, Receipt};
 
 use crate::tui::completion::CompletionState;
 use crate::tui::input_buffer::InputBuffer;
@@ -1533,7 +1533,7 @@ mod tests {
     fn chat_run_setter_updates_routing_without_stealing_selection_or_draft() {
         let mut app = App::new();
         let initial = Target::Run {
-            run_id: String::new(),
+            run_id: super::PENDING_SESSION_ID.to_owned(),
         };
         assert_eq!(app.session_chat_target(), initial);
         assert!(app.is_session_chat(&initial));
@@ -1546,7 +1546,7 @@ mod tests {
         assert!(!app.is_session_chat(&initial));
         assert!(matches!(
             app.conversations.submit(&chat, &app.input),
-            Submission::SessionChatPrompt
+            ComposerAction::SessionChatPrompt
         ));
         let invocation = Target::Invocation {
             run_id: "chat".into(),
@@ -1566,7 +1566,7 @@ mod tests {
         assert!(matches!(
             app.conversations
                 .submit(&app.session_chat_target(), &app.input),
-            Submission::SessionChatPrompt
+            ComposerAction::SessionChatPrompt
         ));
     }
 
@@ -1683,7 +1683,7 @@ mod tests {
             }
             assert_eq!(app.live_executions.len(), 2);
             let rows = app.watch_ids();
-            assert_eq!(rows.len(), 3);
+            assert_eq!(rows.len(), 4);
             let mut selections = Vec::new();
             for (stage, id) in [("review", "review-1"), ("build", "build-1")] {
                 let execution = app
@@ -1719,7 +1719,7 @@ mod tests {
             app.observe_pipeline_frame(&boundary(id, true));
         }
         assert_eq!(app.live_executions.len(), 2);
-        assert_eq!(app.watch_ids().len(), 3);
+        assert_eq!(app.watch_ids().len(), 4);
         let key = app
             .live_executions
             .iter()
@@ -1979,7 +1979,7 @@ mod tests {
             }),
         );
         app.insert_char('x');
-        let Submission::Correction { id, .. } = app
+        let ComposerAction::Correction { id, .. } = app
             .conversations
             .submit(&app.session_chat_target(), &app.input)
         else {
@@ -2021,7 +2021,7 @@ mod tests {
         assert!(matches!(
             app.conversations
                 .submit(&app.session_chat_target(), &app.input),
-            Submission::SessionChatPrompt
+            ComposerAction::SessionChatPrompt
         ));
     }
 
@@ -2132,6 +2132,7 @@ mod tests {
     #[test]
     fn watch_ids_sorts_running_first_then_id() {
         let mut app = App::new();
+        app.chat_run_id = None;
         app.on_run_started("b".into(), "def".into(), "run".into());
         app.on_run_started("a".into(), "def".into(), "run".into());
         app.on_run_started("c".into(), "def".into(), "run".into());
@@ -2312,6 +2313,7 @@ mod tests {
     #[test]
     fn watch_move_steps_and_clamps() {
         let mut app = App::new();
+        app.chat_run_id = None;
         app.on_run_started("b".into(), "def".into(), "run".into());
         app.on_run_started("a".into(), "def".into(), "run".into());
         app.on_run_started("c".into(), "def".into(), "run".into());

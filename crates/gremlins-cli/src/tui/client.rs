@@ -14,10 +14,6 @@
 
 mod session_chat;
 
-#[cfg(test)]
-#[path = "client/session_chat_shutdown_tests.rs"]
-mod session_chat_shutdown_tests;
-
 use std::collections::{HashMap, VecDeque};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex as StdMutex};
@@ -61,8 +57,46 @@ struct Connection {
     out: Arc<OutState>,
 }
 
+#[cfg(test)]
+pub(crate) struct FakeRequest {
+    pub(crate) request: Value,
+    pub(crate) reply: FakeReply,
+}
+
+// Allocate at delivery, not when a request's continuation happens to resume.
+static REPLY_ORDER: AtomicU64 = AtomicU64::new(1);
+const REPLY_ORDER_FIELD: &str = "__client_reply_order";
+
+fn stamp_reply(mut value: Value) -> Value {
+    if value["type"] == "ok" && value["enqueued"] == true && value["chat_run_id"].is_string() {
+        if let Some(object) = value.as_object_mut() {
+            object.insert(
+                REPLY_ORDER_FIELD.into(),
+                REPLY_ORDER.fetch_add(1, Ordering::Relaxed).into(),
+            );
+        }
+    }
+    value
+}
+
+#[cfg(test)]
+pub(crate) struct FakeReply(oneshot::Sender<Result<Value, String>>);
+
+#[cfg(test)]
+impl FakeReply {
+    pub(crate) fn send(self, value: Result<Value, String>) -> Result<(), Result<Value, String>> {
+        self.0.send(value.map(stamp_reply))
+    }
+}
+
+enum RequestWriter {
+    Socket(OwnedWriteHalf),
+    #[cfg(test)]
+    Fake(mpsc::UnboundedSender<FakeRequest>),
+}
+
 struct WriteState {
-    write_half: OwnedWriteHalf,
+    write_half: RequestWriter,
     /// `Some` for the session connection; `None` for the control socket.
     session_id: Option<String>,
     /// Registry-reserved session_chat identity belonging to the same session socket.
@@ -70,41 +104,31 @@ struct WriteState {
     /// Monotonic generation of the installed session. Incremented each time
     /// [`Connection::restart`] swaps in a replacement session socket.
     generation: u64,
+    retired: bool,
+    confirmation_order: u64,
 }
 
 impl Connection {
-    fn new_control(
-        reader: BufReader<OwnedReadHalf>,
-        write_half: OwnedWriteHalf,
+    #[cfg(test)]
+    fn fake(
+        requests: mpsc::UnboundedSender<FakeRequest>,
+        session_id: Option<String>,
+        chat_run_id: Option<String>,
         out: Arc<OutState>,
     ) -> Self {
-        Self::new(
-            reader,
-            write_half,
-            None,
-            None,
+        Self {
+            write: Arc::new(Mutex::new(WriteState {
+                write_half: RequestWriter::Fake(requests),
+                session_id,
+                chat_run_id,
+                generation: 0,
+                retired: false,
+                confirmation_order: 0,
+            })),
+            responses: Arc::new(Mutex::new(VecDeque::new())),
+            read_handle: Mutex::new(None),
             out,
-            #[cfg(test)]
-            false,
-        )
-    }
-
-    fn new_session(
-        reader: BufReader<OwnedReadHalf>,
-        write_half: OwnedWriteHalf,
-        session_id: String,
-        chat_run_id: String,
-        out: Arc<OutState>,
-    ) -> Self {
-        Self::new(
-            reader,
-            write_half,
-            Some(session_id),
-            Some(chat_run_id),
-            out,
-            #[cfg(test)]
-            false,
-        )
+        }
     }
 
     fn new(
@@ -118,10 +142,12 @@ impl Connection {
         let responses: Arc<Mutex<VecDeque<oneshot::Sender<Value>>>> =
             Arc::new(Mutex::new(VecDeque::new()));
         let write = Arc::new(Mutex::new(WriteState {
-            write_half,
+            write_half: RequestWriter::Socket(write_half),
             session_id,
             chat_run_id,
             generation: 0,
+            retired: false,
+            confirmation_order: 0,
         }));
         let read_out = Arc::clone(&out);
         let read_responses = Arc::clone(&responses);
@@ -148,13 +174,13 @@ impl Connection {
     /// Serialises waiter registration and the socket write under the same
     /// lock so that request order on the wire matches response order.
     async fn send(&self, request: Value) -> Result<Value, String> {
-        self.send_with(request, false, None).await
+        self.send_with(request, false, None, false).await
     }
 
     /// Send a request on the session connection, stamping the session id
     /// that is atomically paired with the current session write half.
     async fn send_on_session(&self, request: Value) -> Result<Value, String> {
-        self.send_with(request, true, None).await
+        self.send_with(request, true, None, false).await
     }
 
     /// Send a session request only if the connection still belongs to the
@@ -164,7 +190,7 @@ impl Connection {
         request: Value,
         expected_generation: u64,
     ) -> Result<Value, String> {
-        self.send_with(request, true, Some(expected_generation))
+        self.send_with(request, true, Some(expected_generation), false)
             .await
     }
 
@@ -173,6 +199,7 @@ impl Connection {
         mut request: Value,
         session_scoped: bool,
         expected_generation: Option<u64>,
+        lifecycle: bool,
     ) -> Result<Value, String> {
         let (tx, rx) = oneshot::channel();
 
@@ -180,6 +207,9 @@ impl Connection {
         // concurrent callers cannot interleave and a session restart cannot
         // publish a new write half while a request is being stamped.
         let mut write = self.write.lock().await;
+        if session_scoped && write.retired && !lifecycle {
+            return Err("session is retired".into());
+        }
         if let Some(expected) = expected_generation {
             if write.generation != expected {
                 return Err(format!(
@@ -200,12 +230,35 @@ impl Connection {
             }
         }
 
+        #[cfg(test)]
+        if let RequestWriter::Fake(requests) = &write.write_half {
+            let (reply, response) = oneshot::channel();
+            requests
+                .send(FakeRequest {
+                    request,
+                    reply: FakeReply(reply),
+                })
+                .map_err(|_| "fake request receiver closed".to_string())?;
+            drop(write);
+            return response
+                .await
+                .map_err(|_| "connection closed".to_string())?;
+        }
+
         {
             let mut guard = self.responses.lock().await;
             guard.push_back(tx);
         }
 
-        if let Err(e) = socket::write_json_line(&mut write.write_half, &request).await {
+        #[cfg(not(test))]
+        let RequestWriter::Socket(write_half) = &mut write.write_half;
+        #[cfg(test)]
+        let write_half = match &mut write.write_half {
+            RequestWriter::Socket(write_half) => write_half,
+            #[cfg(test)]
+            RequestWriter::Fake(_) => unreachable!("fake requests return above"),
+        };
+        if let Err(e) = socket::write_json_line(write_half, &request).await {
             // Write failed — remove our waiter so the queue stays aligned.
             let mut guard = self.responses.lock().await;
             guard.pop_back();
@@ -228,20 +281,19 @@ impl Connection {
         // Abort and await the old reader first. Awaiting guarantees its
         // terminal queue clear can no longer race the new connection's
         // waiters.
-        if let Some(handle) = self.read_handle.lock().await.take() {
-            handle.abort();
-            let _ = handle.await;
-        }
+        self.shutdown().await;
 
         // Hold the write lock across queue draining, write-half replacement,
         // session-id publication, and read-loop installation so a concurrent
         // send can neither enqueue against the old connection nor have its
         // waiter dropped after the fact.
         let mut write = self.write.lock().await;
-        write.write_half = write_half;
+        write.write_half = RequestWriter::Socket(write_half);
         write.session_id = Some(new_session_id);
         write.chat_run_id = Some(new_chat_run_id);
         write.generation += 1;
+        write.retired = false;
+        write.confirmation_order = 0;
         self.responses.lock().await.clear();
 
         let read_out = Arc::clone(&self.out);
@@ -294,10 +346,9 @@ pub struct DaemonClient {
     control: Connection,
     session: Connection,
     out: Arc<OutState>,
-    /// Serializes session recreation so a `/clear` can never race another
-    /// session operation's restart and drop un-acked waiters.
+    /// Serializes recreation and shutdown, not ordinary request replies.
     session_recreate: Mutex<()>,
-    session_chat_display: Mutex<Option<session_chat::Display>>,
+    pub(crate) chat_watch: StdMutex<std::sync::Weak<crate::daemon_client::chat::ChatWatch>>,
     selected_inputs: StdMutex<SelectedInputs>,
     input_epoch: AtomicU64,
     #[cfg(test)]
@@ -305,6 +356,66 @@ pub struct DaemonClient {
 }
 
 impl DaemonClient {
+    fn new(
+        control: Connection,
+        session: Connection,
+        out: Arc<OutState>,
+        #[cfg(test)] aux_streams: Option<VecDeque<tokio::net::UnixStream>>,
+    ) -> Self {
+        Self {
+            control,
+            session,
+            out,
+            session_recreate: Mutex::new(()),
+            chat_watch: StdMutex::new(std::sync::Weak::new()),
+            selected_inputs: StdMutex::new(HashMap::new()),
+            input_epoch: AtomicU64::new(0),
+            #[cfg(test)]
+            aux_streams: Arc::new(Mutex::new(aux_streams)),
+        }
+    }
+
+    /// Socketless requests with independently controlled replies, including recreation.
+    #[cfg(test)]
+    pub(crate) fn fake_with_requests(
+        response: Value,
+    ) -> (
+        Self,
+        mpsc::UnboundedReceiver<FakeRequest>,
+        mpsc::UnboundedReceiver<EventKind>,
+        mpsc::UnboundedReceiver<ChatEvent>,
+        mpsc::UnboundedReceiver<Value>,
+    ) {
+        let (session_id, chat_run_id) = parse_session_setup(&response).unwrap();
+        let (requests, request_rx) = mpsc::unbounded_channel();
+        let (event_tx, event_rx) = mpsc::unbounded_channel();
+        let (chat_tx, chat_rx) = mpsc::unbounded_channel();
+        let (raw_tx, raw_rx) = mpsc::unbounded_channel();
+        let out = Arc::new(OutState {
+            event_tx,
+            chat_tx,
+            raw_tx,
+        });
+        (
+            Self::new(
+                Connection::fake(requests.clone(), None, None, Arc::clone(&out)),
+                Connection::fake(
+                    requests,
+                    Some(session_id),
+                    Some(chat_run_id),
+                    Arc::clone(&out),
+                ),
+                out,
+                // Reject auxiliary socket attempts instead of reaching the real daemon.
+                Some(VecDeque::new()),
+            ),
+            request_rx,
+            event_rx,
+            chat_rx,
+            raw_rx,
+        )
+    }
+
     /// Build a fake from the same authoritative setup response as a real connection.
     #[cfg(test)]
     pub(super) fn fake_with_identity(response: Value) -> (Self, [tokio::net::UnixStream; 2]) {
@@ -321,7 +432,7 @@ impl DaemonClient {
     }
 
     #[cfg(test)]
-    pub(super) fn fake_with_aux_streams_and_channels(
+    pub(crate) fn fake_with_aux_streams_and_channels(
         response: Value,
         streams: Vec<tokio::net::UnixStream>,
     ) -> (
@@ -360,8 +471,8 @@ impl DaemonClient {
         let (control_read, control_write) = control.into_split();
         let (session_read, session_write) = session.into_split();
         (
-            Self {
-                control: Connection::new(
+            Self::new(
+                Connection::new(
                     BufReader::new(control_read),
                     control_write,
                     None,
@@ -369,7 +480,7 @@ impl DaemonClient {
                     Arc::clone(&out),
                     retain_write_until_reader_stops,
                 ),
-                session: Connection::new(
+                Connection::new(
                     BufReader::new(session_read),
                     session_write,
                     Some(session_id),
@@ -378,12 +489,8 @@ impl DaemonClient {
                     retain_write_until_reader_stops,
                 ),
                 out,
-                session_recreate: Mutex::new(()),
-                session_chat_display: Mutex::new(None),
-                selected_inputs: StdMutex::new(HashMap::new()),
-                input_epoch: AtomicU64::new(0),
-                aux_streams: Arc::new(Mutex::new(Some(streams.into()))),
-            },
+                Some(streams.into()),
+            ),
             [control_peer, session_peer],
             event_rx,
             chat_rx,
@@ -408,6 +515,15 @@ impl DaemonClient {
             .expect("session connection has a session_chat run id")
     }
 
+    pub(crate) async fn chat_identity(&self) -> (u64, String, String) {
+        let write = self.session.write.lock().await;
+        (
+            write.generation,
+            write.session_id.clone().unwrap_or_default(),
+            write.chat_run_id.clone().unwrap_or_default(),
+        )
+    }
+
     /// The generation of the current session socket. Callers capture this
     /// at submission time and pass it to
     /// [`send_session_request_for_generation`](Self::send_session_request_for_generation)
@@ -427,7 +543,6 @@ impl DaemonClient {
     /// session write half, so a `/clear` restart can never write a request
     /// bearing the old id to the new socket.
     pub async fn send_session_request(&self, request: Value) -> Result<Value, String> {
-        let _guard = self.session_recreate.lock().await;
         self.send_session_chat_or_session(request, None).await
     }
 
@@ -443,11 +558,6 @@ impl DaemonClient {
         request: Value,
         expected_generation: u64,
     ) -> Result<Value, String> {
-        // Queue behind any in-progress `/clear` recreation. Once the new
-        // session is installed, the generation check below rejects a request
-        // that was submitted against a retired session instead of writing it
-        // to the old (already-closed) socket or stamping it with the new id.
-        let _recreate_guard = self.session_recreate.lock().await;
         self.send_session_chat_or_session(request, Some(expected_generation))
             .await
     }
@@ -653,13 +763,7 @@ impl DaemonClient {
             "tail": tail,
         });
         let resp = self.send_session_request(request).await?;
-        if resp.get("type").and_then(|v| v.as_str()) == Some("error") {
-            return Err(resp
-                .get("message")
-                .and_then(|v| v.as_str())
-                .unwrap_or("unknown error")
-                .to_string());
-        }
+        check_response(&resp)?;
         let lines: Vec<String> = resp
             .get("lines")
             .and_then(|v| v.as_array())
@@ -682,13 +786,7 @@ impl DaemonClient {
             "id": id,
         });
         let resp = self.send_session_request(request).await?;
-        if resp.get("type").and_then(|v| v.as_str()) == Some("error") {
-            return Err(resp
-                .get("message")
-                .and_then(|v| v.as_str())
-                .unwrap_or("unknown error")
-                .to_string());
-        }
+        check_response(&resp)?;
         Ok(resp)
     }
 
@@ -701,14 +799,38 @@ impl DaemonClient {
     pub async fn recreate_session(&self) -> Result<(), String> {
         let _recreate_guard = self.session_recreate.lock().await;
 
+        self.session.write.lock().await.retired = true;
         self.invalidate_inputs();
-        self.session_chat_display.lock().await.take();
+        let hook = self.chat_watch.lock().unwrap().upgrade();
+        if let Some(hook) = &hook {
+            hook.retire().await;
+        }
         let close_request = serde_json::json!({"op": "close_session"});
-        let _ = self.session.send_on_session(close_request).await?;
+        let _ = self
+            .session
+            .send_with(close_request, true, None, true)
+            .await?;
 
         let create_request = serde_json::json!({"op": "create_session"});
         let resp = self.control.send(create_request).await?;
         let (new_session_id, new_chat_run_id) = parse_session_setup(&resp)?;
+
+        #[cfg(test)]
+        {
+            let mut write = self.session.write.lock().await;
+            if matches!(&write.write_half, RequestWriter::Fake(_)) {
+                write.session_id = Some(new_session_id);
+                write.chat_run_id = Some(new_chat_run_id);
+                write.generation += 1;
+                write.retired = false;
+                write.confirmation_order = 0;
+                drop(write);
+                if let Some(hook) = hook {
+                    hook.reset().await;
+                }
+                return Ok(());
+            }
+        }
 
         let state_root = gremlins::config::state_root();
         let stream = socket::connect_session_socket(&state_root, &new_session_id).await?;
@@ -717,19 +839,21 @@ impl DaemonClient {
         self.session
             .restart(reader, write_half, new_session_id, new_chat_run_id)
             .await;
+        if let Some(hook) = hook {
+            hook.reset().await;
+        }
         Ok(())
     }
 
     /// Retire pending session_chat acquisitions and abort the background readers.
     pub async fn shutdown(&self) {
-        {
-            // Match install_session_chat's lock order so a late watch acknowledgment
-            // cannot publish a display after shutdown, even if none exists yet.
-            let mut display = self.session_chat_display.lock().await;
-            let mut write = self.session.write.lock().await;
-            write.generation += 1;
-            display.take();
+        let _recreate_guard = self.session_recreate.lock().await;
+        self.session.write.lock().await.retired = true;
+        let hook = self.chat_watch.lock().unwrap().upgrade();
+        if let Some(hook) = hook {
+            hook.close().await;
         }
+        self.session.write.lock().await.generation += 1;
         self.invalidate_inputs();
         self.control.shutdown().await;
         self.session.shutdown().await;
@@ -751,29 +875,14 @@ async fn follow_run(
     follow_watch(stream, session_id, id, None, None, true).await
 }
 
-async fn follow_watch(
-    stream: tokio::net::UnixStream,
-    session_id: &str,
-    id: &str,
-    stage: Option<&str>,
-    stage_run_id: Option<&str>,
-    replay: bool,
-) -> Result<(mpsc::Receiver<Value>, tokio::task::JoinHandle<()>), String> {
-    follow_watch_mapped(stream, session_id, id, stage, stage_run_id, replay, Some).await
-}
-
-async fn follow_watch_mapped<F>(
+pub(crate) async fn follow_watch(
     mut stream: tokio::net::UnixStream,
     session_id: &str,
     id: &str,
     stage: Option<&str>,
     stage_run_id: Option<&str>,
     replay: bool,
-    mut receive: F,
-) -> Result<(mpsc::Receiver<Value>, tokio::task::JoinHandle<()>), String>
-where
-    F: FnMut(Value) -> Option<Value> + Send + 'static,
-{
+) -> Result<(mpsc::Receiver<Value>, tokio::task::JoinHandle<()>), String> {
     let mut request =
         json!({"op":"watch", "scope":"run", "id":id, "session_id":session_id, "replay":replay});
     for (key, value) in [("stage", stage), ("stage_run_id", stage_run_id)] {
@@ -802,9 +911,6 @@ where
     let (tx, rx) = mpsc::channel(256);
     let handle = tokio::spawn(async move {
         while let Some(frame) = socket::read_json_line(&mut reader).await.ok().flatten() {
-            let Some(frame) = receive(frame) else {
-                continue;
-            };
             if tx.send(frame).await.is_err() {
                 break;
             }
@@ -813,14 +919,18 @@ where
     Ok((rx, handle))
 }
 
-fn parse_session_setup(response: &Value) -> Result<(String, String), String> {
-    if response.get("type").and_then(Value::as_str) == Some("error") {
-        return Err(response
-            .get("message")
-            .and_then(Value::as_str)
+fn check_response(response: &Value) -> Result<(), String> {
+    if response["type"] == "error" {
+        return Err(response["message"]
+            .as_str()
             .unwrap_or("unknown error")
             .to_owned());
     }
+    Ok(())
+}
+
+fn parse_session_setup(response: &Value) -> Result<(String, String), String> {
+    check_response(response)?;
     let required = |field: &str| {
         response
             .get(field)
@@ -871,33 +981,39 @@ pub async fn connect() -> Result<
     };
     let (session_id, chat_run_id) = parse_session_setup(&create_resp)?;
 
-    let control = Connection::new_control(control_reader, control_write_half, Arc::clone(&out));
+    let control = Connection::new(
+        control_reader,
+        control_write_half,
+        None,
+        None,
+        Arc::clone(&out),
+        #[cfg(test)]
+        false,
+    );
 
     // 2. Connect the fresh session socket and hand it a permanent reader.
     let state_root = gremlins::config::state_root();
     let session_stream = socket::connect_session_socket(&state_root, &session_id).await?;
     let (session_read_half, session_write_half) = session_stream.into_split();
     let session_reader = BufReader::new(session_read_half);
-    let session = Connection::new_session(
+    let session = Connection::new(
         session_reader,
         session_write_half,
-        session_id,
-        chat_run_id,
+        Some(session_id),
+        Some(chat_run_id),
         Arc::clone(&out),
+        #[cfg(test)]
+        false,
     );
 
     Ok((
-        DaemonClient {
+        DaemonClient::new(
             control,
             session,
             out,
-            session_recreate: Mutex::new(()),
-            session_chat_display: Mutex::new(None),
-            selected_inputs: StdMutex::new(HashMap::new()),
-            input_epoch: AtomicU64::new(0),
             #[cfg(test)]
-            aux_streams: Arc::new(Mutex::new(None)),
-        },
+            None,
+        ),
         event_rx,
         chat_rx,
         raw_rx,
@@ -932,45 +1048,19 @@ async fn read_loop(
         // Classify as an EventKind next — unsolicited events can arrive
         // at any time, even when a request is pending.
         if let Ok(event) = serde_json::from_value::<EventKind>(value.clone()) {
-            // Chat events carry a `chat_turn` tag inserted by the daemon's
-            // chat_payload wrapper. Extract it before forwarding so the TUI
-            // can filter stale turns.
-            //
-            // IMPORTANT: only classify as chat when the tag is present.
-            // Bare `type:"error"` lines (request/response errors) must reach
-            // the FIFO response queue, not the chat stream.
-            if event.is_chat_event() {
-                let chat_turn = value
-                    .get("chat_turn")
-                    .and_then(|v| v.as_str())
-                    .map(String::from);
-                let can_route_to_chat = |kind: &EventKind| -> bool {
-                    match kind {
-                        EventKind::Error { .. } | EventKind::SystemWarning { .. } => {
-                            chat_turn.is_some()
-                        }
-                        _ => true,
-                    }
-                };
-                if can_route_to_chat(&event) {
-                    // SessionChat display comes exclusively from its passive bus watch.
-                    // Retire legacy frames without consuming a response waiter.
-                } else {
-                    // Bare error/system_warning — treat as a response.
-                    let response_tx = {
-                        let mut guard = responses.lock().await;
-                        guard.pop_front()
-                    };
-                    if let Some(tx) = response_tx {
-                        let _ = tx.send(value);
-                    } else {
-                        let _ = out.raw_tx.send(value);
-                    }
-                }
-            } else {
+            if !event.is_chat_event() {
                 let _ = out.event_tx.send(event);
+                continue;
             }
-            continue;
+            // Display comes exclusively from the passive bus watch. Retire legacy
+            // chat frames, but let bare errors/warnings reach the response FIFO.
+            let bare_response = matches!(
+                event,
+                EventKind::Error { .. } | EventKind::SystemWarning { .. }
+            ) && value.get("chat_turn").and_then(Value::as_str).is_none();
+            if !bare_response {
+                continue;
+            }
         }
 
         // Not an event — deliver as a response to the oldest pending request.
@@ -980,7 +1070,7 @@ async fn read_loop(
         };
 
         if let Some(tx) = response_tx {
-            let _ = tx.send(value);
+            let _ = tx.send(stamp_reply(value));
             continue;
         }
 
@@ -1689,6 +1779,77 @@ mod replay_fallback_tests {
     #[tokio::test]
     async fn rejected_run_surfaces_disk_error_without_live_subscription() {
         fallback(true).await;
+    }
+}
+
+#[cfg(test)]
+mod socketless_request_tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn overlapping_requests_have_independent_replies() {
+        let (client, mut requests, _events, _chat, _raw) =
+            DaemonClient::fake_with_requests(json!({"session_id":"old", "chat_run_id":"chat-old"}));
+        let client = Arc::new(client);
+        let first_client = client.clone();
+        let first = tokio::spawn(async move {
+            first_client
+                .session
+                .send_on_session(json!({"op":"first"}))
+                .await
+        });
+        let first_request = requests.recv().await.unwrap();
+        assert_eq!(first_request.request["session_id"], "old");
+        let second_client = client.clone();
+        let second = tokio::spawn(async move {
+            second_client
+                .session
+                .send_on_session(json!({"op":"second"}))
+                .await
+        });
+        let second_request = requests.recv().await.unwrap();
+        second_request
+            .reply
+            .send(Err("second failed".into()))
+            .unwrap();
+        assert_eq!(second.await.unwrap(), Err("second failed".into()));
+        assert!(!first.is_finished());
+        first_request.reply.send(Ok(json!({"first":true}))).unwrap();
+        assert_eq!(first.await.unwrap().unwrap(), json!({"first":true}));
+    }
+
+    #[tokio::test]
+    async fn recreation_installs_identity_and_rejects_stale_generation() {
+        let (client, mut requests, _events, _chat, _raw) =
+            DaemonClient::fake_with_requests(json!({"session_id":"old", "chat_run_id":"chat-old"}));
+        let client = Arc::new(client);
+        let epoch = client.input_epoch();
+        let recreating_client = client.clone();
+        let recreate = tokio::spawn(async move { recreating_client.recreate_session().await });
+        let close = requests.recv().await.unwrap();
+        assert_eq!(
+            close.request,
+            json!({"op":"close_session", "session_id":"old"})
+        );
+        close.reply.send(Ok(json!({"type":"closed"}))).unwrap();
+        let create = requests.recv().await.unwrap();
+        assert_eq!(create.request, json!({"op":"create_session"}));
+        create
+            .reply
+            .send(Ok(json!({"session_id":"new", "chat_run_id":"chat-new"})))
+            .unwrap();
+        recreate.await.unwrap().unwrap();
+        assert_eq!(client.session_id().await, "new");
+        assert_eq!(client.chat_run_id().await, "chat-new");
+        assert_eq!(client.session_generation().await, 1);
+        assert!(client.input_epoch() > epoch);
+        let stale = client
+            .session
+            .send_on_session_for_generation(json!({"op":"prompt"}), 0)
+            .await;
+        assert!(stale.unwrap_err().contains("session was recreated"));
+        assert!(requests.try_recv().is_err());
+        client.shutdown().await;
     }
 }
 
