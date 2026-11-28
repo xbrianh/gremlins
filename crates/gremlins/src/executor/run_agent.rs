@@ -1164,17 +1164,11 @@ mod tests {
     const CAPTURED: &str = "deliberate run_agent dispatch capture";
 
     struct SessionChatUsageBackend {
-        fail: bool,
         baselines: Mutex<Vec<u64>>,
     }
 
-    #[async_trait::async_trait]
-    impl Backend for SessionChatUsageBackend {
-        async fn run(
-            &self,
-            mut params: RunParams,
-            _interactive: InteractiveSession,
-        ) -> Result<CompletedRun, ClientError> {
+    impl SessionChatUsageBackend {
+        fn report_usage(&self, params: &RunParams, completed: bool) {
             use crate::clients::protocol::UsageStats;
             use gremlins_magic_bus::ModelCallUsage;
             let baseline = params.usage_baseline.as_ref().unwrap();
@@ -1221,18 +1215,46 @@ mod tests {
                             agent_id: if task { "[task.test]" } else { "" }.into(),
                             request_kind: String::new(),
                             reported: true,
-                            completed: !self.fail,
+                            completed,
                             raw: serde_json::json!({}),
                             usage,
                         },
                     },
                 );
             }
-            if self.fail {
-                return Err(ClientError::Runtime {
-                    message: CAPTURED.into(),
-                });
-            }
+        }
+    }
+
+    struct SessionChatFailureBackend(SessionChatUsageBackend);
+
+    #[async_trait::async_trait]
+    impl Backend for SessionChatFailureBackend {
+        async fn run(
+            &self,
+            params: RunParams,
+            _interactive: InteractiveSession,
+        ) -> Result<CompletedRun, ClientError> {
+            self.0.report_usage(&params, false);
+            Err(ClientError::Runtime {
+                message: CAPTURED.into(),
+            })
+        }
+
+        fn model(&self) -> &str {
+            self.0.model()
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl Backend for SessionChatUsageBackend {
+        async fn run(
+            &self,
+            mut params: RunParams,
+            _interactive: InteractiveSession,
+        ) -> Result<CompletedRun, ClientError> {
+            use crate::clients::protocol::UsageStats;
+
+            self.report_usage(&params, true);
             params
                 .prepopulated_conversation
                 .set_next_prompt(&params.prompt);
@@ -1293,7 +1315,8 @@ mod tests {
                 .and_then(|u| u.prompt_tokens)
                 .unwrap_or(0);
             self.baselines.lock().unwrap().push(baseline);
-            let correction = if baseline == 0 {
+            let first_turn = self.locals.lock().unwrap().is_empty();
+            let correction = if first_turn {
                 self.inputs.as_ref().map(|inputs| {
                     let corr = params.output_corr_id.as_ref().unwrap();
                     let (_, sender) = inputs
@@ -1317,7 +1340,7 @@ mod tests {
                 None
             };
             let done = || E::tool_call("done", "Done", serde_json::json!({"summary": "finished"}));
-            let model = if baseline == 0 {
+            let model = if first_turn {
                 MockCompletionModel::from_stream_turns([
                     vec![
                         E::tool_call(
@@ -1399,7 +1422,11 @@ mod tests {
         let (_sandbox, mut gremlin) = test_gremlin(stage);
         gremlin.state.patch(
             &[],
-            serde_json::json!({"kind": "chat"}).as_object().unwrap(),
+            serde_json::json!({
+                "kind": "chat", "token_usage": {"prompt_tokens": 900}
+            })
+            .as_object()
+            .unwrap(),
         );
         let spec = "anthropic/session_chat-real-loop-usage";
         let backend = Arc::new(NativeLoopBackend {
@@ -1445,7 +1472,7 @@ mod tests {
                         terminal.push(usage.as_ref().unwrap().prompt_tokens.unwrap())
                     }
                     EventKind::TokenUsage { usage, .. } => {
-                        if turn == 1 && usage.prompt_tokens == Some(150) {
+                        if turn == 1 && usage.prompt_tokens == Some(1050) {
                             missed_live += 1;
                             continue;
                         }
@@ -1473,21 +1500,28 @@ mod tests {
                     .count(),
                 1
             );
-            assert_eq!(terminal, [if turn == 1 { 150 } else { 170 }]);
+            assert_eq!(terminal, [if turn == 1 { 1050 } else { 1070 }]);
             if turn == 1 {
                 // The viewer misses the last live snapshot, but receives Done.
                 assert_eq!(missed_live, 1);
-                assert_ne!(live.last(), Some(&150));
+                assert_ne!(live.last(), Some(&1050));
                 let mut displayed = live.last().copied();
-                assert_ne!(displayed, Some(150));
+                assert_ne!(displayed, Some(1050));
                 displayed = terminal.last().copied();
-                assert_eq!(displayed, Some(150));
+                assert_eq!(displayed, Some(1050));
             } else {
-                assert_eq!(live.last(), Some(&170));
+                assert_eq!(live.last(), Some(&1070));
             }
             assert_eq!(
                 gremlin.state.read_field("token_usage").unwrap()["prompt_tokens"],
-                if turn == 1 { 180 } else { 200 }
+                if turn == 1 { 1080 } else { 1100 }
+            );
+            assert_eq!(
+                gremlin
+                    .state
+                    .read_field("session_chat_outer_usage")
+                    .unwrap()["prompt_tokens"],
+                if turn == 1 { 1050 } else { 1070 }
             );
             if turn == 1 {
                 assert_eq!(records.len(), 3);
@@ -1545,7 +1579,7 @@ mod tests {
                         break;
                     }
                 }
-                assert_eq!(replay_done, [serde_json::json!(150)]);
+                assert_eq!(replay_done, [serde_json::json!(1050)]);
                 watch.abort();
                 let _ = watch.await;
                 assert_eq!(gremlin.state.read_field("token_usage").unwrap(), before);
@@ -1556,7 +1590,7 @@ mod tests {
                 );
                 assert_eq!(
                     session_chat_native_usage(&gremlin).unwrap().prompt_tokens,
-                    Some(150)
+                    Some(1050)
                 );
                 // Reopen with the cached fallback deliberately absent.
                 gremlin.state.patch(
@@ -1568,7 +1602,7 @@ mod tests {
                 gremlin.state = StateData::open("gr-test").unwrap();
                 assert_eq!(
                     session_chat_native_usage(&gremlin).unwrap().prompt_tokens,
-                    Some(150)
+                    Some(1050)
                 );
                 while rx.try_recv().is_ok() {}
             }
@@ -1589,7 +1623,7 @@ mod tests {
                 .unwrap();
             assert_eq!(row["prompt_tokens"], tokens);
         }
-        assert_eq!(*backend.baselines.lock().unwrap(), [0, 150]);
+        assert_eq!(*backend.baselines.lock().unwrap(), [900, 1050]);
         assert_eq!(*backend.locals.lock().unwrap(), [150, 20]);
     }
 
@@ -1642,62 +1676,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn session_chat_two_turn_usage_excludes_tasks_and_corrects_requests() {
-        use crate::executor::stage_boundary::StageInvocation;
-        let stage = AgentBuilder::new("chat-0001")
-            .prompt(CHAT_A)
-            .build()
-            .unwrap();
-        let (_sandbox, mut gremlin) = test_gremlin(stage);
-        gremlin.state.patch(
-            &[],
-            serde_json::json!({
-                "kind": "chat", "token_usage": {"prompt_tokens": 900}
-            })
-            .as_object()
-            .unwrap(),
-        );
-        let spec = "anthropic/session_chat-two-turn-usage";
-        let backend = Arc::new(SessionChatUsageBackend {
-            fail: false,
-            baselines: Mutex::new(vec![]),
-        });
-        install_test_backend(&ModelURI::parse(spec).unwrap().to_string(), backend.clone());
-        gremlin.model_override = Some(spec.into());
-        let (_guard, mut rx) = gremlins_magic_bus::subscribe_run(gremlin.id.as_str());
-        for turn in 1..=2 {
-            let mut node = chat_node(turn, CHAT_A).await;
-            let ExecutorStage::Agent { model, .. } = &mut node else {
-                unreachable!()
-            };
-            *model = Some(ModelURI::parse(spec).unwrap());
-            let invocation = StageInvocation::enter(gremlin.id.as_str(), node.name(), "agent");
-            run_agent(&node, &mut gremlin, &invocation, "", "", None, None)
-                .await
-                .unwrap();
-            assert_eq!(
-                gremlin.state.read_field("token_usage").unwrap()["prompt_tokens"],
-                900 + 106 * turn
-            );
-            assert_eq!(
-                gremlin
-                    .state
-                    .read_field("session_chat_outer_usage")
-                    .unwrap()["prompt_tokens"],
-                900 + 6 * turn
-            );
-        }
-        assert_eq!(*backend.baselines.lock().unwrap(), [900, 906]);
-        let mut terminal = vec![];
-        while let Ok(event) = rx.try_recv() {
-            if let EventKind::Done { usage, .. } = event.kind() {
-                terminal.push(usage.as_ref().unwrap().prompt_tokens.unwrap());
-            }
-        }
-        assert_eq!(terminal, [906, 912]);
-    }
-
-    #[tokio::test]
     async fn session_chat_native_failure_flushes_corrected_and_task_usage_before_error() {
         use crate::executor::stage_boundary::StageInvocation;
         let stage = AgentBuilder::new("chat-0001")
@@ -1712,10 +1690,9 @@ mod tests {
         let spec = "anthropic/session_chat-failed-usage";
         install_test_backend(
             &ModelURI::parse(spec).unwrap().to_string(),
-            Arc::new(SessionChatUsageBackend {
-                fail: true,
+            Arc::new(SessionChatFailureBackend(SessionChatUsageBackend {
                 baselines: Mutex::new(vec![]),
-            }),
+            })),
         );
         gremlin.model_override = Some(spec.into());
         let mut node = chat_node(1, CHAT_A).await;
@@ -1756,7 +1733,6 @@ mod tests {
         );
         gremlin.state = StateData::open("gr-test").unwrap();
         let retry = Arc::new(SessionChatUsageBackend {
-            fail: false,
             baselines: Mutex::new(vec![]),
         });
         install_test_backend(&ModelURI::parse(spec).unwrap().to_string(), retry.clone());
@@ -1972,7 +1948,6 @@ mod tests {
         );
         let spec = "anthropic/native-chat-commit-failure";
         let backend = Arc::new(SessionChatUsageBackend {
-            fail: false,
             baselines: Mutex::new(vec![]),
         });
         install_test_backend(&ModelURI::parse(spec).unwrap().to_string(), backend);
@@ -2052,7 +2027,6 @@ mod tests {
             gremlin.state.patch(&[], fields.as_object().unwrap());
             let spec = format!("anthropic/session_chat-transition-{legacy_field}");
             let backend = Arc::new(SessionChatUsageBackend {
-                fail: false,
                 baselines: Mutex::new(vec![]),
             });
             install_test_backend(
@@ -2201,7 +2175,6 @@ mod tests {
         }
         let spec = "anthropic/session_chat-home-migration";
         let backend = Arc::new(SessionChatUsageBackend {
-            fail: false,
             baselines: Mutex::new(vec![]),
         });
         install_test_backend(&ModelURI::parse(spec).unwrap().to_string(), backend.clone());
@@ -2278,7 +2251,6 @@ mod tests {
         install_test_backend(
             &ModelURI::parse(spec).unwrap().to_string(),
             Arc::new(SessionChatUsageBackend {
-                fail: false,
                 baselines: Mutex::new(vec![]),
             }),
         );
