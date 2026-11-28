@@ -32,7 +32,7 @@ run()
  ├─ Redirect stderr → state_root/tui.log
  └─ run_app()
       ├─ App::new()
-      ├─ client::connect() → DaemonClient + event_rx + chat_rx + raw_rx
+      ├─ DaemonSession::connect() → session-owned client and receivers
       ├─ Initial "ls" snapshot → populates app.active_runs
       ├─ Crossterm event channel (poll 20ms → mpsc)
       ├─ Per-frame: live_area.compose(&app) → render widgets → commit overflow → draw
@@ -47,7 +47,7 @@ run()
       │    8. selected bus stream — replay/live invocation output
       │    9. delivery_rx  — correction delivery receipts
       │   10. reset_rx / model_rx — session reset and model-query results
-      └─ Exit: commit in-flight turn to history, release local input/log tasks, client.shutdown()
+      └─ Exit: invalidate attachment on success; DaemonSession::close() on success or error
 
 On a fatal `run_app()` error after the stderr redirect, `run()` restores the
 terminal and the saved stderr, writes the `gremlins: `-prefixed error to

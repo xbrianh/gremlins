@@ -32,7 +32,7 @@ use tokio::net::unix::{OwnedReadHalf, OwnedWriteHalf};
 use tokio::sync::{mpsc, oneshot, Mutex};
 
 /// A session_chat event, its wire turn tag, and its exact agent execution when advertised.
-pub(super) type ChatEvent = (EventKind, Option<String>, Option<Execution>);
+pub(crate) type ChatEvent = (EventKind, Option<String>, Option<Execution>);
 
 /// Outbound side of a single daemon socket connection.
 struct OutState {
@@ -78,7 +78,15 @@ impl Connection {
         write_half: OwnedWriteHalf,
         out: Arc<OutState>,
     ) -> Self {
-        Self::new(reader, write_half, None, None, out)
+        Self::new(
+            reader,
+            write_half,
+            None,
+            None,
+            out,
+            #[cfg(test)]
+            false,
+        )
     }
 
     fn new_session(
@@ -88,7 +96,15 @@ impl Connection {
         chat_run_id: String,
         out: Arc<OutState>,
     ) -> Self {
-        Self::new(reader, write_half, Some(session_id), Some(chat_run_id), out)
+        Self::new(
+            reader,
+            write_half,
+            Some(session_id),
+            Some(chat_run_id),
+            out,
+            #[cfg(test)]
+            false,
+        )
     }
 
     fn new(
@@ -97,22 +113,30 @@ impl Connection {
         session_id: Option<String>,
         chat_run_id: Option<String>,
         out: Arc<OutState>,
+        #[cfg(test)] retain_write_until_reader_stops: bool,
     ) -> Self {
         let responses: Arc<Mutex<VecDeque<oneshot::Sender<Value>>>> =
             Arc::new(Mutex::new(VecDeque::new()));
+        let write = Arc::new(Mutex::new(WriteState {
+            write_half,
+            session_id,
+            chat_run_id,
+            generation: 0,
+        }));
         let read_out = Arc::clone(&out);
         let read_responses = Arc::clone(&responses);
+        // Only the shutdown regression fake retains the writer: its peer's EOF
+        // must prove the reader stopped, rather than merely that the client dropped.
+        #[cfg(test)]
+        let retained_write = retain_write_until_reader_stops.then(|| Arc::clone(&write));
         let read_handle = tokio::spawn(async move {
+            #[cfg(test)]
+            let _retained_write = retained_write;
             read_loop(reader, read_out, read_responses).await;
         });
 
         Self {
-            write: Arc::new(Mutex::new(WriteState {
-                write_half,
-                session_id,
-                chat_run_id,
-                generation: 0,
-            })),
+            write,
             responses,
             read_handle: Mutex::new(Some(read_handle)),
             out,
@@ -307,6 +331,21 @@ impl DaemonClient {
         mpsc::UnboundedReceiver<ChatEvent>,
         mpsc::UnboundedReceiver<Value>,
     ) {
+        Self::fake_with_reader_lifetime(response, streams, false)
+    }
+
+    #[cfg(test)]
+    pub(super) fn fake_with_reader_lifetime(
+        response: Value,
+        streams: Vec<tokio::net::UnixStream>,
+        retain_write_until_reader_stops: bool,
+    ) -> (
+        Self,
+        [tokio::net::UnixStream; 2],
+        mpsc::UnboundedReceiver<EventKind>,
+        mpsc::UnboundedReceiver<ChatEvent>,
+        mpsc::UnboundedReceiver<Value>,
+    ) {
         let (session_id, chat_run_id) = parse_session_setup(&response).unwrap();
         let (control, control_peer) = tokio::net::UnixStream::pair().unwrap();
         let (session, session_peer) = tokio::net::UnixStream::pair().unwrap();
@@ -322,17 +361,21 @@ impl DaemonClient {
         let (session_read, session_write) = session.into_split();
         (
             Self {
-                control: Connection::new_control(
+                control: Connection::new(
                     BufReader::new(control_read),
                     control_write,
+                    None,
+                    None,
                     Arc::clone(&out),
+                    retain_write_until_reader_stops,
                 ),
-                session: Connection::new_session(
+                session: Connection::new(
                     BufReader::new(session_read),
                     session_write,
-                    session_id,
-                    chat_run_id,
+                    Some(session_id),
+                    Some(chat_run_id),
                     Arc::clone(&out),
+                    retain_write_until_reader_stops,
                 ),
                 out,
                 session_recreate: Mutex::new(()),

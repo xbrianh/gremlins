@@ -93,10 +93,9 @@ impl Harness {
         let (observe, snapshots) = mpsc::unbounded_channel();
         let (watch_selection_override, selection_rx) = mpsc::unbounded_channel();
         let io = LoopIo {
-            client: Arc::new(client),
-            event_rx,
-            chat_rx,
-            raw_rx,
+            session: crate::daemon_client::DaemonSession::from_client(
+                client, event_rx, chat_rx, raw_rx,
+            ),
             ct_rx,
             suspend_handle: SuspendHandle::new().0,
             observe: Some(observe),
@@ -242,6 +241,136 @@ impl Harness {
             .unwrap()
             .unwrap()
             .unwrap();
+    }
+}
+
+#[tokio::test]
+async fn daemon_session_close_is_idempotent() {
+    let (client, [control, session], event_rx, chat_rx, raw_rx) =
+        client::DaemonClient::fake_with_aux_streams_and_channels(
+            json!({"session_id":"test", "chat_run_id":"session_chat"}),
+            Vec::new(),
+        );
+    let mut daemon =
+        crate::daemon_client::DaemonSession::from_client(client, event_rx, chat_rx, raw_rx);
+    let client = Arc::clone(daemon.client());
+    daemon.close().await;
+    assert!(client.chat_sender().is_closed());
+    for take_after_close in [
+        |daemon: &mut crate::daemon_client::DaemonSession| {
+            drop(daemon.take_event_rx());
+        },
+        |daemon: &mut crate::daemon_client::DaemonSession| {
+            drop(daemon.take_chat_rx());
+        },
+        |daemon: &mut crate::daemon_client::DaemonSession| {
+            drop(daemon.take_raw_rx());
+        },
+    ] {
+        assert!(std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            take_after_close(&mut daemon);
+        }))
+        .is_err());
+    }
+    let generation = client.session_generation().await;
+    tokio::time::timeout(WAIT, daemon.close())
+        .await
+        .expect("second close blocked");
+    assert_eq!(client.session_generation().await, generation);
+    drop(client);
+    drop(daemon);
+    for peer in [control, session] {
+        assert_eq!(
+            tokio::time::timeout(WAIT, socket::read_json_line(&mut BufReader::new(peer)))
+                .await
+                .expect("daemon socket did not close")
+                .unwrap(),
+            None
+        );
+    }
+}
+
+#[tokio::test]
+async fn ordinary_fake_drop_closes_socket_write_halves() {
+    let (client, peers) = client::DaemonClient::fake_with_identity(
+        json!({"session_id":"test", "chat_run_id":"session_chat"}),
+    );
+    drop(client);
+    for peer in peers {
+        assert_eq!(
+            tokio::time::timeout(WAIT, socket::read_json_line(&mut BufReader::new(peer)))
+                .await
+                .expect("ordinary fake retained its socket write half")
+                .unwrap(),
+            None
+        );
+    }
+}
+
+#[tokio::test]
+async fn resize_error_closes_control_and_session_sockets() {
+    let _sandbox = Sandbox::new();
+    let (client, [control, session], event_rx, chat_rx, raw_rx) =
+        client::DaemonClient::fake_with_reader_lifetime(
+            json!({"session_id":"test", "chat_run_id":"session_chat"}),
+            Vec::new(),
+            true,
+        );
+    let (keys, ct_rx) = mpsc::unbounded_channel();
+    let (observe, mut snapshots) = mpsc::unbounded_channel();
+    let (_selection_tx, selection_rx) = mpsc::unbounded_channel();
+    let io = LoopIo {
+        session: crate::daemon_client::DaemonSession::from_client(
+            client, event_rx, chat_rx, raw_rx,
+        ),
+        ct_rx,
+        suspend_handle: SuspendHandle::new().0,
+        observe: Some(observe),
+        watch_selection_override: selection_rx,
+    };
+    let task = tokio::spawn(async move {
+        let mut live = LiveArea::with_backend(TestBackend::new(100, 35), 100, 35);
+        run_app_loop(&mut live, io, |_, _, _| {
+            Err(io::Error::other("injected resize failure"))
+        })
+        .await
+    });
+    let mut control = BufReader::new(control);
+    let mut session = BufReader::new(session);
+    assert_eq!(read(&mut control).await, json!({"op":"ls"}));
+    reply(&mut control, json!({"gremlins":[]})).await;
+    assert_eq!(read(&mut session).await["op"], "chat_model");
+    reply(&mut session, json!({"model":"test-model"})).await;
+    tokio::time::timeout(WAIT, async {
+        loop {
+            if snapshots.recv().await.expect("event loop stopped").screen == Screen::Chat {
+                break;
+            }
+        }
+    })
+    .await
+    .expect("chat startup timed out");
+
+    keys.send(Event::Resize(101, 35)).unwrap();
+    let error = tokio::time::timeout(WAIT, task)
+        .await
+        .expect("event loop did not exit after resize failure")
+        .expect("event loop task panicked")
+        .expect_err("resize failure should propagate");
+    assert_eq!(error.kind(), io::ErrorKind::Other);
+    assert_eq!(error.to_string(), "injected resize failure");
+    // This fake opts into retaining write halves: dropping LoopIo cannot produce EOF.
+    let (control_eof, session_eof) = tokio::join!(
+        tokio::time::timeout(WAIT, socket::read_json_line(&mut control)),
+        tokio::time::timeout(WAIT, socket::read_json_line(&mut session)),
+    );
+    for (name, eof) in [("control", control_eof), ("session", session_eof)] {
+        assert_eq!(
+            eof.unwrap_or_else(|_| panic!("{name} socket stayed open after resize failure"))
+                .unwrap_or_else(|error| panic!("failed to read {name} socket: {error}")),
+            None,
+            "{name} socket should reach EOF after resize failure"
+        );
     }
 }
 

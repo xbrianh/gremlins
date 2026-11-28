@@ -25,6 +25,7 @@ use gremlins::executor::supervisor;
 use gremlins::schemas::bootstrap;
 use serde_json::Value;
 
+mod daemon_client;
 mod display;
 mod input;
 mod spawn;

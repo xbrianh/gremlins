@@ -1705,10 +1705,7 @@ fn spawn_terminal_reader(reader: ReaderChannels, ct_tx: mpsc::UnboundedSender<Ev
 }
 
 struct LoopIo {
-    client: Arc<client::DaemonClient>,
-    event_rx: mpsc::UnboundedReceiver<gremlins_magic_bus::EventKind>,
-    chat_rx: mpsc::UnboundedReceiver<client::ChatEvent>,
-    raw_rx: mpsc::UnboundedReceiver<serde_json::Value>,
+    session: crate::daemon_client::DaemonSession,
     ct_rx: mpsc::UnboundedReceiver<Event>,
     suspend_handle: SuspendHandle,
     #[cfg(test)]
@@ -1744,7 +1741,7 @@ struct LoopSnapshot {
 }
 
 async fn run_app(live_area: &mut LiveArea) -> io::Result<()> {
-    let (client, event_rx, chat_rx, raw_rx) = client::connect()
+    let session = crate::daemon_client::DaemonSession::connect()
         .await
         .map_err(|e| io::Error::new(io::ErrorKind::NotConnected, e))?;
     let (suspend_handle, reader) = SuspendHandle::new();
@@ -1753,10 +1750,7 @@ async fn run_app(live_area: &mut LiveArea) -> io::Result<()> {
     run_app_loop(
         live_area,
         LoopIo {
-            client: Arc::new(client),
-            event_rx,
-            chat_rx,
-            raw_rx,
+            session,
             ct_rx,
             suspend_handle,
             #[cfg(test)]
@@ -1779,21 +1773,32 @@ async fn run_app_with_io<B: ratatui::backend::Backend>(
 
 async fn run_app_loop<B: ratatui::backend::Backend>(
     live_area: &mut LiveArea<B>,
-    io: LoopIo,
+    mut io: LoopIo,
+    resize: fn(&mut LiveArea<B>, u16, u16) -> io::Result<()>,
+) -> io::Result<()> {
+    let result = run_app_loop_inner(live_area, &mut io, resize).await;
+    io.session.close().await;
+    result
+}
+
+async fn run_app_loop_inner<B: ratatui::backend::Backend>(
+    live_area: &mut LiveArea<B>,
+    io: &mut LoopIo,
     resize: fn(&mut LiveArea<B>, u16, u16) -> io::Result<()>,
 ) -> io::Result<()> {
     let LoopIo {
-        client,
-        mut event_rx,
-        mut chat_rx,
-        mut raw_rx,
-        mut ct_rx,
+        session,
+        ct_rx,
         suspend_handle,
         #[cfg(test)]
         observe,
         #[cfg(test)]
-        mut watch_selection_override,
+        watch_selection_override,
     } = io;
+    let client = Arc::clone(session.client());
+    let mut event_rx = session.take_event_rx();
+    let mut chat_rx = session.take_chat_rx();
+    let mut raw_rx = session.take_raw_rx();
     #[cfg(test)]
     let mut observed_width = live_area.size().0;
     let mut app = App::new();
@@ -2116,7 +2121,7 @@ async fn run_app_loop<B: ratatui::backend::Backend>(
                                 continue;
                             }
 
-                            match open_editor(app.input.text(), &suspend_handle).await {
+                            match open_editor(app.input.text(), suspend_handle).await {
                                 Ok(outcome) => {
                                     // `open_editor` returns the reader-resume
                                     // guard so we can drain the event channel
@@ -3050,10 +3055,6 @@ async fn run_app_loop<B: ratatui::backend::Backend>(
     }
 
     attachment.invalidate(&mut app);
-    client.release_inputs();
-
-    // Close the persistent socket connection.
-    client.shutdown().await;
 
     Ok(())
 }
